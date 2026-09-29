@@ -26,6 +26,8 @@ Setting `PLAYWRIGHT_BASE_URL`, or running inside a Spur session with an `isolate
 
 Specs import `test`, `expect`, and `devices` from `./fixtures.js`, never `playwright/test` — ESLint enforces it, type-only imports excepted. The extended `test` aborts and records any `/api` request no spec mocked, then fails the test at teardown; app-shell routes (`runtime/*`, `tags`, `todo`, `conversation`, ...) carry neutral defaults a spec can override.
 
+The `landing` sidecar (`scripts/spur-landing.sh`) serves `landing/` with live reload for marketing-page work: static files plus an SSE watch that reloads the browser on change, injected at serve time so the committed HTML stays clean. It reserves one port from `5700-5749` as `SPUR_RESERVED_PORT_LANDING` and binds loopback; set `LANDING_HOST` to widen that. The daemon resolves sidecars from the instance's own `spur.yaml`, so a session whose daemon predates this entry cannot start it by name — run `node scripts/landing-dev-server.mjs landing` directly in that case. Point the published origin at a real domain with `node scripts/landing-set-origin.mjs https://<host>`, which rewrites canonical, Open Graph, JSON-LD, `robots.txt` and `sitemap.xml` together.
+
 ## PR Checks
 
 Before opening or updating a PR:

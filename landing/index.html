@@ -1,0 +1,2790 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Spur — the missing layer between you and your CLI agents</title>
+    <meta
+      name="description"
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Spur launches the same binaries, then adds a git worktree per agent, event triggers and one dashboard you reach from any device. Nothing to migrate."
+    />
+    <link rel="canonical" href="https://spur.dev/" />
+    <meta name="theme-color" content="#0d0d0e" />
+    <meta name="robots" content="index,follow,max-image-preview:large" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Spur" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content="Spur — the missing layer between you and your CLI agents" />
+    <meta
+      property="og:description"
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Same binaries, same auth, a git worktree per agent, one dashboard. Nothing to migrate."
+    />
+    <meta property="og:url" content="https://spur.dev/" />
+    <meta property="og:image" content="https://spur.dev/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Spur — the missing layer between you and your CLI agents"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Spur — the missing layer between you and your CLI agents" />
+    <meta
+      name="twitter:description"
+      content="A tool for software engineers who already run claude, codex, cursor or opencode. Same binaries, same auth. Nothing to migrate."
+    />
+    <meta name="twitter:image" content="https://spur.dev/og.png" />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' fill='%230d0d0e'/%3E%3Cpath d='M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="preload"
+      as="style"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+      onload="this.rel = 'stylesheet'"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap"
+      />
+      <style>
+        html .rv {
+          opacity: 1 !important;
+          transform: none !important;
+          transition: none !important;
+        }
+        h1 .line > span {
+          transform: none;
+        }
+        .flow {
+          transform: scaleX(1);
+        }
+      </style>
+    </noscript>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://spur.dev/#website",
+            "url": "https://spur.dev/",
+            "name": "Spur",
+            "publisher": { "@id": "https://spur.dev/#org" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://spur.dev/#org",
+            "name": "Spur",
+            "url": "https://spur.dev/",
+            "sameAs": ["https://github.com/ashugaev/spur"]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://spur.dev/#app",
+            "name": "Spur",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Ubuntu Linux",
+            "description": "Local daemon and CLI that runs AI coding agents (claude, codex, cursor, opencode) as tmux sessions with a git worktree each, routes GitHub, CI, Sentry, cron and Telegram events into them, and shows the fleet on a mobile web dashboard.",
+            "license": "https://www.apache.org/licenses/LICENSE-2.0",
+            "codeRepository": "https://github.com/ashugaev/spur",
+            "softwareHelp": "https://github.com/ashugaev/spur/blob/main/README.md",
+            "image": "https://spur.dev/og.png",
+            "url": "https://spur.dev/",
+            "isAccessibleForFree": true
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Which agents does Spur run?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "claude, codex, cursor, opencode. Each gets its own tmux session and a default model from config."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Do I have to change how I use my agents?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Same binary, your auth, your model config, in a real tmux pane. Stop the daemon and you are left with ordinary git worktrees."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which operating systems work?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB box, 2 GB recommended. macOS and Windows are partial — expect to sort out host differences yourself."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Do parallel agents step on each other?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. A session owns a git worktree and branch — ten agents, ten checkouts. The shared project path is opt-in."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can I use it from my phone?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. The dashboard is mobile-first, the terminal takes touch input, and Telegram spawns sessions and relays text and voice."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What can trigger an agent automatically?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a session or sends a message into a live one."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Does my code leave the box?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Spur stores its state on your machine and has no Spur cloud. Agent CLIs and configured integrations still send data to their own providers. The web UI binds to loopback; the default Tailscale setup adds your tailnet IP, and public exposure is an explicit override."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+      }
+
+      :root {
+        color-scheme: dark;
+        --bg: #0d0d0e;
+        --surface: rgba(17, 17, 18, 0.8);
+        --term: #0a0a0f;
+        --b-sub: rgba(48, 48, 52, 0.75);
+        --b: rgba(52, 52, 57, 1);
+        --b-strong: rgba(78, 78, 84, 1);
+        --t0: #ffffff;
+        --t1: #e1e1e1;
+        --t2: #a1a1a1;
+        --t3: #8b8b90;
+        --t4: #555558;
+        --brand: #ff3d9a;
+        --working: #58a6ff;
+        --ready: #3fb950;
+        --attention: #ffd700;
+        --error: #ff4d4d;
+        --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+        --gut: clamp(16px, 4vw, 40px);
+        --max: 1180px;
+
+        --step--1: 11px;
+        --step-0: 13px;
+        --step-1: clamp(15px, 1.1vw, 17px);
+        --step-2: clamp(21px, 2.6vw, 28px);
+        --step-3: clamp(28px, 4.4vw, 44px);
+        --step-4: clamp(32px, 6.2vw, 66px);
+
+        font-variant-numeric: tabular-nums;
+      }
+
+      body {
+        font-family: var(--mono);
+        background: var(--bg);
+        color: var(--t1);
+        font-size: var(--step-0);
+        letter-spacing: 0.02em;
+        line-height: 1.6;
+        overflow-x: clip;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      ::selection {
+        background: var(--brand);
+        color: #0d0d0e;
+      }
+      :focus-visible {
+        outline: 1px solid var(--t1);
+        outline-offset: 3px;
+      }
+
+      .skip {
+        position: absolute;
+        left: -9999px;
+      }
+      .skip:focus {
+        left: var(--gut);
+        top: 12px;
+        z-index: 99;
+        background: var(--bg);
+        border: 1px solid var(--t1);
+        padding: 8px 12px;
+        text-decoration: none;
+      }
+
+      /* ── background ────────────────────────────────────────────────── */
+      #grid {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        opacity: 0.55;
+        -webkit-mask-image: linear-gradient(
+          180deg,
+          rgba(0, 0, 0, 1) 0%,
+          rgba(0, 0, 0, 0.85) 42%,
+          rgba(0, 0, 0, 0.3) 100%
+        );
+        mask-image: linear-gradient(
+          180deg,
+          rgba(0, 0, 0, 1) 0%,
+          rgba(0, 0, 0, 0.85) 42%,
+          rgba(0, 0, 0, 0.3) 100%
+        );
+      }
+      .wrap {
+        position: relative;
+        z-index: 2;
+      }
+
+      /* ── primitives ────────────────────────────────────────────────── */
+      .shell {
+        max-width: var(--max);
+        margin: 0 auto;
+        padding-inline: var(--gut);
+        position: relative;
+      }
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        font-weight: 700;
+        line-height: 1.05;
+        color: var(--t0);
+      }
+      p {
+        margin: 0;
+      }
+      a {
+        color: inherit;
+      }
+      code {
+        font-family: var(--mono);
+        color: var(--t1);
+        background: rgba(255, 255, 255, 0.06);
+        padding: 1px 5px;
+      }
+
+      .mono-label {
+        font-size: var(--step--1);
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--t3);
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 22px;
+        border: 1px solid var(--b-strong);
+        background: transparent;
+        color: var(--t1);
+        text-decoration: none;
+        font: inherit;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        transition:
+          color 0.18s,
+          border-color 0.18s,
+          background-color 0.18s,
+          letter-spacing 0.18s;
+      }
+      .btn.primary {
+        background: var(--t1);
+        color: var(--bg);
+        border-color: var(--t1);
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .btn:hover {
+          letter-spacing: 0.09em;
+          border-color: var(--t1);
+        }
+        .btn.primary:hover {
+          background: var(--brand);
+          border-color: var(--brand);
+          color: #0d0d0e;
+        }
+      }
+      .btn:focus-visible {
+        outline-color: var(--brand);
+      }
+
+      /* ── nav ───────────────────────────────────────────────────────── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        background: rgba(13, 13, 14, 0.62);
+        border-bottom: 1px solid transparent;
+        transition:
+          border-color 0.3s,
+          background 0.3s;
+      }
+      nav.stuck {
+        border-bottom-color: var(--b-sub);
+        background: rgba(13, 13, 14, 0.88);
+      }
+      .nav-in {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        height: 58px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        text-decoration: none;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        font-size: var(--step-1);
+      }
+      .brand svg {
+        width: 20px;
+        height: 20px;
+      }
+      .nav-links {
+        display: none;
+        gap: 26px;
+        margin-left: auto;
+        font-size: var(--step--1);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--t3);
+      }
+      .nav-links a {
+        text-decoration: none;
+        position: relative;
+        transition: color 0.2s;
+      }
+      .nav-links a::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        bottom: -5px;
+        width: 0;
+        height: 1px;
+        background: var(--t1);
+        transition: width 0.25s;
+      }
+      .nav-cta {
+        margin-left: auto;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .nav-links a:hover {
+          color: var(--t1);
+        }
+        .nav-links a:hover::after {
+          width: 100%;
+        }
+      }
+      @media (min-width: 1080px) {
+        .nav-links {
+          display: flex;
+        }
+        .nav-cta {
+          margin-left: 0;
+        }
+      }
+
+      /* ── hero ──────────────────────────────────────────────────────── */
+      header.hero {
+        padding-block: clamp(64px, 13vh, 144px) clamp(56px, 9vh, 104px);
+        position: relative;
+      }
+      .eyebrow {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 28px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 11px;
+        border: 1px solid var(--b);
+        font-size: 10.5px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--t2);
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        background: var(--ready);
+        box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6);
+        animation: pulse 2.4s infinite;
+      }
+      @keyframes pulse {
+        70% {
+          box-shadow: 0 0 0 7px rgba(63, 185, 80, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(63, 185, 80, 0);
+        }
+      }
+
+      h1 {
+        font-size: var(--step-4);
+        letter-spacing: -0.045em;
+        text-indent: -0.06em;
+        max-width: 26ch;
+      }
+      @media (max-width: 600px) {
+        h1 {
+          letter-spacing: -0.03em;
+        }
+      }
+      h1 .line {
+        display: block;
+        overflow: hidden;
+        padding-bottom: 0.12em;
+        margin-bottom: -0.12em;
+      }
+      h1 .line > span {
+        display: block;
+        transform: translateY(105%);
+        animation: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+      h1 .line:nth-child(2) > span {
+        animation-delay: 0.09s;
+      }
+      @keyframes rise {
+        to {
+          transform: translateY(0);
+        }
+      }
+      h1 em {
+        font-style: normal;
+        color: var(--brand);
+      }
+      .blip {
+        animation:
+          blipblink 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite,
+          blipcolor 5.6s steps(1) infinite;
+      }
+      @keyframes blipblink {
+        0%,
+        100% {
+          opacity: 0.12;
+        }
+        45% {
+          opacity: 1;
+        }
+      }
+      @keyframes blipcolor {
+        0% {
+          color: var(--working);
+        }
+        25% {
+          color: var(--ready);
+        }
+        50% {
+          color: var(--attention);
+        }
+        75% {
+          color: var(--brand);
+        }
+      }
+
+      .lede {
+        margin-top: clamp(28px, 4vh, 44px);
+        max-width: 66ch;
+        color: var(--t2);
+        font-size: var(--step-1);
+        line-height: 1.7;
+      }
+      .lede b {
+        color: var(--t1);
+        font-weight: 500;
+      }
+      .hero-cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 34px;
+      }
+
+      .keeps {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(20px, 2.2vw, 26px);
+      }
+      .keeps .mono-label {
+        color: var(--t3);
+      }
+      .reach {
+        list-style: none;
+        margin: 16px 0 0;
+        padding: 0;
+      }
+      .reach li {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--b-sub);
+        color: var(--t1);
+      }
+      .reach li:last-child {
+        border-bottom: 0;
+        padding-bottom: 0;
+      }
+      .reach i {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        transform: translateY(-1px);
+      }
+      .c-working {
+        background: var(--working);
+      }
+      .c-ready {
+        background: var(--ready);
+      }
+      .c-attention {
+        background: var(--attention);
+      }
+      .c-brand {
+        background: var(--brand);
+      }
+
+      .install-grid {
+        margin-top: 28px;
+        display: grid;
+        gap: 1px;
+        background: var(--b-sub);
+        border: 1px solid var(--b-sub);
+      }
+      @media (min-width: 820px) {
+        .install-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      .install-grid .keeps {
+        border: 0;
+        min-width: 0;
+      }
+      .install-grid .reach li {
+        min-width: 0;
+      }
+      /* Confined to the code chips: on the row it inherits and breaks plain
+         words mid-letter at 375px. */
+      .install-grid .reach code {
+        overflow-wrap: anywhere;
+      }
+      .install-note {
+        margin-top: 24px;
+        color: var(--t3);
+        font-size: var(--step-0);
+      }
+      .install-note a {
+        color: var(--t1);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: var(--brand);
+      }
+      .install-note a:hover {
+        color: var(--brand);
+      }
+      .install-body {
+        display: grid;
+        gap: 24px;
+        align-items: start;
+      }
+      @media (min-width: 900px) {
+        .install-body {
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 40px;
+        }
+      }
+      .install-body .copy {
+        justify-self: start;
+      }
+      .cmd {
+        position: relative;
+        padding: 4px 0 4px clamp(18px, 2vw, 26px);
+      }
+      .cmd::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: linear-gradient(180deg, var(--brand), var(--b-strong) 55%, transparent);
+      }
+      .cmd code {
+        display: block;
+        background: none;
+        padding: 0;
+        color: var(--t2);
+        font-size: clamp(13.5px, 1.1vw, 15px);
+        line-height: 1.95;
+        max-width: 92ch;
+        overflow-wrap: anywhere;
+      }
+      .copy {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--brand);
+        background: var(--brand);
+        color: #0d0d0e;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        padding: 12px 20px;
+        cursor: pointer;
+        transition: 0.18s;
+      }
+      .copy svg {
+        width: 14px;
+        height: 14px;
+        flex: none;
+      }
+      .copy:hover {
+        background: #ff66b0;
+        border-color: #ff66b0;
+      }
+      .copy.done {
+        background: var(--ready);
+        border-color: var(--ready);
+      }
+
+      /* ── section frame ─────────────────────────────────────────────── */
+      section {
+        padding-block: clamp(84px, 13vh, 152px);
+        position: relative;
+      }
+      section + section::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 100vw;
+        transform: translateX(-50%);
+        height: 1px;
+        background: var(--b-sub);
+      }
+      section[id],
+      header[id] {
+        scroll-margin-top: 74px;
+      }
+      #dashboard {
+        padding-block: clamp(96px, 16vh, 176px);
+      }
+      .sec-head {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        margin-bottom: clamp(40px, 7vh, 76px);
+        max-width: 64ch;
+        position: relative;
+      }
+      .sec-head::before {
+        content: attr(data-n);
+        position: absolute;
+        left: -64px;
+        top: 0;
+        font-size: var(--step--1);
+        color: #0d0d0e;
+        background: var(--brand);
+        padding: 4px 7px;
+        letter-spacing: 0.14em;
+        font-weight: 700;
+      }
+      @media (max-width: 1180px) {
+        .sec-head::before {
+          display: none;
+        }
+      }
+      .sec-head h2 {
+        font-size: var(--step-3);
+        letter-spacing: -0.035em;
+      }
+      .sec-head p {
+        color: var(--t2);
+        line-height: 1.7;
+      }
+
+      /* ── reveal ────────────────────────────────────────────────────── */
+      .rv {
+        opacity: 0;
+        transform: translateY(22px);
+        transition:
+          opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+          transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .rv.in {
+        opacity: 1;
+        transform: none;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      /* ── hero fan-out ──────────────────────────────────────────────── */
+      .fanout {
+        position: absolute;
+        right: var(--gut);
+        top: 52%;
+        transform: translateY(-42%);
+        width: min(37vw, 460px);
+        margin: 0;
+        pointer-events: none;
+      }
+      @media (min-width: 1121px) {
+        header.hero > .eyebrow,
+        header.hero > h1,
+        header.hero > .lede,
+        header.hero > .hero-cta {
+          max-width: calc(100% - 500px);
+        }
+      }
+      .fanout svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      @media (max-width: 1120px) {
+        .fanout {
+          position: static;
+          transform: none;
+          width: 100%;
+          max-width: 520px;
+          margin-top: clamp(36px, 6vh, 56px);
+        }
+      }
+      .fo-wire {
+        fill: none;
+        stroke: var(--b);
+        stroke-width: 1.25;
+      }
+      .fo-wire-main {
+        stroke: var(--b-strong);
+      }
+      .fo-source rect,
+      .fo-agent rect,
+      .fo-you-frame,
+      .fo-frame {
+        fill: var(--bg);
+        stroke: var(--b);
+        stroke-width: 1.5;
+        transition: stroke 0.25s;
+      }
+      .fo-source.is-active rect,
+      .fo-agent.is-active rect {
+        stroke: var(--brand);
+      }
+      .fo-agent.is-ready rect {
+        stroke: var(--ready);
+      }
+      .fo-icon {
+        fill: var(--t3);
+        stroke: none;
+      }
+      .fo-icon-stroke {
+        fill: none;
+        stroke: var(--t3);
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .fo-you {
+        fill: var(--t1);
+        stroke: none;
+      }
+      .fo-you g {
+        opacity: 0;
+        animation: chomp 0.52s steps(1) infinite;
+      }
+      .fo-you g:nth-child(2) {
+        animation-delay: 0.13s;
+      }
+      .fo-you g:nth-child(3) {
+        animation-delay: 0.26s;
+      }
+      .fo-you g:nth-child(4) {
+        animation-delay: 0.39s;
+      }
+      @keyframes chomp {
+        0%,
+        25% {
+          opacity: 1;
+        }
+        25.01%,
+        100% {
+          opacity: 0;
+        }
+      }
+      .fo-you-frame,
+      .fo-frame {
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+      .fo-you-frame.hit,
+      .fo-frame.hit {
+        animation: nodehit 0.42s ease-out;
+      }
+      @keyframes nodehit {
+        40% {
+          transform: scale(1.09);
+        }
+        to {
+          transform: scale(1);
+        }
+      }
+      .fo-cap {
+        fill: var(--t4);
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        text-anchor: middle;
+      }
+      .fo-logo path {
+        fill: none;
+        stroke: var(--brand);
+        stroke-width: 1.5;
+        stroke-linecap: round;
+      }
+      .fo-logo {
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: fospin 9s linear infinite;
+      }
+      @keyframes fospin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .fo-frame {
+        stroke: var(--b-strong);
+      }
+      .fo-primary-label {
+        fill: var(--t3);
+        font-family: var(--mono);
+        font-size: 16px;
+        font-weight: 500;
+      }
+      .fo-source.is-active .fo-primary-label,
+      .fo-agent.is-active .fo-primary-label,
+      .fo-agent.is-ready .fo-primary-label {
+        fill: var(--t1);
+      }
+      .fo-secondary-label,
+      .fo-agent-state {
+        fill: var(--t4);
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.1em;
+      }
+      .fo-agent-state {
+        opacity: 0;
+        transition: opacity 0.25s;
+      }
+      .fo-agent.is-active .fo-agent-state,
+      .fo-agent.is-ready .fo-agent-state {
+        opacity: 1;
+      }
+      .fo-pkt {
+        fill: var(--brand);
+        opacity: 0;
+      }
+      @media (max-width: 430px) {
+        .fo-secondary-label:not(.fo-context-label) {
+          display: none;
+        }
+      }
+
+      /* ── architecture diagram ──────────────────────────────────────── */
+      .arch {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(18px, 3vw, 34px);
+        margin: 0;
+      }
+      .arch svg {
+        display: block;
+        width: 100%;
+        height: auto;
+        overflow: visible;
+      }
+      .arch text {
+        font-family: var(--mono);
+        font-size: 13px;
+        fill: var(--t2);
+      }
+      .arch-route--mobile {
+        display: none !important;
+      }
+      .a-stage > rect {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .a-route {
+        fill: none;
+        stroke: var(--b-strong);
+        stroke-width: 1.5;
+      }
+      .a-stage-label {
+        text-anchor: middle;
+        fill: var(--t1) !important;
+        font-size: 14px !important;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+      }
+      .a-stage-sub {
+        text-anchor: middle;
+        fill: var(--t3);
+        font-size: 12px;
+      }
+      .a-pkt {
+        fill: var(--brand);
+        offset-rotate: 0deg;
+        animation: arch-route 5.8s ease-in-out infinite;
+      }
+      .arch-route--desktop .a-pkt {
+        offset-path: path("M110 200 H390 H550 H890");
+      }
+      .arch-route--mobile .a-pkt {
+        offset-path: path("M170 64 V145 V242");
+      }
+      @keyframes arch-route {
+        0%,
+        100% {
+          offset-distance: 0%;
+          opacity: 0;
+        }
+        8%,
+        92% {
+          opacity: 1;
+        }
+        44%,
+        56% {
+          offset-distance: 100%;
+        }
+      }
+      @media (max-width: 900px) {
+        .cli pre {
+          white-space: pre-wrap;
+        }
+      }
+      @media (max-width: 720px) {
+        .arch {
+          padding: 14px 10px;
+        }
+        .arch-route--desktop {
+          display: none !important;
+        }
+        .arch-route--mobile {
+          display: block !important;
+        }
+      }
+
+      /* ── incident flow ─────────────────────────────────────────────── */
+      .incident {
+        max-width: 820px;
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(22px, 4vw, 40px);
+      }
+      .incident-flow {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .incident-step {
+        position: relative;
+        padding: 0 0 30px 38px;
+        min-width: 0;
+      }
+      .incident-step:last-child {
+        padding-bottom: 0;
+      }
+      .incident-step::before {
+        content: "";
+        position: absolute;
+        left: 7px;
+        top: 8px;
+        bottom: -8px;
+        width: 1px;
+        background: var(--b);
+      }
+      .incident-step:last-child::before {
+        display: none;
+      }
+      .incident-dot {
+        position: absolute;
+        left: 2px;
+        top: 4px;
+        width: 11px;
+        height: 11px;
+        border: 1px solid var(--b-strong);
+        background: var(--term);
+        animation: incident-dot 11s linear infinite;
+        animation-delay: calc(var(--i) * 2.2s);
+      }
+      .incident-step h3 {
+        font-size: max(11px, var(--step-1));
+        letter-spacing: -0.02em;
+        margin-bottom: 5px;
+      }
+      .incident-step > p {
+        color: var(--t2);
+        line-height: 1.65;
+      }
+      @keyframes incident-dot {
+        0%,
+        17% {
+          border-color: var(--brand);
+          background: var(--brand);
+          transform: scale(1.25);
+        }
+        20%,
+        100% {
+          border-color: var(--b-strong);
+          background: var(--term);
+          transform: scale(1);
+        }
+      }
+      .agent-work {
+        margin-top: 16px;
+        border: 1px solid var(--b);
+        padding: 16px;
+        display: grid;
+        gap: 10px;
+      }
+      .agent-work-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--t1);
+        font-size: 12px;
+      }
+      .agent-activity {
+        width: 8px;
+        height: 8px;
+        background: var(--working);
+        animation: agent-pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes agent-pulse {
+        50% {
+          opacity: 0.25;
+          transform: scale(0.7);
+        }
+      }
+      .agent-states {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .agent-state {
+        border: 1px solid var(--b-sub);
+        padding: 8px;
+        color: var(--t3);
+        font-size: 11px;
+        line-height: 1.45;
+        animation: agent-state 6.6s linear infinite;
+        animation-delay: calc(var(--state) * 2.2s);
+      }
+      @keyframes agent-state {
+        0%,
+        28% {
+          border-color: var(--brand);
+          color: var(--t1);
+          opacity: 1;
+        }
+        34%,
+        100% {
+          border-color: var(--b-sub);
+          color: var(--t3);
+          opacity: 0.55;
+        }
+      }
+      @media (max-width: 520px) {
+        .incident {
+          padding: 20px 16px;
+        }
+        .incident-step {
+          padding-left: 30px;
+        }
+        .agent-states {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ── dashboard mock ────────────────────────────────────────────── */
+      .mock {
+        border: 1px solid var(--b-strong);
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .mock-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--b-sub);
+        font-size: 11px;
+        color: var(--t3);
+      }
+      .mock-body {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+      @media (min-width: 900px) {
+        .mock-body {
+          grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+        }
+      }
+      .rows {
+        border-right: 1px solid var(--b-sub);
+        min-width: 0;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 12px 15px;
+        border-bottom: 1px solid var(--b-sub);
+        font-size: 12px;
+        min-width: 0;
+        transition: background 0.2s;
+      }
+      .row .sd {
+        width: 7px;
+        height: 7px;
+        flex: none;
+        transition: background 0.35s;
+      }
+      .row .nm {
+        color: var(--t1);
+        flex: none;
+      }
+      .row .ag {
+        color: var(--t2);
+        font-size: 11px;
+        flex: none;
+      }
+      .row .br {
+        color: var(--t3);
+        margin-left: auto;
+        font-size: 11px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sd.working {
+        background: var(--working);
+        animation: pulse2 1.6s infinite;
+      }
+      .sd.ready {
+        background: var(--ready);
+      }
+      .sd.attention {
+        background: var(--attention);
+        animation: pulse2 1.2s infinite;
+      }
+      .sd.idle {
+        background: var(--t4);
+      }
+      @keyframes pulse2 {
+        50% {
+          opacity: 0.25;
+        }
+      }
+      .term {
+        background: var(--term);
+        padding: 15px;
+        font-size: 11.5px;
+        line-height: 1.75;
+        color: var(--t2);
+        height: 252px;
+        overflow: hidden;
+      }
+      .term .g {
+        color: var(--ready);
+      }
+      .term .v {
+        color: var(--brand);
+      }
+      .term .b {
+        color: var(--working);
+      }
+      .term .y {
+        color: var(--attention);
+      }
+      .cursorblk {
+        display: inline-block;
+        width: 7px;
+        height: 13px;
+        background: var(--t1);
+        vertical-align: -2px;
+        animation: blink 1.05s steps(1) infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      /* ── bento ─────────────────────────────────────────────────────── */
+      .bento {
+        display: grid;
+        gap: 1px;
+        background: var(--b-sub);
+        border: 1px solid var(--b-sub);
+      }
+      @media (min-width: 700px) {
+        .bento {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+      @media (min-width: 1000px) {
+        .bento {
+          grid-template-columns: repeat(3, 1fr);
+        }
+      }
+      .cell {
+        background: var(--bg);
+        padding: 32px 28px 36px;
+        position: relative;
+        overflow: hidden;
+        transition: background 0.3s;
+      }
+      .cell .ic {
+        width: 28px;
+        height: 28px;
+        margin-bottom: 20px;
+        color: var(--brand);
+      }
+      .cell:nth-child(3n + 2) .ic {
+        color: var(--working);
+      }
+      .cell:nth-child(3n + 3) .ic {
+        color: var(--ready);
+      }
+      .cell h3 {
+        font-size: var(--step-1);
+        letter-spacing: -0.02em;
+        margin-bottom: 9px;
+      }
+      .cell p {
+        color: var(--t2);
+        font-size: var(--step-0);
+        line-height: 1.65;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .cell:hover {
+          background: rgba(255, 255, 255, 0.035);
+        }
+        .row:hover {
+          background: rgba(255, 255, 255, 0.03);
+        }
+      }
+
+      /* ── cli ───────────────────────────────────────────────────────── */
+      .cli {
+        border: 1px solid var(--b);
+        background: var(--term);
+        padding: clamp(18px, 3vw, 30px);
+        overflow-x: auto;
+      }
+      .cli pre {
+        margin: 0;
+        font: inherit;
+        font-size: 12.5px;
+        line-height: 2;
+      }
+      .cli .p {
+        color: var(--brand);
+      }
+      .cli .c {
+        color: var(--t3);
+      }
+      .cli .f {
+        color: var(--working);
+      }
+
+      /* ── faq ───────────────────────────────────────────────────────── */
+      .faq details {
+        border-bottom: 1px solid var(--b-sub);
+      }
+      .faq details:first-child {
+        border-top: 1px solid var(--b-sub);
+      }
+      .faq summary {
+        list-style: none;
+        cursor: pointer;
+        /* Right padding is load-bearing: the +/x marker's ink runs past its
+           content box, so with none it sits half off the gutter edge. */
+        padding: 20px 8px 20px 0;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-size: var(--step-1);
+        font-weight: 500;
+        transition: color 0.2s;
+      }
+      .faq summary::-webkit-details-marker {
+        display: none;
+      }
+      .faq summary:hover {
+        color: var(--brand);
+      }
+      .faq summary:focus-visible {
+        outline: 1px solid var(--brand);
+        outline-offset: -2px;
+      }
+      .faq summary .pm {
+        margin-left: auto;
+        color: var(--t2);
+        transition: transform 0.3s;
+      }
+      .faq details[open] summary .pm {
+        transform: rotate(45deg);
+        color: var(--brand);
+      }
+      .faq .ans {
+        padding: 0 0 22px;
+        color: var(--t2);
+        line-height: 1.75;
+        max-width: 70ch;
+      }
+
+      /* ── cta + footer ──────────────────────────────────────────────── */
+      .endcta {
+        text-align: center;
+        border: 1px solid var(--b);
+        background: var(--surface);
+        padding: clamp(40px, 7vw, 72px) clamp(18px, 4vw, 40px);
+      }
+      .endcta h2 {
+        font-size: var(--step-3);
+        letter-spacing: -0.035em;
+        margin-bottom: 16px;
+      }
+      .endcta p {
+        color: var(--t2);
+        margin: 0 auto 30px;
+        max-width: 56ch;
+      }
+      footer {
+        border-top: 1px solid var(--b-sub);
+        padding: 30px 0 46px;
+        color: var(--t3);
+        font-size: var(--step--1);
+      }
+      .foot-in {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+      }
+      .foot-links {
+        display: flex;
+        gap: 20px;
+        margin-left: auto;
+        flex-wrap: wrap;
+      }
+      .foot-links a {
+        text-decoration: none;
+        transition: color 0.2s;
+      }
+      .foot-links a:hover {
+        color: var(--t1);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+        html {
+          scroll-behavior: auto !important;
+        }
+        .rv {
+          opacity: 1;
+          transform: none;
+        }
+        h1 .line > span {
+          transform: none;
+        }
+        .a-pkt,
+        .fo-pkt {
+          display: none;
+        }
+        .fo-you g {
+          opacity: 1;
+        }
+        .fo-you g + g {
+          display: none;
+        }
+        .agent-state {
+          opacity: 1;
+          color: var(--t1);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <canvas id="grid" aria-hidden="true"></canvas>
+
+    <div class="wrap">
+      <nav id="nav" aria-label="Primary">
+        <div class="shell nav-in">
+          <a class="brand" href="#top">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+              <path
+                d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span>Spur</span>
+          </a>
+          <div class="nav-links">
+            <a href="#architecture">Access</a>
+            <a href="#dashboard">Dashboard</a>
+            <a href="#pipeline">Automation</a>
+            <a href="#features">Features</a>
+            <a href="#cli">CLI</a>
+            <a href="#install">Install</a>
+            <a href="#faq">FAQ</a>
+          </div>
+          <a class="btn nav-cta" href="https://github.com/ashugaev/spur" rel="noopener">GitHub</a>
+        </div>
+      </nav>
+
+      <main id="main">
+        <header class="hero shell" id="top">
+          <div class="eyebrow">
+            <span class="pill"><i class="dot"></i> Runs on your machine</span>
+            <span class="pill">Open source</span>
+          </div>
+
+          <h1>
+            <span class="line"
+              ><span>The <em>missing layer</em></span></span
+            >
+            <span class="line"
+              ><span>between you and your CLI agents<span class="blip">.</span></span></span
+            >
+          </h1>
+
+          <p class="lede">
+            For engineers already running <b>claude</b>, <b>codex</b>, <b>cursor</b> or
+            <b>opencode</b>. Same binaries, plus a worktree each, event triggers and one dashboard.
+            Nothing to migrate.
+          </p>
+
+          <div class="hero-cta">
+            <a class="btn primary" href="#install">Get Spur &rarr;</a>
+            <a class="btn" href="#dashboard">See it running</a>
+          </div>
+
+          <figure class="fanout" role="img" aria-labelledby="fanout-desc">
+            <svg viewBox="0 0 460 400" aria-hidden="true" focusable="false">
+              <path class="fo-wire" d="M124 112 C155 112 158 190 190 190" />
+              <path class="fo-wire" d="M124 158 C155 158 158 190 190 190" />
+              <path class="fo-wire" d="M124 204 H190" />
+              <path class="fo-wire" d="M124 250 C155 250 158 190 190 190" />
+              <path class="fo-wire" d="M124 296 C155 296 158 190 190 190" />
+              <path class="fo-wire" d="M124 342 C155 342 158 190 190 190" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 112 334 112" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 174 334 174" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 236 334 236" />
+              <path class="fo-wire fo-wire-main" d="M250 190 C285 190 302 298 334 298" />
+              <path class="fo-wire fo-wire-main" d="M220 160 V76" />
+
+              <g class="fo-user">
+                <rect class="fo-you-frame" x="194" y="16" width="52" height="52" />
+                <g class="fo-you" transform="translate(202.6 24.6) scale(1.45)">
+                  <g><path d="M12 12 L18.89 6.21 A9 9 0 1 0 18.89 17.79 Z" /></g>
+                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+                  <g><path d="M12 12 L20.80 10.13 A9 9 0 1 0 20.80 13.87 Z" /></g>
+                  <g><path d="M12 12 L20.16 8.20 A9 9 0 1 0 20.16 15.80 Z" /></g>
+                </g>
+                <text class="fo-cap" x="220" y="88">you</text>
+              </g>
+
+              <g class="fo-hub">
+                <rect class="fo-frame" x="190" y="160" width="60" height="60" />
+                <g transform="translate(202 172) scale(1.5)">
+                  <g class="fo-logo">
+                    <path
+                      d="M12 12V2 M12 12h10 M12 12v10 M12 12H2 M12 12l6.4 6.4 M12 12 5.6 5.6 M12 12l6.4-6.4 M12 12 5.6 18.4"
+                    />
+                  </g>
+                </g>
+                <text class="fo-cap" x="220" y="238">Spur</text>
+              </g>
+
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="112">
+                <rect x="6" y="94" width="118" height="36" />
+                <g class="fo-icon" transform="translate(16 104) scale(.95)">
+                  <path
+                    d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                  />
+                </g>
+                <text class="fo-primary-label" x="40" y="111">GitHub</text>
+                <text class="fo-secondary-label" x="40" y="123">PR / CI</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="158">
+                <rect x="6" y="140" width="118" height="36" />
+                <g class="fo-icon" transform="translate(16 150) scale(.95)">
+                  <path
+                    d="M8.001 15.15 10.945 6.09h-5.89L8 15.15Z M8.001 15.15 5.055 6.09H.925l7.076 9.06Z M.925 6.09.03 8.845a.611.611 0 0 0 .221.683l7.75 5.622L.925 6.09Z M.925 6.09h4.13L3.28.633a.306.306 0 0 0-.581 0L.925 6.09Z M8.001 15.15 10.945 6.09h4.13L8 15.15Z M15.075 6.09l.895 2.755a.611.611 0 0 1-.221.683l-7.75 5.622 7.076-9.06Z M15.075 6.09h-4.13L12.72.633a.306.306 0 0 1 .581 0l1.774 5.457Z"
+                  />
+                </g>
+                <text class="fo-primary-label" x="40" y="163">GitLab</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="204">
+                <rect x="6" y="186" width="118" height="36" />
+                <path class="fo-icon-stroke" d="M17 210l5-13 5 13m-8-5h6" />
+                <text class="fo-primary-label" x="40" y="209">Sentry</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="250">
+                <rect x="6" y="232" width="118" height="36" />
+                <path class="fo-icon" d="M15 249l15-7-5 16-4-5-3 3 1-5z" />
+                <text class="fo-primary-label" x="40" y="255">Telegram</text>
+              </g>
+              <g class="fo-source" data-source-kind="event" data-x="124" data-y="296">
+                <rect x="6" y="278" width="118" height="36" />
+                <circle class="fo-icon-stroke" cx="22" cy="296" r="8" />
+                <path class="fo-icon-stroke" d="M22 291v5l4 2" />
+                <text class="fo-primary-label" x="40" y="301">cron</text>
+              </g>
+              <g class="fo-source" data-source-kind="context">
+                <rect x="6" y="324" width="118" height="36" />
+                <g class="fo-icon" transform="translate(14 333) scale(.75)">
+                  <path
+                    d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77zM2 11.6a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72A4.362 4.362 0 0 0 12.48 22V12.44a.84.84 0 0 0-.84-.84H2z"
+                  />
+                </g>
+                <text class="fo-primary-label" x="40" y="341">Jira</text>
+                <text class="fo-secondary-label fo-context-label" x="40" y="353">backlog</text>
+              </g>
+
+              <g class="fo-agent" data-x="334" data-y="112">
+                <rect x="334" y="92" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="110">claude</text>
+                <text class="fo-agent-state" x="346" y="124">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="174">
+                <rect x="334" y="154" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="172">codex</text>
+                <text class="fo-agent-state" x="346" y="186">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="236">
+                <rect x="334" y="216" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="234">cursor</text>
+                <text class="fo-agent-state" x="346" y="248">working</text>
+              </g>
+              <g class="fo-agent" data-x="334" data-y="298">
+                <rect x="334" y="278" width="120" height="40" />
+                <text class="fo-primary-label" x="346" y="296">opencode</text>
+                <text class="fo-agent-state" x="346" y="310">working</text>
+              </g>
+
+              <rect class="fo-pkt" x="-4" y="-4" width="8" height="8" />
+            </svg>
+            <figcaption id="fanout-desc" class="sr-only">
+              GitHub, GitLab, Sentry, cron, and Telegram events enter Spur, which routes work to one
+              CLI agent and returns the result to you. Jira supplies backlog context.
+            </figcaption>
+          </figure>
+        </header>
+
+        <section id="architecture" class="shell" aria-labelledby="architecture-h">
+          <div class="sec-head rv" data-n="01">
+            <span class="mono-label">How you reach them</span>
+            <h2 id="architecture-h">Your box holds the agents. Your tailnet is the door.</h2>
+            <p>
+              Agents live in tmux on a machine you own. Every device attaches to the same running
+              session.
+            </p>
+            <p>
+              The web UI binds to loopback; the default Tailscale setup adds your tailnet IP. Public
+              exposure requires the explicit <code>--expose-web</code> flag.
+            </p>
+          </div>
+
+          <figure class="arch rv" role="img" aria-labelledby="arch-desc">
+            <svg
+              class="arch-route--desktop"
+              viewBox="0 0 960 400"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path class="a-route" d="M110 200 H390 H550 H890" />
+              <g class="a-stage">
+                <rect x="20" y="120" width="180" height="160" />
+                <text class="a-stage-label" x="110" y="154">YOUR DEVICES</text>
+                <text class="a-stage-sub" x="110" y="190">phone · tablet</text>
+                <text class="a-stage-sub" x="110" y="214">laptop · browser</text>
+              </g>
+              <g class="a-stage">
+                <rect x="300" y="150" width="180" height="100" />
+                <text class="a-stage-label" x="390" y="188">TAILSCALE</text>
+                <text class="a-stage-sub" x="390" y="216">private network</text>
+              </g>
+              <g class="a-stage">
+                <rect x="550" y="88" width="390" height="224" />
+                <text class="a-stage-label" x="745" y="124">YOUR MACHINE</text>
+                <text class="a-stage-sub" x="745" y="174">Spur daemon</text>
+                <text class="a-stage-sub" x="745" y="210">agent sessions</text>
+                <text class="a-stage-sub" x="745" y="246">tmux · one worktree each</text>
+              </g>
+              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
+            </svg>
+
+            <svg
+              class="arch-route--mobile"
+              viewBox="0 0 340 340"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path class="a-route" d="M170 64 V145 V242" />
+              <g class="a-stage">
+                <rect x="40" y="14" width="260" height="76" />
+                <text class="a-stage-label" x="170" y="44">YOUR DEVICES</text>
+                <text class="a-stage-sub" x="170" y="68">phone · tablet · laptop</text>
+              </g>
+              <g class="a-stage">
+                <rect x="70" y="112" width="200" height="68" />
+                <text class="a-stage-label" x="170" y="140">TAILSCALE</text>
+                <text class="a-stage-sub" x="170" y="162">private network</text>
+              </g>
+              <g class="a-stage">
+                <rect x="40" y="206" width="260" height="120" />
+                <text class="a-stage-label" x="170" y="234">YOUR MACHINE</text>
+                <text class="a-stage-sub" x="170" y="260">Spur daemon · agent sessions</text>
+                <text class="a-stage-sub" x="170" y="286">tmux · one worktree each</text>
+              </g>
+              <rect class="a-pkt" x="-5" y="-5" width="10" height="10" />
+            </svg>
+            <figcaption id="arch-desc" class="sr-only">
+              Your devices reach the Spur daemon and its agent sessions through Tailscale; responses
+              return over the same private route. The web UI remains on loopback, and public
+              exposure is an explicit override.
+            </figcaption>
+          </figure>
+        </section>
+
+        <section id="dashboard" class="shell" aria-labelledby="dashboard-h">
+          <div class="sec-head rv" data-n="02">
+            <span class="mono-label">Control surface</span>
+            <h2 id="dashboard-h">One list. Every agent. Live.</h2>
+            <p>State, branch and PR per session. Tap one, get the tmux pane itself.</p>
+          </div>
+
+          <div class="mock rv">
+            <div class="mock-bar">
+              <span>spur &mdash; dashboard</span>
+              <span style="margin-left: auto" id="clock">1 running &middot; 1 needs input</span>
+            </div>
+            <div class="mock-body">
+              <div class="rows" id="rows">
+                <div class="row">
+                  <i class="sd idle"></i><span class="nm">ses_a41f</span
+                  ><span class="ag">claude</span><span class="br">feature/flaky-auth-test</span>
+                </div>
+                <div class="row">
+                  <i class="sd attention"></i><span class="nm">ses_9c02</span
+                  ><span class="ag">codex</span><span class="br">feature/todo-ledger</span>
+                </div>
+                <div class="row">
+                  <i class="sd ready"></i><span class="nm">ses_77bd</span
+                  ><span class="ag">cursor</span><span class="br">feature/web-terminal</span>
+                </div>
+                <div class="row">
+                  <i class="sd working"></i><span class="nm">ses_1e58</span
+                  ><span class="ag">opencode</span><span class="br">feature/source-poller</span>
+                </div>
+                <div class="row">
+                  <i class="sd idle"></i><span class="nm">ses_b300</span
+                  ><span class="ag">claude</span><span class="br">feature/landing-page</span>
+                </div>
+              </div>
+              <div class="term" id="term" aria-hidden="true">
+                <span class="v">$</span> spur spawn backend-api "Fix flaky auth test" --worktree<br />
+                <span class="g">✓</span> worktree&nbsp; feature/flaky-auth-test<br />
+                <span class="g">✓</span> tmux&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ses_a41f<br />
+                <span class="b">→</span> claude&nbsp;&nbsp;&nbsp; working<br /><br />
+                <span class="v">$</span> spur list<br />
+                &nbsp; ses_a41f&nbsp; <span class="b">working</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                claude&nbsp; feature/flaky-auth-test<br />
+                &nbsp; ses_9c02&nbsp; <span class="y">needs input</span>&nbsp; codex&nbsp;&nbsp;
+                feature/todo-ledger<br /><br />
+                <span class="v">$</span> spur send ses_9c02 "use the queue, not a retry"<br />
+                <span class="g">✓</span> delivered
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="pipeline" class="shell" aria-labelledby="pipeline-h">
+          <div class="sec-head rv" data-n="03">
+            <span class="mono-label">Sources &amp; triggers</span>
+            <h2 id="pipeline-h">Something happens. An agent is already on it.</h2>
+            <p>
+              You write the rule once in <code>spur.yaml</code>. After that nobody has to be awake.
+            </p>
+          </div>
+
+          <article class="incident rv">
+            <ol class="incident-flow">
+              <li class="incident-step" style="--i: 0">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>CI fails on main</h3>
+                <p>GitHub CI reports the failed job to Spur.</p>
+              </li>
+              <li class="incident-step" style="--i: 1">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Spur starts one agent</h3>
+                <p>A fresh worktree and branch isolate the repair.</p>
+              </li>
+              <li class="incident-step" style="--i: 2">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Agent investigates and fixes</h3>
+                <p>The same agent owns the job from failure to patch.</p>
+                <div class="agent-work">
+                  <div class="agent-work-head">
+                    <span class="agent-activity" aria-hidden="true"></span>
+                    <span>claude · feature/fix-main-ci</span>
+                  </div>
+                  <div class="agent-states" aria-label="Agent work states">
+                    <span class="agent-state" style="--state: 0">reading failed job</span>
+                    <span class="agent-state" style="--state: 1">editing</span>
+                    <span class="agent-state" style="--state: 2">fix ready</span>
+                  </div>
+                </div>
+              </li>
+              <li class="incident-step" style="--i: 3">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Checks pass</h3>
+                <p>Tests and build finish, then the branch is pushed.</p>
+              </li>
+              <li class="incident-step" style="--i: 4">
+                <span class="incident-dot" aria-hidden="true"></span>
+                <h3>Merged after review</h3>
+                <p>You review the focused diff and merge it.</p>
+              </li>
+            </ol>
+          </article>
+        </section>
+
+        <section id="features" class="shell" aria-labelledby="features-h">
+          <div class="sec-head rv" data-n="04">
+            <span class="mono-label">What you get</span>
+            <h2 id="features-h">One control plane for every agent.</h2>
+          </div>
+
+          <div class="bento rv">
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path
+                  d="M6 3v12a3 3 0 003 3h9M6 21a3 3 0 100-6 3 3 0 000 6zM18 12a3 3 0 100-6 3 3 0 000 6z"
+                />
+              </svg>
+              <h3>Worktree per session</h3>
+              <p>
+                Own git worktree, own branch. Ten agents, ten checkouts, one repo. The shared path
+                is opt-in.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <rect x="2" y="4" width="20" height="16" />
+                <path d="M6 9l3 3-3 3M12 15h5" />
+              </svg>
+              <h3>tmux, in the browser</h3>
+              <p>Attaches to the live pane. Scrollback, keys, clickable links, on a phone.</p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <rect x="3" y="4" width="18" height="12" />
+                <path d="M8 20h8M12 16v4" />
+                <path d="M7 10l2 2 5-5" />
+              </svg>
+              <h3>Nothing dies with your shell</h3>
+              <p>
+                Close the shell or drop SSH and tmux keeps running. Daemon restarts rediscover live
+                sessions; restore after a host reboot is opt-in per project.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M4 4h16v13H7l-3 3z" />
+                <path d="M8 9h8M8 13h5" />
+              </svg>
+              <h3>Telegram &amp; voice</h3>
+              <p>
+                Bind a chat or topic with <code>/watch</code>, talk to the agent from your phone.
+                Voice notes transcribe with a provider key.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" />
+              </svg>
+              <h3>Your CLIs, unchanged</h3>
+              <p>
+                Same binary you type, your auth, your model config. One spawn, wake and send across
+                all four.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <rect x="3" y="5" width="18" height="14" />
+                <path d="M3 10h18M8 5v14" />
+              </svg>
+              <h3>Sidecars</h3>
+              <p>
+                Dev servers and compose stacks on reserved ports. They start and die with the
+                session.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <circle cx="12" cy="12" r="8" />
+                <path d="M12 8v4l3 2" />
+              </svg>
+              <h3>Wake &amp; subscribe</h3>
+              <p>
+                <code>wake --in 30m</code>, or every morning at 09:00. <code>subscribe</code> makes
+                one session wake another the moment it hits <code>needs_input</code>.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M4 8a8 8 0 0113-4M20 16a8 8 0 01-13 4" />
+                <path d="M4 4v4h4M20 20v-4h-4" />
+              </svg>
+              <h3>Rate-limit failover</h3>
+              <p>
+                Store several Claude logins and switch a session between them in place, no kill and
+                no relaunch. Opt in to automatic swaps on rate limit.
+              </p>
+            </article>
+            <article class="cell">
+              <svg
+                class="ic"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7z" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+              <h3>Spur has no cloud relay.</h3>
+              <p>
+                Spur stores its state on your machine. Agent CLIs and configured integrations still
+                send data to their own providers.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="cli" class="shell" aria-labelledby="cli-h">
+          <div class="sec-head rv" data-n="05">
+            <span class="mono-label">CLI</span>
+            <h2 id="cli-h">Spawn, wake, message and audit from the shell.</h2>
+          </div>
+          <div class="cli rv">
+            <pre><span class="c"># start an agent on its own worktree</span>
+<span class="p">$</span> spur spawn backend-api "Fix flaky auth test" <span class="f">--agent</span> claude <span class="f">--model</span> opus <span class="f">--worktree</span>
+
+<span class="c"># see the fleet</span>
+<span class="p">$</span> spur list
+
+<span class="c"># talk to a running one</span>
+<span class="p">$</span> spur send ses_123 "rebase on main and push"
+
+<span class="c"># queue a message for later, or on a schedule</span>
+<span class="p">$</span> spur wake ses_123 <span class="f">--in</span> 30m "check CI"
+
+<span class="c"># have one session wake another when it stalls</span>
+<span class="p">$</span> spur subscribe ses_123 <span class="f">--session</span> ses_456 <span class="f">--state</span> needs_input <span class="f">--message</span> "target needs a decision"
+
+<span class="c"># check the host</span>
+<span class="p">$</span> spur doctor</pre>
+          </div>
+        </section>
+
+        <section id="install" class="shell" aria-labelledby="install-h">
+          <div class="sec-head rv" data-n="06">
+            <span class="mono-label">Install</span>
+            <h2 id="install-h">You don't install it. Your agent does.</h2>
+            <p>
+              No package manager to reason about, no unit files to write. Paste one prompt into a
+              coding agent you already have and let it read the guide.
+            </p>
+          </div>
+
+          <div class="install rv">
+            <div class="install-body">
+              <div class="cmd">
+                <code id="installcmd"
+                  >Read
+                  https://raw.githubusercontent.com/ashugaev/spur/main/docs/install-from-npm.md and
+                  install and run Spur on this machine end to end, following the guide. Do the steps
+                  yourself; don't ask me to run what you can run.</code
+                >
+              </div>
+              <button class="copy" data-copy="#installcmd" aria-label="Copy the install prompt">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <rect x="9" y="9" width="12" height="12" />
+                  <path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1" />
+                </svg>
+                <span class="copy-t">Copy prompt</span>
+              </button>
+            </div>
+
+            <div class="install-grid">
+              <div class="keeps">
+                <span class="mono-label">What it will do</span>
+                <ul class="reach">
+                  <li>
+                    <i class="c-brand"></i>Install <code>@shugaev/spur</code> under
+                    <code>~/.local</code>
+                  </li>
+                  <li>
+                    <i class="c-working"></i>Run <code>spur init</code> — daemon on 4310, web UI on
+                    5555
+                  </li>
+                  <li><i class="c-ready"></i>Register both as systemd user services</li>
+                  <li>
+                    <i class="c-attention"></i>Put the UI on your tailnet, not a public interface
+                  </li>
+                </ul>
+              </div>
+
+              <div class="keeps">
+                <span class="mono-label">Before you start</span>
+                <ul class="reach">
+                  <li>
+                    <i class="c-ready"></i>Ubuntu, bare metal or a VM. This is the tested target
+                  </li>
+                  <li>
+                    <i class="c-attention"></i>macOS and Windows: partial, expect to sort out host
+                    differences
+                  </li>
+                  <li>
+                    <i class="c-working"></i>Node 20.19+, 22.13+ or 24+, plus tmux and git on the
+                    box
+                  </li>
+                  <li><i class="c-brand"></i>Your agent CLIs installed and already logged in</li>
+                </ul>
+              </div>
+            </div>
+
+            <p class="install-note">
+              Rather do it by hand?
+              <a
+                href="https://github.com/ashugaev/spur/blob/main/docs/install-from-npm.md"
+                rel="noopener"
+                >Read the same guide yourself</a
+              >.
+            </p>
+          </div>
+        </section>
+
+        <section id="faq" class="shell" aria-labelledby="faq-h">
+          <div class="sec-head rv" data-n="07">
+            <span class="mono-label">FAQ</span>
+            <h2 id="faq-h">Before you install.</h2>
+          </div>
+          <div class="faq rv">
+            <details open>
+              <summary>
+                Which agents does Spur run?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                claude, codex, cursor, opencode. Each gets its own tmux session and a default model
+                from config.
+              </div>
+            </details>
+            <details>
+              <summary>
+                Do I have to change how I use my agents?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                No. Same binary, your auth, your model config, in a real tmux pane. Stop the daemon
+                and you are left with ordinary git worktrees.
+              </div>
+            </details>
+            <details>
+              <summary>
+                Which operating systems work?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                Ubuntu is the tested target, bare metal or a VM; verified on 24.04 down to a ~1 GB
+                box, 2 GB recommended. macOS and Windows are partial — expect to sort out host
+                differences yourself.
+              </div>
+            </details>
+            <details>
+              <summary>
+                Do parallel agents step on each other?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                No. A session owns a git worktree and branch — ten agents, ten checkouts. The shared
+                project path is opt-in.
+              </div>
+            </details>
+            <details>
+              <summary>
+                Can I use it from my phone?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                Yes. The dashboard is mobile-first, the terminal takes touch input, and Telegram
+                spawns sessions and relays text and voice.
+              </div>
+            </details>
+            <details>
+              <summary>
+                What can trigger an agent automatically?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                Six pollers: cron, GitHub, GitHub CI, GitLab, Sentry, Telegram. A trigger spawns a
+                session or sends a message into a live one.
+              </div>
+            </details>
+            <details>
+              <summary>
+                Does my code leave the box?<span class="pm" aria-hidden="true">+</span>
+              </summary>
+              <div class="ans">
+                Spur stores its state on your machine and has no Spur cloud. Agent CLIs and
+                configured integrations still send data to their own providers. The web UI binds to
+                loopback; the default Tailscale setup adds your tailnet IP, and public exposure is
+                an explicit override.
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section class="shell" aria-label="Get started">
+          <div class="endcta rv">
+            <h2>Stop babysitting one terminal.</h2>
+            <p>Hand the prompt to a coding agent and go do something else.</p>
+            <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap">
+              <a class="btn primary" href="#install">Install Spur &rarr;</a>
+              <a class="btn" href="https://github.com/ashugaev/spur/stargazers" rel="noopener"
+                >Star on GitHub</a
+              >
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <div class="shell foot-in">
+          <span>Spur &mdash; Apache-2.0</span>
+          <span class="foot-links">
+            <a href="https://github.com/ashugaev/spur" rel="noopener">Source on GitHub</a>
+            <a href="https://github.com/ashugaev/spur/blob/main/docs/commands.md" rel="noopener"
+              >Command reference</a
+            >
+            <a
+              href="https://github.com/ashugaev/spur/blob/main/docs/configuration.md"
+              rel="noopener"
+              >Configuration reference</a
+            >
+            <a href="https://github.com/ashugaev/spur/blob/main/docs/daemon-api.md" rel="noopener"
+              >Daemon HTTP API</a
+            >
+          </span>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var fine = matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+        /* nav */
+        var nav = document.getElementById("nav");
+        addEventListener(
+          "scroll",
+          function () {
+            nav.classList.toggle("stuck", scrollY > 12);
+          },
+          { passive: true },
+        );
+
+        /* reveal — without IntersectionObserver everything stays revealed
+           rather than stuck at opacity 0 behind a thrown script */
+        var hasIO = typeof IntersectionObserver === "function";
+        if (hasIO) {
+          var io = new IntersectionObserver(
+            function (es) {
+              es.forEach(function (e) {
+                if (e.isIntersecting) {
+                  e.target.classList.add("in");
+                  io.unobserve(e.target);
+                }
+              });
+            },
+            { threshold: 0.12, rootMargin: "0px 0px -8% 0px" },
+          );
+          document.querySelectorAll(".rv").forEach(function (el, i) {
+            el.style.transitionDelay = (i % 3) * 60 + "ms";
+            io.observe(el);
+          });
+        } else {
+          document.querySelectorAll(".rv").forEach(function (el) {
+            el.classList.add("in");
+          });
+        }
+
+        /* copy */
+        document.querySelectorAll(".copy").forEach(function (btn) {
+          var label = btn.querySelector(".copy-t") || btn;
+          // Captured once: reading it per click pins the button at "Copied"
+          // when clicks overlap the restore timer.
+          var idle = label.textContent;
+          var restore = 0;
+
+          function say(word) {
+            label.textContent = word;
+          }
+          function settle() {
+            clearTimeout(restore);
+            restore = setTimeout(function () {
+              say(idle);
+              btn.classList.remove("done");
+            }, 1600);
+          }
+          function ok() {
+            say("Copied");
+            btn.classList.add("done");
+            btn.setAttribute("aria-live", "polite");
+            settle();
+          }
+          function selectSource(target) {
+            // Last resort: put the text under the user's cursor so "select it"
+            // is true rather than an instruction with nothing selected.
+            try {
+              var sel = getSelection();
+              var range = document.createRange();
+              range.selectNodeContents(target);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            } catch (e) {
+              /* selection unavailable; the label still tells the user */
+            }
+            say("Select it");
+            settle();
+          }
+
+          btn.addEventListener("click", function () {
+            var target = document.querySelector(btn.dataset.copy);
+            if (!target) return;
+            var lines = target.querySelectorAll(".ln");
+            var text = lines.length
+              ? Array.prototype.map
+                  .call(lines, function (l) {
+                    return l.textContent.replace(/\s+/g, " ").trim();
+                  })
+                  .join("\n")
+              : target.textContent.replace(/\s+/g, " ").trim();
+
+            function legacyCopy() {
+              var ta = document.createElement("textarea");
+              ta.value = text;
+              ta.setAttribute("readonly", "");
+              ta.style.cssText = "position:fixed;top:-9999px";
+              document.body.appendChild(ta);
+              ta.select();
+              var copied = false;
+              try {
+                copied = document.execCommand("copy");
+              } catch (e) {
+                copied = false;
+              }
+              document.body.removeChild(ta);
+              if (copied) ok();
+              else selectSource(target);
+            }
+
+            if (navigator.clipboard && isSecureContext) {
+              navigator.clipboard.writeText(text).then(ok, legacyCopy);
+              return;
+            }
+            legacyCopy();
+          });
+        });
+
+        /* terminal drives the session rows */
+        var term = document.getElementById("term");
+        // Ships with a static transcript so the panel is not a blank 252px box
+        // without JS; the scripted version replaces it.
+        term.innerHTML = "";
+        var dots = document.querySelectorAll("#rows .sd");
+        var clock = document.getElementById("clock");
+        var STATES = ["working", "ready", "attention", "idle"];
+
+        function setRow(i, state) {
+          var d = dots[i];
+          if (!d) return;
+          STATES.forEach(function (s) {
+            d.classList.remove(s);
+          });
+          d.classList.add(state);
+          syncClock();
+        }
+        function syncClock() {
+          var w = 0,
+            a = 0;
+          dots.forEach(function (d) {
+            if (d.classList.contains("working")) w++;
+            if (d.classList.contains("attention")) a++;
+          });
+          clock.textContent = w + " running · " + a + " needs input";
+        }
+        syncClock();
+
+        var steps = [
+          {
+            html: '<span class="v">$</span> spur spawn backend-api "Fix flaky auth test" --worktree',
+          },
+          { html: '<span class="g">✓</span> worktree  feature/flaky-auth-test' },
+          { html: '<span class="g">✓</span> tmux      ses_a41f' },
+          { html: '<span class="b">→</span> claude    working', row: [0, "working"] },
+          { html: "" },
+          { html: '<span class="v">$</span> spur list' },
+          {
+            html: '  ses_a41f  <span class="b">working</span>      claude  feature/flaky-auth-test',
+          },
+          { html: '  ses_9c02  <span class="y">needs input</span>  codex   feature/todo-ledger' },
+          { html: "" },
+          { html: '<span class="v">$</span> spur send ses_9c02 "use the queue, not a retry"' },
+          { html: '<span class="g">✓</span> delivered', row: [1, "ready"] },
+        ];
+
+        if (reduce) {
+          term.innerHTML = steps
+            .map(function (s) {
+              return s.html;
+            })
+            .join("<br>");
+          setRow(0, "working");
+          setRow(1, "ready");
+        } else {
+          var done = document.createElement("div");
+          var cur = document.createElement("div");
+          var text = document.createTextNode("");
+          var caret = document.createElement("span");
+          caret.className = "cursorblk";
+          cur.appendChild(text);
+          cur.appendChild(caret);
+          term.appendChild(done);
+          term.appendChild(cur);
+
+          var probe = document.createElement("div");
+          var li = 0,
+            ci = 0,
+            typing = false;
+
+          function tick() {
+            if (!termAwake()) {
+              typing = false;
+              return;
+            }
+            if (li >= steps.length) {
+              setTimeout(reset, 4200);
+              return;
+            }
+            probe.innerHTML = steps[li].html;
+            var plain = probe.textContent;
+            if (ci <= plain.length) {
+              text.nodeValue = plain.slice(0, ci);
+              ci++;
+              setTimeout(tick, plain.length ? 17 : 0);
+              return;
+            }
+            done.insertAdjacentHTML("beforeend", steps[li].html + "<br>");
+            text.nodeValue = "";
+            if (steps[li].row) setRow(steps[li].row[0], steps[li].row[1]);
+            li++;
+            ci = 0;
+            setTimeout(tick, 280);
+          }
+
+          function reset() {
+            done.innerHTML = "";
+            text.nodeValue = "";
+            li = 0;
+            ci = 0;
+            setRow(0, "idle");
+            setRow(1, "attention");
+            if (termAwake()) tick();
+            else typing = false;
+          }
+
+          // Typing keeps running only while the panel is on screen and the tab
+          // is visible; without this the setTimeout chain re-types forever.
+          var termVisible = !hasIO;
+          function termAwake() {
+            return termVisible && !document.hidden;
+          }
+          function termWake() {
+            if (termAwake() && !typing) {
+              typing = true;
+              tick();
+            }
+          }
+          document.addEventListener("visibilitychange", termWake);
+          if (hasIO) {
+            new IntersectionObserver(
+              function (es) {
+                termVisible = es[0].isIntersecting;
+                termWake();
+              },
+              { threshold: 0.3 },
+            ).observe(term);
+          } else {
+            termWake();
+          }
+        }
+
+        /* hero routing: one source, one agent, one result per round */
+        (function () {
+          var fanout = document.querySelector(".fanout");
+          if (!fanout) return;
+          var sources = fanout.querySelectorAll('.fo-source[data-source-kind="event"]');
+          var agents = fanout.querySelectorAll(".fo-agent");
+          var packet = fanout.querySelector(".fo-pkt");
+          var youFrame = fanout.querySelector(".fo-you-frame");
+          var hubFrame = fanout.querySelector(".fo-frame");
+
+          function hit(node, colour) {
+            node.style.stroke = colour;
+            node.classList.remove("hit");
+            void node.getBBox();
+            node.classList.add("hit");
+            setTimeout(function () {
+              node.style.stroke = "";
+              node.classList.remove("hit");
+            }, 420);
+          }
+
+          function reset() {
+            sources.forEach(function (source) {
+              source.classList.remove("is-active");
+            });
+            agents.forEach(function (agent) {
+              agent.classList.remove("is-active", "is-ready");
+              agent.querySelector(".fo-agent-state").textContent = "working";
+            });
+          }
+
+          if (reduce) return;
+
+          var alive = false;
+          var token = 0;
+
+          function wait(ms) {
+            return new Promise(function (r) {
+              setTimeout(r, ms);
+            });
+          }
+
+          function flight(fromX, fromY, toX, toY, colour, duration) {
+            packet.style.fill = colour;
+            var anim = packet.animate(
+              [
+                { transform: "translate(" + fromX + "px," + fromY + "px)", opacity: 0 },
+                {
+                  transform: "translate(" + fromX + "px," + fromY + "px)",
+                  opacity: 1,
+                  offset: 0.1,
+                },
+                { transform: "translate(" + toX + "px," + toY + "px)", opacity: 1, offset: 0.9 },
+                { transform: "translate(" + toX + "px," + toY + "px)", opacity: 0 },
+              ],
+              { duration: duration, easing: "cubic-bezier(.4,0,.2,1)" },
+            );
+            return anim.finished.catch(function () {});
+          }
+
+          async function round(mine, roundIndex) {
+            var stale = function () {
+              return mine !== token;
+            };
+            var source = sources[roundIndex % sources.length];
+            var agent = agents[roundIndex % agents.length];
+            var sourceX = Number(source.dataset.x);
+            var sourceY = Number(source.dataset.y);
+            var agentX = Number(agent.dataset.x);
+            var agentY = Number(agent.dataset.y);
+            var agentState = agent.querySelector(".fo-agent-state");
+
+            reset();
+            await wait(450);
+            if (stale()) return;
+
+            source.classList.add("is-active");
+            await flight(sourceX, sourceY, 190, 190, "var(--brand)", 760);
+            if (stale()) return;
+            hit(hubFrame, "var(--brand)");
+
+            await flight(250, 190, agentX, agentY, "var(--brand)", 720);
+            if (stale()) return;
+            agent.classList.add("is-active");
+            agentState.textContent = "working";
+            await wait(1000);
+
+            agent.classList.remove("is-active");
+            agent.classList.add("is-ready");
+            agentState.textContent = "result ready";
+            await flight(agentX, agentY, 250, 190, "var(--ready)", 720);
+            if (stale()) return;
+            hit(hubFrame, "var(--ready)");
+            await flight(220, 160, 220, 68, "var(--ready)", 640);
+            if (stale()) return;
+            hit(youFrame, "var(--ready)");
+            await wait(1200);
+          }
+
+          async function loop() {
+            var mine = ++token;
+            var roundIndex = 0;
+            alive = true;
+            while (alive && mine === token) {
+              await round(mine, roundIndex);
+              roundIndex++;
+            }
+          }
+
+          function stop() {
+            alive = false;
+            token++;
+          }
+
+          // Resuming needs both conditions. Keying only off visibility
+          // restarted the round while the diagram was scrolled away, and no
+          // intersection event was left to stop it again.
+          var onScreen = !hasIO;
+          function maybeRun() {
+            if (onScreen && !document.hidden) {
+              if (!alive) loop();
+            } else {
+              stop();
+            }
+          }
+          document.addEventListener("visibilitychange", maybeRun);
+          if (hasIO) {
+            new IntersectionObserver(
+              function (es) {
+                onScreen = es[0].isIntersecting;
+                maybeRun();
+              },
+              { threshold: 0 },
+            ).observe(fanout);
+          } else {
+            maybeRun();
+          }
+        })();
+
+        /* background: a scattered crosshair field that reacts to scroll */
+        var cv = document.getElementById("grid");
+        var cx = cv.getContext("2d");
+        var dpr = Math.min(devicePixelRatio || 1, 2);
+        var W = 0,
+          H = 0,
+          raf = 0,
+          live = false;
+        var mx = -9999,
+          my = -9999;
+        var marks = [];
+        var energy = 0;
+        var drift = 0;
+        var lastY = window.scrollY || 0;
+
+        // Fixed seed so the scatter is stable across resizes and repaints.
+        function rng(seed) {
+          return function () {
+            seed |= 0;
+            seed = (seed + 0x6d2b79f5) | 0;
+            var x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+            x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+            return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+          };
+        }
+
+        var CELL = 104;
+        function build() {
+          var rand = rng(0x5eed1a9);
+          var cell = CELL * dpr;
+          marks = [];
+          for (var gx = -cell; gx < W + cell; gx += cell) {
+            for (var gy = -cell; gy < H + cell * 2; gy += cell) {
+              marks.push({
+                x: gx + rand() * cell,
+                y: gy + rand() * cell,
+                len: (6 + rand() * 10) * dpr,
+                diag: rand() < 0.3,
+                base: 0.05 + rand() * 0.08,
+                depth: 0.15 + rand() * 0.55,
+                spin: rand() < 0.5 ? 1 : -1,
+              });
+            }
+          }
+        }
+
+        function size() {
+          // Resample: a zoom change or a move to another monitor changes dpr,
+          // and the backing store has to follow it.
+          dpr = Math.min(devicePixelRatio || 1, 2);
+          W = cv.width = innerWidth * dpr;
+          H = cv.height = innerHeight * dpr;
+          cv.style.width = innerWidth + "px";
+          cv.style.height = innerHeight + "px";
+          build();
+          paint();
+        }
+
+        function paint() {
+          cx.clearRect(0, 0, W, H);
+          var reach = 200 * dpr;
+          var th = Math.max(1, Math.round(dpr));
+          var span = H + CELL * 3 * dpr;
+          for (var i = 0; i < marks.length; i++) {
+            var m = marks[i];
+            var y = m.y - ((drift * m.depth) % span);
+            if (y < -CELL * dpr) y += span;
+            var dx = m.x - mx,
+              dy = y - my;
+            var near = Math.max(0, 1 - Math.sqrt(dx * dx + dy * dy) / reach);
+            var a = m.base + near * 0.5 + energy * 0.14;
+            var len = m.len + near * 6 * dpr + energy * 9 * dpr;
+            cx.fillStyle =
+              near > 0.25 ? "rgba(255,61,154," + a + ")" : "rgba(225,225,225," + a + ")";
+            cx.save();
+            cx.translate(m.x, y);
+            cx.rotate((m.diag ? Math.PI / 4 : 0) + energy * m.spin * 0.5);
+            cx.fillRect(-len / 2, -th / 2, len, th);
+            cx.fillRect(-th / 2, -len / 2, th, len);
+            cx.restore();
+          }
+        }
+
+        size();
+        // Debounced: reallocating a ~33MB backing store on every resize event
+        // is what makes a window drag crawl.
+        var resizeTimer = 0;
+        addEventListener("resize", function () {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(size, 120);
+        });
+
+        if (!reduce) {
+          if (fine) {
+            addEventListener(
+              "pointermove",
+              function (e) {
+                mx = e.clientX * dpr;
+                my = e.clientY * dpr;
+                wake();
+              },
+              { passive: true },
+            );
+          } else {
+            // Touch has no pointermove to wake on; a tap still nudges the field.
+            addEventListener(
+              "touchstart",
+              function () {
+                energy = Math.min(1, energy + 0.25);
+                wake();
+              },
+              { passive: true },
+            );
+          }
+
+          addEventListener(
+            "scroll",
+            function () {
+              var y = window.scrollY || 0;
+              var delta = y - lastY;
+              lastY = y;
+              drift += delta * dpr * 0.35;
+              energy = Math.min(1, energy + Math.abs(delta) * 0.012);
+              wake();
+            },
+            { passive: true },
+          );
+
+          // Runs only while there is something to settle, then parks itself.
+          function frame() {
+            energy *= 0.9;
+            paint();
+            if (energy > 0.002 && !document.hidden) {
+              raf = requestAnimationFrame(frame);
+            } else {
+              energy = 0;
+              live = false;
+              paint();
+            }
+          }
+
+          function wake() {
+            if (!live && !document.hidden) {
+              live = true;
+              raf = requestAnimationFrame(frame);
+            }
+          }
+
+          document.addEventListener("visibilitychange", function () {
+            if (document.hidden) {
+              // Settle to rest before parking, otherwise the field freezes at
+              // whatever brightness the last frame had and stays there.
+              cancelAnimationFrame(raf);
+              live = false;
+              energy = 0;
+              paint();
+            } else {
+              lastY = window.scrollY || 0;
+              wake();
+            }
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
