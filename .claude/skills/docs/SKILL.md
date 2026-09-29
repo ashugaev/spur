@@ -1,6 +1,6 @@
 ---
 name: docs
-description: "Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY). Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Not for config/command field semantics (docs/configuration.md + docs/commands.md, owned by the config-doc rule and spur skill) or SKILL.md/agent prose (skill-writer)."
+description: "Governs published docs (README.md, docs/, SETUP/TROUBLESHOOTING/CONTRIBUTING/SECURITY), including the reference-doc format for docs/commands.md, docs/configuration.md, docs/daemon-api.md. Load on any published-doc edit — create, change, move, trim, or link fix. Enforces open-source standards: Diataxis mode, granular single-topic files, caveman prose, one source per topic, link don't restate. Which facts land in the reference docs (config-doc rule) stays with AGENTS.md/CLAUDE.md and the spur skill; SKILL.md/agent prose belongs to skill-writer."
 ---
 
 DOCS MANAGEMENT: root README is a minimal hub, Docs section lists every
@@ -45,10 +45,37 @@ GRANULAR: one doc, one topic, one Diataxis mode; split on drift.
                                  docs/daemon-api.md
   Explanation (why)             gitignored planning notes, not shipped
 
+REFERENCE DOCS: docs/commands.md, docs/configuration.md, docs/daemon-api.md are
+navigation for an agent that reads source freely, never a copy of the source.
+
+  One line per surface item: name, default only if verified against current
+  source, pointer to the owning file for behavior (`v2/src/config.ts`,
+  `v2/src/cli.ts`, a route handler, a source file under `v2/src/event-sources/`).
+  No sub-bullets, no multi-sentence entries. Sibling keys sharing an owner
+  collapse onto one line (`ports.<id>.{env,start,end,url}: ... file.ts`).
+  Banned: mechanism (tick order, call chains, race handling, exact algorithm
+  steps), rationale, history, an example past one minimal skeleton, restating
+  `--help` output or a code constant a source file defines, and any
+  multi-clause sentence describing behavior — that belongs to code and its
+  own tests, never to this file.
+  New surface ships with exactly one line added. Nothing else grows.
+  Line budget per file, hard cap: commands.md 132, configuration.md 250,
+  daemon-api.md 94. daemon-api.md only: one method + one full path per
+  line, always — never `GET|POST /x` or `/x/a|b`, a route grep must find
+  its exact `METHOD /path` string verbatim on one line. Over budget on your
+  own edit: cut elsewhere in the same file before adding.
+  A section that is a guide or how-to, not a lookup table: drop it. Check
+  inbound anchors first (`git grep -n '\.md#<anchor>'`) — a live inbound
+  anchor keeps a one-line heading, everything else in the section goes.
+  Never pin a test's assertion to a doc's exact sentence. A test verifies a
+  surface exists and is findable (name, flag, route, event, status code);
+  it never re-derives behavior from doc prose.
+
 ONE SOURCE: each topic has one owning doc, everything else links.
 
   - Commands: docs/commands.md only. Config fields: docs/configuration.md only.
-    Deploy, todo, queue, and shepherd route contracts: docs/daemon-api.md only.
+    Route names: docs/daemon-api.md only — full payload/status-code contracts
+    live in the handler (`v2/src/server.ts`), per daemon-api.md's own scope line.
     A route documented as part of a config field's behavior stays with that field.
   - Contradiction: pick the owner, delete the copy, link.
 

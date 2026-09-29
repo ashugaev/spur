@@ -806,7 +806,7 @@ function parseBacklog(
 
   // `spawn` (used by some live configs to document Take-spawn prompts) is
   // parsed and ignored here — no code path consumes it. See
-  // docs/configuration.md's backlog section.
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,
