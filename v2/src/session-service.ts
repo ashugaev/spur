@@ -12706,6 +12706,9 @@ export class SessionService {
               "sessions",
             ),
             ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            ...(session.agent === "cursor"
+              ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+              : {}),
             freshLaunch: false,
           })
         : null;
@@ -12806,6 +12809,9 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          ...(session.agent === "cursor"
+            ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+            : {}),
           freshLaunch,
         })
       : null;

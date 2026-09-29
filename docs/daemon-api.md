@@ -1,67 +1,84 @@
 # Daemon HTTP API
+> Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
-> Scope: daemon HTTP routes. Caveman, no overhead. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
-
-- `GET /info` — daemon identity and runtime config, `200 { ok: true, apiVersion, version, pid, host, port, dataDir, worktreeDir, configPath, tmuxSocketName, uiPort, startedAt, tags }`. `apiVersion` is the daemon's own `SPUR_DAEMON_API_VERSION` (currently `3`), used by clients to detect a stale build. `tags` is the instance's tag definition list (`name`, `description`, `color`) from bootstrap config — see `tags.<name>` in [configuration.md](configuration.md#field-reference).
-- `POST /deploy/switch` — the web UI's runtime-version switch. Matches the daemon's own reported version: `202 { accepted: true, version, autoUpdate }`, skips `install-and-restart.sh`. A different valid release starts the detached helper: default user scope installs the package, runs `spur reinit`, reinstalls user units, restarts services, health-checks them (a failed package validation or nonzero `spur reinit` reinstalls the previous version); non-default `SYSTEMCTL` (e.g. `SYSTEMCTL="sudo systemctl"`) installs the package then runs `$SYSTEMCTL restart spur-daemon.service spur-web.service`. A second request while the helper runs: `409 { error, inProgress: true, version }` for the active target, including after the daemon restarts. Every `202` also disarms `autoUpdate` in the instance config and echoes the resulting on-disk value; a failed write logs `daemon.auto_update.disarm_failed` and leaves the flag as it was — see [Auto update](configuration.md#auto-update). Also refreshes the host skill symlinks under `~/.claude/skills`/`~/.codex/skills`, same as `spur init`/`spur update`/`spur reinit`/the auto-update tick — see [Install from npm](install-from-npm.md). Accepted requests log `daemon.deploy_switch.started`, refused ones `daemon.deploy_switch.rejected`.
-- `GET /deploy/switch/status` — durable `running`/`succeeded`/`failed` record; before any switch, `{ phase: "idle" }`. Every record carries `initiator`: `"manual"` for this route, `"auto"` for the daemon's own auto-update switch. A `failed` record also carries `failureKind` — `install_failed`, `rolled_back`, `install_unhealthy`, or `interrupted_unknown` — unless the run died before the helper classified it; the retry rule keyed on those values is in [Auto update](configuration.md#auto-update). `interrupted_unknown` is written only by the daemon's own reconcile step, when a `running` record's process identity is dead and no terminal record exists — the run's own trap never got to name what it did. A `succeeded` record may also carry `outcome: "restart_skipped"`, written by the helper when the install completed but no restart mechanism (`systemctl`) was available. A record written before `initiator` existed reads back as `{ phase: "idle" }`. A `spur update` rollback writes one too: `initiator: "manual"`, `exitCode: -1`, `failureKind` `rolled_back` or `install_unhealthy`.
-- `GET /deploy/versions` — carries `autoUpdate: <boolean>`, the on-disk value read fresh on every call, and an `updateFailure: { version, failureKind, initiator }` field from one of two disjoint sources: a `failed` record whose `failureKind` is `rolled_back`, `install_unhealthy`, or `interrupted_unknown`; or a `succeeded` record with `outcome: "restart_skipped"` whose `version` differs from the daemon's own running version (`failureKind: "restart_skipped"` on the wire), which stops appearing on its own once the running version matches — no dismiss action clears it. The `initiator` is what tells an operator-visible suspension (`auto`, the daemon disarmed itself) from a rollback that changed no flag (`manual`).
-- `POST /deploy/auto-update` — body `{ enabled: <boolean> }`. `200 { autoUpdate: <boolean> }` on success; `enabled: true` also deletes a `failed` record whose `failureKind` is `rolled_back`, `install_unhealthy`, or `interrupted_unknown`, `enabled: false` deletes nothing, and no clear path touches a `running`, `succeeded` (including `restart_skipped`), or `install_failed` record; `400` for a non-boolean `enabled`; `409` when the config file changed on disk mid-write, is not a YAML mapping, fails config validation, or is missing; `500` on an unexpected write failure. With `autoUpdate: true`, the daemon's 5-minute reaper tick starts the same executor once a newer published version appears — see [Auto update](configuration.md#auto-update) for the default, the detection latency, and the hand-edit escape hatch.
-
-## Session routes
-
-`GET /sessions` lists sessions. Params: `includeCompleted` (`1` or `true`, trimmed and lowercased — any other value, including `yes`, is read as absent): when present, includes `completed` sessions; when absent, omits them unless the record has `retainInList`. `killed` sessions are never included by this param — only when `retainInList` is set on the record. `view` — `dashboard` for the lean 2s-cache shape the web UI uses, anything else (including omitted) for the default `full` list. The `full` list returns a projected item per session: everything a single-session `SessionView` carries EXCEPT `artifacts`, `artifactsTruncated`, `stateHistory`, `launchCommand`, `prompt`, and `originalTaskPrompt` — those six are dropped from the list response, not walked to compute them (no per-session artifact filesystem walk on this path). Fetch `GET /sessions/:id` for the full detail on one session, including all six. `200` with a JSON array either way.
-
-`GET /sessions/:id` returns the full single-session `SessionView`, unchanged: all fields the list carries plus `artifacts`, `artifactsTruncated` (when the walk truncated), `stateHistory` (when non-empty), `launchCommand`, `prompt`, `originalTaskPrompt` (when present on the record).
-
-`view=dashboard` drops nine more fields on top of that projection: `queuedMessages`, `pipeline`, `sidecarNames`, `sidecarPorts`, `launchCommand`, `stateSubscriptions`, `allowedTriggers`, `agentSessionId` and `branchSource`. Read those from `GET /sessions/:id`.
-
-Every JSON response body is compact, not indented.
-
-`GET /sessions/:id/todo` reads the ToDo projection. `POST /sessions/:id/todo` accepts `{ action: "add", text, reason }`, `{ action: "complete" | "cancel", itemId, reason }`, `{ action: "hold", itemId, reason, blocker, requiredHumanAction? }`, or `{ action: "resume", itemId }`. `blocker` is `external` or `human`; a human blocker requires `requiredHumanAction`, an external blocker rejects it. Unknown fields or an invalid body return `invalid_todo_request` (400). A zero-item ledger returns `todo_ledger_empty` (409); open/held work returns `todo_open_work` (409) with the blocking ids — both carry an actionable `error` string. Invalid transitions return `todo_transition_conflict` (409); ledger corruption returns `todo_ledger_corrupt` (500). No mutation web proxy, no DELETE route. See [todo](commands.md#todo).
-
-`GET /sessions/:id/auto-ping-suppressions` returns `{ records }` for active suppressions owned by that session. Records omit raw handles and handle hashes.
-
-`POST /sessions/:id/auto-ping-suppressions/unsubscribe` takes `{ scope: "event" | "thread" | "subscription", handle }`. Response: `{ record, created }`. Repeating an active unsubscribe returns `200` with `created:false`.
-
-`POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` takes `{}`. Response: `{ records, removed }`. Repeating resume for a known removed id returns `200` with `removed:false`.
-
-Auto-ping routes return `400` for malformed bodies or scope mismatch, `403` for a foreign actor, `404` for unknown or expired handles, and `409` for pending grants or consumed-then-resumed grants. Agent callers must send `x-spur-caller-session` matching `:id`; CLI callers outside a session can target an exact session through the local daemon trust boundary. See [auto-ping](commands.md#auto-ping).
-
-`POST /sessions/:id/queue/remove` and `POST /sessions/:id/queue/flush` take body `{"message": "<exact queued text>"}` — content-keyed, no index over the wire, matched against the trimmed queued value; `404` when that text is not queued. The web session view drives both from per-row send-now/delete icons. See [send, queue](commands.md#send-queue).
-
-`POST /sessions/:id/wake` accepts a schedule body (`at`, `delayMs`, `intervalMs`, `dailyAt`, `stopCondition`, `message`), a targeted message update `{ target: "scheduled" | "interval" | "daily", message: string }`, or a manual dispatch `{ target: "scheduled" | "interval" | "daily", dispatch: true }`. Update mode trims `message` once, requires a nonblank result, rejects schedule fields beside `target`, and changes only that wake record's `message` plus session `updatedAt`; every schedule field and coexisting wake record stays unchanged. Dispatch mode runs the daemon wake delivery path for that target (formatted recurring message, schedule claim/advance, one-shot clear). `200` returns the enriched `SessionView`; invalid update or dispatch bodies return `400 { error }`; a `target` with no matching wake record returns `409 { error }` before any write. An unknown `:id` returns `404 { error }` once session lookup runs (after body parse; invalid bodies can still return `400` first). `POST /sessions/:id/wake/cancel` clears the session's wake records, `200` with the enriched `SessionView`, and answers an unknown `:id` the same `404 { error }`. See [shepherd, wake](commands.md#shepherd-wake).
-
-`POST /sessions/:id/sidecars/:name/stop` returns the enriched `SessionView` 200 body plus an additive `sidecarStop` field reporting the real outcome: `{ outcome: "reaped" }`, `{ outcome: "partial", survivors: number[], unverifiedPorts?: number[] }`, or `{ outcome: "nothing-to-stop" }`. `partial`'s `survivors` can carry the pid of a detached daemon still holding the sidecar's own recorded port, not only a surviving pane-tree pid — the route always probes that port, even when the pane is already gone. `unverifiedPorts` carries a recorded port that could not be confirmed clear by this stop — either its listener probe itself failed (neither `lsof` nor `ss` produced a usable result), or the port was excluded from the probe entirely because a non-terminal sibling session also records it and the port is proven occupied (ambiguous ownership, never signaled). Either cause is a cannot-prove result, never collapsed into `reaped` or `nothing-to-stop`; it can be non-empty even when `survivors` is empty. Every other top-level field (`id`, `sidecars`, ...) is unchanged. See [Sidecars](commands.md#sidecars).
-
-`POST /sessions/:id/sidecars/:name/start` — body `{ callerSidecarName?, callerSidecarDepth?, clearPort? }`. A blocked port range returns `409 { code: "sidecar_port_busy", sidecarName, candidates }`, one `candidate` per port ID `{ portId, env, port, owner?, reservedBy?, holder?, clearable? }` per configured port that is currently blocking the start — a free, unreserved port in the range is never listed. `reservedBy` is set when a Spur session/sidecar recorded that port; `holder: { pid, cwd }` is set only when the port is host-occupied by an untracked process whose listener could be attributed (best-effort, 4s budget; a probe that could not run — no `lsof`/`ss` — leaves both `reservedBy` and `holder` unset, never signaled as free). `clearable: false` marks a port already claimed by a sibling port ID in this same start attempt — clearing it would break that other reservation; the UI disables it. `clearPort` retries with that port torn down (host clear, plus the owning session's sidecar reaped if cross-session) and bypasses a cached refusal. Every refusal emits `session.sidecar.start_rejected` (`details.reason: "port_conflict"`, `details.candidates`) carrying the session's id. A repeat conflict on the same session+sidecar within a bounded window returns the cached `409` without re-probing the host; past a deadline (at least 30 minutes), at most once per backoff window (not on every attempt), the daemon re-probes the previously blocked ports and either clears the refusal (any port now free) or emits one more `session.sidecar.start_rejected` (`details.terminal: true`) and keeps refusing. A successful start, a stop, a relaunch, a restore, or the session ending clears the cached refusal. A start whose recorded process is still serving its reserved ports (tmux supervisor gone, identity and occupancy still match) returns `200` unchanged — no reap, no relaunch — and emits `session.sidecar.start_noop` once per identity.
-
-`POST /sidecars/sweep` body `{ reap?: boolean }`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance, an `orphan-daemon` row (a reparented daemon whose `cli.js` no longer exists on disk) is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` (its own instance config's `server.port`) and `liveness: "serving" | "not-serving" | "unknown"` (whether that port's real listener is this row's own pid). `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not. See [Sidecars](commands.md#sidecars).
-
-`POST /sessions/:id/slots` accepts `{ title?, clearTitle?, setTitleIfAbsent?, source?: "manual" | "agent", links?, unlinkLabels?, tags?, untags? }`. `200` returns `SessionView` plus `slotUpdate: { titleResult, message? }`. `source: "manual"` locks title against agent writes (`titleResult: "blocked"`). `404` unknown session; `500` validation failure. See [spur-slots](commands.md#spur-slots).
-
-`POST /shepherd/spawn` reuses the newest running or spawning Shepherd session, skipping one that holds a Telegram reply target (bound by `/watch` or `autoSpawn`) — that case spawns a fresh Shepherd. `{ reportDisposition: true }` returns `{ disposition: "spawned" | "reused", session }`; omitted, the legacy session-only response. See [shepherd, wake](commands.md#shepherd-wake).
-
-`GET /sessions/:id/conversation?from=<n>` returns a page of the session's transcript, absolute-indexed into the full conversation. `from` omitted returns the newest 100 entries (`CONVERSATION_PAGE_ENTRIES`); `from=k` returns entries `[k, end)`, open-ended through the newest entry; a non-negative-integer `from` that fails `/^\d+$/` is ignored (treated as omitted). Response: `entries` (`TranscriptEntry[]`, full-fidelity — messages, tool calls, questions, never truncated), `messages` (derived from `entries`, text-bearing messages only), `durationMs`, `state`, `startIndex` (absolute index of `entries[0]`), `totalEntries` (size of the full transcript), `hasMore` (`startIndex > 0`, i.e. older entries exist before this page). For the `claude` agent, `state` always comes from the incremental transcript-tail reader's classification, on every request regardless of `from` — never a status-derived fallback while a transcript exists.
-
-`GET /sessions/:id/artifacts/:path` streams one artifact. `:path` is the file's POSIX-separated path relative to the session's artifacts root, sent as real path segments (each percent-encoded), not `%2F`. Refused with `404` (body `Artifact not found: ...`): a `..` or `.` segment, an absolute path, a backslash, a NUL byte, the reserved `.spur-artifacts.json` name, an id or session id segment with an invalid percent-encoding, and any id whose realpath resolves outside the artifacts root (a symlink escape). `content-disposition` carries the basename, not the full relative path.
-
-Listing (part of the single-session `SessionView`, field `artifacts` — not on the `GET /sessions` list item; see above): every file directly in the session artifacts root is always listed, uncapped. Files in subfolders are listed under their POSIX relative path (`design/design-spec.md`), bounded below the root by an entry-walk budget and a row cap (`MAX_NESTED_ARTIFACT_WALK_ENTRIES` = 2000 directory entries examined, `MAX_NESTED_ARTIFACT_ROWS` = 200 emitted nested rows); hitting either stops the walk. The entry budget also charges one tick per directory opened below the root (not only per entry inside it), so a tree of many empty directories sets `artifactsTruncated: true` on directory expansion alone, with zero nested rows emitted. Two distinct paths reaching the same physical directory (for example a symlink alongside its target) are both listed as separate rows. When a nested budget cut the walk short, the session view sets `artifactsTruncated: true` (omitted otherwise) — root-level files are never affected by truncation.
-
-`SessionView.tokenUsageView` and dashboard session rows report `available` with provider, gross `inputTokens`, `outputTokens`, `totalTokens`, optional `cacheReadInputTokens`, `cacheWriteInputTokens`, `reasoningOutputTokens`, `cacheWrite5mInputTokens`, `cacheWrite1hInputTokens`, optional `budget`, and `exhausted`; `waiting` before Claude, Codex, Cursor, or OpenCode reports usage. Omitted component fields mean the provider did not report that category; zero means it reported zero. Raw generation identifiers stay private. Missing usage never blocks launch. Budget exhaustion persists `stopReason: "token_budget"` and emits `session.token_budget.exhausted` once for that stop.
-
-`SessionView.preflightTokenUsageView` reports pre-flight usage separately as `measured`, `partial`, `unknown`, or `legacy_unknown`, with attempt and provider-iteration counts. Measured views include gross totals and `byProvider`; raw batch, native-session, artifact, and generation ids stay private. `SessionView.tokenBudgetView` reports `knownTotalTokens`, optional `budget`, `exhausted`, `enforced`, `overridden`, and an unenforced reason across pre-flight plus main usage.
-
-Budget exhaustion sets `status: "budget_limited"`; automatic wakes cannot resume it. `POST /sessions/:id/restore` accepts `{ overrideTokenBudget: true }` to approve unlimited tokens for that session and resume it. Approval survives daemon restart and later restores; usage keeps accumulating. The response retains the configured `budget`, sets `overridden: true`, and clears `exhausted` and `enforced`. Legacy `stopped` sessions with `stopReason: "token_budget"` and other restorable sessions whose known usage reaches the current limit accept the same approval. Other sessions reject approval.
-
-`POST /projects/:id/preflight-batches` accepts an empty body and returns `200 { preflightBatchId }` without executing a provider. Allocate once per draft before previews; concurrent previews share that id. Retrying a lost allocation response creates another empty batch without paid usage. Unknown projects return `404`.
-
-`POST /projects/:id/preflight` accepts optional UUID `preflightBatchId` and returns `branch`, `preflightBatchId`, and `preflightTokenUsageView`. A failed preview after batch creation returns non-2xx with `error`, `preflightBatchId`, and the recorded `preflightTokenUsageView`. Omit the id to start a fresh batch; otherwise reuse the server-allocated id for previews and spawn. Adopt a replacement id even when its preview result is superseded within the same draft. A project change requires a new id. `POST /sessions` and `POST /sessions/background` accept the id, claim it once for the created session, and reject project mismatch or replay by another session.
-
-An unreadable accounting batch is replaced with a new id; prior usage stays unknown. A supplied id absent from storage also has unknown prior usage. Ledger write failures preserve accounting in daemon memory and do not block provider execution. Known project and ownership mismatches still reject the request.
+- `GET /info`
+- `GET /headroom`
+- `GET /models`
+- `GET /user-actions`
+- `GET /deploy/versions`
+- `GET /deploy/switch/status`
+- `POST /deploy/switch` — see [Auto update](configuration.md#auto-update)
+- `POST /deploy/auto-update`
+- `GET /claude-accounts`
+- `POST /claude-accounts/add`
+- `POST /claude-accounts/remove`
+- `POST /claude-accounts/:id/finish-login`
+- `GET /claude-accounts/:id/login-status`
 
 ## Project routes
 
-`GET /projects/:id/branches/exists?name=<branch>` — `200 { exists, remote, checkedOutAt }` for the project's repo. A blank or unnormalizable `name` returns `{ exists: false, remote: false, checkedOutAt: null }`.
+- `GET /projects`
+- `POST /projects`
+- `PATCH /projects/:id`
+- `DELETE /projects/:id`
+- `POST /projects/connect`
+- `POST /projects/disconnect`
+- `GET /backlog/available`
+- `GET /projects/:id/slash-commands`
+- `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, worktree}`
+- `GET /projects/:id/branches/exists?name=<branch>`
+- `POST /projects/:id/preflight-batches`
+- `POST /projects/:id/preflight`
 
-An unknown project id returns `404 { error }` on every project-scoped route that resolves the project: `GET /projects/:id/branches/exists`, `GET /projects/:id/slash-commands`, `GET /projects/:id/spawn-defaults`, and `POST /projects/:id/preflight`.
+## Session routes
+
+- `GET /sessions`
+- `POST /sessions`
+- `POST /sessions/background`
+- `POST /shepherd/spawn`
+- `POST /sidecars/sweep`
+- `GET /sessions/:id`
+- `GET /sessions/:id/slash-commands`
+- `GET /sessions/:id/conversation`
+- `GET /sessions/:id/user-actions`
+- `GET /sessions/:id/subscriptions`
+- `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
+- `POST /sessions/:id/send`
+- `POST /sessions/:id/answer`
+- `POST /sessions/:id/source-reply`
+- `POST /sessions/:id/opened`
+- `POST /sessions/:id/pause`
+- `POST /sessions/:id/complete`
+- `POST /sessions/:id/self-destruct`
+- `POST /sessions/:id/kill`
+- `POST /sessions/:id/restore`
+- `POST /sessions/:id/reopen`
+- `POST /sessions/:id/handoff`
+- `POST /sessions/:id/respawn`
+- `POST /sessions/:id/switch-auth`
+- `GET /sessions/:id/todo`
+- `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
+- `GET /sessions/:id/auto-ping-suppressions`
+- `POST /sessions/:id/auto-ping-suppressions/unsubscribe`
+- `POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume` — `400|403|404|409`. See [auto-ping](commands.md#auto-ping)
+- `POST /sessions/:id/queue/remove` — `{"message": "<exact queued text>"}`. See [send, queue](commands.md#send-queue)
+- `POST /sessions/:id/queue/flush`
+- `POST /sessions/:id/wake`
+- `POST /sessions/:id/wake/cancel`
+- `POST /sessions/:id/subscriptions`
+- `POST /sessions/:id/subscriptions/:subId/remove`
+- `POST /sessions/:id/slots` — see [spur-slots](commands.md#spur-slots)
+- `POST /sessions/:id/sidecars/:name/start`
+- `POST /sessions/:id/sidecars/:name/stop` — see [Sidecars](commands.md#sidecars)
+- `GET /sessions/:id/services`
+- `GET /sessions/:id/services/:name`
+- `POST /sessions/:id/services/:name/run`
+- `GET /sessions/:id/artifacts/:path` — streams one artifact
+- `GET /sessions/:id/session-memory`
+- `GET /sessions/:id/session-memory/:key`
+- `POST /sessions/:id/session-memory/:key`
+- `POST /sessions/:id/session-memory/:key/resolve`
+- `GET /sessions/:id/shared-memory/:scope`
+- `GET /sessions/:id/shared-memory/:scope/:key`
+- `POST /sessions/:id/shared-memory/:scope/:key`
+- `DELETE /sessions/:id/shared-memory/:scope/:key`
