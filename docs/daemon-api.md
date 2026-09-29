@@ -1,4 +1,5 @@
 # Daemon HTTP API
+
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
 - `GET /info`
