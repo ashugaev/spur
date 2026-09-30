@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as githubProviderModule from "../../src/review-providers/github.js";
+import type {
+  RefreshReviewSignalsInput,
+  ReviewSignalRefreshResult,
+} from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
 import type {
   AutoPingRouteDescriptor,
@@ -32,6 +37,8 @@ const readPendingSendBatchMock = vi.fn();
 const updatePendingSendBatchConditionalMock = vi.fn();
 const deletePendingSendBatchConditionalMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const refreshSignalsMock =
+  vi.fn<(input: RefreshReviewSignalsInput) => Promise<ReviewSignalRefreshResult[]>>();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
 
 function inputLogEntries(sessionId: string): unknown[] {
@@ -65,6 +72,14 @@ vi.mock("../../src/metadata.js", () => ({
   updatePendingSendBatchConditional: updatePendingSendBatchConditionalMock,
   deletePendingSendBatchConditional: deletePendingSendBatchConditionalMock,
 }));
+
+vi.mock("../../src/review-providers/github.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof githubProviderModule>();
+  return {
+    ...actual,
+    githubReviewProvider: { ...actual.githubReviewProvider, refreshSignals: refreshSignalsMock },
+  };
+});
 
 function config(options?: { event?: string; interrupt?: boolean; prompt?: string }) {
   const event = options?.event ?? "github:comment";
@@ -493,6 +508,7 @@ function githubEvent(signalKey = "comment:1") {
     data: {
       sessionId: "api-1",
       repo: "acme/api",
+      prUrl: "https://github.com/acme/api/pull/42",
       prNumber: 42,
       prTitle: "Tighten coverage",
       signals: [
@@ -571,6 +587,7 @@ function mergeConflictEvent() {
     data: {
       sessionId: "api-1",
       repo: "acme/api",
+      prUrl: "https://github.com/acme/api/pull/42",
       prNumber: 42,
       prTitle: "Tighten coverage",
       signals: [mergeConflictSignal()],
@@ -726,6 +743,11 @@ async function advanceSendWindow(): Promise<void> {
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    refreshSignalsMock
+      .mockReset()
+      .mockImplementation(async (input) =>
+        input.signals.map((signal) => ({ status: "live", key: signal.key, signal })),
+      );
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
     readReviewSourceSnapshotMock.mockReset().mockReturnValue(null);
     readWorkItemLifecyclesMock.mockReset().mockReturnValue(new Map());
@@ -798,6 +820,525 @@ describe("startConfiguredTriggers", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  describe("persisted live feedback", () => {
+    const pending = (): PersistedPendingBatch | undefined =>
+      readPendingSendBatchesMock().get("api:send:api-1");
+    const running = (path: string) => ({
+      id: "api-1",
+      status: path === "stale" ? "stopped" : "running",
+      state: path === "stale" ? "stale" : path === "interrupt" ? "working" : "waiting",
+      stopReason: "stale_timeout",
+      workspaceExists: true,
+      worktreePath: "/removed/worktree",
+      lastActivityAt: staleActivity(),
+    });
+    const emit = (
+      bus: EventBus,
+      signals: ReviewSignal[],
+      overrides: { prUrl?: string; repo?: string } = {},
+    ) => {
+      readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
+      bus.emit({
+        ...githubEvent(),
+        occurrenceId: `fresh-${Date.now()}`,
+        data: { ...githubEvent().data, ...overrides, signals },
+      });
+    };
+
+    it.each(["queued", "stale", "interrupt"])(
+      "resolves edited and deleted feedback on %s delivery",
+      async (path) => {
+        const get = vi.fn().mockResolvedValue(running(path));
+        const deliver = vi.fn().mockResolvedValue(undefined);
+        const signals: ReviewSignal[] = [
+          { key: "comment:1", kind: "comment", text: "cached" },
+          { key: "comment:2", kind: "comment", text: "deleted" },
+        ];
+        refreshSignalsMock.mockImplementation(async (input) => {
+          expect(input.cwd).toBe(DATA_DIR);
+          expect(input.hostname).toBe("git.example.com");
+          expect(pending()?.claim?.claimId).toBeTruthy();
+          expect(
+            pending()?.retryAccounting?.filter((entry) => entry.deliveryAttempts === 1),
+          ).toHaveLength(2);
+          return input.signals.map((signal) =>
+            signal.key === "comment:2"
+              ? { status: "deleted", key: signal.key }
+              : { status: "live", key: signal.key, signal: { ...signal, text: "current body" } },
+          );
+        });
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config({ interrupt: path === "interrupt", prompt: "review" }) as never,
+          bus,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          emit(bus, signals, { prUrl: "https://git.example.com/acme/api/pull/42" });
+          await vi.advanceTimersByTimeAsync(path === "queued" ? 35_000 : 1);
+          expect(deliver).toHaveBeenCalledWith("api-1", expect.stringContaining("current body"), {
+            interrupt: path === "interrupt",
+          });
+          expect(deliver.mock.calls[0]?.[1]).not.toContain("cached");
+          expect(deliver.mock.calls[0]?.[1]).not.toContain("deleted");
+          expect(inputLogEntries("api-1")).toHaveLength(1);
+          expect(pending()).toBeUndefined();
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it("charges only the selected four and advances deferred siblings during failed-item backoff", async () => {
+      const signals: ReviewSignal[] = Array.from({ length: 6 }, (_, index) => ({
+        key: `comment:${index + 1}`,
+        kind: "comment",
+        text: `cached ${index + 1}`,
+      }));
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      refreshSignalsMock.mockImplementationOnce(async (input) => {
+        expect(input.signals).toHaveLength(4);
+        expect(
+          pending()?.retryAccounting?.filter((entry) => entry.deliveryAttempts === 0),
+        ).toHaveLength(2);
+        return input.signals.map((signal) => ({
+          status: "failed",
+          key: signal.key,
+          error: "HTTP 403",
+        }));
+      });
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        emit(bus, signals);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deliver).not.toHaveBeenCalled();
+        expect(pending()?.retryAccounting?.map((entry) => entry.deliveryAttempts)).toEqual([
+          1, 1, 1, 1, 0, 0,
+        ]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(refreshSignalsMock.mock.calls[1]?.[0].signals.map((signal) => signal.key)).toEqual([
+          "comment:5",
+          "comment:6",
+        ]);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(pending()?.retryAccounting?.map((entry) => entry.deliveryAttempts)).toEqual([
+          1, 1, 1, 1,
+        ]);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each(["rate_limit", "memory_guard", "cap", "general"])(
+      "refunds only actual submissions on %s, never failed lookups or deletion",
+      async (reason) => {
+        const signals: ReviewSignal[] = [
+          { key: "comment:1", kind: "comment", text: "failed" },
+          { key: "comment:2", kind: "comment", text: "gone" },
+          { key: "comment:3", kind: "comment", text: "ready" },
+          { key: "ci_failed", kind: "ci_failed", text: "CI failed" },
+        ];
+        refreshSignalsMock.mockImplementation(async (input) =>
+          input.signals.map((signal) =>
+            signal.key === "comment:1"
+              ? { status: "failed", key: signal.key, error: "HTTP 401" }
+              : signal.key === "comment:2"
+                ? { status: "deleted", key: signal.key }
+                : { status: "live", key: signal.key, signal: { ...signal, text: "current" } },
+          ),
+        );
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const { SessionRateLimitedError, SessionAdmissionDeniedError } =
+          await import("../../src/session-service.js");
+        const error =
+          reason === "rate_limit"
+            ? new SessionRateLimitedError("limited")
+            : reason === "general"
+              ? new Error("uncertain submit")
+              : new SessionAdmissionDeniedError(
+                  "held",
+                  reason === "memory_guard" ? "memory_guard" : "cap",
+                );
+        const get = vi.fn().mockResolvedValue(running("stale"));
+        const deliver = vi.fn().mockRejectedValue(error);
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config({ prompt: "review" }) as never,
+          bus,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          emit(bus, signals);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(deliver.mock.calls[0]?.[1]).toContain("current");
+          expect(deliver.mock.calls[0]?.[1]).not.toContain("- failed\n");
+          const record = pending();
+          expect(record?.batch).toMatchObject({ signals: [signals[0], signals[2], signals[3]] });
+          expect(
+            record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
+          ).toMatchObject({ deliveryAttempts: 1 });
+          expect(
+            record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:2")),
+          ).toBeUndefined();
+          expect(
+            record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:3")),
+          ).toMatchObject({ deliveryAttempts: reason === "general" ? 1 : 0 });
+          expect(
+            record?.retryAccounting?.find((entry) => entry.itemKey.includes("ci_failed")),
+          ).toMatchObject({
+            deliveryAttempts: reason === "general" ? 1 : 0,
+            ciAttempts: reason === "general" ? 1 : 0,
+          });
+          expect(record?.batch.autoPing?.items["comment:2"]).toBeUndefined();
+          expect(record?.batch.autoPing?.items["comment:1"]).toBeTruthy();
+          expect(inputLogEntries("api-1")).toHaveLength(0);
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it("retains failed lookup budgets on restart, overlays live edits without reset, and resets separately enqueued edits", async () => {
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockRejectedValue(new Error("uncertain submit"));
+      refreshSignalsMock.mockImplementationOnce(async (input) =>
+        input.signals.map((signal) => ({ status: "failed", key: signal.key, error: "timeout" })),
+      );
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const deps = {
+        config: config() as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      const signals: ReviewSignal[] = [{ key: "comment:1", kind: "comment", text: "original" }];
+      try {
+        emit(bus, signals);
+        await vi.advanceTimersByTimeAsync(1);
+        const fingerprint = pending()?.retryAccounting?.[0]?.fingerprint;
+        await controller.stop();
+        controller = startConfiguredTriggers(deps);
+        refreshSignalsMock.mockImplementation(async (input) =>
+          input.signals.map((signal) => ({
+            status: "live",
+            key: signal.key,
+            signal: { ...signal, text: "edited remotely" },
+          })),
+        );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(pending()?.retryAccounting?.[0]).toMatchObject({ deliveryAttempts: 2, fingerprint });
+        expect(pending()?.batch).toMatchObject({ signals });
+        emit(
+          bus,
+          signals.map((signal) => ({ ...signal, text: "separately enqueued edit" })),
+        );
+        await vi.advanceTimersByTimeAsync(1);
+        expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+        expect(pending()?.retryAccounting?.[0]?.fingerprint).not.toBe(fingerprint);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each(["host", "repo", "same"])(
+      "retires absent exhausted accounting only when the %s context changes",
+      async (change) => {
+        const dataDir = mkdtempSync(join(tmpdir(), "spur-feedback-context-"));
+        const autoPing = new AutoPingService(dataDir);
+        const released = vi.spyOn(autoPing, "releaseOccurrenceReference");
+        let session = running("interrupt");
+        const get = vi.fn().mockImplementation(async () => session);
+        const deliver = vi.fn().mockRejectedValue(new Error("uncertain submit"));
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: { ...config(), dataDir } as never,
+          bus,
+          autoPing,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+        const old = githubEvent("comment:2");
+        const incoming = githubEvent();
+        const { createSendBatchParser } = await import("../../src/send-batches.js");
+        const parsed = createSendBatchParser("github", "api", "pr-watch")(incoming.data);
+        const item = parsed?.retryItems()[0];
+        if (!item) throw new Error("Missing item fixture");
+        try {
+          readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(old.data.signals));
+          bus.emit(old);
+          await vi.advanceTimersByTimeAsync(1);
+          const record = pending();
+          if (!record) throw new Error("Missing pending fixture");
+          record.retryAccounting?.push(
+            {
+              itemKey: item.itemKey,
+              fingerprint: item.fingerprint,
+              deliveryAttempts: 8,
+              ciAttempts: 0,
+              nextAttemptAt: 0,
+            },
+            {
+              itemKey: '["github",420,"comment:1"]',
+              fingerprint: item.fingerprint,
+              deliveryAttempts: 8,
+              ciAttempts: 0,
+              nextAttemptAt: 0,
+            },
+            {
+              itemKey: '["gitlab",42,"comment:1"]',
+              fingerprint: item.fingerprint,
+              deliveryAttempts: 8,
+              ciAttempts: 0,
+              nextAttemptAt: 0,
+            },
+          );
+          session = running("stale");
+          refreshSignalsMock.mockImplementation(async (input) => {
+            if (change !== "same") {
+              expect(input.hostname).toBe(change === "host" ? "new.example" : "github.com");
+              expect(input.repo).toBe(change === "repo" ? "other/api" : "acme/api");
+              expect(input.signals.map((signal) => signal.key)).toEqual(["comment:1"]);
+              expect(
+                pending()?.retryAccounting?.find((entry) => entry.itemKey === item.itemKey)
+                  ?.deliveryAttempts,
+              ).toBe(1);
+            }
+            return input.signals.map((signal) => ({
+              status: "live",
+              key: signal.key,
+              signal: { ...signal, text: "current on selected host" },
+            }));
+          });
+          emit(bus, incoming.data.signals, {
+            prUrl:
+              change === "host"
+                ? "https://new.example/acme/api/pull/42"
+                : change === "repo"
+                  ? "https://github.com/other/api/pull/42"
+                  : incoming.data.prUrl,
+            repo: change === "repo" ? "other/api" : "acme/api",
+          });
+          if (change === "same")
+            readGitHubSourceSnapshotMock.mockReturnValue(
+              storedSnapshot([...old.data.signals, ...incoming.data.signals]),
+            );
+          await vi.advanceTimersByTimeAsync(1);
+          const updated = pending();
+          expect(
+            updated?.retryAccounting?.filter(
+              (entry) =>
+                entry.itemKey.startsWith('["github",420,') ||
+                entry.itemKey.startsWith('["gitlab",42,'),
+            ),
+          ).toHaveLength(2);
+          if (change === "same") {
+            expect(
+              updated?.retryAccounting?.find((entry) => entry.itemKey === item.itemKey)
+                ?.deliveryAttempts,
+            ).toBe(8);
+            expect(
+              refreshSignalsMock.mock.calls
+                .flatMap(([input]) => input.signals)
+                .some((signal) => signal.key === "comment:1"),
+            ).toBe(false);
+          } else {
+            expect(deliver.mock.calls[0]?.[1]).toContain("current on selected host");
+            expect(updated?.batch.autoPing?.items["comment:2"]).toBeUndefined();
+            expect(released).toHaveBeenCalledWith(expect.any(String), old.occurrenceId);
+            expect(
+              updated?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:2")),
+            ).toBeUndefined();
+          }
+        } finally {
+          await controller.stop();
+          autoPing.dispose();
+          rmSync(dataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("persists failed-only attempts across reload until bound8 while preserving CI's independent3 reminders", async () => {
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      refreshSignalsMock.mockImplementation(async (input) =>
+        input.signals.map((signal) => ({ status: "failed", key: signal.key, error: "HTTP 403" })),
+      );
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const deps = {
+        config: config() as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      };
+      let controller = startConfiguredTriggers(deps);
+      const signals: ReviewSignal[] = [
+        { key: "comment:1", kind: "comment", text: "original" },
+        { key: "ci_failed", kind: "ci_failed", text: "CI failed" },
+      ];
+      try {
+        emit(bus, signals);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(
+          pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("ci_failed")),
+        ).toMatchObject({ ciAttempts: 1, deliveryAttempts: 1 });
+        await controller.stop();
+        controller = startConfiguredTriggers(deps);
+        for (let attempt = 1; attempt < 8; attempt += 1) {
+          await vi.advanceTimersByTimeAsync(10_000 * 2 ** (attempt - 1) + 5_000);
+        }
+        expect(refreshSignalsMock).toHaveBeenCalledTimes(8);
+        expect(deliver).toHaveBeenCalledTimes(3);
+        expect(deliver.mock.calls.every((call) => !String(call[1]).includes("original"))).toBe(
+          true,
+        );
+        expect(pending()).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(refreshSignalsMock).toHaveBeenCalledTimes(8);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("charges missing legacy identity durably without invoking the provider", async () => {
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        const event = githubEvent();
+        const { prUrl: _url, ...legacy } = event.data;
+        readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(legacy.signals));
+        bus.emit({ ...event, data: legacy });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(pending()?.retryAccounting?.[0]).toMatchObject({
+          deliveryAttempts: 1,
+          ciAttempts: 0,
+        });
+        expect(refreshSignalsMock).not.toHaveBeenCalled();
+        expect(deliver).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(2);
+        expect(refreshSignalsMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("makes no merge-conflict claim or input event when live feedback is all deleted", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-feedback-delete-"));
+      const autoPing = new AutoPingService(dataDir);
+      const claim = vi.spyOn(autoPing, "claimMergeConflict");
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      refreshSignalsMock.mockImplementation(async (input) =>
+        input.signals.map((signal) => ({ status: "deleted", key: signal.key })),
+      );
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: { ...config({ prompt: "review" }), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        emit(bus, githubEvent().data.signals);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(pending()).toBeUndefined();
+        expect(deliver).not.toHaveBeenCalled();
+        expect(claim).not.toHaveBeenCalled();
+        expect(inputLogEntries("api-1")).toHaveLength(0);
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+          "trigger.send.dropped",
+        );
+      } finally {
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps unsubscribe behind locked refresh then suppresses the failed delivery's queued feedback", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-feedback-order-"));
+      const autoPing = new AutoPingService(dataDir);
+      const get = vi.fn().mockResolvedValue(running("stale"));
+      const deliver = vi.fn().mockRejectedValue(new Error("uncertain submit"));
+      let release = (_results: ReviewSignalRefreshResult[]): void => {};
+      let entered = (): void => {};
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      refreshSignalsMock.mockImplementationOnce(async () => {
+        entered();
+        return new Promise<ReviewSignalRefreshResult[]>((resolve) => {
+          release = resolve;
+        });
+      });
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: { ...config(), dataDir } as never,
+        bus,
+        autoPing,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        emit(bus, githubEvent().data.signals);
+        const advancing = vi.advanceTimersByTimeAsync(1);
+        await started;
+        const handle = pending()?.batch.autoPing?.items["comment:1"]?.eventHandle;
+        if (!handle) throw new Error("Missing unsubscribe handle");
+        let unsubscribed = false;
+        const unsubscribe = autoPing.unsubscribe("api-1", "event", handle).then(() => {
+          unsubscribed = true;
+        });
+        await Promise.resolve();
+        expect(unsubscribed).toBe(false);
+        release([
+          {
+            status: "live",
+            key: "comment:1",
+            signal: { key: "comment:1", kind: "comment", text: "current" },
+          },
+        ]);
+        await advancing;
+        await unsubscribe;
+        expect(unsubscribed).toBe(true);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+        expect(deliver).toHaveBeenCalledTimes(1);
+      } finally {
+        release([]);
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("delivers GitHub updates via flush loop when the target session is waiting", async () => {
@@ -4975,6 +5516,7 @@ describe("startConfiguredTriggers", () => {
         projectId: "api",
         sourceId: "pr-watch",
         sessionId: "api-1",
+        prUrl: "https://github.com/acme/api/pull/42",
         prNumber: 42,
         prTitle: "Tighten coverage",
         signals: [{ key: "comment:1", kind: "comment", text: "A new comment arrived." }],
@@ -5489,6 +6031,7 @@ describe("startConfiguredTriggers", () => {
           projectId: "api",
           sourceId: "pr-watch",
           sessionId: "api-1",
+          prUrl: "https://github.com/acme/api/pull/42",
           prNumber: 42,
           prTitle: "Tighten coverage",
           signals: [{ key: "comment:1", kind: "comment", text: "A new comment arrived." }],

@@ -565,6 +565,8 @@ export function reviewSnapshotBaseline(
 
 export interface ReviewEventData {
   sessionId: string;
+  repo?: string;
+  prUrl?: string;
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
@@ -622,6 +624,8 @@ export type PersistedSendBatch = (
       sourceId: string;
       prompt?: string;
       sessionId: string;
+      repo?: string;
+      prUrl?: string;
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
