@@ -49,7 +49,7 @@ import {
   invalidateOpenCodeState,
   opencodeCommand,
   readOpenCodeConversation,
-  scanOpenCodeForNewUserMessage,
+  scanOpenCodeForTypedMessage,
 } from "./opencode.js";
 import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
@@ -671,9 +671,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
           sessionId: baseline.sessionId,
           after: baseline.after,
         },
-        async scan() {
+        async scan(text) {
           return {
-            found: await scanOpenCodeForNewUserMessage(baseline),
+            found: await scanOpenCodeForTypedMessage(baseline, text),
             lastScannedFile: null,
           };
         },

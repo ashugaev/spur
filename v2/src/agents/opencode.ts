@@ -598,6 +598,87 @@ export async function scanOpenCodeForNewUserMessage(
   }
 }
 
+const normalizeTypedText = (value: string) =>
+  value.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim();
+
+// User messages newer than the watermark, with their joined text parts.
+export async function readOpenCodeUserTextsAfterFromDatabase(
+  baseline: OpenCodeSubmitBaseline,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<string[]> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const after = baseline.after;
+    const rows = database
+      .prepare(
+        `SELECT m.id AS messageId, json_extract(p.data, '$.text') AS text
+         FROM message m JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user'
+           AND json_extract(p.data, '$.type') = 'text'
+           AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
+         ORDER BY m.time_created, m.id, p.id`,
+      )
+      .all(baseline.sessionId, after?.createdMs ?? -1, after?.createdMs ?? -1, after?.id ?? "");
+    const texts = new Map<unknown, string>();
+    for (const row of rows) {
+      const text = row["text"];
+      if (typeof text !== "string") continue;
+      const prior = texts.get(row["messageId"]);
+      texts.set(row["messageId"], prior === undefined ? text : `${prior}\n${text}`);
+    }
+    return [...texts.values()];
+  } finally {
+    database.close();
+  }
+}
+
+// Export form of readOpenCodeUserTextsAfterFromDatabase.
+export function parseOpenCodeUserTextsAfter(
+  value: unknown,
+  after: OpenCodeUserMessageMark | null,
+): string[] {
+  const texts: string[] = [];
+  for (const message of openCodeMessages(value)) {
+    const info = messageInfo(message);
+    const id = info?.["id"];
+    const time = info?.["time"];
+    const createdMs = isRecord(time) ? time["created"] : undefined;
+    if (info?.["role"] !== "user" || typeof id !== "string" || typeof createdMs !== "number") {
+      continue;
+    }
+    if (isAfterMark({ createdMs, id }, after)) texts.push(textFromParts(message["parts"]));
+  }
+  return texts;
+}
+
+// The ack of one typed text: a slash command is stored expanded, so any user
+// message past the watermark acks it; any other text must appear in one, or
+// the user's own direct input would ack a message opencode never got.
+export async function scanOpenCodeForTypedMessage(
+  baseline: OpenCodeSubmitBaseline,
+  typed: string,
+): Promise<boolean> {
+  if (typed.trimStart().startsWith("/")) {
+    return scanOpenCodeForNewUserMessage(baseline);
+  }
+  const target = normalizeTypedText(typed);
+  try {
+    let texts: string[];
+    try {
+      texts = await readOpenCodeUserTextsAfterFromDatabase(baseline);
+    } catch {
+      texts = parseOpenCodeUserTextsAfter(
+        await exportOpenCodeSession(baseline.sessionId),
+        baseline.after,
+      );
+    }
+    return texts.some((text) => normalizeTypedText(text).includes(target));
+  } catch {
+    return false;
+  }
+}
+
 // The scan reads opencode.db, but falls back to `opencode export` (2-4s per
 // call on a loaded host) when the DB is unreadable, so the launch check keeps
 // the same budget as identity binding rather than a few polls' worth.

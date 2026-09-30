@@ -25,6 +25,8 @@ import {
   parseOpenCodeState,
   readOpenCodeLatestUserMessageFromDatabase,
   scanOpenCodeForNewUserMessage,
+  scanOpenCodeForTypedMessage,
+  parseOpenCodeUserTextsAfter,
   waitForOpenCodeLaunchMessage,
   parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
@@ -845,6 +847,63 @@ describe("OpenCode adapter", () => {
         vi.unstubAllEnvs();
         await rm(dataHome, { recursive: true, force: true });
       }
+    });
+
+    // The user's own input, or a ToDo nudge, past the watermark is not the
+    // ack of a text opencode never got; a slash command is stored expanded.
+    it("acks a typed text only by a new user message that carries it, a slash command by any", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      database.exec(
+        "CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const addPart = (id: string, messageId: string, text: string) =>
+        database
+          .prepare("INSERT INTO part VALUES (?, ?, 'ses_1', 0, 0, ?)")
+          .run(id, messageId, JSON.stringify({ type: "text", text }));
+      insert(database, "msg_u1", "ses_1", "user", 100);
+      addPart("prt_1", "msg_u1", "Marker QA1: reply ok");
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        if (!baseline) throw new Error("expected a baseline");
+        insert(database, "msg_u2", "ses_1", "user", 200);
+        addPart("prt_2", "msg_u2", "Reply with the single word pong.");
+        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
+          false,
+        );
+        await expect(scanOpenCodeForTypedMessage(baseline, "/review 986")).resolves.toBe(true);
+        insert(database, "msg_u3", "ses_1", "user", 300);
+        addPart("prt_3", "msg_u3", "Marker   QA1:\r\nreply ok");
+        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
+          true,
+        );
+      } finally {
+        database.close();
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("reads the texts of user messages past a watermark from an export", () => {
+      const exported = {
+        messages: [
+          {
+            info: { id: "m1", role: "user", time: { created: 100 } },
+            parts: [{ type: "text", text: "old" }],
+          },
+          {
+            info: { id: "m2", role: "assistant", time: { created: 150 } },
+            parts: [{ type: "text", text: "a" }],
+          },
+          {
+            info: { id: "m3", role: "user", time: { created: 200 } },
+            parts: [{ type: "text", text: "new" }],
+          },
+        ],
+      };
+      expect(parseOpenCodeUserTextsAfter(exported, { createdMs: 100, id: "m1" })).toEqual(["new"]);
+      expect(parseOpenCodeUserTextsAfter(exported, null)).toEqual(["old", "new"]);
     });
   });
 
