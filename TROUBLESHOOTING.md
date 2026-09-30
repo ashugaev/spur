@@ -58,4 +58,4 @@ bash scripts/setup.sh
 
 ## Session stays `spawning` with a shell prompt in the pane
 
-Spur writes each agent's launch to `agent-launch.sh` (mode `600`) in the session tool dir and starts the pane as `$SHELL -lic '. <script>; exec $SHELL -l'`, so the agent gets your login and interactive rc environment. An rc file that asks a question on startup (for example oh-my-zsh's `Would you like to update? [Y/n]`) waits in the pane before the agent starts. Answer it in the session's web terminal; the spawn continues if the agent comes up within its ready timeout, otherwise the spawn fails with the error on the session. To stop the question, set your rc tool's own non-interactive update mode.
+The agent launches through your login + interactive shell rc (`$SHELL -lic`). An rc prompt on startup (oh-my-zsh `Would you like to update? [Y/n]`) blocks it. Answer in the session's web terminal before the agent's ready timeout, or the spawn fails. Permanent fix: your rc tool's non-interactive update mode.

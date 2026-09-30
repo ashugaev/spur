@@ -45,6 +45,7 @@
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
 - `POST /sessions/:id/send`
 - `POST /sessions/:id/answer`
+- `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/source-reply`
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
