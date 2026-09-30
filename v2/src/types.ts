@@ -376,6 +376,8 @@ export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;
   statusMessageId?: number;
+  /** Last forum-topic name applied for this session; a rename happens only when the computed name differs. */
+  topicName?: string;
   lastInboundAt?: string;
   lastReplyAt?: string;
   updatedAt: string;

@@ -729,6 +729,7 @@ function recordTelegramReplyTarget(
     chatId: target.chatId,
     ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
     ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+    ...(sameTarget && previous.topicName !== undefined ? { topicName: previous.topicName } : {}),
     ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
     lastInboundAt,
   });

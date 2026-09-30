@@ -6507,16 +6507,96 @@ describe("SessionService", () => {
     });
 
     it("clears the placeholder the reply consumed when nothing newer arrived", async () => {
-      readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ statusMessageId: 77 }));
+      let stored: Record<string, unknown> = replyTargetFor({ statusMessageId: 77 });
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
       sendTelegramReplyMock.mockResolvedValue({ statusMessageIdConsumed: true, messageIds: [77] });
       const { service } = await serviceWithTelegramSession();
 
       await service.replyToSource("api-1", { message: "hello" });
 
-      expect(writeTelegramReplyTargetMock).toHaveBeenLastCalledWith(
-        TEST_DATA_DIR,
-        expect.not.objectContaining({ statusMessageId: expect.any(Number) }),
+      expect(stored).not.toHaveProperty("statusMessageId");
+    });
+
+    it("renames the forum topic once when its computed name differs, and records the applied name", async () => {
+      let stored: Record<string, unknown> = replyTargetFor({ topicName: "stale name" });
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      const { service, telegramSource } = await serviceWithTelegramSession("Fix login");
+
+      await service.replyToSource("api-1", { message: "one" });
+      await service.replyToSource("api-1", { message: "two" });
+
+      expect(editTelegramTopicMock).toHaveBeenCalledTimes(1);
+      expect(editTelegramTopicMock).toHaveBeenCalledWith(
+        telegramSource,
+        -1001,
+        22,
+        expect.stringContaining("api-1 claude — Fix login"),
       );
+      expect(stored["topicName"]).toEqual(expect.stringContaining("Fix login"));
+    });
+
+    it("renames a forum topic when the session title slot changes", async () => {
+      readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ topicName: "🟡 api-1 claude" }));
+      applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+        slots: { title: "New title", titleSource: "agent", links: [] },
+        result: { titleResult: "updated" },
+      });
+      const { service, telegramSource } = await serviceWithTelegramSession();
+
+      await service.updateSlots("api-1", { title: "New title" });
+
+      expect(editTelegramTopicMock).toHaveBeenCalledWith(
+        telegramSource,
+        -1001,
+        22,
+        expect.stringContaining("New title"),
+      );
+    });
+
+    it("makes no rename call when the topic name is unchanged", async () => {
+      readTelegramReplyTargetMock.mockReturnValue(replyTargetFor());
+      const { service } = await serviceWithTelegramSession();
+      await service.replyToSource("api-1", { message: "probe" });
+      const applied = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+      editTelegramTopicMock.mockClear();
+      readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ topicName: applied }));
+
+      await service.replyToSource("api-1", { message: "again" });
+
+      expect(editTelegramTopicMock).not.toHaveBeenCalled();
+    });
+
+    it("records the name a newly created topic was given, so the next send does not rename it", async () => {
+      let stored: Record<string, unknown> = replyTargetFor({ messageThreadId: undefined });
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44, messageIds: [91] });
+      const { service } = await serviceWithTelegramSession();
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      expect(stored["messageThreadId"]).toBe(44);
+      expect(stored["topicName"]).toEqual(expect.stringContaining("api-1 claude"));
+      expect(editTelegramTopicMock).not.toHaveBeenCalled();
+    });
+
+    it("makes no rename call for a private chat", async () => {
+      readTelegramReplyTargetMock.mockReturnValue(
+        replyTargetFor({ chatId: 123, messageThreadId: 5 }),
+      );
+      const { service } = await serviceWithTelegramSession("Fix login");
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      expect(editTelegramTopicMock).not.toHaveBeenCalled();
     });
 
     it("claims the placeholder before the send starts, so a concurrent inbound cannot overwrite the answer", async () => {

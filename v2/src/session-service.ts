@@ -2677,6 +2677,8 @@ interface TelegramReplyTargetChanges {
   sentStatusMessageId?: number;
   /** Topic created by the send; applies only while the target is still in that chat with no thread. */
   createdThread?: { chatId: number; messageThreadId: number };
+  /** Topic name now applied; with `createdThread` it applies only if the thread does. */
+  topicName?: string;
   lastReplyAt?: string;
 }
 
@@ -6746,21 +6748,42 @@ export class SessionService {
       const result = await sendTelegramReply(source, target, text, {
         topicName: telegramTopicName(topicSession),
       });
-      this.recordTelegramSend(sessionId, target, result, { createIfMissing: false });
-      if (target.messageThreadId !== undefined && target.chatId < 0) {
-        if (options.closeTopic) {
+      this.recordTelegramSend(sessionId, target, result, {
+        createIfMissing: false,
+        topicName: telegramTopicName(topicSession),
+      });
+      if (options.closeTopic) {
+        if (target.messageThreadId !== undefined && target.chatId < 0) {
           await closeTelegramTopic(source, target.chatId, target.messageThreadId);
-        } else if (options.updateTopicName) {
-          await editTelegramTopic(
-            source,
-            target.chatId,
-            target.messageThreadId,
-            telegramTopicName(topicSession),
-          );
         }
+      } else if (options.updateTopicName) {
+        await this.syncTelegramTopicName(sessionId, topicSession);
       }
     } catch (error) {
       this.logTelegramNoticeFailure(sessionId, "notice", error);
+    }
+  }
+
+  /**
+   * Renames the agent's forum topic when its computed name (status emoji, id,
+   * agent, title) differs from the last name applied. The one place that calls
+   * editTelegramTopic; group topics only.
+   */
+  private async syncTelegramTopicName(
+    sessionId: string,
+    view: Pick<SessionView, "id" | "agent" | "state" | "slots">,
+  ): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(sessionId);
+      if (!resolved) return;
+      const { target, source } = resolved;
+      if (target.chatId >= 0 || target.messageThreadId === undefined) return;
+      const name = telegramTopicName(view);
+      if (target.topicName === name) return;
+      await editTelegramTopic(source, target.chatId, target.messageThreadId, name);
+      this.patchTelegramReplyTarget(sessionId, null, { topicName: name });
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "topic rename", error);
     }
   }
 
@@ -6790,13 +6813,18 @@ export class SessionService {
     const { updatedAt: _updatedAt, statusMessageId, ...rest } = current;
     const keptStatus =
       statusMessageId !== changes.sentStatusMessageId ? statusMessageId : undefined;
+    const appliesThread =
+      changes.createdThread !== undefined &&
+      current.chatId === changes.createdThread.chatId &&
+      current.messageThreadId === undefined;
     const merged = {
       ...rest,
       ...(keptStatus !== undefined ? { statusMessageId: keptStatus } : {}),
-      ...(changes.createdThread !== undefined &&
-      current.chatId === changes.createdThread.chatId &&
-      current.messageThreadId === undefined
+      ...(appliesThread && changes.createdThread
         ? { messageThreadId: changes.createdThread.messageThreadId }
+        : {}),
+      ...(changes.topicName !== undefined && (changes.createdThread === undefined || appliesThread)
+        ? { topicName: changes.topicName }
         : {}),
       ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
     };
@@ -6824,19 +6852,19 @@ export class SessionService {
     sessionId: string,
     target: TelegramReplyTarget,
     result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; createIfMissing: true },
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: true },
   ): TelegramReplyTarget;
   private recordTelegramSend(
     sessionId: string,
     target: TelegramReplyTarget,
     result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; createIfMissing: false },
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: false },
   ): TelegramReplyTarget | null;
   private recordTelegramSend(
     sessionId: string,
     target: TelegramReplyTarget,
     result: TelegramReplySendResult,
-    options: { lastReplyAt?: string; createIfMissing: boolean },
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: boolean },
   ): TelegramReplyTarget | null {
     recordTelegramMessages(
       this.config.dataDir,
@@ -6851,6 +6879,10 @@ export class SessionService {
         : {}),
       ...(result.messageThreadId !== undefined
         ? { createdThread: { chatId: target.chatId, messageThreadId: result.messageThreadId } }
+        : {}),
+      // A topic the send just created carries the name it was created with.
+      ...(result.messageThreadId !== undefined && options.topicName !== undefined
+        ? { topicName: options.topicName }
         : {}),
       ...(options.lastReplyAt !== undefined ? { lastReplyAt: options.lastReplyAt } : {}),
     };
@@ -11964,10 +11996,12 @@ export class SessionService {
     }
     const replyTarget = this.recordTelegramSend(sessionId, target, result, {
       lastReplyAt: nowIso(),
+      topicName: telegramTopicName(view),
       createIfMissing: true,
     });
     // Covers a freshly created forum topic too: its key cannot already be taken.
     this.bindTelegramChatIfFree(replyTarget, sessionId);
+    await this.syncTelegramTopicName(sessionId, view);
     this.logEvent("source.reply.sent", {
       level: "info",
       sessionId,
@@ -13202,10 +13236,9 @@ export class SessionService {
       owner?.id === sessionId
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
-    return {
-      ...(await this.enrich(callerRecord)),
-      slotUpdate: applied.result,
-    };
+    const callerView = await this.enrich(callerRecord);
+    await this.syncTelegramTopicName(sessionId, callerView);
+    return { ...callerView, slotUpdate: applied.result };
   }
 
   async startSidecar(
