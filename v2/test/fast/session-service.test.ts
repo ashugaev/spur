@@ -10152,6 +10152,46 @@ describe("SessionService", () => {
       });
     });
 
+    it("never types a queued message off a 'waiting' read whose activity predates the Send now's paste (V4)", async () => {
+      agentStateStrategyMock.mockImplementation((agent: string) =>
+        agent === "opencode" ? "opencode" : "claude_jsonl",
+      );
+      const t0 = Date.now();
+      // The interrupted turn's aborted row: read in the gap after the paste,
+      // before opencode recorded the new turn, and served from its cache.
+      let state = { state: "working", reason: "assistant incomplete", activityMs: t0 - 5_000 };
+      readOpenCodeStateMock.mockImplementation(async () => state);
+      sendInterruptKeysToTmuxMock.mockImplementation(async () => {
+        state = { state: "waiting", reason: "assistant aborted", activityMs: t0 - 100 };
+        return true;
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ agent: "opencode", agentSessionId: "ses_1", launchCommand: "opencode" }),
+      );
+      const service = await liveService();
+
+      await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledTimes(1);
+      // Queued 2.5s later, past the settle measured from the stale activity.
+      vi.setSystemTime(new Date(t0 + 2_500));
+      await service.send("api-1", { message: "queued", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["now"]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued"]);
+
+      // The Send-now turn ends: its completion is past the paste.
+      state = { state: "waiting", reason: "assistant completed", activityMs: t0 + 3_000 };
+      let now = t0 + 3_000;
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["now", "queued"]);
+      });
+    });
+
     it("never types a queued message into the turn a Send now just started, off a cached opencode 'waiting'", async () => {
       agentStateStrategyMock.mockImplementation((agent: string) =>
         agent === "opencode" ? "opencode" : "claude_jsonl",

@@ -553,6 +553,9 @@ const MESSAGE_READY_GRACE_MS = 15_000;
 // pass -- the stopped-before-sleep return bounds nothing on its own.
 const DELIVERY_HEAL_CONTINUE_LIMIT = 3;
 const STATE_HOLD_MS = 4_000;
+// Bound on queuedDeliveryState's fence: a write the agent never records (an
+// Enter over an empty composer) stops holding the queue after this.
+const PANE_WRITE_FENCE_MS = 30_000;
 // Codex turns that hang after their tool calls complete (model inference dies between/after tools)
 // pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
 // signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
@@ -2732,6 +2735,9 @@ export class SessionService {
   // Epoch ms at which the last queued delivery's submit ack was confirmed;
   // lets waitForQueuedMessage release the prompt hold without its grace.
   private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Epoch ms at which the latest pane write to the session started
+  // (recordPaneWrite); queuedDeliveryState's fence.
+  private readonly paneWriteFenceAt = new Map<string, number>();
   // Queued send() calls parked until the session's next queued pane write
   // (notifyQueuedPaneWrite) or their own attempt's end, capped at
   // QUEUED_SEND_PANE_WRITE_WAIT_MS.
@@ -12110,7 +12116,7 @@ export class SessionService {
 
     const readySession = await this.ensureSessionReadyForSend(session);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
-      ? await this.classifySessionState(readySession)
+      ? this.queuedDeliveryState(await this.classifySessionRecord(readySession))
       : "waiting";
     const activeRecord = this.appendQueuedMessage(
       { ...readySession, status: "running" },
@@ -12211,8 +12217,9 @@ export class SessionService {
             `Agent process for ${sessionId} is not running; launch prompt not submitted`,
           );
         }
+        const writeStartedAt = Date.now();
         await sendSubmitKeyToTmux(session.tmuxSession);
-        this.recordPaneWrite(session);
+        this.recordPaneWrite(session, writeStartedAt);
       });
       this.logEvent("session.spawn.launch_submitted", {
         level: "info",
@@ -12236,17 +12243,42 @@ export class SessionService {
     if (!Number.isInteger(optionIndex) || optionIndex < 0) {
       throw new Error("optionIndex must be a non-negative integer");
     }
+    const writeStartedAt = Date.now();
     await sendMenuSelectionKeys(session.tmuxSession, optionIndex);
-    this.recordPaneWrite(session);
+    this.recordPaneWrite(session, writeStartedAt);
   }
 
   // Every pane write that submits input to the agent: any state read before
   // it (this service's classification cache, the agent's own state cache)
   // predates the turn the write starts, so a queued message must never act on
   // its "waiting".
-  private recordPaneWrite(session: Pick<SessionRecord, "id" | "agent" | "agentSessionId">): void {
+  private recordPaneWrite(
+    session: Pick<SessionRecord, "id" | "agent" | "agentSessionId">,
+    startedAt: number,
+  ): void {
     this.stateCache.delete(session.id);
     invalidateAgentState(session.agent, session.agentSessionId);
+    this.paneWriteFenceAt.set(session.id, startedAt);
+  }
+
+  // Queued delivery's read of a classification. A "waiting" whose last agent
+  // activity predates the latest pane write was read before the agent took
+  // that write (an agent state cache filled in the gap, a slow export): it
+  // describes the turn the write replaced, so it reads as working until the
+  // agent records activity past the write, for at most PANE_WRITE_FENCE_MS.
+  private queuedDeliveryState(classified: SessionStateResult): SessionState {
+    if (classified.state !== "waiting") return classified.state;
+    const fence = this.paneWriteFenceAt.get(classified.session.id);
+    const activityAt = classified.agentActivityAt;
+    if (
+      fence === undefined ||
+      activityAt === null ||
+      activityAt.getTime() >= fence ||
+      Date.now() - fence >= PANE_WRITE_FENCE_MS
+    ) {
+      return "waiting";
+    }
+    return "working";
   }
 
   async deliver(
@@ -12830,8 +12862,9 @@ export class SessionService {
             freshLaunch: false,
           })
         : null;
+      const writeStartedAt = Date.now();
       await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
-      this.recordPaneWrite(session);
+      this.recordPaneWrite(session, writeStartedAt);
       if (!binding) return "submitted" as const;
       // Bounded resend loop, short window on every agent: this callback holds
       // withPaneWriteLock, so a long window (claude/codex/opencode pacing is
@@ -12962,7 +12995,7 @@ export class SessionService {
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
-    this.recordPaneWrite(session);
+    this.recordPaneWrite(session, pastedAt);
     options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     if (!binding) {
       return "submitted";
@@ -14909,10 +14942,11 @@ export class SessionService {
         // out. Bypass sendAgentMessage the same way restore() does for codex.
         // A dead pane still surfaces: send-keys against a gone tmux session
         // throws.
+        const writeStartedAt = Date.now();
         await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
           agent: session.agent,
         });
-        this.recordPaneWrite(session);
+        this.recordPaneWrite(session, writeStartedAt);
       } else {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
@@ -15289,10 +15323,11 @@ export class SessionService {
           current.selfDestruct,
         );
         if (current.agent === "codex") {
+          const writeStartedAt = Date.now();
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
             agent: current.agent,
           });
-          this.recordPaneWrite(current);
+          this.recordPaneWrite(current, writeStartedAt);
         } else {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
@@ -16312,7 +16347,7 @@ export class SessionService {
         // scoped to the agent and is untouched by both.
         const settleRemainingMs = async (): Promise<number | null> => {
           const classified = await this.classifySessionRecord(readySession);
-          if (classified.state !== "waiting" && !classified.serverError) {
+          if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
             return null;
           }
           const activityAt = resolveAgentActivityAt(classified);
@@ -16963,7 +16998,7 @@ export class SessionService {
       const promptGraceMs = agentQueuedSendPromptGraceMs(session.agent);
 
       const classified = await this.classifySessionRecord(session);
-      const agentState = classified.state;
+      const agentState = this.queuedDeliveryState(classified);
       if (agentState === "working") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
