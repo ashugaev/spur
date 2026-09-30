@@ -199,6 +199,7 @@ import {
   closeTelegramTopic,
   editTelegramTopic,
   formatTelegramSessionLabel,
+  sendTelegramChatAction,
   sendTelegramReply,
   type TelegramReplySendResult,
 } from "./telegram-source-state.js";
@@ -2662,6 +2663,9 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
 }
 
 const TELEGRAM_TOPIC_NAME_MAX = 128;
+// "Typing" is shown while the session works on an unanswered message, never
+// longer than this after the message arrived.
+const TELEGRAM_TYPING_MAX_MS = 10 * 60_000;
 
 function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
   const title = session.slots?.title?.trim();
@@ -2964,6 +2968,9 @@ export class SessionService {
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly telegramTypingInFlight = new Set<string>();
+  // Keyed by session id: no typing call before this time (Telegram 429 retry_after).
+  private readonly telegramTypingPausedUntil = new Map<string, number>();
   private readonly todoNudgeDisabled = new Map<
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
@@ -5649,6 +5656,7 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
+          if (view.state === "working") this.maybeSendTelegramTyping(view.id);
           if (
             view.status === "running" &&
             view.state === "waiting" &&
@@ -5746,6 +5754,9 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.telegramTypingPausedUntil.keys()) {
+      if (!liveIds.has(sessionId)) this.telegramTypingPausedUntil.delete(sessionId);
+    }
     for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
       if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
     }
@@ -6913,6 +6924,42 @@ export class SessionService {
   private async buildPaneTail(tmuxSession: string): Promise<string> {
     const tail = (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
     return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+  }
+
+  /**
+   * Shows "typing" in the chat while the session works on a Telegram message
+   * that is delivered but unanswered. At most one call per sweep, none after a
+   * reply, past the cap, or for a group main chat. Fire and forget.
+   */
+  private maybeSendTelegramTyping(sessionId: string): void {
+    if (this.telegramTypingInFlight.has(sessionId)) return;
+    const pausedUntil = this.telegramTypingPausedUntil.get(sessionId);
+    if (pausedUntil !== undefined) {
+      if (Date.now() < pausedUntil) return;
+      this.telegramTypingPausedUntil.delete(sessionId);
+    }
+    const resolved = this.resolveTelegramNotice(sessionId);
+    if (!resolved) return;
+    const { target, source } = resolved;
+    if (target.lastInboundAt === undefined) return;
+    if (target.lastReplyAt !== undefined && target.lastReplyAt >= target.lastInboundAt) return;
+    if (Date.now() - Date.parse(target.lastInboundAt) > TELEGRAM_TYPING_MAX_MS) return;
+    if (target.chatId < 0 && target.messageThreadId === undefined) return;
+    // Still queued: the agent has not seen the message yet.
+    if (hasPendingTelegramSend(this.config.dataDir, sessionId)) return;
+    this.telegramTypingInFlight.add(sessionId);
+    void sendTelegramChatAction(source, target.chatId, target.messageThreadId)
+      .then(({ retryAfterMs }) => {
+        if (retryAfterMs !== undefined) {
+          this.telegramTypingPausedUntil.set(sessionId, Date.now() + retryAfterMs);
+        }
+      })
+      .catch(() => {
+        // sendTelegramChatAction never rejects; nothing to recover.
+      })
+      .finally(() => {
+        this.telegramTypingInFlight.delete(sessionId);
+      });
   }
 
   private async maybeNudgeForgottenReply(

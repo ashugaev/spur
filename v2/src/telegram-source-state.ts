@@ -79,6 +79,7 @@ async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
   body: Record<string, unknown>,
+  options: { retry?: false } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -104,10 +105,40 @@ async function callTelegram<T>(
           : undefined,
       );
     } catch (error) {
-      const delayMs = retryDelay(error, attempt);
+      const delayMs = options.retry === false ? null : retryDelay(error, attempt);
       if (delayMs === null) throw error;
       await sleep(delayMs);
     }
+  }
+}
+
+/**
+ * One "typing" indicator, lasting about five seconds in the chat. Fire and
+ * forget: never retries, never throws. A 429 reports how long to stay quiet.
+ */
+export async function sendTelegramChatAction(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageThreadId?: number,
+): Promise<{ retryAfterMs?: number }> {
+  try {
+    await callTelegram(
+      config,
+      "sendChatAction",
+      {
+        chat_id: chatId,
+        action: "typing",
+        ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      },
+      { retry: false },
+    );
+    return {};
+  } catch (error) {
+    return error instanceof TelegramApiError &&
+      error.status === 429 &&
+      error.retryAfterMs !== undefined
+      ? { retryAfterMs: error.retryAfterMs }
+      : {};
   }
 }
 

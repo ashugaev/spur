@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeTelegramTopic,
   editTelegramTopic,
+  sendTelegramChatAction,
   sendTelegramReply,
 } from "../../src/telegram-source-state.js";
 
@@ -353,5 +354,57 @@ describe("closeTelegramTopic", () => {
     );
 
     await expect(closeTelegramTopic({ token: "token-123" }, -1001, 22)).resolves.toBeUndefined();
+  });
+});
+
+describe("sendTelegramChatAction", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends one typing action without retry", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, -1001, 22)).resolves.toEqual({});
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/sendChatAction",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: -1001, action: "typing", message_thread_id: 22 }),
+      }),
+    );
+  });
+
+  it("reports retry_after on 429 and never retries or throws", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          description: "Too Many Requests",
+          parameters: { retry_after: 12 },
+        }),
+        { status: 429 },
+      ),
+    );
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, 123)).resolves.toEqual({
+      retryAfterMs: 12_000,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a network error without retrying", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValueOnce(new Error("network down"));
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, 123)).resolves.toEqual({});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

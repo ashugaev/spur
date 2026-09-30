@@ -382,6 +382,7 @@ const writeTelegramOfferMock = vi.fn();
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
+const sendTelegramChatActionMock = vi.fn();
 const editTelegramTopicMock = vi.fn();
 const closeTelegramTopicMock = vi.fn();
 const writeTelegramBindingsMock = vi.fn();
@@ -591,6 +592,7 @@ vi.mock("../../src/desktop-notify.js", () => ({
 vi.mock("../../src/telegram-source-state.js", async (importOriginal) => ({
   ...(await importOriginal<typeof telegramSourceStateModule>()),
   sendTelegramReply: sendTelegramReplyMock,
+  sendTelegramChatAction: sendTelegramChatActionMock,
   editTelegramTopic: editTelegramTopicMock,
   closeTelegramTopic: closeTelegramTopicMock,
 }));
@@ -1526,6 +1528,7 @@ describe("SessionService", () => {
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
     recordTelegramMessagesMock.mockReset();
+    sendTelegramChatActionMock.mockReset().mockResolvedValue({});
     deleteTelegramReplyTargetMock.mockReset();
     hasPendingTelegramSendMock.mockReset().mockReturnValue(false);
     editTelegramTopicMock.mockReset().mockResolvedValue(true);
@@ -19268,6 +19271,97 @@ describe("SessionService", () => {
       expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
     );
     service.dispose();
+  });
+
+  describe("typing indicator", () => {
+    const inbound = {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    };
+
+    async function startWorking(
+      target: Record<string, unknown>,
+      hookState: "working" | "waiting" = "working",
+    ) {
+      const { config, telegramSource } = telegramProjectConfig();
+      loadConfigMock.mockReturnValue(config);
+      readTelegramReplyTargetMock.mockReturnValue(target);
+      seedCodexNudgeSession();
+      readAgentHookStateMock.mockReturnValue({
+        state: hookState,
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(0);
+      sendTelegramChatActionMock.mockClear();
+      return { service, telegramSource };
+    }
+
+    it("sends typing each sweep while working on an unanswered inbound", async () => {
+      const { service, telegramSource } = await startWorking(inbound);
+
+      await advanceSeconds(5);
+      await advanceSeconds(5);
+
+      expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(2);
+      expect(sendTelegramChatActionMock).toHaveBeenCalledWith(telegramSource, -1001, 22);
+      service.dispose();
+    });
+
+    it("sends typing in a private chat without a thread", async () => {
+      const { service, telegramSource } = await startWorking({
+        ...inbound,
+        chatId: 123,
+        messageThreadId: undefined,
+      });
+
+      await advanceSeconds(5);
+
+      expect(sendTelegramChatActionMock).toHaveBeenCalledWith(telegramSource, 123, undefined);
+      service.dispose();
+    });
+
+    it.each([
+      ["a reply already went out", { lastReplyAt: "2026-03-18T10:04:30.000Z" }, "working", false],
+      ["the session is waiting", {}, "waiting", false],
+      [
+        "the inbound is older than 10 minutes",
+        { lastInboundAt: "2026-03-18T09:50:00.000Z" },
+        "working",
+        false,
+      ],
+      ["it is a group main chat", { messageThreadId: undefined }, "working", false],
+      ["the message is still queued", {}, "working", true],
+    ] as const)("does not type when %s", async (_label, patch, hookState, pending) => {
+      hasPendingTelegramSendMock.mockReturnValue(pending);
+      const { service } = await startWorking({ ...inbound, ...patch }, hookState);
+
+      await advanceSeconds(5);
+      await advanceSeconds(5);
+
+      expect(sendTelegramChatActionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("pauses typing for retry_after after a 429", async () => {
+      const { service } = await startWorking(inbound);
+      sendTelegramChatActionMock.mockResolvedValueOnce({ retryAfterMs: 30_000 });
+
+      await advanceSeconds(5);
+      expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(1);
+      await advanceSeconds(25);
+      expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(1);
+      await advanceSeconds(5);
+
+      expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
   });
 
   it("skips the waiting nudge while a telegram send for the session is pending", async () => {
