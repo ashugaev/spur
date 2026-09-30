@@ -918,7 +918,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           claimed,
         )
       ) {
-        if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
         return { status: "suppressed" };
       }
       batch.revision = claimedRevision;
@@ -978,11 +977,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             details: { interrupt },
           });
         }
-      }
-      if (submission.isEmpty()) {
-        if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
-        else persistResult();
-        return { status: "suppressed" };
       }
       submission.filterItems((item) => {
         if (!item.mergeConflict) return true;
