@@ -3265,6 +3265,41 @@ describe("SessionDetail voice input", () => {
     expect(await screen.findByText("Sent, agent hasn't confirmed yet")).toBeInTheDocument();
   });
 
+  it("says a cursor Send now the daemon queued ahead sends when the turn ends", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ agent: "cursor" })), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ agent: "cursor" }),
+            queuedAheadReason: "no_interrupt",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+    fireEvent.change(textarea, { target: { value: "After the turn" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    expect(
+      await screen.findByText("Cursor can't be interrupted — sends when the turn ends"),
+    ).toBeInTheDocument();
+  });
+
   it("sends immediately without queue when clicking Send now", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

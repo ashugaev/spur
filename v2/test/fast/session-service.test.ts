@@ -88,6 +88,7 @@ const readAgentConversationMock = vi.fn();
 const agentProcessMatchersMock = vi.fn();
 const agentLaunchUsesForeignBinaryMock = vi.fn();
 const agentBusyQueuedSendAwaitsPromptMock = vi.fn();
+const agentInterruptKeysMock = vi.fn();
 const agentQueuedSendPromptGraceMsMock = vi.fn();
 const agentSessionConfigMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
@@ -493,6 +494,7 @@ vi.mock("../../src/agents/index.js", () => ({
   agentProcessMatchers: agentProcessMatchersMock,
   agentLaunchUsesForeignBinary: agentLaunchUsesForeignBinaryMock,
   agentBusyQueuedSendAwaitsPrompt: agentBusyQueuedSendAwaitsPromptMock,
+  agentInterruptKeys: agentInterruptKeysMock,
   agentQueuedSendPromptGraceMs: agentQueuedSendPromptGraceMsMock,
   agentSessionConfig: agentSessionConfigMock,
   agentStateStrategy: agentStateStrategyMock,
@@ -1454,6 +1456,9 @@ describe("SessionService", () => {
     agentBusyQueuedSendAwaitsPromptMock
       .mockReset()
       .mockImplementation((agent: string) => agent === "cursor");
+    agentInterruptKeysMock
+      .mockReset()
+      .mockImplementation((agent: string) => (agent === "cursor" ? [] : ["C-c"]));
     agentQueuedSendPromptGraceMsMock
       .mockReset()
       .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 15_000));
@@ -10150,6 +10155,77 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(2, "api-1", "retry me", {
         agent: "claude",
       });
+    });
+
+    it("queues a cursor Send now at the head while the turn runs, and types it once when the turn ends", async () => {
+      mockCursorJsonlState("working", { lastMtimeMs: Date.now() - 1_000 });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "cursor",
+          launchCommand: "cursor-agent",
+          queuedMessages: { messages: ["older"], awaitingPrompt: true },
+        }),
+      );
+      const service = await liveService();
+
+      const sent = await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(sent.queuedAheadReason).toBe("no_interrupt");
+      expect(sent.submitUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")?.queuedMessages).toEqual({
+        messages: ["now", "older"],
+        awaitingPrompt: true,
+      });
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.message.queued_ahead",
+        ),
+      ).toHaveLength(1);
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual([]);
+
+      // The turn ends: the head goes first, once.
+      mockCursorJsonlState("waiting", { lastMtimeMs: Date.now() });
+      let now = Date.now();
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()[0]).toBe("now");
+      });
+      expect(typedMessages().filter((text) => text === "now")).toHaveLength(1);
+    });
+
+    it("moves a flushed cursor message to the head instead of typing it into a busy turn", async () => {
+      mockCursorJsonlState("working", { lastMtimeMs: Date.now() - 1_000 });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "cursor",
+          launchCommand: "cursor-agent",
+          queuedMessages: { messages: ["a", "b"], awaitingPrompt: true },
+        }),
+      );
+      const service = await liveService();
+
+      const flushed = await service.flushQueuedMessage("api-1", "b");
+      expect(flushed.queuedAheadReason).toBe("no_interrupt");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["b", "a"]);
+      expect(typedMessages()).toEqual([]);
+    });
+
+    it("types a cursor Send now at once while the agent is waiting", async () => {
+      mockCursorJsonlState("waiting", { lastMtimeMs: Date.now() - 60_000 });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agent: "cursor", launchCommand: "cursor-agent" }));
+      const service = await liveService();
+
+      const sent = await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(sent.queuedAheadReason).toBeUndefined();
+      expect(typedMessages()).toEqual(["now"]);
     });
 
     it("never types a queued message off a 'waiting' read whose activity predates the Send now's paste (V4)", async () => {

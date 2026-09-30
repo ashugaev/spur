@@ -13,6 +13,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
+  agentInterruptKeys,
   agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
@@ -12402,10 +12403,14 @@ export class SessionService {
     this.queueDeliveryInFlight.add(sessionId);
     try {
       // Same as web Send now: a working agent gets its interrupt key first.
-      await this.deliverPreparedLocked(sessionId, message, {
+      const delivered = await this.deliverPreparedLocked(sessionId, message, {
         entryPoint: "flush",
         interrupt: true,
       });
+      // Moved to the head, still queued.
+      if (delivered.queuedAheadReason) {
+        return delivered;
+      }
       // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
       const persisted = this.writeQueueWithout(latest, message);
@@ -12444,6 +12449,36 @@ export class SessionService {
       details: { agent: record.agent },
     });
     return { ...record, submitUnconfirmedAt: sentAt };
+  }
+
+  // Queue head, held for the prompt, on a fresh queue read: the next runner
+  // pass types it once the agent is waiting. The response names the reason.
+  private async queueAheadOfBusyTurn(
+    readySession: SessionRecord,
+    message: string,
+    state: SessionState,
+  ): Promise<SessionView> {
+    const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
+    const record = withQueuedMessages(
+      { ...readySession, status: "running", updatedAt: nowIso() },
+      [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+      true,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.queued_ahead", {
+      level: "info",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Queued a Send now to ${record.id} at the head: ${record.agent} has no interrupt key and is ${state}`,
+      details: {
+        agent: record.agent,
+        state,
+        queuedCount: queuedMessages(record).length,
+        messageLength: message.length,
+      },
+    });
+    this.scheduleDeliveryRunner(record.id);
+    return { ...(await this.enrich(record)), queuedAheadReason: "no_interrupt" };
   }
 
   private async commitDeliveredSend(
@@ -12530,6 +12565,20 @@ export class SessionService {
         }
       }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
+      // No interrupt key (cursor): text typed into a busy turn lands in the
+      // agent's own follow-up box, which can drop it. Send now and flush queue
+      // it at the head instead; the runner types it when the turn ends. A
+      // session this send relaunched has no turn to wait out.
+      if (
+        interactive &&
+        initialSession.status === "running" &&
+        agentInterruptKeys(readySession.agent).length === 0
+      ) {
+        const state = this.queuedDeliveryState(await this.classifySessionRecord(readySession));
+        if (state !== "waiting") {
+          return await this.queueAheadOfBusyTurn(readySession, message, state);
+        }
+      }
       let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);

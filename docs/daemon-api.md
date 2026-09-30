@@ -43,7 +43,7 @@
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
-- `POST /sessions/:id/send`
+- `POST /sessions/:id/send` — `queue: false` to an agent with no interrupt key (cursor) that is not waiting queues at the head instead, response `queuedAheadReason: "no_interrupt"`; same for queue flush
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/source-reply`

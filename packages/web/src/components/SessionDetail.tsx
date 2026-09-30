@@ -1961,6 +1961,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
+  // Send now / flush to an agent with no interrupt key while it works: the
+  // daemon queued the message at the head instead of typing it.
+  const showQueuedAheadToast = (payload: unknown) => {
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      (payload as { queuedAheadReason?: unknown }).queuedAheadReason === "no_interrupt"
+    ) {
+      const agent = session?.agent ?? "agent";
+      showSuccessToast(
+        `${agent.charAt(0).toUpperCase()}${agent.slice(1)} can't be interrupted — sends when the turn ends`,
+      );
+    }
+  };
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -2021,6 +2036,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         ) {
           showErrorToast("Sent, agent hasn't confirmed yet");
         }
+        showQueuedAheadToast(payload);
       }
       await loadSession();
       return true;
@@ -2053,6 +2069,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) {
         throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
       }
+      showQueuedAheadToast(payload);
       await loadSession();
     } catch (queueError) {
       showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));

@@ -1142,6 +1142,12 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  /**
+   * Send now / flush response only: the message was queued at the head
+   * instead of typed. `no_interrupt`: the agent has no interrupt key and was
+   * not waiting.
+   */
+  queuedAheadReason?: "no_interrupt";
 }
 
 /**
