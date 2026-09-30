@@ -2142,6 +2142,53 @@ describe("telegramSourceModule", () => {
     expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
   });
 
+  it("keeps lastInboundAt behind an agent reply when the spawn bind runs, and a real inbound re-arms it", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockImplementation(async () => {
+      // What the daemon does mid-spawn: pre-write the target, then the agent replies.
+      writeTelegramReplyTarget(dataDir, {
+        sessionId: "api-3",
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: 123,
+        lastInboundAt: "2000-01-01T00:00:00.000Z",
+        lastReplyAt: "2000-01-02T00:00:00.000Z",
+      });
+      return { id: "api-3", project: "api", agent: "claude", state: "working" };
+    });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-3", project: "api", agent: "claude", state: "waiting" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      listProjects,
+      listSessions,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({
+        text: "/spawn claude do X",
+        chat: { id: 123 },
+        message_thread_id: undefined,
+      }),
+    );
+
+    expect(readTelegramReplyTarget(dataDir, "api-3")).toMatchObject({
+      lastInboundAt: "2000-01-01T00:00:00.000Z",
+      lastReplyAt: "2000-01-02T00:00:00.000Z",
+    });
+
+    await bot.emitText(
+      telegramContext({ text: "next", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+
+    const afterInbound = readTelegramReplyTarget(dataDir, "api-3");
+    expect((afterInbound?.lastInboundAt ?? "") > (afterInbound?.lastReplyAt ?? "")).toBe(true);
+    expect(afterInbound?.lastReplyAt).toBe("2000-01-02T00:00:00.000Z");
+  });
+
   it("stamps lastInboundAt when forwarding a bound inbound message", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);

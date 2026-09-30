@@ -663,9 +663,17 @@ function recordTelegramReplyTarget(
     chatId: number;
     messageThreadId?: number;
     statusMessageId?: number;
+    /** Bind path: keep the previous inbound stamp while the chat and thread are unchanged. */
+    keepInboundStamp?: boolean;
   },
 ): void {
   const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
+  const sameTarget =
+    previous !== null && isSameTelegramTarget(previous, target.chatId, target.messageThreadId);
+  const lastInboundAt =
+    target.keepInboundStamp && sameTarget && previous.lastInboundAt !== undefined
+      ? previous.lastInboundAt
+      : new Date().toISOString();
   const keepsNewStatus =
     target.statusMessageId !== undefined &&
     (target.chatId > 0 || target.messageThreadId !== undefined);
@@ -682,7 +690,7 @@ function recordTelegramReplyTarget(
     ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
     ...(statusMessageId !== undefined ? { statusMessageId } : {}),
     ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
-    lastInboundAt: new Date().toISOString(),
+    lastInboundAt,
   });
 }
 
@@ -711,10 +719,13 @@ async function bindTelegramThread(
     logPersistError(deps, error);
     throw error;
   }
+  // A bind is not an inbound message: it must not move lastInboundAt past an
+  // agent reply that already landed.
   recordTelegramReplyTarget(deps, {
     sessionId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+    keepInboundStamp: true,
   });
 }
 
