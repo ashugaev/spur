@@ -21,9 +21,76 @@ import {
   type SpurSessionView,
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
+import { join } from "node:path";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+test("loads local JetBrains Mono faces in both dashboard themes", async ({ page }, testInfo) => {
+  const fontResponses: Array<{ url: string; status: number }> = [];
+  const failedFonts: string[] = [];
+  const googleRequests: string[] = [];
+  page.on("request", (request) => {
+    if (/^https:\/\/fonts\.(googleapis|gstatic)\.com\//.test(request.url()))
+      googleRequests.push(request.url());
+  });
+  page.on("response", (response) => {
+    if (response.request().resourceType() === "font")
+      fontResponses.push({ url: response.url(), status: response.status() });
+  });
+  page.on("requestfailed", (request) => {
+    if (request.resourceType() === "font") failedFonts.push(request.url());
+  });
+  await mockSessions(page, []);
+  await page.goto("/");
+  for (const theme of ["dark", "light"] as const) {
+    if (theme === "light")
+      await page.getByRole("button", { name: "Switch to light theme" }).click();
+    const typography = await page.evaluate(async () => {
+      const variable = getComputedStyle(document.documentElement)
+        .getPropertyValue("--font-jetbrains-mono")
+        .trim();
+      const family = variable
+        .split(",")[0]
+        .trim()
+        .replace(/^['"]|['"]$/g, "");
+      await Promise.all(
+        ["300", "400", "500", "700"].map((weight) =>
+          document.fonts.load(`${weight} 12px "${family}"`),
+        ),
+      );
+      await document.fonts.ready;
+      return {
+        family,
+        bodyFamily: getComputedStyle(document.body).fontFamily,
+        faces: Array.from(document.fonts)
+          .filter((face) => face.family.replace(/^['"]|['"]$/g, "") === family)
+          .map((face) => ({ weight: face.weight, style: face.style, status: face.status })),
+      };
+    });
+    expect(typography.family).not.toBe("");
+    expect(typography.bodyFamily).toContain(typography.family);
+    expect(typography.faces.sort((a, b) => Number(a.weight) - Number(b.weight))).toEqual(
+      ["300", "400", "500", "700"].map((weight) => ({ weight, style: "normal", status: "loaded" })),
+    );
+    await page.screenshot({
+      path: process.env.SPUR_SESSION_ARTIFACTS_DIR
+        ? join(process.env.SPUR_SESSION_ARTIFACTS_DIR, `jetbrains-mono-${theme}.png`)
+        : testInfo.outputPath(`jetbrains-mono-${theme}.png`),
+    });
+  }
+  const emittedFonts = fontResponses.filter((response) =>
+    new URL(response.url).pathname.startsWith("/_next/static/media/"),
+  );
+  expect(emittedFonts).toHaveLength(4);
+  for (const response of fontResponses) {
+    expect(response.status).toBe(200);
+    expect(new URL(response.url).origin).toBe(new URL(page.url()).origin);
+  }
+  for (const response of emittedFonts) expect(new URL(response.url).pathname).toMatch(/\.woff2$/);
+  expect(failedFonts).toEqual([]);
+  expect(googleRequests).toEqual([]);
+});
 
 test("failed update diagnosis reports Shepherd reuse and links the session", async ({ page }) => {
   await page.clock.install();
