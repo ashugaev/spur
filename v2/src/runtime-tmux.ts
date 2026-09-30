@@ -116,6 +116,26 @@ interface FleetSessionSnapshot {
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
 const FLEET_SESSION_CACHE_KEY = "sessions";
 
+function isKnownAbsentTmuxServer(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if (
+    !("code" in error) ||
+    error.code !== 1 ||
+    !("killed" in error) ||
+    error.killed !== false ||
+    !("signal" in error) ||
+    error.signal !== null ||
+    !("stdout" in error) ||
+    error.stdout !== "" ||
+    !("stderr" in error) ||
+    typeof error.stderr !== "string"
+  )
+    return false;
+  return /^(?:no server running on \S+|error connecting to \S+ \(No such file or directory\))$/.test(
+    error.stderr.trim(),
+  );
+}
+
 // Fleet-wide session existence AND activity in ONE fork instead of one
 // `has-session` plus one `display-message` per session.
 // `tmuxSessionExists`/`getTmuxSessionActivity` reroute through this cached
@@ -168,9 +188,11 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
         );
       }
     } catch (error) {
-      readable = false;
-      unresponsive = isTmuxTimeoutKill(error);
-      diagnostic = probeDiagnostic("tmux list-windows", error);
+      if (!isKnownAbsentTmuxServer(error)) {
+        readable = false;
+        unresponsive = isTmuxTimeoutKill(error);
+        diagnostic = probeDiagnostic("tmux list-windows", error);
+      }
     }
     return { names, activity, readable, unresponsive, ...(diagnostic ? { diagnostic } : {}) };
   });
@@ -328,9 +350,11 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
         panes.set(sessionName, entry);
       }
     } catch (error) {
-      readable = false;
-      unresponsive = isTmuxTimeoutKill(error);
-      diagnostic = probeDiagnostic("tmux list-panes", error);
+      if (!isKnownAbsentTmuxServer(error)) {
+        readable = false;
+        unresponsive = isTmuxTimeoutKill(error);
+        diagnostic = probeDiagnostic("tmux list-panes", error);
+      }
     }
     return { readable, unresponsive, panes, ...(diagnostic ? { diagnostic } : {}) };
   });

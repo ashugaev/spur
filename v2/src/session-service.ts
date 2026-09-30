@@ -5567,13 +5567,20 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
-          const { view, classified } = await this.enrichWithClassified(
+          const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
             sidecarProcSnapshot,
           );
           await this.checkPrForSession(session, view.state);
+          if (detectionOnlyError) {
+            const previousAttention = this.attentionStates.get(view.id);
+            if (previousAttention !== undefined) nextStates.set(view.id, previousAttention);
+            const previousRunState = this.lastObservedRunStates.get(view.id);
+            if (previousRunState !== undefined) nextRunStates.set(view.id, previousRunState);
+            continue;
+          }
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
@@ -18372,9 +18379,23 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
-  ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
+  ): Promise<{
+    view: SessionListItemView;
+    classified: SessionStateResult;
+    detectionOnlyError: boolean;
+  }> {
+    const hasIndependentError = (record: SessionRecord): boolean =>
+      record.status === "errored" ||
+      Boolean(record.serverErrorAt) ||
+      Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
+    const inputHasIndependentError = hasIndependentError(session);
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
+    const preReportHasIndependentError =
+      hasIndependentError(session) ||
+      (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
+      Boolean(classified.serverError) ||
+      classified.serverErrorEvidence === "error";
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
 
@@ -18481,7 +18502,13 @@ export class SessionService {
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
-    return { view, classified };
+    const detectionOnlyError =
+      view.state === "error" &&
+      Boolean(view.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) &&
+      !inputHasIndependentError &&
+      !preReportHasIndependentError &&
+      !hasIndependentError(session);
+    return { view, classified, detectionOnlyError };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {

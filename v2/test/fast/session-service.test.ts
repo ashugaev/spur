@@ -1267,6 +1267,8 @@ type SessionServiceInternals = {
   pollAttentionStates(baseline: boolean): Promise<void>;
   attentionMonitorRunning: boolean;
   attentionMonitorSuppressedTicks: number;
+  attentionStates: Map<string, "needs_input" | "error" | "rate_limited">;
+  lastObservedRunStates: Map<string, SessionState>;
   todoNudgeDisabled: Map<string, { kind: "ledger_corrupt" | "target_gone"; reason: string }>;
   todoNudgeBackoff: Map<string, { failures: number; nextRetryAtMs: number }>;
   scheduleHealedSidecarRestart(session: SessionRecord): void;
@@ -17835,7 +17837,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("does not re-notify an unchanged needs_input session after enrich throws on one tick", async () => {
+  it("does not re-notify an unchanged needs_input session after detection fails", async () => {
     const sessions = createSessionStore();
     sessions.set(
       "api-1",
@@ -17868,25 +17870,36 @@ describe("SessionService", () => {
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    // Failed detection reports an error through the existing attention path.
+    // Detection diagnostics retain attention history and remain visible.
     tmuxSessionExistsMock.mockImplementation(async () => {
       throw new Error("boom: transient tmux probe failure");
     });
     await advanceSeconds(5);
-    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.error).toContain("Session status detection failed:");
+    expect((await service.get("api-1")).state).toBe("error");
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
 
-    // Third tick: enrich recovers; state is still needs_input, unchanged.
+    // Recovery observes needs_input again without repeating its notification.
     // Without the carry-forward fix, attentionStates.get(view.id) would read
     // undefined here (not "needs_input"), so this observably-unchanged
     // session would be re-notified — a duplicate desktop + Telegram ping.
     tmuxSessionExistsMock.mockResolvedValue(true);
     await advanceSeconds(5);
-    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(3);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    mockClaudeJsonlState("waiting");
+    await advanceSeconds(5);
+    mockClaudeJsonlState("needs_input");
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
 
     service.dispose();
   });
 
-  it("carries the working->waiting nudge edge across a tick where enrich throws", async () => {
+  it("carries the working->waiting nudge edge across a detection failure", async () => {
     const { config } = telegramProjectConfig();
     loadConfigMock.mockReturnValue(config);
     readTelegramReplyTargetMock.mockReturnValue({
@@ -17925,11 +17938,8 @@ describe("SessionService", () => {
     // Baseline tick: observed run state is "working".
     await vi.advanceTimersByTimeAsync(0);
 
-    // The hook file already flipped to "waiting" before the next tick, but
-    // that tick's enrich throws (transient tmux probe failure) before the
-    // loop body can record the observed run state for this session. Without
-    // carrying the previous run state forward, lastObservedRunStates loses
-    // "working" for this session on this aborted tick.
+    // The hook flipped to waiting, but the runtime probe fails before it can
+    // be read. Keep the observed working state across this unknown tick.
     readAgentHookStateMock.mockReturnValue({
       state: "waiting",
       updatedAt: "2026-03-18T10:05:05.000Z",
@@ -17938,8 +17948,7 @@ describe("SessionService", () => {
       throw new Error("boom: transient tmux probe failure");
     });
     await advanceSeconds(5);
-    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
-    expect(sendTelegramReplyMock.mock.calls[0]?.[2]).toContain("error");
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
 
     // Next tick: enrich recovers and observes "waiting" again. Without the
     // carry-forward fix, prevRunState reads undefined here (not "working"),
@@ -17950,6 +17959,7 @@ describe("SessionService", () => {
     await advanceSeconds(5);
 
     expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(sendTelegramReplyMock.mock.calls[0]?.[2]).not.toContain("error");
     service.dispose();
   });
 
@@ -46043,6 +46053,101 @@ describe("SessionService", () => {
   });
 
   describe("retains sessions on status uncertainty", () => {
+    it.each([
+      "healthy",
+      "provider error",
+      "provider state error",
+      "serverErrorAt",
+      "errored",
+      "unowned error",
+    ])("preserves error attention evidence with reporting uncertainty: %s", async (evidence) => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = runningSession({ id: "api-1", sidecarNames: ["dev"] });
+      if (evidence === "serverErrorAt") record.serverErrorAt = record.updatedAt;
+      if (evidence === "errored") {
+        record.status = "errored";
+        record.error = "Session status detection failed: previous probe";
+      }
+      if (evidence === "unowned error") record.error = "agent failed";
+      sessions.set(record.id, record);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: evidence.startsWith("provider") ? "error" : "waiting",
+        serverError: evidence === "provider error",
+        reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      });
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+      sidecarTmuxAliveMock.mockRejectedValue(new TmuxProbeUnknownError("resource unavailable"));
+      const notify = vi
+        .spyOn(
+          service as unknown as {
+            notifyAttention(view: SessionView, state: "error"): Promise<void>;
+          },
+          "notifyAttention",
+        )
+        .mockResolvedValue();
+      const internals = sessionServiceInternals(service);
+      internals.attentionStates.set(record.id, "needs_input");
+      internals.lastObservedRunStates.set(record.id, "working");
+      await internals.pollAttentionStates(false);
+      if (evidence === "healthy") {
+        expect(notify).not.toHaveBeenCalled();
+        expect(internals.attentionStates.get(record.id)).toBe("needs_input");
+        expect(internals.lastObservedRunStates.get(record.id)).toBe("working");
+      } else {
+        expect(notify).toHaveBeenCalledWith(expect.objectContaining({ state: "error" }), "error");
+        expect(internals.attentionStates.get(record.id)).toBe("error");
+      }
+      expect(sessions.get(record.id)?.error).toBeTruthy();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      "leaves absent attention history absent on a detection-only tick (baseline=%s)",
+      async (baseline) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1" }));
+        tmuxSessionExistsMock.mockRejectedValue(new Error("probe unavailable"));
+        readClaudeJsonlStateMock.mockClear();
+        const internals = sessionServiceInternals(service);
+        await internals.pollAttentionStates(baseline);
+        expect(internals.attentionStates.has("api-1")).toBe(false);
+        expect(internals.lastObservedRunStates.has("api-1")).toBe(false);
+        expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.error).toContain("probe unavailable");
+        expect(sendDesktopNotificationMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["serverErrorAt", "errored", "unowned error"])(
+      "notifies recorded independent errors despite status uncertainty: %s",
+      async (evidence) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            id: "api-1",
+            ...(evidence === "serverErrorAt"
+              ? { serverErrorAt: "2026-03-18T10:01:00.000Z" }
+              : evidence === "errored"
+                ? { status: "errored", error: "Session status detection failed: previous probe" }
+                : { error: "agent failed" }),
+          }),
+        );
+        tmuxSessionExistsMock.mockRejectedValue(new Error("probe unavailable"));
+        readClaudeJsonlStateMock.mockClear();
+        await sessionServiceInternals(service).pollAttentionStates(false);
+        expect(sendDesktopNotificationMock).toHaveBeenCalledWith(
+          expect.objectContaining({ title: "Spur error [api-1]", urgent: true }),
+        );
+        expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(["sidecar sessions", "sidecar panes", "registered service"])(
       "keeps get/list/dashboard and attention readable when %s reporting throws unknown",
       async (probe) => {
@@ -46119,10 +46224,7 @@ describe("SessionService", () => {
           .mockResolvedValue();
         logSpurEventMock.mockClear();
         await sessionServiceInternals(service).pollAttentionStates(false);
-        expect(notify).toHaveBeenCalledWith(
-          expect.objectContaining({ id: record.id, state: "error" }),
-          "error",
-        );
+        expect(notify).not.toHaveBeenCalled();
         expect(
           logSpurEventMock.mock.calls.some(
             ([, entry]) => entry.event === "session.attention_monitor.session_failed",

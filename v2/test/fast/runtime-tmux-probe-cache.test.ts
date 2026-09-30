@@ -575,6 +575,75 @@ describe("runtime-tmux shared probe cache", () => {
     );
   });
 
+  it.each([
+    "no server running on /tmp/test-tmux/socket\n",
+    "error connecting to /tmp/test-tmux/socket (No such file or directory)\n",
+  ])("recognizes structured absent-server stderr: %s", async (stderr) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("tmux failed"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect(await runtime.getTmuxSessionPresence("api-1")).toEqual({
+      present: false,
+      unresponsive: false,
+    });
+    expect(await runtime.getTmuxPanePresence("api-1")).toEqual({ dead: true, unresponsive: false });
+    expect(await runtime.tmuxSessionExists("api-1")).toBe(false);
+    expect(await runtime.tmuxPaneDead("api-1")).toBe(true);
+    expect(await runtime.isProcessRunningInTmux("api-1", ["node"])).toBe(false);
+    expect(callsFor((file) => file === "ps")).toBe(0);
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("list-windows") ? "api-1 1700000000" : "api-1 1 1 0 100 /dev/pts/1",
+      stderr: "",
+    }));
+    expect(await runtime.tmuxSessionExists("api-1")).toBe(false);
+    expect(await runtime.tmuxSessionExists("api-1", { fresh: true })).toBe(true);
+    expect(await runtime.tmuxPaneDead("api-1", { fresh: true })).toBe(false);
+  });
+
+  it.each([
+    { code: "ENOENT" },
+    { code: "EACCES" },
+    { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+    { code: 2 },
+    { killed: true },
+    { signal: "SIGTERM" },
+    { stdout: "partial" },
+    { stderr: "permission denied" },
+    { stderr: "no server running on /tmp/socket\nextra" },
+    { stderr: "no server running on /tmp/socket extra text" },
+    { stderr: "no server running on " },
+    { stderr: undefined },
+    { killed: undefined },
+    { signal: undefined },
+    { stdout: undefined },
+  ])("keeps ambiguous absence evidence unknown: %j", async (override) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("no server running on /tmp/socket"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr: "no server running on /tmp/socket",
+        ...override,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect((await runtime.getTmuxSessionPresence("api-1")).diagnostic).toContain(
+      "list-windows failed",
+    );
+    expect((await runtime.getTmuxPanePresence("api-1")).diagnostic).toContain("list-panes failed");
+    await expect(runtime.tmuxSessionExists("api-1")).rejects.toThrow();
+    await expect(runtime.tmuxPaneDead("api-1")).rejects.toThrow();
+    await expect(runtime.isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow();
+  });
+
   // Issue #807 / DELTA 1: a single combined reader (present+unresponsive off
   // ONE fleet-snapshot fetch), not two separate exported readers — a second
   // top-level call for the unresponsive flag alone would risk missing an
