@@ -365,6 +365,13 @@ export interface TelegramChoice {
   expiresAt: string;
 }
 
+/** A bot message and the session that sent it, so a user reply routes back there. */
+export interface TelegramMessageOwner {
+  chatId: number;
+  messageId: number;
+  sessionId: string;
+}
+
 export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;

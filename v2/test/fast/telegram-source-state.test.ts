@@ -34,7 +34,7 @@ describe("sendTelegramReply", () => {
         }),
       }),
     );
-    expect(result).toEqual({ statusMessageIdConsumed: true });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
   });
 
   it("falls back to a fresh message when editing the pending status fails", async () => {
@@ -68,7 +68,32 @@ describe("sendTelegramReply", () => {
         }),
       }),
     );
-    expect(result).toEqual({ statusMessageIdConsumed: true });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [55] });
+  });
+
+  it("returns the ids of every sent chunk and the edited status message", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const okId = (id: number): Response =>
+      new Response(JSON.stringify({ ok: true, result: { message_id: id } }));
+    const config = { token: "token-123" };
+    const long = `${"a".repeat(4096)}b`;
+
+    fetchMock.mockResolvedValueOnce(okId(77)).mockResolvedValueOnce(okId(78));
+    const edited = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, long);
+    expect(edited.messageIds).toEqual([77, 78]);
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "message to edit not found" })),
+      )
+      .mockResolvedValueOnce(okId(90))
+      .mockResolvedValueOnce(okId(91));
+    const fallback = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, long);
+    expect(fallback.messageIds).toEqual([90, 91]);
+
+    fetchMock.mockResolvedValueOnce(okId(100)).mockResolvedValueOnce(okId(101));
+    const fresh = await sendTelegramReply(config, { chatId: 123 }, long);
+    expect(fresh.messageIds).toEqual([100, 101]);
   });
 
   it("chunks Telegram replies longer than one message", async () => {
@@ -233,7 +258,7 @@ describe("sendTelegramReply", () => {
         }),
       }),
     );
-    expect(result).toEqual({ messageThreadId: 44 });
+    expect(result).toEqual({ messageThreadId: 44, messageIds: [55] });
   });
 });
 

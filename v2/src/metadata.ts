@@ -30,6 +30,7 @@ import {
   type SidecarProcessIdentity,
   type TelegramBinding,
   type TelegramChoice,
+  type TelegramMessageOwner,
   type TelegramReplyTarget,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
@@ -121,6 +122,10 @@ function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: s
 
 function telegramChoiceFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "telegram", projectId, "choices", `${sourceId}.json`);
+}
+
+function telegramMessageFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, "messages", `${sourceId}.json`);
 }
 
 function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
@@ -311,6 +316,9 @@ const EMPTY_INDEX: Readonly<Record<string, string>> = Object.freeze({});
 /** Cap on pending inline-button choices kept per Telegram source. */
 const MAX_TELEGRAM_CHOICES = 200;
 
+/** Cap on bot-message owners kept per Telegram source; oldest evicted first. */
+const MAX_TELEGRAM_MESSAGES = 1000;
+
 function statFingerprint(path: string): FileFingerprint | null {
   try {
     return statSync(path);
@@ -383,6 +391,19 @@ function isTelegramBinding(value: unknown): value is TelegramBinding {
       (typeof binding.messageThreadId === "number" && Number.isInteger(binding.messageThreadId))) &&
     typeof binding.sessionId === "string" &&
     binding.sessionId.trim().length > 0
+  );
+}
+
+function isTelegramMessageOwner(value: unknown): value is TelegramMessageOwner {
+  if (!value || typeof value !== "object") return false;
+  const owner = value as Partial<TelegramMessageOwner>;
+  return (
+    typeof owner.chatId === "number" &&
+    Number.isInteger(owner.chatId) &&
+    typeof owner.messageId === "number" &&
+    Number.isInteger(owner.messageId) &&
+    typeof owner.sessionId === "string" &&
+    owner.sessionId.length > 0
   );
 }
 
@@ -1621,6 +1642,61 @@ export function writeTelegramBindings(
   });
 }
 
+function readTelegramMessages(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): TelegramMessageOwner[] {
+  const path = telegramMessageFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const messages = (parsed as { messages?: unknown }).messages;
+  return Array.isArray(messages) ? messages.filter(isTelegramMessageOwner) : [];
+}
+
+/** Records bot messages a session sent, upserting by chat and message id. Empty ids write nothing. */
+export function recordTelegramMessages(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  owner: { sessionId: string; chatId: number },
+  messageIds: number[],
+): void {
+  if (messageIds.length === 0) return;
+  const recorded = new Set(messageIds);
+  const kept = readTelegramMessages(dataDir, projectId, sourceId).filter(
+    (message) => message.chatId !== owner.chatId || !recorded.has(message.messageId),
+  );
+  const added = [...recorded].map((messageId) => ({
+    chatId: owner.chatId,
+    messageId,
+    sessionId: owner.sessionId,
+  }));
+  writeJsonFile(telegramMessageFilePath(dataDir, projectId, sourceId), {
+    messages: [...kept, ...added].slice(-MAX_TELEGRAM_MESSAGES),
+  });
+}
+
+/** The session that sent one bot message, or null when unrecorded. */
+export function findTelegramMessageSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  chatId: number,
+  messageId: number,
+): string | null {
+  const found = readTelegramMessages(dataDir, projectId, sourceId).find(
+    (message) => message.chatId === chatId && message.messageId === messageId,
+  );
+  return found?.sessionId ?? null;
+}
+
 /** Newest-last, expired entries dropped. */
 export function readTelegramChoices(
   dataDir: string,
@@ -1767,12 +1843,13 @@ export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): void {
+): { heldBinding: boolean } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return;
+    return { heldBinding: false };
   }
+  let heldBinding = false;
 
   const choiceDir = join(dir, "choices");
   if (existsSync(choiceDir)) {
@@ -1793,6 +1870,7 @@ export function deleteTelegramSourceStateForSession(
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
+      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -1804,6 +1882,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
+  return { heldBinding };
 }
 
 export function listActiveServiceProblems(

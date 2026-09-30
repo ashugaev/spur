@@ -26,6 +26,8 @@ import {
   recordWorkItem,
   recordWorkItemLifecycle,
   findTelegramChoice,
+  findTelegramMessageSession,
+  recordTelegramMessages,
   takeTelegramChoice,
   writeTelegramOffer,
   writeTelegramBindings,
@@ -239,7 +241,9 @@ describe("telegram source state", () => {
       chatId: 1,
     });
 
-    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: true,
+    });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
       { chatId: 2, sessionId: "api-2" },
@@ -247,6 +251,43 @@ describe("telegram source state", () => {
     expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: false,
+    });
+  });
+
+  it("records telegram message owners per source, upserts, and evicts the oldest past 1000", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [1, 2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, [2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, []);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBe("api-1");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 2)).toBe("api-2");
+    expect(findTelegramMessageSession(dataDir, "api", "other", 5, 1)).toBeNull();
+
+    const ids = Array.from({ length: 1000 }, (_, index) => 100 + index);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-3", chatId: 5 }, ids);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 100)).toBe("api-3");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1099)).toBe("api-3");
+  });
+
+  it("finds a message owner only in its own chat", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 6, 7)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBe("api-1");
+  });
+
+  it("treats a corrupt telegram message file as empty", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+    writeFileSync(join(dataDir, "source-state", "telegram", "api", "messages", "tg.json"), "{");
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBeNull();
   });
 
   it("finds a pending choice without consuming it", async () => {

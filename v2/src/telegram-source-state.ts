@@ -16,6 +16,13 @@ interface TelegramForumTopic {
 export interface TelegramReplySendResult {
   messageThreadId?: number;
   statusMessageIdConsumed?: boolean;
+  /** Ids of every message the reply produced or edited, in send order. */
+  messageIds: number[];
+}
+
+/** First line of every agent-authored Telegram message: `<id> — <title>`, or `<id>` alone. */
+export function formatTelegramSessionLabel(id: string, title?: string): string {
+  return title ? `${id} — ${title}` : id;
 }
 
 /** One inline button: `text` is what the user sees, `callbackData` what the click carries back. */
@@ -176,13 +183,14 @@ async function sendTelegramMessage(
   text: string,
   messageThreadId?: number,
   replyMarkup?: TelegramInlineKeyboard,
-): Promise<void> {
-  await callTelegram(config, "sendMessage", {
+): Promise<number | undefined> {
+  const sent = await callTelegram<{ message_id?: unknown } | undefined>(config, "sendMessage", {
     chat_id: chatId,
     text,
     ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
     ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   });
+  return Number.isInteger(sent?.message_id) ? (sent?.message_id as number) : undefined;
 }
 
 export async function sendTelegramReply(
@@ -198,6 +206,10 @@ export async function sendTelegramReply(
   const chunkMarkup = (index: number): TelegramInlineKeyboard | undefined =>
     index === chunks.length - 1 ? keyboard : undefined;
   const firstChunkMarkup = chunkMarkup(0);
+  const messageIds: number[] = [];
+  const collect = (id: number | undefined): void => {
+    if (id !== undefined) messageIds.push(id);
+  };
   if (target.statusMessageId !== undefined) {
     try {
       await callTelegram(config, "editMessageText", {
@@ -206,27 +218,34 @@ export async function sendTelegramReply(
         text: firstChunk,
         ...(firstChunkMarkup ? { reply_markup: firstChunkMarkup } : {}),
       });
+      messageIds.push(target.statusMessageId);
     } catch (error) {
-      if (!isNotModifiedError(error)) {
-        await sendTelegramMessage(
-          config,
-          target.chatId,
-          firstChunk,
-          target.messageThreadId,
-          firstChunkMarkup,
+      if (isNotModifiedError(error)) {
+        messageIds.push(target.statusMessageId);
+      } else {
+        collect(
+          await sendTelegramMessage(
+            config,
+            target.chatId,
+            firstChunk,
+            target.messageThreadId,
+            firstChunkMarkup,
+          ),
         );
       }
     }
     for (const [index, chunk] of chunks.slice(1).entries()) {
-      await sendTelegramMessage(
-        config,
-        target.chatId,
-        chunk,
-        target.messageThreadId,
-        chunkMarkup(index + 1),
+      collect(
+        await sendTelegramMessage(
+          config,
+          target.chatId,
+          chunk,
+          target.messageThreadId,
+          chunkMarkup(index + 1),
+        ),
       );
     }
-    return { statusMessageIdConsumed: true };
+    return { statusMessageIdConsumed: true, messageIds };
   }
 
   const createdThreadId =
@@ -235,7 +254,9 @@ export async function sendTelegramReply(
       : null;
   const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
   for (const [index, chunk] of chunks.entries()) {
-    await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index));
+    collect(
+      await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index)),
+    );
   }
-  return messageThreadId !== undefined ? { messageThreadId } : {};
+  return messageThreadId !== undefined ? { messageThreadId, messageIds } : { messageIds };
 }
