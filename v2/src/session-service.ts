@@ -18185,6 +18185,7 @@ export class SessionService {
       allowedTriggers: _allowedTriggers,
       agentSessionId: _agentSessionId,
       branchSource: _branchSource,
+      error: _error,
       ...dashboardSession
     } = session;
     const workspacePresent = classified.workspacePresent;
@@ -18211,7 +18212,7 @@ export class SessionService {
     ).filter((name): name is string => name !== null);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
-    session = readSession(this.config.dataDir, session.id) ?? session;
+    session = this.withReportingError(session);
     const state = this.stabilizeState(
       session.id,
       hasRetainedSessionError(session) ? "error" : classified.state,
@@ -18287,6 +18288,19 @@ export class SessionService {
         this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`);
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
+  }
+
+  private withReportingError(session: SessionRecord): SessionRecord {
+    const latest = readSession(this.config.dataDir, session.id);
+    if (
+      latest &&
+      (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX) ||
+        session.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX))
+    ) {
+      const { error: _error, ...base } = session;
+      return latest.error ? { ...base, error: latest.error } : base;
+    }
+    return session;
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
@@ -18410,7 +18424,7 @@ export class SessionService {
         ...(paneDead ? { deadPane: true } : {}),
       });
     }
-    session = readSession(this.config.dataDir, session.id) ?? session;
+    session = this.withReportingError(session);
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);

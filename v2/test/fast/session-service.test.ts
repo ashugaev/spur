@@ -46177,6 +46177,10 @@ describe("SessionService", () => {
         tmuxSessionExistsMock.mockResolvedValue(true);
         await service.get(record.id);
         expect(sessions.get(record.id)?.error).toBeUndefined();
+        const healedDashboard = (await sessionServiceInternals(service).enrichDashboard(
+          sessions.get(record.id) ?? record,
+        )) as DashboardSessionView;
+        expect(healedDashboard.error).toBeUndefined();
       },
     );
 
