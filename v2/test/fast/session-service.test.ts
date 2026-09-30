@@ -10597,6 +10597,49 @@ describe("SessionService", () => {
       expect(scan).toHaveBeenCalledWith("typed");
     });
 
+    it("rebinds a cursor restart scan with the session's cursor config dir, so a rotated chat acks", async () => {
+      mockCursorJsonlState("waiting");
+      const cursorBaseline = {
+        agent: "cursor",
+        file: "/t/pinned.jsonl",
+        size: 9,
+        rotated: { file: "/t/rotated.jsonl", size: 40 },
+      } as const;
+      const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: "/t/rotated.jsonl" });
+      resumeAgentSubmitAckBindingMock.mockResolvedValue({ baseline: cursorBaseline, scan });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "cursor",
+          launchCommand: "cursor-agent",
+          agentSessionId: "pinned-id",
+          queuedMessages: { messages: ["later"], awaitingPrompt: true },
+          queuedMessageTyped: {
+            message: "typed",
+            typedAt: "2026-03-18T10:04:00.000Z",
+            ackBaseline: cursorBaseline,
+          },
+        }),
+      );
+
+      await liveService();
+
+      await waitForRealTime(() => {
+        expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      });
+      expect(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+        "cursor",
+        expect.objectContaining({
+          agentSessionId: "pinned-id",
+          cursorConfigDir: `${TEST_DATA_DIR}/cursor/api-1`,
+        }),
+        cursorBaseline,
+      );
+      // Acked: never retyped.
+      expect(typedMessages()).not.toContain("typed");
+    });
+
     it("drops a leftover typed marker with the queue on kill", async () => {
       mockClaudeJsonlState("waiting");
       // Seeded after construction: boot recovery never sees it.

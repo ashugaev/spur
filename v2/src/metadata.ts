@@ -731,7 +731,15 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
     typeof record["file"] === "string" &&
     typeof record["size"] === "number"
   ) {
-    return { agent, file: record["file"], size: record["size"] };
+    const base = { file: record["file"], size: record["size"] };
+    const rotated = record["rotated"];
+    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
+      return { agent, ...base };
+    }
+    const { file, size } = rotated as Record<string, unknown>;
+    return typeof file === "string" && typeof size === "number"
+      ? { agent, ...base, rotated: { file, size } }
+      : { agent, ...base };
   }
   const offsets = record["offsets"];
   if (agent === "codex" && offsets !== null && typeof offsets === "object") {

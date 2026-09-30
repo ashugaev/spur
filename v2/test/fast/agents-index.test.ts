@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
+import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
 
 const {
   ensureCodexHooksConfigMock,
@@ -54,7 +55,8 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
-vi.mock("../../src/agents/cursor-submit-ack.js", () => ({
+vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorSubmitAckModule>()),
   captureCursorSubmitBaseline: captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
 }));
@@ -64,6 +66,7 @@ import {
   agentSubmitAckPacing,
   buildAgentLaunchPlan,
   createAgentSubmitAckBinding,
+  resumeAgentSubmitAckBinding,
   setupAgentHooks,
 } from "../../src/agents/index.js";
 
@@ -520,7 +523,11 @@ describe("createAgentSubmitAckBinding", () => {
     expect(binding).not.toBeNull();
     const result = await binding?.scan("hello");
 
-    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "sid-1");
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(
+      ctx.worktreePath,
+      "sid-1",
+      undefined,
+    );
     expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/chat.jsonl", size: 7 },
       "hello",
@@ -548,6 +555,9 @@ describe("createAgentSubmitAckBinding", () => {
     const binding = await createAgentSubmitAckBinding("cursor", pinnedCtx);
     await binding?.scan("hello");
 
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, "sid-1", {
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    });
     expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/chat.jsonl", size: 7 },
       "hello",
@@ -603,5 +613,35 @@ describe("agentSubmitAckPacing", () => {
       windowMs: 10_000,
       maxResends: 2,
     });
+  });
+});
+
+describe("cursor submit-ack resume", () => {
+  it("rebinds a persisted rotated-chat offset and forwards cursorConfigDir to the scan", async () => {
+    scanCursorJsonlForMessageMock.mockResolvedValue({ found: true, scannedFile: "/r.jsonl" });
+    const ctx = {
+      worktreePath: "/tmp/worktree",
+      codexSessionsDir: "/tmp/codex-sessions",
+      agentSessionId: "sid-1",
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    };
+    const persisted = {
+      agent: "cursor" as const,
+      file: "/k.jsonl",
+      size: 9,
+      rotated: { file: "/r.jsonl", size: 40 },
+    };
+
+    const binding = await resumeAgentSubmitAckBinding("cursor", ctx, persisted);
+    expect(binding?.baseline).toEqual(persisted);
+    expect(await binding?.scan("hello")).toEqual({ found: true, lastScannedFile: "/r.jsonl" });
+    expect(captureCursorSubmitBaselineMock).not.toHaveBeenCalled();
+    expect(scanCursorJsonlForMessageMock).toHaveBeenCalledWith(
+      { file: "/k.jsonl", size: 9, rotationOffsets: new Map([["/r.jsonl", 40]]) },
+      "hello",
+      "/tmp/worktree",
+      "sid-1",
+      { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
+    );
   });
 });

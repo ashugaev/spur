@@ -32,7 +32,12 @@ import {
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
-import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
+import {
+  captureCursorSubmitBaseline,
+  persistCursorSubmitBaseline,
+  restoreCursorSubmitBaseline,
+  scanCursorJsonlForMessage,
+} from "./cursor-submit-ack.js";
 import {
   buildOpenCodePlan,
   buildOpenCodeConfig,
@@ -601,13 +606,17 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     submitAck: async (ctx, persisted) => {
       const baseline =
         persisted?.agent === "cursor"
-          ? { file: persisted.file, size: persisted.size }
-          : await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
+          ? restoreCursorSubmitBaseline(persisted)
+          : await captureCursorSubmitBaseline(
+              ctx.worktreePath,
+              ctx.agentSessionId,
+              ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            );
       if (!baseline) {
         return null;
       }
       return {
-        baseline: { agent: "cursor", ...baseline },
+        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,

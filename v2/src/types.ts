@@ -1634,7 +1634,13 @@ export interface ConversationMessage {
 export type SubmitAckBaseline =
   | { agent: "claude"; file: string; size: number }
   | { agent: "codex"; offsets: Record<string, number> }
-  | { agent: "cursor"; file: string; size: number }
+  | {
+      agent: "cursor";
+      file: string;
+      size: number;
+      /** Rotated chat transcript and its offset at send time. */
+      rotated?: { file: string; size: number };
+    }
   | {
       agent: "opencode";
       sessionId: string;
