@@ -1137,6 +1137,14 @@ function isRestorableStatus(status: SessionStatus): boolean {
 // A launch or Send now whose submit never confirmed: the prompt may still sit
 // unsubmitted in the composer, and any typed send (its line clear) would erase
 // it. Every path that types into the pane checks this one predicate.
+// An unacked send holds the pane only when the ack scan could have seen it. A
+// slash command can run inside the agent's TUI and write no transcript
+// record (codex /status, opencode /models), so its hold would never settle
+// and a re-queue would run it twice: it counts as submitted.
+function unconfirmedSubmitHolds(message: string): boolean {
+  return !message.trimStart().startsWith("/");
+}
+
 function submitPending(session: Pick<SessionRecord, "submitUnconfirmedAt">): boolean {
   return session.submitUnconfirmedAt !== undefined;
 }
@@ -12722,7 +12730,7 @@ export class SessionService {
       const persisted = await this.commitDeliveredSend(
         sessionId,
         readySession,
-        recovered ? pane.typed : null,
+        recovered && unconfirmedSubmitHolds(message) ? pane.typed : null,
       );
       if (recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -16678,7 +16686,10 @@ export class SessionService {
       requeued !== undefined && (recovered || requeued !== message)
         ? { ...acked, submitRequeuedMessage: requeued }
         : acked;
-    const updated = recovered && typed ? this.withSubmitUnconfirmed(kept, typed) : kept;
+    const updated =
+      recovered && typed && unconfirmedSubmitHolds(message)
+        ? this.withSubmitUnconfirmed(kept, typed)
+        : kept;
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);

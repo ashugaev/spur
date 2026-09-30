@@ -57,7 +57,20 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
   if (message["role"] !== "user") {
     return null;
   }
-  return extractTextContent(message);
+  const text = extractTextContent(message);
+  return slashCommandText(text) ?? text;
+}
+
+// A slash command or skill is recorded as tags, not as the typed line:
+// `<command-name>/cmd</command-name>` plus `<command-args>…</command-args>`
+// (and `<command-message>`), in either order. Rebuilt as `/cmd args`.
+function slashCommandText(text: string): string | null {
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]?.trim();
+  if (!name) {
+    return null;
+  }
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() ?? "";
+  return args ? `${name} ${args}` : name;
 }
 
 // A send typed into a busy pane is queued, and claude writes no `type:"user"`

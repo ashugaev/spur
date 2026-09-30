@@ -10439,6 +10439,57 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
     });
 
+    it.each(["claude", "codex", "cursor", "opencode"] as const)(
+      "%s: an unacked slash command, sent now or queued, sets no hold and is never retyped",
+      async (agent) => {
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
+        mockCursorJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
+        readOpenCodeStateMock.mockResolvedValue({
+          state: "waiting",
+          reason: "assistant completed",
+          activityMs: Date.parse("2026-03-18T10:04:00.000Z"),
+        });
+        agentWaitsForSubmitAckMock.mockReturnValue(true);
+        createAgentSubmitAckBindingMock.mockImplementation(async () => ({ scan: vi.fn() }));
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            agent,
+            agentSessionId: "ses_1",
+            launchCommand: agent === "cursor" ? "cursor-agent" : agent,
+          }),
+        );
+        const service = await liveService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+          found: false,
+          lastScannedFile: null,
+        });
+
+        const sent = await service.send("api-1", { message: "/status", queue: false });
+        expect(sent.submitUnconfirmedAt).toBeUndefined();
+        // The agent records activity after the command; the queue follows.
+        const after = Date.now() + 1_000;
+        mockClaudeJsonlState("waiting", { lastMtimeMs: after });
+        mockCursorJsonlState("waiting", { lastMtimeMs: after });
+        readAgentHookStateMock.mockReturnValue({
+          state: "waiting",
+          updatedAt: new Date(after).toISOString(),
+        });
+        await service.send("api-1", { message: "/review 986", queue: true });
+        let now = after;
+        await waitForRealTime(() => {
+          now += 30_000;
+          vi.setSystemTime(new Date(now));
+          expect(typedMessages()).toEqual(["/status", "/review 986"]);
+        });
+        await waitForRealTime(() => {
+          expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+        });
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      },
+    );
+
     it("holds the next queued message after a queued delivery whose ack timed out on a live agent, then types it once", async () => {
       mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T10:04:00.000Z") });
       const sessions = createSessionStore();
