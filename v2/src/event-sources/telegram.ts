@@ -1295,9 +1295,11 @@ async function deliverRoutedPrompt(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
   }
-  if (statusMessageId !== undefined) {
-    await markPlaceholderReceived(deps, ctx, session.id, message);
-  }
+  // Read and replaced in one synchronous step: a reply that claimed the old
+  // placeholder before this point is not superseded, and one that starts after
+  // it reads the new placeholder.
+  const superseded =
+    statusMessageId !== undefined ? supersededPlaceholder(deps, session.id, message) : undefined;
   recordTelegramReplyTarget(deps, {
     sessionId: session.id,
     chatId: message.chat.id,
@@ -1308,28 +1310,26 @@ async function deliverRoutedPrompt(
   });
   rememberSent(deps, session.id, message.chat.id, statusMessageId);
   deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, session.id, text));
+  if (superseded !== undefined && ctx.api) {
+    // Best-effort: the superseded placeholder stops claiming the agent is thinking.
+    try {
+      await ctx.api.editMessageText(message.chat.id, superseded, "Received.");
+    } catch {
+      // Already edited or deleted: nothing left to clear.
+    }
+  }
 }
 
-/** Best-effort: a placeholder the new one supersedes stops claiming the agent is thinking. */
-async function markPlaceholderReceived(
+/** The unconsumed placeholder in this chat and thread, if the session has one. */
+function supersededPlaceholder(
   deps: SourceStartDeps<TelegramSourceConfig>,
-  ctx: Pick<TelegramTextContext, "api">,
   sessionId: string,
   message: TelegramTextMessage,
-): Promise<void> {
+): number | undefined {
   const previous = readTelegramReplyTarget(deps.dataDir, sessionId);
-  if (
-    previous?.statusMessageId === undefined ||
-    !ctx.api ||
-    !isSameTelegramTarget(previous, message.chat.id, message.message_thread_id)
-  ) {
-    return;
-  }
-  try {
-    await ctx.api.editMessageText(previous.chatId, previous.statusMessageId, "Received.");
-  } catch {
-    // Already edited or deleted: nothing left to clear.
-  }
+  return previous && isSameTelegramTarget(previous, message.chat.id, message.message_thread_id)
+    ? previous.statusMessageId
+    : undefined;
 }
 
 /** Records a bot message so a user reply to it routes back to the session. */

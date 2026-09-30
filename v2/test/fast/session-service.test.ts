@@ -6466,6 +6466,39 @@ describe("SessionService", () => {
         expect.not.objectContaining({ statusMessageId: expect.any(Number) }),
       );
     });
+
+    it("claims the placeholder before the send starts, so a concurrent inbound cannot overwrite the answer", async () => {
+      readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ statusMessageId: 77 }));
+      let writtenBeforeSend: unknown[] = [];
+      sendTelegramReplyMock.mockImplementation(async () => {
+        writtenBeforeSend = writeTelegramReplyTargetMock.mock.calls.map(([, target]) => target);
+        return { statusMessageIdConsumed: true, messageIds: [77] };
+      });
+      const { service } = await serviceWithTelegramSession();
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      expect(writtenBeforeSend).toHaveLength(1);
+      expect(writtenBeforeSend[0]).not.toHaveProperty("statusMessageId");
+    });
+
+    it("does not merge a created topic onto a target that moved to another chat mid-send", async () => {
+      readTelegramReplyTargetMock
+        .mockReturnValueOnce(replyTargetFor({ messageThreadId: undefined }))
+        .mockReturnValue(replyTargetFor({ chatId: 123, messageThreadId: undefined }));
+      sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44, messageIds: [91] });
+      const { service } = await serviceWithTelegramSession();
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      const lastWrite = writeTelegramReplyTargetMock.mock.calls.at(-1)?.[1];
+      expect(lastWrite).toMatchObject({ chatId: 123 });
+      expect(lastWrite).not.toHaveProperty("messageThreadId", 44);
+      expect(writeTelegramReplyTargetMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ chatId: 123, messageThreadId: 44 }),
+      );
+    });
   });
 
   it("persists a created Telegram topic for future source replies", async () => {
@@ -18863,7 +18896,11 @@ describe("SessionService", () => {
       lastInboundAt: "2026-03-18T10:04:00.000Z",
       updatedAt: "2026-03-18T10:04:00.000Z",
     });
-    sendTelegramReplyMock.mockResolvedValue({ statusMessageIdConsumed: true, messageIds: [55] });
+    let writesBeforeSend = -1;
+    sendTelegramReplyMock.mockImplementation(async () => {
+      writesBeforeSend = writeTelegramReplyTargetMock.mock.calls.length;
+      return { statusMessageIdConsumed: true, messageIds: [55] };
+    });
     seedCodexNudgeSession();
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -18872,6 +18909,8 @@ describe("SessionService", () => {
     await driveWorkingToWaitingEdge();
 
     expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    // The placeholder is claimed (cleared) before the notice send starts.
+    expect(writesBeforeSend).toBe(1);
     expect(recordTelegramMessagesMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",

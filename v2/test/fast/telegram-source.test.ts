@@ -1803,6 +1803,78 @@ describe("telegramSourceModule", () => {
     expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(78);
   });
 
+  it("records the new placeholder before editing the superseded one", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const first = telegramContext({ chat: { id: 123 } });
+    first.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(first);
+    const second = telegramContext({ chat: { id: 123 } });
+    second.reply.mockResolvedValueOnce({ message_id: 78 });
+    const recordedDuringEdit: (number | undefined)[] = [];
+    second.api.editMessageText.mockImplementation(async () => {
+      recordedDuringEdit.push(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId);
+    });
+
+    await bot.emitText(second);
+
+    expect(second.api.editMessageText).toHaveBeenCalledWith(123, 77, "Received.");
+    expect(recordedDuringEdit).toEqual([78]);
+  });
+
+  it("does not edit a placeholder an agent reply already claimed", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const first = telegramContext({ chat: { id: 123 } });
+    first.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(first);
+    // The agent claims the placeholder (clears it) before it starts editing it.
+    const claimed = readTelegramReplyTarget(dataDir, "api-1");
+    if (!claimed) throw new Error("missing reply target");
+    const { statusMessageId: _claimed, updatedAt: _updatedAt, ...withoutStatus } = claimed;
+    writeTelegramReplyTarget(dataDir, withoutStatus);
+    const second = telegramContext({ chat: { id: 123 } });
+    second.reply.mockResolvedValueOnce({ message_id: 78 });
+
+    await bot.emitText(second);
+
+    expect(second.api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it("tells the user a replied-to session is not active and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([
+      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+      { id: "api-2", project: "api", agent: "claude", state: "stopped", inactive: true },
+    ]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    recordTelegramMessages(
+      dataDir,
+      "api",
+      "telegram",
+      { sessionId: "api-2", chatId: -1001 },
+      [500],
+    );
+    const textCtx = telegramContext({ reply_to_message: { message_id: 500 } });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith("api-2 is not active. Message not delivered.");
+    expect(emit).not.toHaveBeenCalled();
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+    ]);
+  });
+
   it("leaves a placeholder in another chat untouched when the session is reached elsewhere", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);

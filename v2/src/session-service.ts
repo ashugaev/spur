@@ -2673,7 +2673,8 @@ function telegramSessionLabel(session: Pick<SessionView, "id" | "slots">): strin
 interface TelegramReplyTargetChanges {
   /** The placeholder this send edited; cleared only while it is still the recorded one. */
   sentStatusMessageId?: number;
-  messageThreadId?: number;
+  /** Topic created by the send; applies only while the target is still in that chat with no thread. */
+  createdThread?: { chatId: number; messageThreadId: number };
   lastReplyAt?: string;
 }
 
@@ -6739,6 +6740,7 @@ export class SessionService {
         options.resolved !== undefined ? options.resolved : this.resolveTelegramNotice(sessionId);
       if (!resolved) return;
       const { target, source } = resolved;
+      this.claimTelegramPlaceholder(sessionId, target);
       const result = await sendTelegramReply(source, target, text, {
         topicName: telegramTopicName(topicSession),
       });
@@ -6789,13 +6791,26 @@ export class SessionService {
     const merged = {
       ...rest,
       ...(keptStatus !== undefined ? { statusMessageId: keptStatus } : {}),
-      ...(changes.messageThreadId !== undefined
-        ? { messageThreadId: changes.messageThreadId }
+      ...(changes.createdThread !== undefined &&
+      current.chatId === changes.createdThread.chatId &&
+      current.messageThreadId === undefined
+        ? { messageThreadId: changes.createdThread.messageThreadId }
         : {}),
       ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
     };
     writeTelegramReplyTarget(this.config.dataDir, merged);
     return { ...merged, updatedAt: nowIso() };
+  }
+
+  /**
+   * Marks the placeholder as in use before the send starts, in the same
+   * synchronous step that read the target. An inbound arriving mid-send then
+   * finds no unconsumed placeholder and cannot overwrite the answer with its
+   * "Received." edit. Never recreates a deleted target.
+   */
+  private claimTelegramPlaceholder(sessionId: string, target: TelegramReplyTarget): void {
+    if (target.statusMessageId === undefined) return;
+    this.patchTelegramReplyTarget(sessionId, null, { sentStatusMessageId: target.statusMessageId });
   }
 
   /**
@@ -6832,7 +6847,9 @@ export class SessionService {
       ...(result.statusMessageIdConsumed && target.statusMessageId !== undefined
         ? { sentStatusMessageId: target.statusMessageId }
         : {}),
-      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+      ...(result.messageThreadId !== undefined
+        ? { createdThread: { chatId: target.chatId, messageThreadId: result.messageThreadId } }
+        : {}),
       ...(options.lastReplyAt !== undefined ? { lastReplyAt: options.lastReplyAt } : {}),
     };
     return options.createIfMissing
@@ -11903,6 +11920,7 @@ export class SessionService {
         choices,
       });
     }
+    this.claimTelegramPlaceholder(sessionId, target);
     const result = await sendTelegramReply(
       source,
       target,
