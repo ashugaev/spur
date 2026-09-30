@@ -112,6 +112,12 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 // busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
 // so worst case elapsed time is unbounded, not just the backoff sum.
 const DELIVERY_RETRY_BASE_MS = 10_000;
+// A person is waiting on an interactive batch (Telegram): it waits for the
+// agent to be idle this long, not the 30s review window. Two seconds still
+// merges a message split into several by the client.
+const INTERACTIVE_SEND_WINDOW_MS = 2_000;
+// The one-shot flush timer fires just past the gate so the tick is not needed.
+const INTERACTIVE_FLUSH_MARGIN_MS = 50;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
@@ -554,11 +560,16 @@ function isSendTrigger(
   return "send" in trigger;
 }
 
-function isDeliverableState(session: SessionView): boolean {
+/** Send window for a batch: the idle wait, capped for interactive batches. */
+function sendWindowMs(batch: SendBatch): number {
+  const idleWaitMs = getIdleWaitBeforeFlushMs();
+  return batch.interactive ? Math.min(idleWaitMs, INTERACTIVE_SEND_WINDOW_MS) : idleWaitMs;
+}
+
+function isDeliverableState(session: SessionView, windowMs: number): boolean {
   return (
     session.state === "stale" ||
-    (session.state === "waiting" &&
-      isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs()))
+    (session.state === "waiting" && isIdleEnoughToReceive(session.lastActivityAt, windowMs))
   );
 }
 
@@ -639,7 +650,7 @@ function mergeIntoBatch(
     customPrompt,
     customPromptRecorded: false,
     batch: incoming,
-    notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
+    notBeforeAt: Date.now() + sendWindowMs(incoming),
     routeFingerprint: policy.routeFingerprint,
     destination: policy.destination,
     workId: randomUUID(),
@@ -718,6 +729,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   let flushTimer: NodeJS.Timeout | null = null;
   let autoCompleteTimer: NodeJS.Timeout | null = null;
   let stopped = false;
+  const interactiveFlushTimers = new Set<NodeJS.Timeout>();
 
   const leaseForRoute = (
     routeFingerprint: string,
@@ -1076,6 +1088,34 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     });
   };
 
+  // One timer per new interactive batch: flush as soon as the send window and
+  // the agent's idle gate allow, instead of waiting for the 5s tick. Claim and
+  // attempt accounting stay in flushPending, so a timer and a tick that both
+  // fire deliver once. Never reschedules; a closed gate is left to the tick.
+  const scheduleInteractiveFlush = (
+    queueKey: string,
+    batch: PendingBatch,
+    session: SessionView,
+  ): void => {
+    const gateOpensAt = Math.max(
+      batch.notBeforeAt,
+      Date.parse(session.lastActivityAt) + sendWindowMs(batch.batch),
+    );
+    const delayMs = Math.max(0, gateOpensAt - Date.now() + INTERACTIVE_FLUSH_MARGIN_MS);
+    const workId = batch.workId;
+    const timer = setTimeout(() => {
+      interactiveFlushTimers.delete(timer);
+      if (stopped) return;
+      const current = pendingBatches.get(queueKey);
+      if (current?.workId !== workId) return;
+      enqueue(queueKey, async () => {
+        await flushPending(queueKey, current);
+      });
+    }, delayMs);
+    timer.unref();
+    interactiveFlushTimers.add(timer);
+  };
+
   const loadSessionOrClear = async (
     queueKey: string,
     batch: PendingBatch,
@@ -1162,7 +1202,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    const deliverable = isDeliverableState(session);
+    const deliverable = isDeliverableState(session, sendWindowMs(batch.batch));
     if (batch.eventName.endsWith(":ci_failed")) {
       const trigger = deps.config.projects[batch.projectId]?.triggers[batch.triggerId];
       const interrupt =
@@ -1292,6 +1332,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
+    if (!merged && sendBatch.interactive) {
+      scheduleInteractiveFlush(queueKey, batch, session);
+    }
 
     // Same shed-pause exemption as flushPending: while the memory hold is
     // engaged a "stopped" session is deferred, not dropped.
@@ -1470,7 +1513,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         customPrompt: sendTrigger.send.prompt,
         customPromptRecorded: false,
         batch,
-        notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
+        notBeforeAt: Date.now() + sendWindowMs(batch),
         routeFingerprint,
         destination,
         workId,
@@ -1643,6 +1686,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearInterval(flushTimer);
         flushTimer = null;
       }
+      for (const timer of interactiveFlushTimers) clearTimeout(timer);
+      interactiveFlushTimers.clear();
       if (autoCompleteTimer) {
         clearInterval(autoCompleteTimer);
         autoCompleteTimer = null;

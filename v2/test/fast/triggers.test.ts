@@ -5578,6 +5578,216 @@ describe("startConfiguredTriggers", () => {
       }
     });
   });
+
+  describe("interactive (telegram) send window", () => {
+    function telegramConfig() {
+      return {
+        dataDir: DATA_DIR,
+        projects: {
+          api: {
+            sources: { tg: { type: "telegram" } },
+            triggers: {
+              chat: { source: "tg", event: "telegram:message", send: { interrupt: false } },
+            },
+          },
+        },
+      };
+    }
+
+    function telegramEvent(messageId: number, text: string) {
+      return {
+        name: "telegram:message",
+        occurrenceId: `tg-${messageId}`,
+        projectId: "api",
+        sourceId: "tg",
+        data: { sessionId: "api-1", chatId: 123, userId: 7, messageId, text },
+      };
+    }
+
+    function waitingSession(lastActivityAt: string, state = "waiting") {
+      return {
+        id: "api-1",
+        status: "running",
+        state,
+        lastActivityAt,
+        workspaceExists: true,
+      };
+    }
+
+    async function startTelegram(getMock: ReturnType<typeof vi.fn>) {
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: telegramConfig() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      return { bus, controller, deliverMock };
+    }
+
+    it("delivers a telegram message to a waiting agent 2s after it arrives", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(deliverMock).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(101);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(deliverMock).toHaveBeenCalledWith("api-1", expect.stringContaining("hello there"), {
+          interrupt: false,
+        });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("merges telegram messages inside the 2s window into one delivery", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "first part"));
+        await vi.advanceTimersByTimeAsync(500);
+        const timersAfterFirst = vi.getTimerCount();
+        bus.emit(telegramEvent(2, "second part"));
+        await vi.advanceTimersByTimeAsync(0);
+        // A merge adds no flush timer.
+        expect(vi.getTimerCount()).toBe(timersAfterFirst);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        const text = deliverMock.mock.calls[0]?.[1] as string;
+        expect(text).toContain("first part");
+        expect(text).toContain("second part");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("holds a telegram message until 2s after the agent's last activity", async () => {
+      const getMock = vi
+        .fn()
+        .mockResolvedValue(waitingSession(new Date(Date.now() + 1_500).toISOString()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(2_100);
+        expect(deliverMock).not.toHaveBeenCalled();
+        // The timer waits for the activity gate (3.5s), not the 5s tick.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("delivers a telegram batch once when the timer and the flush tick both fire", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(12_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("restored telegram batch uses the 2s window", async () => {
+      const persisted: PersistedPendingBatch = {
+        queueKey: "api:chat:api-1",
+        projectId: "api",
+        triggerId: "chat",
+        sourceId: "tg",
+        batch: {
+          kind: "telegram",
+          sessionId: "api-1",
+          messages: [
+            { sessionId: "api-1", chatId: 123, userId: 7, messageId: 1, text: "restored hello" },
+          ],
+        },
+      };
+      readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { controller, deliverMock } = await startTelegram(getMock);
+      try {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("restored hello"),
+          { interrupt: false },
+        );
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("stop clears a pending telegram flush timer", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      bus.emit(telegramEvent(1, "hello there"));
+      await vi.advanceTimersByTimeAsync(0);
+      await controller.stop();
+      getMock.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(getMock).not.toHaveBeenCalled();
+    });
+
+    it("merges events that arrive while the agent works into one follow-up delivery", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "text 1"));
+        await vi.advanceTimersByTimeAsync(2_100);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+
+        getMock.mockResolvedValue(waitingSession(new Date().toISOString(), "working"));
+        await vi.advanceTimersByTimeAsync(900);
+        bus.emit(telegramEvent(2, "text 2"));
+        await vi.advanceTimersByTimeAsync(1_000);
+        bus.emit(telegramEvent(3, "text 3"));
+        await vi.advanceTimersByTimeAsync(1_000);
+        bus.emit(telegramEvent(4, "text 4"));
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+
+        getMock.mockResolvedValue(waitingSession(new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deliverMock).toHaveBeenCalledTimes(2);
+        const second = deliverMock.mock.calls[1]?.[1] as string;
+        expect(second).toContain("text 2");
+        expect(second).toContain("text 3");
+        expect(second).toContain("text 4");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("keeps the 30s window for non-telegram batches", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+  });
 });
 
 describe("dropsQueuedSend", () => {

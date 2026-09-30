@@ -721,3 +721,19 @@ describe("restoreSendBatch", () => {
     ).toBeNull();
   });
 });
+
+describe("interactive batches", () => {
+  it("only telegram batches are interactive, including restored ones", () => {
+    const github = createSendBatchParser("github", "proj", "src-1")(githubEventData());
+    const service = createSendBatchParser("service", "proj", "src-1")(serviceEventData());
+    const telegram = createSendBatchParser("telegram", "proj", "src-1")(telegramEventData());
+
+    expect(github?.interactive).toBe(false);
+    expect(service?.interactive).toBe(false);
+    expect(telegram?.interactive).toBe(true);
+    const restored = telegram ? restoreSendBatch(telegram.serialize()) : null;
+    expect(restored?.interactive).toBe(true);
+    const restoredGithub = github ? restoreSendBatch(github.serialize()) : null;
+    expect(restoredGithub?.interactive).toBe(false);
+  });
+});

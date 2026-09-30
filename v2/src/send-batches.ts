@@ -19,6 +19,8 @@ import type {
 
 export interface SendBatch {
   readonly sessionId: string;
+  /** A person is waiting on this batch: it uses the short send window. */
+  readonly interactive: boolean;
   merge(incoming: SendBatch): void;
   prune(dataDir: string): void;
   isEmpty(): boolean;
@@ -148,6 +150,8 @@ abstract class AutoPingAwareBatch {
 export type SendBatchParser = (data: unknown) => SendBatch | null;
 
 class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
+  readonly interactive = false;
+
   static parse(
     providerId: ReviewProviderId,
     projectId: string,
@@ -330,6 +334,8 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
 }
 
 class ServiceSendBatch extends AutoPingAwareBatch implements SendBatch {
+  readonly interactive = false;
+
   static parse(prompt: string | undefined, data: unknown): ServiceSendBatch | null {
     if (!isServiceProblemEventData(data)) return null;
     return new ServiceSendBatch(prompt, data);
@@ -425,6 +431,8 @@ class ServiceSendBatch extends AutoPingAwareBatch implements SendBatch {
 }
 
 class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
+  readonly interactive = true;
+
   static parse(prompt: string | undefined, data: unknown): TelegramSendBatch | null {
     if (!isTelegramMessageEventData(data)) return null;
     return new TelegramSendBatch(prompt, data);
