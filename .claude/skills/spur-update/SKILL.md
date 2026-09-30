@@ -18,7 +18,7 @@ LAYOUT
   update state  ~/.spur/rollback-state.json
   switch state  deploy-switch.json in the Spur data dir
 
-RECOVERY PATHS
+REPAIR PATHS
 
   1  spur update [version] — installs, monitors, auto-rolls-back. Flags: `spur update --help`.
   2  bash <install>/scripts/install-and-restart.sh <version> — what the UI click runs. Prints nothing to the terminal; read the helper log.

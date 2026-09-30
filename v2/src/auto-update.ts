@@ -124,18 +124,8 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
     return;
   }
 
-  // Retry suppression, by recorded kind. A terminal record naming this exact
-  // candidate suppresses it only when another attempt cannot help:
-  // a failure kind that says the package installed and left the host changed. A failure that
-  // installed nothing, or one with no recorded kind at all, is attempted
-  // again on every tick with no cap: the reported bug was a transient
-  // registry error stranding a host on the old version forever, silently.
-  // A human press is unaffected either way: this branch lives in the tick,
-  // not in `startDeploySwitch`. `state` is guaranteed terminal here (the
-  // `phase === "running"` branch above already returned).
-  // Level tracks whether the tick did something: this branch does not, so
-  // `info`. Every attempt still logs — `retry` below, `started`/`skipped`
-  // after it — and the disarm, a real state change, stays `warn`.
+  // Terminal records suppress only no-retry failure kinds. Succeeded and
+  // retryable records permit another attempt for the same newer candidate.
   if (state && state.version === candidate.tag) {
     if (isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {
