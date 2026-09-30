@@ -140,6 +140,7 @@ const deleteRuntimeLogCursorsForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const deleteTelegramSourceStateForSessionMock = vi.fn();
+const deleteTelegramReplyTargetMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
 const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
@@ -613,6 +614,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
   deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
+  deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -1522,6 +1524,7 @@ describe("SessionService", () => {
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
     recordTelegramMessagesMock.mockReset();
+    deleteTelegramReplyTargetMock.mockReset();
     editTelegramTopicMock.mockReset().mockResolvedValue(undefined);
     closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
     writeTelegramBindingsMock.mockReset();
@@ -3365,6 +3368,55 @@ describe("SessionService", () => {
     );
     expect(validateOpenCodeModelMock).not.toHaveBeenCalled();
     service.dispose();
+  });
+
+  describe("Telegram spawn origin", () => {
+    const telegramOrigin = { projectId: "api", sourceId: "agentChat", chatId: 123 };
+
+    it("writes the reply target before the launch prompt can reach the agent", async () => {
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello", telegramOrigin });
+
+      expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ sessionId: "api-1", ...telegramOrigin }),
+      );
+      const written = writeTelegramReplyTargetMock.mock.invocationCallOrder[0] ?? Infinity;
+      expect(written).toBeLessThan(
+        createTmuxSessionMock.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+      );
+      expect(written).toBeLessThan(
+        sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? Number.NEGATIVE_INFINITY,
+      );
+      service.dispose();
+    });
+
+    it("writes nothing for a spawn that did not come from Telegram", async () => {
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(writeTelegramReplyTargetMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("removes the reply target when the spawn fails", async () => {
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello", telegramOrigin }),
+      ).rejects.toThrow();
+
+      expect(deleteTelegramReplyTargetMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+      service.dispose();
+    });
   });
 
   describe("host.disk.low pre-spawn probe", () => {

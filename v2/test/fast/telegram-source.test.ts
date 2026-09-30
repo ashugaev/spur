@@ -1327,6 +1327,31 @@ describe("telegramSourceModule", () => {
     );
   });
 
+  it("hands the DM it was spawned from to the daemon as the agent's reply origin", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, { listProjects });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({
+        text: "/spawn claude do X",
+        chat: { id: 123 },
+        message_thread_id: undefined,
+      }),
+    );
+
+    expect(spawnSession.mock.calls[0]?.[0]?.telegramOrigin).toEqual({
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: 123,
+    });
+  });
+
   it("a second /spawn with an inline task overwrites the pending record instead of stacking a spawn", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -2292,6 +2317,13 @@ describe("telegramSourceModule", () => {
       model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("help me out"),
+      // The agent may reply before this handler binds; the daemon writes the target from this.
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
     expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
@@ -2711,6 +2743,12 @@ describe("telegramSourceModule voice notes", () => {
       project: "api",
       agent: "codex",
       prompt: wrapTelegramSpawnPrompt("fix the sidecar"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
   });
 
@@ -2745,6 +2783,12 @@ describe("telegramSourceModule voice notes", () => {
       agent: "opencode",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("fix the sidecar"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
 
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");

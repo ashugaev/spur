@@ -620,6 +620,12 @@ async function bindSpawnedSession(
     const session = await spawnTelegramSession(runtime, {
       ...request,
       prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
+      telegramOrigin: {
+        projectId: deps.projectId,
+        sourceId: deps.sourceId,
+        chatId,
+        ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+      },
     });
     if (!session) {
       await editOrReply(

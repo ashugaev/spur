@@ -210,6 +210,7 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  deleteTelegramReplyTarget,
   deleteTelegramSourceStateForSession,
   listActiveServiceProblems,
   readAvailableBacklogItems,
@@ -10051,6 +10052,15 @@ export class SessionService {
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
+      // Before the launch prompt exists: an agent that replies ahead of the
+      // source's own bind step must answer the chat that asked for it.
+      if (request.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...request.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
       workspacePath = placeholder.worktreePath;
@@ -10363,6 +10373,9 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (sessionId && request.telegramOrigin) {
+        deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+      }
       if (sessionId && project && placeholderWritten && agent) {
         // This catch wraps every stage from tmux.create through record.write,
         // so the pane can already hold a real launched agent by the time we

@@ -1266,6 +1266,12 @@ export interface SpawnSessionRequest {
   // falling back to the (still-rate-limited) default.
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
+  // Telegram chat the spawn came from. The reply target is written before the
+  // launch prompt reaches the agent, so its first `source reply` goes there.
+  telegramOrigin?: Pick<
+    TelegramReplyTarget,
+    "projectId" | "sourceId" | "chatId" | "messageThreadId"
+  >;
 }
 
 export interface SendMessageAttachment {
