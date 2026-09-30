@@ -670,6 +670,7 @@ function recordTelegramReplyTarget(
   const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
   const sameTarget =
     previous !== null && isSameTelegramTarget(previous, target.chatId, target.messageThreadId);
+  const carriedStatus = sameTarget ? previous.statusMessageId : undefined;
   const lastInboundAt =
     target.keepInboundStamp && sameTarget && previous.lastInboundAt !== undefined
       ? previous.lastInboundAt
@@ -677,10 +678,6 @@ function recordTelegramReplyTarget(
   const keepsNewStatus =
     target.statusMessageId !== undefined &&
     (target.chatId > 0 || target.messageThreadId !== undefined);
-  const carriedStatus =
-    previous && isSameTelegramTarget(previous, target.chatId, target.messageThreadId)
-      ? previous.statusMessageId
-      : undefined;
   const statusMessageId = keepsNewStatus ? target.statusMessageId : carriedStatus;
   writeTelegramReplyTarget(deps.dataDir, {
     sessionId: target.sessionId,

@@ -1654,6 +1654,56 @@ describe("startServer", () => {
     }
   });
 
+  it("never forwards a telegramOrigin from the POST /sessions body to spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSpawn = SessionService.prototype.spawn;
+    const spawnArgs: unknown[][] = [];
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      SessionService.prototype.spawn = async function mockSpawn(...args: unknown[]) {
+        spawnArgs.push(args);
+        throw new Error("stop after capture");
+      };
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+
+      await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          telegramOrigin: { projectId: "demo", sourceId: "tg", chatId: 999 },
+        }),
+      });
+
+      expect(spawnArgs).toHaveLength(1);
+      // Options (2nd argument) carry the internal origin; the HTTP route passes none.
+      expect(spawnArgs[0]?.[1]).toBeUndefined();
+    } finally {
+      SessionService.prototype.spawn = originalSpawn;
+      await server?.stop();
+    }
+  });
+
   it("routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");

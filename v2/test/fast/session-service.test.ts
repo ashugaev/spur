@@ -3378,7 +3378,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await service.spawn({ project: "api", prompt: "hello", telegramOrigin });
+      await service.spawn({ project: "api", prompt: "hello" }, { telegramOrigin });
 
       expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
@@ -3411,7 +3411,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(
-        service.spawn({ project: "api", prompt: "hello", telegramOrigin }),
+        service.spawn({ project: "api", prompt: "hello" }, { telegramOrigin }),
       ).rejects.toThrow();
 
       expect(deleteTelegramReplyTargetMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");

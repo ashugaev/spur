@@ -448,6 +448,7 @@ import {
   type TelegramChoice,
   type TelegramReplyTarget,
   type TelegramSourceConfig,
+  type TelegramSpawnOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -9840,6 +9841,8 @@ export class SessionService {
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
+      /** Internal: set by a source adapter, never from the HTTP body. */
+      telegramOrigin?: TelegramSpawnOrigin;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -10054,10 +10057,10 @@ export class SessionService {
       placeholderWritten = true;
       // Before the launch prompt exists: an agent that replies ahead of the
       // source's own bind step must answer the chat that asked for it.
-      if (request.telegramOrigin) {
+      if (options?.telegramOrigin) {
         writeTelegramReplyTarget(this.config.dataDir, {
           sessionId,
-          ...request.telegramOrigin,
+          ...options.telegramOrigin,
           lastInboundAt: nowIso(),
         });
       }
@@ -10373,7 +10376,7 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
-      if (sessionId && request.telegramOrigin) {
+      if (sessionId && options?.telegramOrigin) {
         deleteTelegramReplyTarget(this.config.dataDir, sessionId);
       }
       if (sessionId && project && placeholderWritten && agent) {

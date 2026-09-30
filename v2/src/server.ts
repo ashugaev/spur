@@ -753,7 +753,11 @@ export async function startServer(
             ...(dropsQueuedSend(session, service.memoryHoldEngaged()) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn(request);
+          const { telegramOrigin, ...spawnRequest } = request;
+          const session = await service.spawn(
+            spawnRequest,
+            telegramOrigin ? { telegramOrigin } : undefined,
+          );
           return {
             id: session.id,
             project: session.project,
