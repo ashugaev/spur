@@ -1050,6 +1050,16 @@ export function isTerminalSessionStatus(
   return status === "completed" || status === "killed";
 }
 
+export function hasRetainedSessionError(
+  session: Pick<SessionRecord, "status" | "error">,
+  state?: SessionState,
+): boolean {
+  return (
+    !isTerminalSessionStatus(session.status) &&
+    (session.status === "errored" || Boolean(session.error?.trim()) || state === "error")
+  );
+}
+
 // respawn()'s own gate. One definition consumed by the hint builders in
 // session-service.ts and cli.ts so a hint can never name respawn for a
 // status respawn's own throw would reject.

@@ -965,6 +965,33 @@ describe("runtime-tmux", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("reports failed readiness capture as unknown without sending trust confirmation", async () => {
+    execFileAsyncMock.mockRejectedValue(new Error("capture access denied"));
+    const { waitForTmuxReady, TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+    await expect(
+      waitForTmuxReady("api-1", ["ready"], 5_000, { agent: "cursor" }),
+    ).rejects.toBeInstanceOf(TmuxProbeUnknownError);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "send-keys")).toBe(false);
+  });
+
+  it("keeps a successful empty readiness capture distinct from failed capture", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execFileAsyncMock.mockImplementation(async () => {
+      now += 10_000;
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      const { waitForTmuxReady, PromptReadyTimeoutError } =
+        await import("../../src/runtime-tmux.js");
+      await expect(waitForTmuxReady("api-1", ["ready"], 5_000)).rejects.toBeInstanceOf(
+        PromptReadyTimeoutError,
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("throws PromptReadyTimeoutError when the pane never reaches the prompt", async () => {
     let now = 0;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -1436,7 +1463,7 @@ describe("runtime-tmux", () => {
     expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
   });
 
-  it("fails closed on a -1 (no-controlling-terminal) foreground group instead of matching it against an unparseable -1 pgid", async () => {
+  it("reports an unparseable process group as unknown instead of matching a -1 foreground group", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
         return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
@@ -1464,9 +1491,11 @@ describe("runtime-tmux", () => {
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
     // (no `/` or whitespace boundary after "codex").
-    expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
-    expect(
-      await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
-    ).toBe(false);
+    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toThrow(
+      "malformed process table output",
+    );
+    await expect(
+      isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
+    ).rejects.toThrow("malformed process table output");
   });
 });

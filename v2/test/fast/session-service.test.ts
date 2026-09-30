@@ -210,7 +210,7 @@ const probeTmuxProcessMatchMock =
       sessionName: string,
       matchers: string[],
       options?: { fresh?: boolean; paneChildFallback?: boolean },
-    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+    ) => Promise<{ alive: boolean; matchedByName: boolean; diagnostic?: string }>
   >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
@@ -246,14 +246,24 @@ const tmuxSessionExistsMock = vi.fn();
 // Forwards `options` only when the caller actually passed it, matching the
 // arity of every existing direct tmuxSessionExists/tmuxPaneDead call site so
 // mock.calls assertions written against those two mocks don't have to change.
-const getTmuxSessionPresenceMock = vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
-  present: await (options ? tmuxSessionExistsMock(name, options) : tmuxSessionExistsMock(name)),
-  unresponsive: false,
-}));
-const getTmuxPanePresenceMock = vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
-  dead: await (options ? tmuxPaneDeadMock(name, options) : tmuxPaneDeadMock(name)),
-  unresponsive: false,
-}));
+const getTmuxSessionPresenceMock = vi.fn(
+  async (
+    name: string,
+    options?: { fresh?: boolean },
+  ): Promise<{ present: boolean; unresponsive: boolean; diagnostic?: string }> => ({
+    present: await (options ? tmuxSessionExistsMock(name, options) : tmuxSessionExistsMock(name)),
+    unresponsive: false,
+  }),
+);
+const getTmuxPanePresenceMock = vi.fn(
+  async (
+    name: string,
+    options?: { fresh?: boolean },
+  ): Promise<{ dead: boolean; unresponsive: boolean; diagnostic?: string }> => ({
+    dead: await (options ? tmuxPaneDeadMock(name, options) : tmuxPaneDeadMock(name)),
+    unresponsive: false,
+  }),
+);
 const waitForTmuxReadyMock = vi.fn();
 const createWorktreeMock = vi.fn();
 const findWorktreePathForBranchMock = vi.fn();
@@ -702,6 +712,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   const actual = await importOriginal<typeof runtimeTmuxModule>();
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
+    TmuxProbeUnknownError: actual.TmuxProbeUnknownError,
     captureTmuxPane: captureTmuxPaneMock,
     captureTmuxPaneOrEmpty: captureTmuxPaneOrEmptyMock,
     createTmuxSession: createTmuxSessionMock,
@@ -2048,9 +2059,10 @@ describe("SessionService", () => {
     expect(waitForTmuxReadyMock).toHaveBeenCalledWith("api-1", ["Claude Code", "❯"], undefined, {
       agent: "claude",
     });
-    expect(writeSessionMock).toHaveBeenCalledTimes(2);
+    expect(writeSessionMock).toHaveBeenCalledTimes(3);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
-    expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
+    expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("spawning");
+    expect(writeSessionMock.mock.calls[2]?.[1].status).toBe("running");
     expect(result.id).toBe("api-1");
     expect(result.closeoutOwner).toBe(true);
     expect(result.state).toBe("waiting");
@@ -3482,6 +3494,7 @@ describe("SessionService", () => {
     reserveNextSessionIdMock.mockResolvedValue("api-2");
     workspaceExistsMock.mockReturnValue(true);
     createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+    tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-1");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -4750,7 +4763,7 @@ describe("SessionService", () => {
     ]);
   });
 
-  it("uses the extended background readiness timeout only on the first attempt", async () => {
+  it("retains a background attempt after readiness fails without retrying or removing resources", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
     tmuxSessionExistsMock.mockResolvedValue(false);
@@ -4766,10 +4779,10 @@ describe("SessionService", () => {
     });
 
     await vi.waitFor(() => {
-      expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(2);
-      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
-        true,
-      );
+      expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1);
+      expect(
+        writeSessionMock.mock.calls.some(([, session]) => session.error === "agent prompt timeout"),
+      ).toBe(true);
     });
 
     expect(waitForTmuxReadyMock.mock.calls[0]).toEqual([
@@ -4778,12 +4791,10 @@ describe("SessionService", () => {
       120_000,
       { agent: "claude" },
     ]);
-    expect(waitForTmuxReadyMock.mock.calls[1]).toEqual([
-      "api-1",
-      ["Claude Code", "❯"],
-      undefined,
-      { agent: "claude" },
-    ]);
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(deleteAgentHookStateMock).not.toHaveBeenCalled();
   });
 
   it("rejects an explicit branch conflict during background spawn", async () => {
@@ -4826,7 +4837,7 @@ describe("SessionService", () => {
     // initial prompt is sent (claude pins its session id at launch, so the
     // capture step is a no-op and no longer a viable failure injection point).
     writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
-      if (session.status === "running") {
+      if (session.status === "running" && !session.error) {
         throw new Error("capture boom");
       }
       sessions.set(session.id, clone(session));
@@ -4846,17 +4857,13 @@ describe("SessionService", () => {
 
     expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
-    expect(removeWorktreeMock).toHaveBeenCalledTimes(1);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(
       logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.spawn.retrying"),
     ).toBe(false);
-    // The failure lands after createTmuxSession/sendMessageToTmux already
-    // launched a real agent, so cleanupBackgroundSpawnAttempt must tear it
-    // down through killAgentPaneAndConfirmExit (capture-then-confirm), not a
-    // raw killTmuxSession.
-    expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
-    expect(terminateAgentProcessesMock).toHaveBeenCalled();
+    expect(capturePaneAgentProcessesMock).not.toHaveBeenCalled();
+    expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
   });
 
   it("adds sidecar-only testing instructions to the initial message when sidecars are configured", async () => {
@@ -13492,7 +13499,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("persists stopped and skips stale Claude readers when tmux is missing", async () => {
+  it("retains running status and the error when tmux is confirmed missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),
       error: "stale error",
@@ -13513,15 +13520,15 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(250);
     const result = await resultPromise;
 
-    expect(result.status).toBe("stopped");
-    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("error");
     expect(result.runtimeAlive).toBe(false);
     expect(session).toMatchObject({
       id: "api-1",
-      status: "stopped",
+      status: "running",
     });
-    expect(session.error).toBeUndefined();
-    expect(session.stopReason).toBeUndefined();
+    expect(session.error).toBe("stale error");
+    expect(session.stopReason).toBe("manual_pause");
     expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
     expect(readClaudeSessionStatusMock).not.toHaveBeenCalled();
     expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
@@ -15611,6 +15618,7 @@ describe("SessionService", () => {
         "2026-03-18T10:00:00.000Z",
       ) as unknown as MemoryShedService;
       vi.spyOn(service, "classifySessionRecord").mockImplementation(async (session) => ({
+        session,
         state: session.id.startsWith("rate-") ? "rate_limited" : "waiting",
       }));
 
@@ -17858,16 +17866,12 @@ describe("SessionService", () => {
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    // Second tick: enrich throws for this session (a transient tmux probe
-    // failure), aborting the loop body before attentionStates.set(view.id, ...)
-    // runs for it. Without carrying the previous value forward, the
-    // subsequent attentionStates.clear() + repopulate leaves this session
-    // absent from the map.
+    // Failed detection reports an error through the existing attention path.
     tmuxSessionExistsMock.mockImplementation(async () => {
       throw new Error("boom: transient tmux probe failure");
     });
     await advanceSeconds(5);
-    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
 
     // Third tick: enrich recovers; state is still needs_input, unchanged.
     // Without the carry-forward fix, attentionStates.get(view.id) would read
@@ -17875,13 +17879,13 @@ describe("SessionService", () => {
     // session would be re-notified — a duplicate desktop + Telegram ping.
     tmuxSessionExistsMock.mockResolvedValue(true);
     await advanceSeconds(5);
-    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(3);
 
     service.dispose();
   });
 
   it("carries the working->waiting nudge edge across a tick where enrich throws", async () => {
-    const { config, telegramSource } = telegramProjectConfig();
+    const { config } = telegramProjectConfig();
     loadConfigMock.mockReturnValue(config);
     readTelegramReplyTargetMock.mockReturnValue({
       sessionId: "api-1",
@@ -17932,7 +17936,8 @@ describe("SessionService", () => {
       throw new Error("boom: transient tmux probe failure");
     });
     await advanceSeconds(5);
-    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(sendTelegramReplyMock.mock.calls[0]?.[2]).toContain("error");
 
     // Next tick: enrich recovers and observes "waiting" again. Without the
     // carry-forward fix, prevRunState reads undefined here (not "working"),
@@ -17943,12 +17948,6 @@ describe("SessionService", () => {
     await advanceSeconds(5);
 
     expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
-    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
-      telegramSource,
-      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      expect.stringContaining("is waiting."),
-      expect.objectContaining({ topicName: expect.any(String) }),
-    );
     service.dispose();
   });
 
@@ -18624,12 +18623,13 @@ describe("SessionService", () => {
     const second = await service.get("api-1");
 
     expect(second.status).toBe("running");
-    expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(second.state).toBe("error");
+    expect(second.error).toContain("runtime state unknown");
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
         event: "session.runtime.probe_unresponsive",
-        level: "warn",
+        level: "error",
         sessionId: "api-1",
       }),
     );
@@ -19212,7 +19212,7 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
-  it("promotes a stale errored record when tmux and the agent process are live", async () => {
+  it("promotes a stale errored record while preserving its unrelated error", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -19239,9 +19239,9 @@ describe("SessionService", () => {
     const persisted = sessions.get("api-1");
 
     expect(result.status).toBe("running");
-    expect(result.state).toBe("working");
+    expect(result.state).toBe("error");
     expect(persisted?.status).toBe("running");
-    expect(persisted).not.toHaveProperty("error");
+    expect(persisted?.error).toBe("Agent runtime exited unexpectedly.");
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -19511,7 +19511,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("keeps a healed session running without an error when its sidecar restart fails", async () => {
+  it("keeps a healed session running with its unrelated error when its sidecar restart fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -19559,7 +19559,7 @@ describe("SessionService", () => {
     });
 
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")).not.toHaveProperty("error");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
 
     service.dispose();
   });
@@ -20964,7 +20964,7 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("stopped");
     });
 
-    it("completing the anchor releases the shared sidecar and its port when no member has a running agent, so a stopped or errored member cannot strand them", async () => {
+    it("completing the anchor retains the shared sidecar and its port for an errored member", async () => {
       loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
       const sessions = createSessionStore();
       const base = {
@@ -21017,8 +21017,10 @@ describe("SessionService", () => {
       await service.complete("api-1");
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--playwright");
-      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
-      expect(sessions.get("api-1")?.sidecarPorts).toBeUndefined();
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
+      expect(sessions.get("api-1")?.sidecarPorts).toEqual({
+        daemon: { SPUR_RESERVED_PORT_DAEMON: 4100 },
+      });
       // The worktree and the shared artifacts still belong to the members that
       // can come back.
       expect(removeWorktreeMock).not.toHaveBeenCalled();
@@ -22434,11 +22436,14 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
-    // First recovery attempt (native --resume) reports the process exited, so
-    // the fallback fresh launch must mint a new id — the pinned id may already
-    // own a transcript, and claude refuses --session-id on it.
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    let created = false;
+    tmuxSessionExistsMock.mockImplementation(async () => created);
+    createTmuxSessionMock
+      .mockRejectedValueOnce(new Error("native launch failed before creation"))
+      .mockImplementation(async () => {
+        created = true;
+      });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -22505,10 +22510,14 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
-    // First recovery attempt (native --resume) reports the process exited, so
-    // the fallback fresh launch mints a new id.
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    let created = false;
+    tmuxSessionExistsMock.mockImplementation(async () => created);
+    createTmuxSessionMock
+      .mockRejectedValueOnce(new Error("native launch failed before creation"))
+      .mockImplementation(async () => {
+        created = true;
+      });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -23596,6 +23605,7 @@ describe("SessionService", () => {
 
   it("cleans up worktree and tmux state when spawn fails after writing placeholder metadata", async () => {
     createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+    tmuxSessionExistsMock.mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -23624,7 +23634,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("cleans up sidecar tmux sessions when spawn fails after sidecar autostart", async () => {
+  it("retains sidecar tmux sessions and ports when status detection fails after sidecar autostart", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -23651,12 +23661,12 @@ describe("SessionService", () => {
     // unconditionally keeps the assertion deterministic regardless of call order.
     tmuxSessionExistsMock.mockReset().mockRejectedValue(new Error("enrich boom"));
 
-    await expect(
-      service.spawn({
-        project: "api",
-        prompt: "hello",
-      }),
-    ).rejects.toThrow("Failed to spawn api-1: enrich boom");
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+    expect(result.state).toBe("error");
+    expect(result.error).toContain("enrich boom");
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -23664,13 +23674,13 @@ describe("SessionService", () => {
         sidecarName: "dev",
       }),
     );
-    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+    expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--dev");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
-      status: "errored",
-      error: "enrich boom",
+      status: "running",
+      error: expect.stringContaining("enrich boom"),
     });
-    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toHaveProperty("sidecarPorts");
   });
 
   const playwrightSidecarEntry = {
@@ -23935,7 +23945,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("reaps playwright sidecars on the crash path for stopped and errored sessions", async () => {
+  it("reaps a clean stopped playwright sidecar and retains an errored owner's sidecar", async () => {
     const sessions = createSessionStore();
     sessions.set("stopped-1", {
       id: "stopped-1",
@@ -23978,7 +23988,7 @@ describe("SessionService", () => {
     await service.reapDeadSessionSidecars();
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("stopped-1--playwright");
-    expect(killTmuxSessionMock).toHaveBeenCalledWith("err-1--playwright");
+    expect(killTmuxSessionMock).not.toHaveBeenCalledWith("err-1--playwright");
     service.dispose();
   });
 
@@ -25235,6 +25245,7 @@ describe("SessionService", () => {
           },
           // 90 minutes idle at construction time (10:05): past front-local's
           // 60min TTL, within front-pp-tunnel's 180min TTL.
+          createdAt: "2026-03-18T08:00:00.000Z",
           updatedAt: "2026-03-18T08:35:00.000Z",
         }),
       );
@@ -25242,8 +25253,9 @@ describe("SessionService", () => {
         new Set(["api-1--front-local", "api-1--front-pp-tunnel"]),
       );
       sidecarTmuxAliveMock.mockResolvedValue(true);
-      tmuxSessionExistsMock.mockResolvedValue(false);
-      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      getTmuxSessionActivityMock.mockResolvedValue(null);
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService(
@@ -28393,6 +28405,7 @@ describe("SessionService", () => {
 
     it("rolls the record back to completed and logs session.reopen.failed when restore fails after the flip", async () => {
       const seeded = seedReopenableSession();
+      tmuxSessionExistsMock.mockResolvedValue(false);
       createTmuxSessionMock.mockRejectedValue(new Error("boom"));
 
       const service = await createDisposedSessionService();
@@ -28413,6 +28426,7 @@ describe("SessionService", () => {
 
     it("tears down tmux and services on rollback", async () => {
       seedReopenableSession();
+      tmuxSessionExistsMock.mockResolvedValue(false);
       createTmuxSessionMock.mockRejectedValue(new Error("boom"));
 
       const service = await createDisposedSessionService();
@@ -28430,6 +28444,7 @@ describe("SessionService", () => {
 
     it("rolls back from a fresh read, not the stale pre-flip snapshot, so a message queued during the reopen window survives", async () => {
       const seeded = seedReopenableSession();
+      tmuxSessionExistsMock.mockResolvedValue(false);
       createTmuxSessionMock.mockImplementation(async () => {
         // Simulate a concurrent send() landing in the window between
         // reopenLocked's own flip (status stopped/manual_pause, restorable)
@@ -28868,7 +28883,7 @@ describe("SessionService", () => {
     });
 
     await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
-    expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -28969,7 +28984,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
 
     await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
-    expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -29195,7 +29210,7 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")).not.toHaveProperty("error");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
   });
 
   it("startSidecar heals a stale errored session even when the agent transcript read rejects", async () => {
@@ -29244,7 +29259,7 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")).not.toHaveProperty("error");
+    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
   });
 
   it("startSidecar refuses an errored session whose agent process is gone even when the pane is usable", async () => {
@@ -41441,14 +41456,8 @@ describe("SessionService", () => {
 
       await expect(service.restore("api-1")).rejects.toThrow(/no owned process was captured/);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
-      // The failing killAgentPaneAndConfirmExit call itself never reaches
-      // killTmuxSession. restoreLocked's own catch-all cleanup then calls
-      // killAgentPaneAndConfirmExit a SECOND time with failOnSurvivors:false
-      // (unrelated to D3, same as the "process table could not be read"
-      // sibling above) and that second call does reach killTmuxSession —
-      // exactly once. If D3 ever moved to after killTmuxSession in the
-      // failing call, this would read 2: the ordering invariant this pins.
-      expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+      // The ownership disagreement must also block failure-path cleanup.
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(logSpurEventMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
         expect.objectContaining({
@@ -41681,7 +41690,7 @@ describe("SessionService", () => {
       ).toBe(true);
     });
 
-    it("tears down a spawn failure's already-launched pane through killAgentPaneAndConfirmExit, not a raw kill, and does not bury the original error", async () => {
+    it("retains a spawn failure's already-launched pane and reports the original error", async () => {
       // spawn()'s catch wraps every stage from tmux.create through
       // record.write, so createTmuxSession can have already launched a real
       // agent by the time a later stage (here: waitForTmuxReady) throws.
@@ -41696,9 +41705,9 @@ describe("SessionService", () => {
         /agent never became ready/,
       );
 
-      expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
-      expect(terminateAgentProcessesMock).toHaveBeenCalled();
-      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+      expect(capturePaneAgentProcessesMock).not.toHaveBeenCalled();
+      expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1");
     });
   });
 
@@ -42935,7 +42944,8 @@ describe("SessionService", () => {
 
         expect(stalePolledEvents()).toHaveLength(0);
         const persisted = sessions.get("api-1");
-        expect(persisted?.status).toBe("running");
+        expect(persisted?.status).toBe("errored");
+        expect(persisted?.error).toContain("exited before recovery became ready");
         expect(persisted?.queuedMessages?.messages).toEqual(["queued during teardown"]);
         const abortedEvents = logSpurEventMock.mock.calls
           .map(([, entry]) => entry)
@@ -43764,7 +43774,7 @@ describe("SessionService", () => {
           const wakeError = await wake;
 
           expect(wakeError).toBeInstanceOf(Error);
-          expect(sessions.get("api-1")?.status).toBe(operation === "pause" ? "stopped" : "killed");
+          expect(sessions.get("api-1")?.status).toBe(operation === "pause" ? "errored" : "killed");
           expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         },
       );
@@ -45068,7 +45078,7 @@ describe("SessionService", () => {
         expect(persisted).not.toHaveProperty("staleSidecars");
       });
 
-      it("fresh-launch fallback on native-resume failure resends the original task prompt (wrapped as restore context) before the triggering message", async () => {
+      it("fresh-launch fallback on pre-create native-resume failure resends the original task prompt (wrapped as restore context) before the triggering message", async () => {
         // relaunchSessionInPlace's fresh-launch fallback starts a blank agent
         // process (no --resume, no piped prompt) whenever native resume is
         // unavailable or fails, so the agent has zero conversation memory.
@@ -45099,17 +45109,12 @@ describe("SessionService", () => {
         listSessionsMock.mockReturnValue([]);
         let relaunched = false;
         tmuxSessionExistsMock.mockImplementation(async () => relaunched);
-        // First createTmuxSession/waitForTmuxReady attempt is the native
-        // resume attempt; make it fail so relaunchSessionInPlace falls back
-        // to a fresh launch (its catch block only fires when a
-        // recoveryPlan existed, i.e. agentSessionId was present).
+        // Refuse native resume before creating a pane; fresh fallback remains safe.
         let createTmuxSessionCalls = 0;
         createTmuxSessionMock.mockImplementation(async () => {
           createTmuxSessionCalls += 1;
+          if (createTmuxSessionCalls === 1) throw new Error("resume launch refused before create");
           relaunched = true;
-        });
-        waitForTmuxReadyMock.mockImplementationOnce(async () => {
-          throw new Error("resume failed");
         });
         isProcessRunningInTmuxMock.mockImplementation(async () => true);
 
@@ -45161,18 +45166,85 @@ describe("SessionService", () => {
         listSessionsMock.mockReturnValue([]);
         let relaunched = false;
         tmuxSessionExistsMock.mockImplementation(async () => relaunched);
-        createTmuxSessionMock.mockImplementation(async () => {
-          relaunched = true;
-        });
-        // First createTmuxSession/waitForTmuxReady attempt is the native resume
-        // attempt; make it fail so relaunchSessionInPlace falls back to a fresh
-        // launch (same setup as the resend-ordering test above).
-        waitForTmuxReadyMock.mockImplementationOnce(async () => {
-          throw new Error("resume failed");
-        });
+        createTmuxSessionMock
+          .mockRejectedValueOnce(new Error("resume launch refused before create"))
+          .mockImplementation(async () => {
+            relaunched = true;
+          });
         isProcessRunningInTmuxMock.mockImplementation(async () => true);
         return sessions;
       }
+
+      it.each([
+        ["alive", "capture"],
+        ["unknown", "capture"],
+        ["dead", "capture"],
+        ["alive", "timeout"],
+        ["unknown", "timeout"],
+        ["dead", "timeout"],
+      ] as const)(
+        "retains post-create native resume on %s liveness after readiness %s",
+        async (liveness, failure) => {
+          const { TmuxProbeUnknownError, PromptReadyTimeoutError } =
+            await import("../../src/runtime-tmux.js");
+          loadConfigMock.mockReturnValue({ ...baseConfig() });
+          mockAgentWaitingState("claude");
+          const sessions = createSessionStore();
+          const original = {
+            ...fixtureSession("claude"),
+            sidecarNames: ["proxy"],
+            sidecarPorts: { proxy: { SPUR_RESERVED_PORT_PROXY: 4100 } },
+            sidecarProcs: { proxy: { pid: 111, pgid: 111, starttime: 1 } },
+          };
+          sessions.set("api-1", original);
+          listSessionsMock.mockReturnValue([]);
+          let relaunched = false;
+          tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+          let killsAtCreate = 0;
+          let terminationsAtCreate = 0;
+          createTmuxSessionMock.mockImplementation(async () => {
+            relaunched = true;
+            killsAtCreate = killTmuxSessionMock.mock.calls.length;
+            terminationsAtCreate = terminateAgentProcessesMock.mock.calls.length;
+          });
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: liveness === "alive",
+            matchedByName: liveness === "alive",
+            ...(liveness === "unknown" ? { diagnostic: "ps read denied" } : {}),
+          }));
+          const readinessError =
+            failure === "capture"
+              ? new TmuxProbeUnknownError("capture-pane denied")
+              : new PromptReadyTimeoutError({
+                  sessionName: "api-1",
+                  elapsedMs: 120000,
+                  detail: "",
+                });
+          waitForTmuxReadyMock.mockRejectedValueOnce(readinessError);
+          const service = await createDisposedSessionService();
+          await expect(
+            service.send("api-1", { message: "the real trigger", queue: false }),
+          ).rejects.toThrow(readinessError.message);
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsAtCreate);
+          expect(terminateAgentProcessesMock).toHaveBeenCalledTimes(terminationsAtCreate);
+          expect(removeWorktreeMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")).toEqual(
+            expect.objectContaining({
+              worktreePath: original.worktreePath,
+              tmuxSession: original.tmuxSession,
+              agentSessionId: original.agentSessionId,
+              error: readinessError.message,
+              status: liveness === "dead" ? "errored" : "running",
+              launchCommand: createTmuxSessionMock.mock.calls[0]?.[0]?.launchCommand,
+              sidecarNames: original.sidecarNames,
+              sidecarPorts: original.sidecarPorts,
+              sidecarProcs: original.sidecarProcs,
+            }),
+          );
+        },
+      );
 
       it("claude: a confirmed context resend delivers the triggering event with no unconfirmed warning", async () => {
         setUpFreshLaunchRelaunch("claude");
@@ -45413,7 +45485,7 @@ describe("SessionService", () => {
 
         expect(result.session.status).toBe("running");
         expect(sessions.get("shp-1")?.status).toBe("running");
-        expect(sessions.get("shp-1")?.error).toBeUndefined();
+        expect(sessions.get("shp-1")?.error).toBe("Agent runtime exited unexpectedly.");
       });
 
       it("promotes a stopped shepherd back to running while its runtime is alive", async () => {
@@ -45966,5 +46038,277 @@ describe("SessionService", () => {
       // The disarm tick attempts nothing: the flag is the decision.
       expect(startDeploySwitchMock).not.toHaveBeenCalled();
     });
+  });
+
+  describe("retains sessions on status uncertainty", () => {
+    it.each(["sessions", "panes", "process"])(
+      "persists %s probe failures across service reconstruction and heals only its own diagnostic",
+      async (probe) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        const record = sessionRecord({
+          id: "api-1",
+          status: "running",
+          sidecarNames: ["dev"],
+          sidecarPorts: { dev: { http: 12345 } },
+          slots: { title: "Keep me", links: [{ label: "dev", url: "http://localhost:12345" }] },
+        });
+        sessions.set(record.id, record);
+        const diagnostic = `${probe} probe: permission denied`;
+        if (probe === "sessions")
+          getTmuxSessionPresenceMock.mockResolvedValue({
+            present: false,
+            unresponsive: false,
+            diagnostic,
+          });
+        if (probe === "panes")
+          getTmuxPanePresenceMock.mockResolvedValue({
+            dead: true,
+            unresponsive: false,
+            diagnostic,
+          });
+        if (probe === "process")
+          probeTmuxProcessMatchMock.mockResolvedValue({
+            alive: false,
+            matchedByName: false,
+            diagnostic,
+          });
+
+        const first = await sessionServiceInternals(service).classifySessionRecord(record);
+        expect(first.state).toBe("error");
+        expect(first.session.status).toBe("running");
+        expect(first.session.error).toContain(diagnostic);
+        const restarted = await createDisposedSessionService();
+        await sessionServiceInternals(restarted).classifySessionRecord(
+          sessions.get(record.id) ?? record,
+        );
+        expect(sessions.get(record.id)).toMatchObject({
+          worktreePath: record.worktreePath,
+          launchCommand: record.launchCommand,
+          sidecarPorts: record.sidecarPorts,
+          slots: record.slots,
+        });
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.runtime.probe_unresponsive",
+          ),
+        ).toHaveLength(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+        getTmuxPanePresenceMock.mockResolvedValue({ dead: false, unresponsive: false });
+        probeTmuxProcessMatchMock.mockResolvedValue({ alive: true, matchedByName: true });
+        await sessionServiceInternals(restarted).classifySessionRecord(
+          sessions.get(record.id) ?? record,
+        );
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+      },
+    );
+
+    it("preserves unrelated errors while permitting delivery to a confirmed live agent", async () => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = sessionRecord({
+        id: "api-1",
+        status: "running",
+        error: "Provider request failed",
+      });
+      sessions.set(record.id, record);
+      const classified = await sessionServiceInternals(service).classifySessionRecord(record);
+      expect(classified.state).toBe("error");
+      expect(classified.session.error).toBe("Provider request failed");
+      await service.send(record.id, { message: "continue", queue: false });
+      expect(sendMessageToTmuxMock).toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["running", "stopped", "errored"] as const)(
+      "never automatically recovers an error-bearing %s record",
+      async (status) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        const record = sessionRecord({ id: "api-1", status, error: "Retain these resources" });
+        sessions.set(record.id, record);
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        await expect(service.send(record.id, { message: "continue" })).rejects.toThrow(
+          status === "errored" ? "Session is not running" : "retained error",
+        );
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)?.error).toBe(record.error);
+      },
+    );
+
+    it("contains structured status read failure as a retained error", async () => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = sessionRecord({ id: "api-1" });
+      sessions.set(record.id, record);
+      readClaudeJsonlStateMock.mockRejectedValue(new Error("EIO reading transcript"));
+      const classified = await sessionServiceInternals(service).classifySessionRecord(record);
+      expect(classified.state).toBe("error");
+      expect(classified.session.error).toContain("EIO reading transcript");
+      expect(sessions.get(record.id)?.status).toBe("running");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("blocks terminal orphan cleanup on a non-timeout unknown presence result", async () => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({ id: "api-1", status: "completed", sidecarNames: ["dev"] }),
+      );
+      getTmuxSessionPresenceMock.mockResolvedValue({
+        present: false,
+        unresponsive: false,
+        diagnostic: "list-windows failed",
+      });
+      await (service as unknown as { reapOrphanedTmux(): Promise<void> }).reapOrphanedTmux();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+    });
+
+    it("rechecks a retained error appearing while a sidecar reap awaits its process snapshot", async () => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = sessionRecord({
+        id: "api-1",
+        sidecarNames: ["dev"],
+        sidecarPorts: { dev: { http: 12345 } },
+        slots: { links: [{ label: "dev", url: "http://localhost:12345" }] },
+      });
+      sessions.set(record.id, record);
+      snapshotProcessesMock.mockImplementationOnce(async () => {
+        sessions.set(record.id, { ...record, error: "Provider failed during sweep" });
+        return { ok: true, byPid: new Map(), byPgid: new Map() };
+      });
+      await (
+        service as unknown as {
+          executeSidecarReapPlan(plan: {
+            reap: { ownerId: string; sidecarName: string; tmuxName: string; reason: "idle_ttl" }[];
+            keep: [];
+            warn: [];
+          }): Promise<void>;
+        }
+      ).executeSidecarReapPlan({
+        reap: [
+          { ownerId: record.id, sidecarName: "dev", tmuxName: "api-1--dev", reason: "idle_ttl" },
+        ],
+        keep: [],
+        warn: [],
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get(record.id)?.sidecarPorts).toEqual(record.sidecarPorts);
+      expect(sessions.get(record.id)?.slots).toEqual(record.slots);
+    });
+
+    it.each(["alive", "unknown", "dead"])(
+      "retains an uncertain restore readiness result with subsequent %s liveness",
+      async (liveness) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        const record = sessionRecord({
+          id: "api-1",
+          status: "stopped",
+          stopReason: "manual_pause",
+          agentSessionId: "native-session",
+          queuedMessages: { messages: ["pending work"], awaitingPrompt: true },
+        });
+        sessions.set(record.id, record);
+        const runtime = await import("../../src/runtime-tmux.js");
+        waitForTmuxReadyMock.mockRejectedValue(
+          new runtime.TmuxProbeUnknownError("capture-pane failed during restore"),
+        );
+        let killsBeforeLaunch = 0;
+        createTmuxSessionMock.mockImplementation(async () => {
+          killsBeforeLaunch = killTmuxSessionMock.mock.calls.length;
+          probeTmuxProcessMatchMock.mockResolvedValue({
+            alive: liveness === "alive",
+            matchedByName: liveness === "alive",
+            ...(liveness === "unknown" ? { diagnostic: "ps failed" } : {}),
+          });
+        });
+        await expect(service.restore(record.id)).rejects.toThrow(
+          "capture-pane failed during restore",
+        );
+        expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsBeforeLaunch);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)).toMatchObject({
+          status: liveness === "dead" ? "errored" : "running",
+          error: "capture-pane failed during restore",
+          agentSessionId: record.agentSessionId,
+          queuedMessages: record.queuedMessages,
+        });
+        expect(sessions.get(record.id)?.launchCommand).not.toBe("");
+      },
+    );
+
+    it.each(["alive", "unknown", "dead"])(
+      "retains a background readiness failure with subsequent %s liveness and no retry",
+      async (liveness) => {
+        const service = await createDisposedSessionService();
+        const sessions = createSessionStore();
+        const runtime = await import("../../src/runtime-tmux.js");
+        waitForTmuxReadyMock.mockRejectedValue(
+          new runtime.TmuxProbeUnknownError("capture-pane failed during background spawn"),
+        );
+        createTmuxSessionMock.mockImplementation(async () => {
+          probeTmuxProcessMatchMock.mockResolvedValue({
+            alive: liveness === "alive",
+            matchedByName: liveness === "alive",
+            ...(liveness === "unknown" ? { diagnostic: "ps failed" } : {}),
+          });
+        });
+        await service.spawnInBackground({ project: "api", prompt: "hello" });
+        await service.settleBackgroundSpawns();
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toMatchObject({
+          status: liveness === "dead" ? "errored" : "running",
+          error: "capture-pane failed during background spawn",
+        });
+        expect(sessions.get("api-1")?.launchCommand).not.toBe("");
+      },
+    );
+
+    it.each(["unknown", "timeout", "send"])(
+      "preserves a foreground spawn after post-create %s failure",
+      async (failure) => {
+        const sessions = createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const runtime = await import("../../src/runtime-tmux.js");
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        service.dispose();
+        const error =
+          failure === "unknown"
+            ? new runtime.TmuxProbeUnknownError("capture-pane failed")
+            : failure === "timeout"
+              ? new runtime.PromptReadyTimeoutError({
+                  sessionName: "api-1",
+                  elapsedMs: 1000,
+                  detail: "not ready",
+                })
+              : new Error("initial send failed");
+        if (failure === "send") sendMessageToTmuxMock.mockRejectedValue(error);
+        else waitForTmuxReadyMock.mockRejectedValue(error);
+        await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+          error.message,
+        );
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(deleteAgentHookStateMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toMatchObject({ status: "running", error: error.message });
+        expect(sessions.get("api-1")?.launchCommand).not.toBe("");
+      },
+    );
   });
 });

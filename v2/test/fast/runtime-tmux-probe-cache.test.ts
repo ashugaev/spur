@@ -72,6 +72,84 @@ describe("runtime-tmux shared probe cache", () => {
     vi.resetModules();
   });
 
+  it.each([
+    ["list-windows", "api-1"],
+    ["list-panes", "api-1 1 1 invalid 100 /dev/pts/1"],
+    ["ps", "100 broken 100 100 pts/1 10 node"],
+  ])(
+    "reports malformed %s output as unknown and observes a fresh recovery",
+    async (command, output) => {
+      let malformed = true;
+      execFileAsyncMock.mockImplementation(async (file, args) => {
+        const probe = file === "ps" ? "ps" : args.find((arg) => arg.startsWith("list-"));
+        if (malformed && probe === command) return { stdout: output, stderr: "" };
+        if (probe === "list-windows") return { stdout: "api-1 1700000000", stderr: "" };
+        if (probe === "list-panes") return { stdout: "api-1 1 1 0 100 /dev/pts/1", stderr: "" };
+        return {
+          stdout: "PID PPID PGID TPGID TT RSS COMMAND\n100 1 100 100 pts/1 10 node",
+          stderr: "",
+        };
+      });
+      const { getTmuxSessionPresence, getTmuxPanePresence, probeTmuxProcessMatch } =
+        await import("../../src/runtime-tmux.js");
+      if (command === "list-windows") {
+        expect((await getTmuxSessionPresence("api-1")).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await getTmuxSessionPresence("api-1", { fresh: true })).toEqual({
+          present: true,
+          unresponsive: false,
+        });
+      } else if (command === "list-panes") {
+        expect((await getTmuxPanePresence("api-1")).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await getTmuxPanePresence("api-1", { fresh: true })).toEqual({
+          dead: false,
+          unresponsive: false,
+        });
+      } else {
+        expect((await probeTmuxProcessMatch("api-1", ["node"])).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).toEqual({
+          alive: true,
+          matchedByName: true,
+        });
+      }
+    },
+  );
+
+  it.each([
+    new Error("ps access denied"),
+    Object.assign(new Error("ps timed out"), { killed: true }),
+    Object.assign(new Error("stdout maxBuffer exceeded"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    }),
+  ])("keeps failed process-table reads unknown: %s", async (error) => {
+    execFileAsyncMock.mockImplementation(async (file) => {
+      if (file === "ps") throw error;
+      return { stdout: "api-1 1 1 0 100 /dev/pts/1", stderr: "" };
+    });
+    const { probeTmuxProcessMatch, isProcessRunningInTmux } =
+      await import("../../src/runtime-tmux.js");
+    expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
+      alive: false,
+      matchedByName: false,
+      diagnostic: `ps failed: ${error.message}`,
+    });
+    await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow(error.message);
+  });
+
+  it("keeps successful empty fleet and process snapshots known", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { getTmuxSessionPresence, getTmuxPanePresence, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+    expect(await getTmuxSessionPresence("api-1")).toEqual({ present: false, unresponsive: false });
+    expect(await getTmuxPanePresence("api-1")).toEqual({ dead: true, unresponsive: false });
+    expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
+      alive: false,
+      matchedByName: false,
+    });
+  });
+
   it("bounds a fleet-wide dashboard tick to a small constant fork count, not O(N)", async () => {
     installFleetTmuxMock();
 
@@ -471,7 +549,7 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(tmuxSessionExists("dying-api-1")).resolves.toBe(false);
   });
 
-  it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
+  it("keeps failed fleet probes unknown rather than authorizing absence", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-windows")) {
         const error = new Error("no server running on /tmp/tmux-0/default");
@@ -491,8 +569,10 @@ describe("runtime-tmux shared probe cache", () => {
       await import("../../src/runtime-tmux.js");
 
     await expect(listTmuxSessionNames()).resolves.toEqual(new Set());
-    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
-    await expect(isProcessRunningInTmux("api-1", ["node"])).resolves.toBe(false);
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("tmux list-windows failed");
+    await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow(
+      "tmux list-panes failed",
+    );
   });
 
   // Issue #807 / DELTA 1: a single combined reader (present+unresponsive off
@@ -517,10 +597,12 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
       present: false,
       unresponsive: false,
+      diagnostic: expect.stringContaining("list-windows failed"),
     });
     await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
       dead: true,
       unresponsive: false,
+      diagnostic: expect.stringContaining("list-panes failed"),
     });
   });
 
@@ -543,15 +625,15 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
       present: false,
       unresponsive: true,
+      diagnostic: expect.stringContaining("list-windows failed"),
     });
     await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
       dead: true,
       unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed"),
     });
-    // tmuxSessionExists/tmuxPaneDead (every OTHER caller in the daemon) still
-    // read the plain boolean off the same underlying snapshot.
-    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
-    await expect(tmuxPaneDead("api-1")).resolves.toBe(true);
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("list-windows failed");
+    await expect(tmuxPaneDead("api-1")).rejects.toThrow("list-panes failed");
   });
 
   // AC11 (rewritten, DELTA 1): a getTmuxSessionPresence/getTmuxPanePresence
@@ -582,15 +664,17 @@ describe("runtime-tmux shared probe cache", () => {
 
     // Mirrors readRuntimeSnapshot's real call order: the plain boolean read
     // first, the combined presence read second, same tick, same TTL window.
-    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("list-windows failed");
     await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
       present: false,
       unresponsive: true,
+      diagnostic: expect.stringContaining("list-windows failed"),
     });
-    await expect(tmuxPaneDead("api-1")).resolves.toBe(true);
+    await expect(tmuxPaneDead("api-1")).rejects.toThrow("list-panes failed");
     await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
       dead: true,
       unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed"),
     });
 
     expect(listWindowsCalls).toBe(1);
