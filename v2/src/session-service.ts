@@ -18272,7 +18272,7 @@ export class SessionService {
     try {
       const exists = await readExists();
       const paneDead = exists && (await tmuxPaneDead(tmuxSession));
-      if (session) {
+      if (session && exists && !paneDead) {
         const latest = readSession(this.config.dataDir, session.id) ?? session;
         if (latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)) {
           const { error: _error, ...recovered } = latest;

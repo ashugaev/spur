@@ -42,6 +42,7 @@ import type * as reapModule from "../../src/sidecars/reap.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import type { ProcSnapshot } from "../../src/sidecars/reap.js";
 import {
+  hasRetainedSessionError,
   isRespawnableStatus,
   type AgentName,
   type AppConfig,
@@ -46143,6 +46144,34 @@ describe("SessionService", () => {
         });
         expect(classified.state).toBe("error");
         expect(sessions.get(record.id)?.error).toContain(diagnostic);
+        for (const status of ["running", "stopped"] as const) {
+          for (const observation of ["absent", "dead"] as const) {
+            const current = sessions.get(record.id) ?? record;
+            sessions.set(record.id, { ...current, status });
+            sidecarTmuxAliveMock.mockResolvedValue(observation !== "absent");
+            tmuxSessionExistsMock.mockImplementation(async (name: string) =>
+              name === "service-web" ? observation !== "absent" : true,
+            );
+            tmuxPaneDeadMock.mockImplementation(
+              async (name: string) =>
+                (name.includes("dev") || name === "service-web") && observation === "dead",
+            );
+            const view = await service.get(record.id);
+            expect(view.state).toBe("error");
+            expect(view.error).toContain(diagnostic);
+            const persisted = sessions.get(record.id) ?? record;
+            expect(hasRetainedSessionError(persisted)).toBe(true);
+            expect(persisted).toMatchObject({
+              status,
+              sidecarPorts: record.sidecarPorts,
+              sidecarProcs: record.sidecarProcs,
+              worktreePath: record.worktreePath,
+            });
+          }
+        }
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(deleteServiceInstancesForSessionMock).not.toHaveBeenCalled();
         sidecarTmuxAliveMock.mockResolvedValue(true);
         tmuxPaneDeadMock.mockResolvedValue(false);
         tmuxSessionExistsMock.mockResolvedValue(true);
