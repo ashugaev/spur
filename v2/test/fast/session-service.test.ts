@@ -45,6 +45,7 @@ import {
   isRespawnableStatus,
   type AgentName,
   type AppConfig,
+  type DashboardSessionView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
   type ServiceInstanceRecord,
@@ -46041,6 +46042,115 @@ describe("SessionService", () => {
   });
 
   describe("retains sessions on status uncertainty", () => {
+    it.each(["sidecar sessions", "sidecar panes", "registered service"])(
+      "keeps get/list/dashboard and attention readable when %s reporting throws unknown",
+      async (probe) => {
+        const service = await createDisposedSessionService();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        const record = runningSession({
+          id: "api-1",
+          sidecarNames: ["dev"],
+          sidecarPorts: { dev: { http: 12345 } },
+          sidecarProcs: { dev: { pid: 4321, pgid: 4321, starttime: 123 } },
+        });
+        sessions.set(record.id, record);
+        sessions.set("api-2", runningSession({ id: "api-2" }));
+        const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+        const diagnostic = `${probe} snapshot unavailable`;
+        const unknown = new TmuxProbeUnknownError(diagnostic);
+        if (probe === "sidecar sessions") sidecarTmuxAliveMock.mockRejectedValue(unknown);
+        if (probe === "sidecar panes") {
+          sidecarTmuxAliveMock.mockResolvedValue(true);
+          tmuxPaneDeadMock.mockImplementation(async (name: string) => {
+            if (name.includes("dev")) throw unknown;
+            return false;
+          });
+        }
+        if (probe === "registered service") {
+          serviceRecords.set(serviceKey(record.id, "web"), {
+            sessionId: record.id,
+            project: record.project,
+            serviceId: "web",
+            command: "web",
+            cwd: record.worktreePath,
+            tmuxSession: "service-web",
+            status: "running",
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+            port: 12346,
+          });
+          tmuxSessionExistsMock.mockImplementation(async (name: string) => {
+            if (name === "service-web") throw unknown;
+            return true;
+          });
+          await expect(service.getService(record.id, "web")).resolves.toMatchObject({
+            state: "error",
+            error: diagnostic,
+            status: "running",
+            command: "web",
+            port: 12346,
+          });
+        }
+
+        const detail = await service.get(record.id);
+        expect(detail).toMatchObject({ state: "error", status: "running" });
+        expect(detail.error).toContain(diagnostic);
+        expect(detail.sidecars[0]).toMatchObject({ name: "dev" });
+        expect(detail.sidecars[0]?.deadPane).toBeUndefined();
+        const views = await service.list();
+        expect(views).toHaveLength(2);
+        expect(views.find((view) => view.id === record.id)).toMatchObject({ state: "error" });
+        expect(views.find((view) => view.id === "api-2")?.state).not.toBe("error");
+        const dashboard = (await sessionServiceInternals(service).enrichDashboard(
+          record,
+        )) as DashboardSessionView;
+        expect(dashboard).toMatchObject({ state: "error", status: "running" });
+        expect(dashboard.error).toContain(diagnostic);
+        if (probe === "registered service") expect(dashboard.hasServiceIssues).toBe(true);
+        const notify = vi
+          .spyOn(
+            service as unknown as {
+              notifyAttention(view: SessionView, state: "error"): Promise<void>;
+            },
+            "notifyAttention",
+          )
+          .mockResolvedValue();
+        logSpurEventMock.mockClear();
+        await sessionServiceInternals(service).pollAttentionStates(false);
+        expect(notify).toHaveBeenCalledWith(
+          expect.objectContaining({ id: record.id, state: "error" }),
+          "error",
+        );
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) => entry.event === "session.attention_monitor.session_failed",
+          ),
+        ).toBe(false);
+        expect(sessions.get(record.id)).toMatchObject({
+          worktreePath: record.worktreePath,
+          launchCommand: record.launchCommand,
+          sidecarPorts: record.sidecarPorts,
+          sidecarProcs: record.sidecarProcs,
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(deleteServiceInstancesForSessionMock).not.toHaveBeenCalled();
+        const retained = sessions.get(record.id) ?? record;
+        const classified = await sessionServiceInternals(service).classifySessionRecord(retained, {
+          scanPane: false,
+        });
+        expect(classified.state).toBe("error");
+        expect(sessions.get(record.id)?.error).toContain(diagnostic);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        tmuxPaneDeadMock.mockResolvedValue(false);
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+      },
+    );
+
     it.each(["sessions", "panes", "process"])(
       "persists %s probe failures across service reconstruction and heals only its own diagnostic",
       async (probe) => {

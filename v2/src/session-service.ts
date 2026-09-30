@@ -519,6 +519,7 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
+const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
@@ -16556,8 +16557,14 @@ export class SessionService {
   }
 
   private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
-    const runtimeAlive = await tmuxSessionExists(service.tmuxSession);
-    const paneDead = runtimeAlive ? await tmuxPaneDead(service.tmuxSession) : true;
+    const {
+      exists: runtimeAlive,
+      paneDead,
+      diagnostic,
+    } = await this.readReportingPaneState(
+      service.tmuxSession,
+      readSession(this.config.dataDir, service.sessionId) ?? undefined,
+    );
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(service.tmuxSession) : null;
     const updatedAt = new Date(service.updatedAt);
     const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
@@ -16569,7 +16576,7 @@ export class SessionService {
     );
 
     let state: ServiceInstanceView["state"];
-    if (service.status === "errored") {
+    if (diagnostic || service.status === "errored") {
       state = "error";
     } else if (problemRuleIds.length > 0) {
       state = "problem";
@@ -16581,6 +16588,7 @@ export class SessionService {
 
     return {
       ...service,
+      ...(diagnostic && !service.error ? { error: diagnostic } : {}),
       runtimeAlive,
       state,
       lastActivityAt,
@@ -17246,7 +17254,11 @@ export class SessionService {
       if (service.status !== "running") {
         return true;
       }
-      if (!(await tmuxSessionExists(service.tmuxSession))) {
+      const runtime = await this.readReportingPaneState(
+        service.tmuxSession,
+        readSession(this.config.dataDir, session.id) ?? undefined,
+      );
+      if (runtime.diagnostic || !runtime.exists) {
         return true;
       }
       if (
@@ -17555,6 +17567,7 @@ export class SessionService {
     const latest = readSession(this.config.dataDir, session.id) ?? session;
     if (isTerminalSessionStatus(latest.status)) return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
+    if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
     if (latest.error === message) return latest;
@@ -17659,10 +17672,14 @@ export class SessionService {
       runtime.runtimeAlive &&
       runtime.paneUsable &&
       runtime.processAlive &&
-      session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
+      session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
+      !session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
     ) {
       const latest = readSession(this.config.dataDir, session.id) ?? session;
-      if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) {
+      if (
+        latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
+        !latest.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+      ) {
         const { error: _ignoredError, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
@@ -18172,15 +18189,6 @@ export class SessionService {
     } = session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const state = this.stabilizeState(session.id, classified.state);
-    await this.updateStateHistory(
-      session,
-      state,
-      classified.source,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-    );
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
@@ -18196,14 +18204,30 @@ export class SessionService {
       await Promise.all(
         sidecarNames.map(async (name) => {
           const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
-          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
+          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
           return exists && !paneDead ? name : null;
         }),
       )
     ).filter((name): name is string => name !== null);
 
+    const hasServiceIssues = await this.hasServiceIssues(session);
+    session = readSession(this.config.dataDir, session.id) ?? session;
+    const state = this.stabilizeState(
+      session.id,
+      hasRetainedSessionError(session) ? "error" : classified.state,
+    );
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+      classified.serverError,
+      classified.serverErrorEvidence,
+    );
+
     return {
       ...dashboardSession,
+      ...(session.error ? { error: session.error } : {}),
       // Always resolved for consumers, whatever shape the stored record is in.
       // `deskId` rides along as a compat alias so a browser tab still running
       // the previous bundle keeps grouping desks; drop it a release from now.
@@ -18217,7 +18241,7 @@ export class SessionService {
       state,
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+      ...(hasServiceIssues ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
     };
@@ -18233,10 +18257,36 @@ export class SessionService {
   private async sidecarPaneState(
     ownerId: string,
     sidecarName: string,
-  ): Promise<{ exists: boolean; paneDead: boolean }> {
-    const exists = await sidecarTmuxAlive(ownerId, sidecarName);
-    const paneDead = exists && (await tmuxPaneDead(sidecarTmuxSession(ownerId, sidecarName)));
-    return { exists, paneDead };
+    session: SessionRecord,
+  ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    return this.readReportingPaneState(sidecarTmuxSession(ownerId, sidecarName), session, () =>
+      sidecarTmuxAlive(ownerId, sidecarName),
+    );
+  }
+
+  private async readReportingPaneState(
+    tmuxSession: string,
+    session?: SessionRecord,
+    readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
+  ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    try {
+      const exists = await readExists();
+      const paneDead = exists && (await tmuxPaneDead(tmuxSession));
+      if (session) {
+        const latest = readSession(this.config.dataDir, session.id) ?? session;
+        if (latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)) {
+          const { error: _error, ...recovered } = latest;
+          writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
+          this.stateCache.delete(session.id);
+        }
+      }
+      return { exists, paneDead };
+    } catch (error) {
+      if (!(error instanceof TmuxProbeUnknownError)) throw error;
+      if (session)
+        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`);
+      return { exists: false, paneDead: false, diagnostic: error.message };
+    }
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
@@ -18313,20 +18363,6 @@ export class SessionService {
     session = classified.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const state = this.stabilizeState(session.id, classified.state);
-    // Still runs on every enrich — it drives the state machine (the
-    // rateLimitedAt write, the serverErrorAt marker), not just a view field.
-    // The list projection drops the `stateHistory` VIEW FIELD only;
-    // `withSessionDetail` re-reads the same in-memory history for the
-    // single-session view.
-    await this.updateStateHistory(
-      session,
-      state,
-      classified.source,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-    );
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -18363,7 +18399,7 @@ export class SessionService {
       // the backend event can never disagree.
       const ageWarn =
         ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60;
-      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
+      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
       sidecars.push({
         name,
         alive: exists && !paneDead,
@@ -18374,6 +18410,18 @@ export class SessionService {
         ...(paneDead ? { deadPane: true } : {}),
       });
     }
+    session = readSession(this.config.dataDir, session.id) ?? session;
+    classified.session = session;
+    if (hasRetainedSessionError(session)) classified.state = "error";
+    const state = this.stabilizeState(session.id, classified.state);
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+      classified.serverError,
+      classified.serverErrorEvidence,
+    );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(
