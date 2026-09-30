@@ -48016,6 +48016,21 @@ describe("SessionService", () => {
       );
     }
 
+    // A second miss already released the hold: only the failure notice left.
+    function seedFailedPrompt(
+      sessions: ReturnType<typeof createSessionStore>,
+      extra: Partial<SessionRecord> = {},
+    ) {
+      sessions.set(
+        "api-1",
+        runningSession({
+          queuedMessages: { messages: ["later"], awaitingPrompt: true },
+          submitFailedMessage: { message: "typed", at: PENDING_LAUNCH_AT },
+          ...extra,
+        }),
+      );
+    }
+
     function mockHoldAckScan(found: boolean) {
       const scan = vi.fn().mockResolvedValue({ found, lastScannedFile: null });
       resumeAgentSubmitAckBindingMock.mockImplementation(
@@ -48117,10 +48132,51 @@ describe("SessionService", () => {
         expect(record?.queuedMessages?.messages ?? []).not.toContain("typed");
         expect(eventsNamed("session.message.requeued")).toHaveLength(0);
         expect(eventsNamed("session.submit.released")).toHaveLength(1);
+        // Never silent: the failure stays on the record for the view.
+        expect(record?.submitFailedMessage).toEqual({ message: "typed", at: expect.any(String) });
+        expect((await service.get("api-1")).submitFailedMessage?.message).toBe("typed");
         expect(tmuxTexts()).not.toContain("typed");
         service.dispose();
       },
     );
+
+    it("retries a failed prompt at the queue head with a fresh budget, once per click", async () => {
+      const sessions = createSessionStore();
+      seedFailedPrompt(sessions, { submitRequeuedMessage: "typed" });
+      mockAgentActivity("claude", Date.parse(PENDING_LAUNCH_AT) - 1_000, "working");
+      const { SessionService, LaunchPromptPendingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+
+      const view = await service.resolveSubmitFailure("api-1", "retry");
+      expect(view.submitFailedMessage).toBeUndefined();
+      const record = sessions.get("api-1");
+      expect(record?.queuedMessages?.messages).toEqual(["typed", "later"]);
+      expect(record).not.toHaveProperty("submitFailedMessage");
+      expect(record).not.toHaveProperty("submitRequeuedMessage");
+      expect(eventsNamed("session.message.requeued")).toEqual([
+        expect.objectContaining({ details: { reason: "submit_failed_retry", messageLength: 5 } }),
+      ]);
+      await expect(service.resolveSubmitFailure("api-1", "retry")).rejects.toBeInstanceOf(
+        LaunchPromptPendingError,
+      );
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["typed", "later"]);
+      service.dispose();
+    });
+
+    it("dismisses a failed prompt without typing or queuing it", async () => {
+      const sessions = createSessionStore();
+      seedFailedPrompt(sessions);
+      const service = await deferredService();
+
+      const view = await service.resolveSubmitFailure("api-1", "dismiss");
+      expect(view.submitFailedMessage).toBeUndefined();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+      expect(eventsNamed("session.submit.failure_dismissed")).toHaveLength(1);
+      expect(tmuxTexts()).toEqual([]);
+      service.dispose();
+    });
 
     it("clears an opencode hold after the Submit prompt escape once the DB shows activity", async () => {
       const sessions = createSessionStore();

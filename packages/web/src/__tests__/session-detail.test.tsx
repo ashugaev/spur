@@ -3265,6 +3265,61 @@ describe("SessionDetail voice input", () => {
     expect(await screen.findByText("Sent, agent hasn't confirmed yet")).toBeInTheDocument();
   });
 
+  it.each(["retry", "dismiss"] as const)(
+    "shows a prompt the agent never confirmed and %s posts to the daemon",
+    async (action) => {
+      const posts: string[] = [];
+      let failed = true;
+      vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture(
+                failed
+                  ? {
+                      submitFailedMessage: {
+                        message: "/pr-comments-fix 986",
+                        at: "2026-04-02T10:00:05.000Z",
+                      },
+                    }
+                  : {},
+              ),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        if (url.startsWith("/api/sessions/api-a1/submit-failed/") && init?.method === "POST") {
+          posts.push(url);
+          failed = false;
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByText("Agent did not confirm: “/pr-comments-fix 986”"),
+      ).toBeInTheDocument();
+      fireEvent.click(
+        screen.getByRole("button", { name: action === "retry" ? "Retry" : "Dismiss" }),
+      );
+      await waitFor(() => {
+        expect(posts).toEqual([`/api/sessions/api-a1/submit-failed/${action}`]);
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(/Agent did not confirm/)).not.toBeInTheDocument();
+      });
+    },
+  );
+
   it("says a cursor Send now the daemon queued ahead sends when the turn ends", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

@@ -129,6 +129,20 @@ describe("send CLI", () => {
     expect(outputText()).not.toContain("Delivered");
   });
 
+  it("reports a prompt the agent never confirmed after its retry", async () => {
+    postJsonMock.mockResolvedValue(
+      baseSession({
+        queuedMessages: { messages: ["hello"], awaitingPrompt: true },
+        submitFailedMessage: { message: "/pr-comments-fix 986", at: "2026-03-18T10:05:00.000Z" },
+      }),
+    );
+
+    await parseSend(["send", "api-1", "hello"]);
+
+    expect(outputText()).toContain("Queued message for api-1 (1 pending).");
+    expect(outputText()).toContain('Agent did not confirm: "/pr-comments-fix 986".');
+  });
+
   it("prints the delivered line, not a pending count, when only pipelineMessages is set (A3)", async () => {
     postJsonMock.mockResolvedValue(
       baseSession({

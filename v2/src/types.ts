@@ -1053,6 +1053,11 @@ export interface SessionRecord {
    * next unconfirmed submit releases the hold instead of re-queuing it again.
    */
   submitRequeuedMessage?: string;
+  /**
+   * A send the agent never acked, after its one re-queue: the hold is
+   * released, the text shown with Retry and Dismiss until the user acts.
+   */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;

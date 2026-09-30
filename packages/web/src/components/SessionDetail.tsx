@@ -15,6 +15,7 @@ import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
 import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
+import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
@@ -3290,6 +3291,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     {launchPending ? (
                       <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
+                    ) : null}
+                    {session.submitFailedMessage ? (
+                      <SubmitFailedBanner
+                        sessionId={sessionId}
+                        message={session.submitFailedMessage.message}
+                        onResolved={loadSession}
+                      />
                     ) : null}
                     <FileAttachmentTextarea
                       attachments={attachments}

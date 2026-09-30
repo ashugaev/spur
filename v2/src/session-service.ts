@@ -9960,7 +9960,12 @@ export class SessionService {
       ...base
     } = latest;
     if (requeued === message) {
-      writeSession(this.config.dataDir, base);
+      // Never silent: the view shows the text with Retry and Dismiss.
+      const failed: SessionRecord = {
+        ...base,
+        submitFailedMessage: { message, at: nowIso() },
+      };
+      writeSession(this.config.dataDir, failed);
       this.logEvent("session.submit.released", {
         level: "warn",
         sessionId: latest.id,
@@ -9968,7 +9973,7 @@ export class SessionService {
         message: `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
         details: { messageLength: message.length },
       });
-      return base;
+      return failed;
     }
     const record = withQueuedMessages(
       { ...base, submitRequeuedMessage: message, updatedAt: nowIso() },
@@ -12310,6 +12315,52 @@ export class SessionService {
     return record;
   }
 
+  // A submit that failed twice (settleSubmitHold): Retry puts the text back at
+  // the queue head with a fresh re-queue budget; Dismiss drops the notice.
+  async resolveSubmitFailure(sessionId: string, action: "retry" | "dismiss"): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      const failed = session.submitFailedMessage;
+      if (!failed) {
+        throw new LaunchPromptPendingError(`No failed prompt for ${sessionId}`);
+      }
+      const { submitFailedMessage: _resolved, submitRequeuedMessage: requeued, ...base } = session;
+      const kept: SessionRecord =
+        requeued !== undefined && requeued !== failed.message
+          ? { ...base, submitRequeuedMessage: requeued }
+          : base;
+      if (action === "dismiss") {
+        writeSession(this.config.dataDir, kept);
+        this.logEvent("session.submit.failure_dismissed", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Dismissed the failed prompt notice for ${sessionId}`,
+        });
+        return this.enrich(kept);
+      }
+      assertSendableStatus(session);
+      const record = withQueuedMessages(
+        { ...kept, updatedAt: nowIso() },
+        [failed.message, ...removeFirstOccurrence(queuedMessages(session), failed.message)],
+        false,
+      );
+      writeSession(this.config.dataDir, record);
+      this.logEvent("session.message.requeued", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Re-queued a failed prompt for ${sessionId} at the user's retry`,
+        details: { reason: "submit_failed_retry", messageLength: failed.message.length },
+      });
+      this.scheduleDeliveryRunner(sessionId);
+      return this.enrich(record);
+    });
+  }
+
   // The one escape from a pending launch: press the submit key over the
   // prompt already in the composer, never type over it. The marker clears
   // when the agent's transcript shows it took the prompt.
@@ -14593,6 +14644,7 @@ export class SessionService {
     delete record.submitUnconfirmedAt;
     delete record.queuedMessageTyped;
     delete record.submitRequeuedMessage;
+    delete record.submitFailedMessage;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);

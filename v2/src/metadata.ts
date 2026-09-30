@@ -903,6 +903,16 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(typeof normalizedSession.submitRequeuedMessage === "string"
       ? { submitRequeuedMessage: normalizedSession.submitRequeuedMessage }
       : {}),
+    ...(normalizedSession.submitFailedMessage &&
+    typeof normalizedSession.submitFailedMessage.message === "string" &&
+    typeof normalizedSession.submitFailedMessage.at === "string"
+      ? {
+          submitFailedMessage: {
+            message: normalizedSession.submitFailedMessage.message,
+            at: normalizedSession.submitFailedMessage.at,
+          },
+        }
+      : {}),
     ...(normalizedSession.queuedMessageTyped &&
     typeof normalizedSession.queuedMessageTyped.message === "string" &&
     typeof normalizedSession.queuedMessageTyped.typedAt === "string"

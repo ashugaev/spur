@@ -340,6 +340,8 @@ export interface SpurSessionView {
   };
   /** Set while the agent has not confirmed the last prompt; sends are held. */
   submitUnconfirmedAt?: string;
+  /** A send the agent never confirmed after its retry; shown until retried or dismissed. */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -714,6 +716,7 @@ export interface DashboardSession {
     pipelineMessages?: string[];
   };
   submitUnconfirmedAt?: string;
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -796,6 +799,7 @@ export function toDashboardSession(
     ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
     ...(session.submitUnconfirmedAt ? { submitUnconfirmedAt: session.submitUnconfirmedAt } : {}),
+    ...(session.submitFailedMessage ? { submitFailedMessage: session.submitFailedMessage } : {}),
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,

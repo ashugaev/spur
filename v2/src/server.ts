@@ -1730,6 +1730,19 @@ export async function startServer(
         return;
       }
 
+      const submitFailedMatch = path.match(/^\/sessions\/([^/]+)\/submit-failed\/(retry|dismiss)$/);
+      if (method === "POST" && submitFailedMatch?.[1] && submitFailedMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.resolveSubmitFailure(
+            submitFailedMatch[1],
+            submitFailedMatch[2] === "retry" ? "retry" : "dismiss",
+          ),
+        );
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);
