@@ -7087,7 +7087,12 @@ describe("SessionService", () => {
             agent,
             expect.objectContaining({ worktreePath: "/tmp/spur-worktrees/api/api-1" }),
           );
-          expect(waitForAckMock).toHaveBeenCalledWith(binding, "follow up", expect.any(Number));
+          // Waits on the binding's scan, wrapped to track the last miss.
+          expect(waitForAckMock).toHaveBeenCalledWith(
+            expect.objectContaining({ scan: expect.any(Function) }),
+            "follow up",
+            expect.any(Number),
+          );
         } else {
           expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
           expect(waitForAckMock).not.toHaveBeenCalled();
@@ -10259,6 +10264,57 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued"]);
 
       // The Send-now turn ends: its completion is past the paste.
+      state = { state: "waiting", reason: "assistant completed", activityMs: t0 + 3_000 };
+      let now = t0 + 3_000;
+      await waitForRealTime(() => {
+        now += 30_000;
+        vi.setSystemTime(new Date(now));
+        expect(typedMessages()).toEqual(["now", "queued"]);
+      });
+    });
+
+    it("never types a queued message off the interrupted turn's record that closes after the Send now's paste", async () => {
+      agentStateStrategyMock.mockImplementation((agent: string) =>
+        agent === "opencode" ? "opencode" : "claude_jsonl",
+      );
+      agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "opencode");
+      const t0 = Date.now();
+      let state = { state: "working", reason: "assistant incomplete", activityMs: t0 - 5_000 };
+      readOpenCodeStateMock.mockImplementation(async () => state);
+      // opencode takes the pasted text only once its abort lands, after the
+      // paste: the aborted row is newer than the paste.
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        if (message !== "now") return;
+        state = { state: "waiting", reason: "assistant aborted", activityMs: t0 + 300 };
+        vi.setSystemTime(new Date(t0 + 500));
+      });
+      let scans = 0;
+      createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+        agent === "opencode"
+          ? {
+              baseline: { agent: "opencode", sessionId: "ses_1", after: null },
+              scan: vi.fn(async () => {
+                scans += 1;
+                return { found: scans > 1, lastScannedFile: null };
+              }),
+            }
+          : null,
+      );
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ agent: "opencode", agentSessionId: "ses_1", launchCommand: "opencode" }),
+      );
+      const service = await liveService();
+
+      await service.send("api-1", { message: "now", queue: false, interrupt: true });
+      expect(scans).toBe(2);
+      vi.setSystemTime(new Date(t0 + 2_600));
+      await service.send("api-1", { message: "queued", queue: true });
+      const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+      await realTimers.setTimeout(1_500);
+      expect(typedMessages()).toEqual(["now"]);
+
       state = { state: "waiting", reason: "assistant completed", activityMs: t0 + 3_000 };
       let now = t0 + 3_000;
       await waitForRealTime(() => {

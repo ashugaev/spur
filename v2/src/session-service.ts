@@ -13164,9 +13164,24 @@ export class SessionService {
     // the next check, so "alive" is never cached, only "dead" (see the probe's
     // own fresh:true comment).
     let knownDead = false;
+    // The last scan that missed the text read the transcript before the agent
+    // recorded it. An interrupted turn can close after the paste (the agent
+    // takes the input once its abort lands), so on an ack the queue fence
+    // moves up to that read: the closing turn's own records predate it.
+    let lastMissAt = pastedAt;
+    const trackedBinding: SubmitAckBinding = {
+      baseline: binding.baseline,
+      scan: async (text) => {
+        const scannedAt = Date.now();
+        const result = await binding.scan(text);
+        if (!result.found) lastMissAt = scannedAt;
+        return result;
+      },
+    };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
+      lastResult = await this.waitForSubmitAck(trackedBinding, message, ackWindowMs);
       if (lastResult.found) {
+        this.paneWriteFenceAt.set(session.id, lastMissAt);
         return "submitted";
       }
       if (attempt < maxResends) {
