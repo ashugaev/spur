@@ -132,15 +132,17 @@ export async function editTelegramTopic(
   chatId: number,
   messageThreadId: number,
   name: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await callTelegram(config, "editForumTopic", {
       chat_id: chatId,
       message_thread_id: messageThreadId,
       name,
     });
-  } catch {
-    // Best-effort; topic rename failures should never block a Telegram notice.
+    return true;
+  } catch (error) {
+    // The topic already carries this name: as good as applied.
+    return error instanceof TelegramApiError && error.description.includes("TOPIC_NOT_MODIFIED");
   }
 }
 

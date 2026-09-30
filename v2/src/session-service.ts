@@ -6781,8 +6781,10 @@ export class SessionService {
       if (target.chatId >= 0 || target.messageThreadId === undefined) return;
       const name = telegramTopicName(view);
       if (target.topicName === name) return;
-      await editTelegramTopic(source, target.chatId, target.messageThreadId, name);
-      this.patchTelegramReplyTarget(sessionId, null, { topicName: name });
+      // Recorded only when Telegram accepted it, so a failed rename retries.
+      if (await editTelegramTopic(source, target.chatId, target.messageThreadId, name)) {
+        this.patchTelegramReplyTarget(sessionId, null, { topicName: name });
+      }
     } catch (error) {
       this.logTelegramNoticeFailure(sessionId, "topic rename", error);
     }
@@ -6809,7 +6811,8 @@ export class SessionService {
     fallback: TelegramReplyTarget | null,
     changes: TelegramReplyTargetChanges,
   ): TelegramReplyTarget | null {
-    const current = readTelegramReplyTarget(this.config.dataDir, sessionId) ?? fallback;
+    const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const current = stored ?? fallback;
     if (!current) return null;
     const { updatedAt: _updatedAt, statusMessageId, ...rest } = current;
     const keptStatus =
@@ -6829,8 +6832,23 @@ export class SessionService {
         : {}),
       ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
     };
+    // A target rebuilt from the fallback never lands on a chat and thread that
+    // another session's binding already owns.
+    if (stored === null && this.telegramThreadBoundToOther(merged, sessionId)) {
+      return { ...merged, updatedAt: nowIso() };
+    }
     writeTelegramReplyTarget(this.config.dataDir, merged);
     return { ...merged, updatedAt: nowIso() };
+  }
+
+  private telegramThreadBoundToOther(
+    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
+    sessionId: string,
+  ): boolean {
+    const bound = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId).get(
+      telegramBindingKey(target.chatId, target.messageThreadId),
+    );
+    return bound !== undefined && bound.sessionId !== sessionId;
   }
 
   /**
@@ -11950,9 +11968,8 @@ export class SessionService {
     }
     const buttons = parseSourceReplyButtons(request.buttons);
 
-    const target =
-      readTelegramReplyTarget(this.config.dataDir, sessionId) ??
-      this.configuredTelegramReplyTarget(session);
+    const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }
@@ -12000,13 +12017,17 @@ export class SessionService {
         choices: [],
       });
     }
-    const replyTarget = this.recordTelegramSend(sessionId, target, result, {
-      lastReplyAt: nowIso(),
-      topicName: telegramTopicName(view),
-      createIfMissing: true,
-    });
+    // A target that existed when the send began is never re-created: it was
+    // removed mid-send (a spawn took the thread over), and writing it back
+    // would keep this session posting into a thread it no longer owns.
+    const sent = { lastReplyAt: nowIso(), topicName: telegramTopicName(view) };
+    const settledTarget =
+      storedTarget === null
+        ? this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: true })
+        : this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: false });
+    const replyTarget = settledTarget ?? target;
     // Covers a freshly created forum topic too: its key cannot already be taken.
-    this.bindTelegramChatIfFree(replyTarget, sessionId);
+    if (settledTarget) this.bindTelegramChatIfFree(settledTarget, sessionId);
     await this.syncTelegramTopicName(sessionId, view);
     this.logEvent("source.reply.sent", {
       level: "info",
@@ -13243,7 +13264,17 @@ export class SessionService {
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
     const callerView = await this.enrich(callerRecord);
-    await this.syncTelegramTopicName(sessionId, callerView);
+    // The title is workspace-shared: every member's topic carries it.
+    for (const member of this.listDeskSessions(session)) {
+      if (member.id === sessionId) {
+        await this.syncTelegramTopicName(sessionId, callerView);
+        continue;
+      }
+      const topic = this.resolveTelegramNotice(member.id)?.target;
+      if (topic && topic.chatId < 0 && topic.messageThreadId !== undefined) {
+        await this.syncTelegramTopicName(member.id, await this.enrich(member));
+      }
+    }
     return { ...callerView, slotUpdate: applied.result };
   }
 

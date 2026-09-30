@@ -271,11 +271,13 @@ describe("editTelegramTopic", () => {
     vi.unstubAllGlobals();
   });
 
-  it("posts editForumTopic with name and swallows failures", async () => {
+  it("posts editForumTopic with name and reports success", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
 
-    await editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex");
+    await expect(
+      editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
+    ).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.telegram.org/bottoken-123/editForumTopic",
@@ -289,7 +291,7 @@ describe("editTelegramTopic", () => {
     );
   });
 
-  it("swallows a non-ok editForumTopic response without throwing", async () => {
+  it("reports false for a non-ok editForumTopic response without throwing", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ ok: false, description: "topic not found" }), {
@@ -299,7 +301,20 @@ describe("editTelegramTopic", () => {
 
     await expect(
       editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
+  });
+
+  it("counts an already-applied name as success", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "Bad Request: TOPIC_NOT_MODIFIED" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(
+      editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
+    ).resolves.toBe(true);
   });
 });
 

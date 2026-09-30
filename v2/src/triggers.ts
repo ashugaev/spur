@@ -1332,7 +1332,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
-    if (!merged && sendBatch.interactive) {
+    // Revision 1 is a new batch; a merge bumps it, and adds no second timer.
+    if (batch.revision === 1 && sendBatch.interactive) {
       scheduleInteractiveFlush(queueKey, batch, session);
     }
 

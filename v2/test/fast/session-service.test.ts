@@ -1528,7 +1528,7 @@ describe("SessionService", () => {
     recordTelegramMessagesMock.mockReset();
     deleteTelegramReplyTargetMock.mockReset();
     hasPendingTelegramSendMock.mockReset().mockReturnValue(false);
-    editTelegramTopicMock.mockReset().mockResolvedValue(undefined);
+    editTelegramTopicMock.mockReset().mockResolvedValue(true);
     closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
     writeTelegramBindingsMock.mockReset();
     writeTelegramReplyTargetMock.mockReset();
@@ -6498,13 +6498,14 @@ describe("SessionService", () => {
       ...extra,
     });
 
-    async function serviceWithTelegramSession(title?: string) {
+    async function serviceWithTelegramSession(title?: string, configuredChatId?: number) {
       const config = baseConfig();
       const telegramSource = {
         type: "telegram" as const,
         runOnStart: false,
         token: "token-123",
         allowedUsers: [123],
+        ...(configuredChatId !== undefined ? { chatId: configuredChatId } : {}),
       };
       config.projects.api.sources = { agentChat: telegramSource };
       loadConfigMock.mockReturnValue(config);
@@ -6526,7 +6527,7 @@ describe("SessionService", () => {
       });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      return { service, telegramSource };
+      return { service, telegramSource, sessions };
     }
 
     it("prefixes a source reply with the session label and records sent message ids", async () => {
@@ -6599,6 +6600,94 @@ describe("SessionService", () => {
         expect.stringContaining("api-1 claude — Fix login"),
       );
       expect(stored["topicName"]).toEqual(expect.stringContaining("Fix login"));
+    });
+
+    it("does not re-create a target that was removed while the send was in flight", async () => {
+      let stored: Record<string, unknown> | null = replyTargetFor();
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      // A spawn takes the thread over and detaches this session mid-send.
+      sendTelegramReplyMock.mockImplementation(async () => {
+        stored = null;
+        return { messageIds: [91] };
+      });
+      const { service } = await serviceWithTelegramSession();
+
+      const result = await service.replyToSource("api-1", { message: "late answer" });
+
+      expect(stored).toBeNull();
+      expect(writeTelegramBindingsMock).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ ok: true, chatId: -1001, messageThreadId: 22 });
+    });
+
+    it("opens a new topic for a session with no target and records it", async () => {
+      let stored: Record<string, unknown> | null = null;
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 55, messageIds: [91] });
+      const { service } = await serviceWithTelegramSession(undefined, -1009);
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      expect(stored).toMatchObject({ chatId: -1009, messageThreadId: 55 });
+    });
+
+    it("never re-creates a target on a thread another session is bound to", async () => {
+      readTelegramReplyTargetMock.mockReturnValue(null);
+      readTelegramBindingsMock.mockReturnValue(
+        new Map([["-1009:55", { chatId: -1009, messageThreadId: 55, sessionId: "api-9" }]]),
+      );
+      sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 55, messageIds: [91] });
+      const { service } = await serviceWithTelegramSession(undefined, -1009);
+
+      await service.replyToSource("api-1", { message: "hello" });
+
+      expect(writeTelegramReplyTargetMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ messageThreadId: 55 }),
+      );
+    });
+
+    it("retries a failed topic rename on the next send and records only a successful one", async () => {
+      let stored: Record<string, unknown> = replyTargetFor({ topicName: "stale name" });
+      readTelegramReplyTargetMock.mockImplementation(() => stored);
+      writeTelegramReplyTargetMock.mockImplementation((_dir: string, target: object) => {
+        stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
+      });
+      editTelegramTopicMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+      const { service } = await serviceWithTelegramSession("Fix login");
+
+      await service.replyToSource("api-1", { message: "one" });
+      expect(stored["topicName"]).toBe("stale name");
+      await service.replyToSource("api-1", { message: "two" });
+
+      expect(editTelegramTopicMock).toHaveBeenCalledTimes(2);
+      expect(stored["topicName"]).toEqual(expect.stringContaining("Fix login"));
+    });
+
+    it("renames the topic of every workspace member when the shared title changes", async () => {
+      const targets: Record<string, Record<string, unknown>> = {
+        "api-1": replyTargetFor({ topicName: "old 1" }),
+        "api-2": replyTargetFor({ sessionId: "api-2", messageThreadId: 23, topicName: "old 2" }),
+      };
+      readTelegramReplyTargetMock.mockImplementation((_dir: string, id: string) => targets[id]);
+      applyNormalizedSlotsUpdateMock.mockReturnValueOnce({
+        slots: { title: "Shared title", titleSource: "agent", links: [] },
+        result: { titleResult: "updated" },
+      });
+      const { service, sessions } = await serviceWithTelegramSession();
+      const anchor = sessions.get("api-1");
+      if (!anchor) throw new Error("missing anchor");
+      sessions.set("api-2", { ...anchor, id: "api-2", tmuxSession: "api-2", workspaceId: "api-1" });
+
+      await service.updateSlots("api-1", { title: "Shared title" });
+
+      const renamedThreads = editTelegramTopicMock.mock.calls.map((call) => call[2]).sort();
+      expect(renamedThreads).toEqual([22, 23]);
     });
 
     it("renames a forum topic when the session title slot changes", async () => {

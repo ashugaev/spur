@@ -2066,6 +2066,52 @@ describe("telegramSourceModule", () => {
     expect(spawnCtx.reply).toHaveBeenCalledWith("api-3 took over this thread from api-1.");
   });
 
+  it("detaches a displaced agent from the taken thread only, not from other threads or chats", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, { listProjects });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    // The displaced agent's latest reply target is a different thread of the same group.
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+      messageThreadId: 99,
+    });
+    const offer = (chatId: number, token: string) => ({
+      token,
+      offerId: `offer-${token}`,
+      sessionId: "api-1",
+      chatId,
+      text: "Yes",
+      value: "yes",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [offer(-1001, "here")],
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -2002,
+      choices: [offer(-2002, "elsewhere")],
+    });
+
+    await bot.emitText(telegramContext({ text: "/spawn claude do X" }));
+
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.messageThreadId).toBe(99);
+    expect(readTelegramChoices(dataDir, "api", "telegram").map((choice) => choice.token)).toEqual([
+      "elsewhere",
+    ]);
+  });
+
   it("falls back to the chat binding when the replied-to message is unknown", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
