@@ -3818,18 +3818,7 @@ export class SessionService {
             workspaceMembers.map((member) => {
               let pending = retainedMembers.get(member.id);
               if (!pending) {
-                pending = (async () => {
-                  if (hasRetainedSessionError(member)) return true;
-                  if (isTerminalSessionStatus(member.status)) return false;
-                  const classified = await this.classifySessionRecord(member, {
-                    scanPane: false,
-                    reconcileRuntime: false,
-                  });
-                  return hasRetainedSessionError(
-                    readSession(this.config.dataDir, member.id) ?? member,
-                    classified.state,
-                  );
-                })();
+                pending = this.memberRetainsResources(member);
                 retainedMembers.set(member.id, pending);
               }
               return pending;
@@ -10566,25 +10555,26 @@ export class SessionService {
     );
   }
 
+  private async memberRetainsResources(member: SessionRecord): Promise<boolean> {
+    if (hasRetainedSessionError(member)) return true;
+    if (isTerminalSessionStatus(member.status)) return false;
+    const classified = await this.classifySessionRecord(member, {
+      scanPane: false,
+      reconcileRuntime: false,
+    });
+    return hasRetainedSessionError(
+      readSession(this.config.dataDir, member.id) ?? member,
+      classified.state,
+    );
+  }
+
   private async workspaceRetainsResources(
     session: SessionRecord,
     excludeId?: string,
   ): Promise<boolean> {
     for (const member of this.listDeskSessions(session, listSessions(this.config.dataDir))) {
       if (member.id === excludeId) continue;
-      if (hasRetainedSessionError(member)) return true;
-      if (isTerminalSessionStatus(member.status)) continue;
-      const classified = await this.classifySessionRecord(member, {
-        scanPane: false,
-        reconcileRuntime: false,
-      });
-      if (
-        hasRetainedSessionError(
-          readSession(this.config.dataDir, member.id) ?? member,
-          classified.state,
-        )
-      )
-        return true;
+      if (await this.memberRetainsResources(member)) return true;
     }
     return false;
   }
