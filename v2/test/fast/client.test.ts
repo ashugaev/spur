@@ -51,6 +51,7 @@ async function loadClientModule() {
 
 describe("client.ensureServer", () => {
   beforeEach(() => {
+    vi.stubEnv("XDG_CONFIG_HOME", undefined);
     isDefaultInstanceConfigPathMock.mockReset().mockReturnValue(false);
     vi.stubEnv("SPUR_DISABLE_AUTOSTART", undefined);
     vi.stubEnv("SPUR_SESSION", "");
@@ -288,13 +289,20 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it.each(["autostart", "restart"])(
-    "refuses detached %s when a user systemd unit owns the default instance",
-    async (reason) => {
+  it.each([
+    ["autostart", false],
+    ["restart", false],
+    ["autostart", true],
+    ["restart", true],
+  ] as const)(
+    "refuses detached %s when a user unit owns the default instance (XDG=%s)",
+    async (reason, xdg) => {
       isDefaultInstanceConfigPathMock.mockReturnValue(true);
       const home = await mkdtemp(join(tmpdir(), "spur-client-managed-unit-"));
       tempDirs.push(home);
-      const unitDir = join(home, ".config", "systemd", "user");
+      const configHome = join(home, xdg ? "xdg" : ".config");
+      if (xdg) vi.stubEnv("XDG_CONFIG_HOME", configHome);
+      const unitDir = join(configHome, "systemd", "user");
       await mkdir(unitDir, { recursive: true });
       await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
       const configPath = join(home, ".spur", "config.yaml");
