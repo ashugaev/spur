@@ -8,6 +8,7 @@ import {
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
+  hasPendingTelegramSend,
   listSessions,
   readCommentSeenRegistry,
   readPendingSendBatches,
@@ -1609,5 +1610,62 @@ describe("listSessions record cache", () => {
 
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
     expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+  });
+});
+
+describe("hasPendingTelegramSend", () => {
+  const telegramRecord = (
+    queueKey: string,
+    sessionId: string,
+    claimed = false,
+  ): PersistedPendingBatch => ({
+    queueKey,
+    projectId: "api",
+    triggerId: "chat",
+    sourceId: "tg",
+    batch: {
+      kind: "telegram",
+      sessionId,
+      messages: [{ sessionId, chatId: 1, userId: 2, messageId: 3, text: "hi" }],
+    },
+    ...(claimed
+      ? {
+          claim: {
+            controllerId: "c",
+            routeLeaseId: "l",
+            claimId: "id",
+            claimedAt: "2026-01-01T00:00:00.000Z",
+          },
+        }
+      : {}),
+  });
+
+  it("matches only telegram batches for that session", async () => {
+    const dataDir = await newDataDir();
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+    recordPendingSendBatch(dataDir, {
+      queueKey: "api:review:api-1",
+      projectId: "api",
+      triggerId: "review",
+      sourceId: "pr",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr",
+        sessionId: "api-1",
+        prNumber: 1,
+        prTitle: "t",
+        signals: [],
+      },
+    });
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-2", "api-2"));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1", true));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(true);
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
   });
 });

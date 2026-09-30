@@ -1460,6 +1460,23 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
 }
 
+/**
+ * Whether a Telegram message for this session is persisted and not yet
+ * delivered. `unclaimedOnly` skips a batch whose delivery already started.
+ */
+export function hasPendingTelegramSend(
+  dataDir: string,
+  sessionId: string,
+  options: { unclaimedOnly?: true } = {},
+): boolean {
+  for (const record of readPendingSendBatches(dataDir).values()) {
+    if (record.batch.kind !== "telegram" || record.batch.sessionId !== sessionId) continue;
+    if (options.unclaimedOnly && record.claim) continue;
+    return true;
+  }
+  return false;
+}
+
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);

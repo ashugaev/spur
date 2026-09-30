@@ -141,6 +141,7 @@ const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const deleteTelegramSourceStateForSessionMock = vi.fn();
 const deleteTelegramReplyTargetMock = vi.fn();
+const hasPendingTelegramSendMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
 const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
@@ -615,6 +616,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
   deleteTelegramSourceStateForSession: deleteTelegramSourceStateForSessionMock,
   deleteTelegramReplyTarget: deleteTelegramReplyTargetMock,
+  hasPendingTelegramSend: hasPendingTelegramSendMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
   listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
@@ -1525,6 +1527,7 @@ describe("SessionService", () => {
     sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
     recordTelegramMessagesMock.mockReset();
     deleteTelegramReplyTargetMock.mockReset();
+    hasPendingTelegramSendMock.mockReset().mockReturnValue(false);
     editTelegramTopicMock.mockReset().mockResolvedValue(undefined);
     closeTelegramTopicMock.mockReset().mockResolvedValue(undefined);
     writeTelegramBindingsMock.mockReset();
@@ -2353,6 +2356,63 @@ describe("SessionService", () => {
       expect(sessions.get(session.id)?.todoNudge?.attempts).toBe(1);
       await internals.maybeNudgeTodo(session);
       expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the ToDo reminder while a telegram send is pending", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      hasPendingTelegramSendMock.mockReturnValue(true);
+
+      await internals.maybeNudgeTodo(session);
+
+      expect(send).not.toHaveBeenCalled();
+      expect(sessions.get(session.id)?.todoNudge).toBeUndefined();
+    });
+
+    it.each([
+      ["before taking the pane lock", [true, false]],
+      ["after taking the pane lock", [false, true]],
+    ])("skips the ToDo reminder when a telegram send appears %s", async (_label, checks) => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      hasPendingTelegramSendMock
+        .mockReturnValueOnce(checks[0])
+        .mockReturnValueOnce(checks[1])
+        .mockReturnValue(false);
+
+      await internals.maybeNudgeTodo(session);
+
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("resumes the ToDo reminder once the telegram record is dropped", async () => {
+      const sessions = createSessionStore();
+      await useRealTodoLedger();
+      const service = await createDisposedSessionService();
+      const session = runningSession({ agent: "codex" });
+      sessions.set(session.id, session);
+      const internals = sessionServiceInternals(service);
+      const send = vi.spyOn(internals, "writeAgentMessage").mockResolvedValue(SUBMITTED);
+      hasPendingTelegramSendMock.mockReturnValue(true);
+      await internals.maybeNudgeTodo(session);
+      expect(send).not.toHaveBeenCalled();
+
+      hasPendingTelegramSendMock.mockReturnValue(false);
+      vi.setSystemTime(Date.now() + 61_000);
+      await internals.maybeNudgeTodo(session);
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[1]).toContain("Spur ToDo is empty");
     });
 
     it("checks restore warmup after a ToDo nudge acquires the lifecycle lock", async () => {
@@ -19118,6 +19178,104 @@ describe("SessionService", () => {
       TEST_DATA_DIR,
       expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
     );
+    service.dispose();
+  });
+
+  it("skips the waiting nudge while a telegram send for the session is pending", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    backReplyTargetWithStore({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    hasPendingTelegramSendMock.mockReturnValue(true);
+    seedCodexNudgeSession();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await driveWorkingToWaitingEdge();
+
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    expect(writeTelegramReplyTargetMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ lastReplyAt: expect.any(String) }),
+    );
+    service.dispose();
+  });
+
+  it("nudges on the first waiting edge after the pending telegram send clears", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    backReplyTargetWithStore({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    // Pending on the first nudge check only (the ToDo guard calls the mock too).
+    let nudgeChecks = 0;
+    hasPendingTelegramSendMock.mockImplementation(
+      (_dir: string, _id: string, options?: { unclaimedOnly?: true }) =>
+        options?.unclaimedOnly === true && nudgeChecks++ === 0,
+    );
+    seedCodexNudgeSession();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await driveWorkingToWaitingEdge();
+    expect(sendTelegramReplyMock).not.toHaveBeenCalled();
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:06:00.000Z",
+    });
+    await advanceSeconds(5);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:06:30.000Z",
+    });
+    await advanceSeconds(5);
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(sendTelegramReplyMock.mock.calls[0]?.[2]).toBe("🟡 api-1 is waiting.");
+    service.dispose();
+  });
+
+  it("a claimed telegram record does not suppress the waiting nudge", async () => {
+    const { config } = telegramProjectConfig();
+    loadConfigMock.mockReturnValue(config);
+    backReplyTargetWithStore({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "agentChat",
+      chatId: -1001,
+      messageThreadId: 22,
+      lastInboundAt: "2026-03-18T10:04:00.000Z",
+      updatedAt: "2026-03-18T10:04:00.000Z",
+    });
+    hasPendingTelegramSendMock.mockImplementation(
+      (_dir: string, _id: string, options?: { unclaimedOnly?: true }) => !options?.unclaimedOnly,
+    );
+    seedCodexNudgeSession();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await driveWorkingToWaitingEdge();
+
+    expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(hasPendingTelegramSendMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", {
+      unclaimedOnly: true,
+    });
     service.dispose();
   });
 

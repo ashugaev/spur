@@ -212,6 +212,7 @@ import {
   deleteServiceSourceStatesForSession,
   deleteTelegramReplyTarget,
   deleteTelegramSourceStateForSession,
+  hasPendingTelegramSend,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
@@ -6907,6 +6908,9 @@ export class SessionService {
         target.lastReplyAt !== undefined &&
         (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
       if (alreadyReplied) return;
+      // The user's message has not reached the agent yet: "waiting" would be a
+      // lie. No stamp either, so the first edge after delivery still nudges.
+      if (hasPendingTelegramSend(this.config.dataDir, view.id, { unclaimedOnly: true })) return;
       await this.pushTelegramNotice(
         view.id,
         view,
@@ -6954,7 +6958,8 @@ export class SessionService {
       this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
-      session.pipeline?.status === "running"
+      session.pipeline?.status === "running" ||
+      hasPendingTelegramSend(this.config.dataDir, session.id)
     ) {
       return;
     }
@@ -6970,7 +6975,8 @@ export class SessionService {
           current.status !== "running" ||
           hasQueuedMessages(current) ||
           current.queuedMessages?.awaitingPrompt ||
-          current.pipeline?.status === "running"
+          current.pipeline?.status === "running" ||
+          hasPendingTelegramSend(this.config.dataDir, session.id)
         )
           return;
         if (
