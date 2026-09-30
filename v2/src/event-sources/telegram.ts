@@ -12,6 +12,7 @@ import {
   takeTelegramChoice,
   telegramBindingKey,
   writeTelegramBindings,
+  writeTelegramOffer,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
@@ -606,6 +607,41 @@ async function editOrReply(
   await ctx.reply(text);
 }
 
+/**
+ * The new session took over a group thread. The old one loses its reply target
+ * there (its next send falls back to the configured chat and opens its own
+ * topic) and its pending button offers in that chat die.
+ */
+async function detachDisplacedSession(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  taker: SourceSessionListItem,
+  displacedId: string,
+): Promise<void> {
+  const deps = runtime.deps;
+  try {
+    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
+    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
+      deleteTelegramReplyTarget(deps.dataDir, displacedId);
+    }
+    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
+      sessionId: displacedId,
+      chatId,
+      choices: [],
+    });
+    const displaced = await findSession(deps, displacedId);
+    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
+      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
+    await ctx.reply(
+      `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
+    );
+  } catch (error) {
+    logPersistError(deps, error);
+  }
+}
+
 async function bindSpawnedSession(
   runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply" | "api">,
@@ -636,9 +672,16 @@ async function bindSpawnedSession(
       );
       return;
     }
+    // A group thread holds one agent; a private chat holds many.
+    const key = telegramBindingKey(chatId, messageThreadId);
+    if (chatId < 0 && !runtime.bindings.has(key)) mergePersistedBindings(runtime);
+    const displacedId = chatId < 0 ? runtime.bindings.get(key)?.sessionId : undefined;
     await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
     rememberSent(deps, session.id, chatId, statusMessageId);
     await editOrReply(ctx, chatId, statusMessageId, `Spawned and bound: ${session.id}.`);
+    if (displacedId !== undefined && displacedId !== session.id) {
+      await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
+    }
   } catch (error) {
     await editOrReply(
       ctx,
@@ -1196,11 +1239,13 @@ async function routeTelegramPrompt(
   // doc comment above and spec revision 2 G2).
   const hasAwaitingProject = peekedSpawn !== null;
 
-  // A reply to a bot message belongs to the session that sent it, whatever
-  // the chat is bound to. Unlike the binding it never unbinds or auto-spawns.
+  // In a private chat a reply to a bot message belongs to the session that sent
+  // it, whatever the chat is bound to. Unlike the binding it never unbinds or
+  // auto-spawns.
   const repliedTo = message.reply_to_message?.message_id;
+  // Only a private chat routes by reply: a group thread belongs to its binding.
   const ownerId =
-    repliedTo === undefined
+    repliedTo === undefined || message.chat.id < 0
       ? null
       : findTelegramMessageSession(
           deps.dataDir,

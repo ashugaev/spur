@@ -107,7 +107,7 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`); a user reply to it routes back to this session. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Binding rules: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`); in a private chat a user reply to it routes back to this session. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Binding rules: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 
 ## Sidecars
 
