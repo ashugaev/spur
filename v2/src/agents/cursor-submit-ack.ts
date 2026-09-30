@@ -166,8 +166,7 @@ export async function scanCursorJsonlForMessage(
         baseline.rotationOffsets ??= new Map();
         let offset = baseline.rotationOffsets.get(rotated);
         if (offset === undefined) {
-          const rotatedStat = await stat(rotated).catch(() => null);
-          offset = rotatedStat ? rotatedStat.size : 0;
+          offset = await readCursorStableOffset(rotated).catch(() => 0);
           baseline.rotationOffsets.set(rotated, offset);
         }
         const found = await scanFileForUserText(rotated, offset, normalizedTarget);
