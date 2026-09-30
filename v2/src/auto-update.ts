@@ -126,10 +126,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
 
   // Retry suppression, by recorded kind. A terminal record naming this exact
   // candidate suppresses it only when another attempt cannot help:
-  // `succeeded` (install-and-restart.sh can exit 0 without restarting the
-  // daemon — e.g. systemctl absent — leaving a `succeeded` record for a
-  // candidate still newer than the running version), or a failure kind that
-  // says the package installed and left the host changed. A failure that
+  // a failure kind that says the package installed and left the host changed. A failure that
   // installed nothing, or one with no recorded kind at all, is attempted
   // again on every tick with no cap: the reported bug was a transient
   // registry error stranding a host on the old version forever, silently.
@@ -140,7 +137,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
   // `info`. Every attempt still logs — `retry` below, `started`/`skipped`
   // after it — and the disarm, a real state change, stays `warn`.
   if (state && state.version === candidate.tag) {
-    if (state.phase === "succeeded" || isNoRetryFailureKind(state.failureKind)) {
+    if (isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {
         level: "info",
         details: {
@@ -148,7 +145,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
           phase: state.phase,
           failureKind: state.failureKind,
           initiator: state.initiator,
-          reason: state.phase === "succeeded" ? "succeeded_record" : "no_retry_kind",
+          reason: "no_retry_kind",
         },
       });
       return;

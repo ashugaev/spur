@@ -43,6 +43,7 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes and pre-flight batch allocation: docs/daemon-api.md
   Config fields: docs/configuration.md
+  Automatic updates and retry policy: docs/configuration.md#auto-update
 
 EDITING THIS FILE
 

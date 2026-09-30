@@ -140,7 +140,7 @@ Other event names (see source file for trigger conditions): `trigger.spawn.suppr
 
 ## Auto update
 
-`autoUpdate` (instance only, default `false`): self-updates once npm publishes a newer version. Toggle: web `Auto` checkbox or `~/.spur/config.yaml`. Disarm/retry rule, `failureKind` values, ledger (`<dataDir>/update-ledger.jsonl`): `v2/src/auto-update.ts`.
+`autoUpdate` (instance only, default `false`): self-updates once npm publishes a newer version. Toggle: web `Auto` checkbox or `~/.spur/config.yaml`. Retry against running version, disarm, `failureKind` values, ledger (`<dataDir>/update-ledger.jsonl`): `v2/src/auto-update.ts`.
 
 ## Restore after reboot
 

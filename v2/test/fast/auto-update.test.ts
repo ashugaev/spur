@@ -159,8 +159,8 @@ describe("runAutoUpdateTick", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("suppresses a succeeded record and logs the reason", async () => {
-    const start = vi.fn();
+  it("retries a succeeded record while the running version is older", async () => {
+    const start = vi.fn().mockResolvedValue({ status: "accepted" });
     const log = vi.fn();
     const disarm = vi.fn();
     const deps = baseDeps({
@@ -172,20 +172,17 @@ describe("runAutoUpdateTick", () => {
 
     await runAutoUpdateTick(deps);
 
-    expect(start).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledWith("1.1.0");
     // A succeeded switch is not a failure: nothing to disarm.
     expect(disarm).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(
-      "daemon.auto_update.suppressed",
+      "daemon.auto_update.retry",
       expect.objectContaining({
-        // `info`, not `warn`: a suppressed tick took no action, and it repeats
-        // every 5 minutes for as long as this release is the newest one.
         level: "info",
         details: {
           version: "1.1.0",
-          phase: "succeeded",
-          initiator: "auto",
-          reason: "succeeded_record",
+          failureKind: undefined,
+          previousExitCode: 0,
         },
       }),
     );

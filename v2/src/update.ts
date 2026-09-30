@@ -24,10 +24,12 @@ import {
 import {
   makeTargets,
   probe,
+  probeDaemonIdentity,
   readWebPort,
   readWebUnitOptions,
   resolveDaemonPort,
   SERVICE_UNITS,
+  unitMainPidWith,
   unitStateWith,
   type PollSample,
   type ProbeResult,
@@ -255,7 +257,13 @@ export function createRealUpdateDeps(
   return {
     now: () => Date.now(),
     sleep: (ms) => delay(ms),
-    probe: (target) => probe(target),
+    probe: async (target) =>
+      target.id === "daemon"
+        ? probeDaemonIdentity(target, {
+            version: readInstalledVersion(cliEntrypoint),
+            pid: await unitMainPidWith(scope, SERVICE_UNITS.daemon),
+          })
+        : probe(target),
     unitState: (unit) => unitStateWith(scope, unit),
     installVersion: (target) => {
       const args = ["install", "-g"];

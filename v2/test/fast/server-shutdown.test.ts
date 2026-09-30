@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as EventSourcesModule from "../../src/event-sources/index.js";
 import type * as RuntimeLogCollectorModule from "../../src/runtime-log-collector.js";
@@ -17,6 +18,7 @@ import {
   armShutdownBackstop,
   forceShutdownExit,
   summarizeActiveResources,
+  startServer,
 } from "../../src/server.js";
 import { SessionService } from "../../src/session-service.js";
 import { findFreePort } from "../helpers/common.js";
@@ -105,6 +107,25 @@ async function writeDaemonConfig(): Promise<{ configPath: string; dataDir: strin
 }
 
 describe("summarizeActiveResources", () => {
+  it("disposes daemon resources when its port is already occupied", async () => {
+    const { configPath } = await writeDaemonConfig();
+    const { loadConfig } = await import("../../src/config.js");
+    const config = loadConfig(configPath);
+    const listener = createServer();
+    await new Promise<void>((resolve) => listener.listen(config.server.port, "127.0.0.1", resolve));
+    const disposeService = vi.spyOn(SessionService.prototype, "dispose");
+    const disposeAutoPing = vi.spyOn(AutoPingService.prototype, "dispose");
+    try {
+      await expect(startServer(configPath, { info: () => undefined, warn: () => undefined })).rejects.toMatchObject({ code: "EADDRINUSE" });
+      expect(disposeService).toHaveBeenCalledOnce();
+      expect(disposeAutoPing).toHaveBeenCalledOnce();
+    } finally {
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+      disposeService.mockRestore();
+      disposeAutoPing.mockRestore();
+    }
+  });
+
   it("counts live handles by kind", () => {
     const timer = setInterval(() => undefined, 60_000);
     try {
