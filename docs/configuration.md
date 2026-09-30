@@ -45,7 +45,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 ## Telegram binding
 
-`/watch [sessionId]` binds a chat/topic to a session, access via source `allowedUsers`/`allowedChats`; `/unwatch` drops it. `/spawn [agent] [task]`, `autoSpawn.*` on an unbound message. Agent-initiated [`source reply`](commands.md#source-reply) targets the session's latest inbound chat, else `chatId`, claiming that chat for the session and enrolling it in attention pushes below. Pending button choices: 200 per source, oldest evicted first, die with the session. Attention pushes and reply contract: `v2/src/event-sources/telegram.ts`.
+`/watch [sessionId]` binds a chat/topic to a session, access via source `allowedUsers`/`allowedChats`; `/unwatch` drops it. `/spawn [agent] [task]`, `autoSpawn.*` on an unbound message. Agent-initiated [`source reply`](commands.md#source-reply) targets the session's latest inbound chat, else `chatId`, claiming that chat for the session and enrolling it in attention pushes below. A reply-to on a bot message routes to the session that sent it, ahead of the binding (bot message ids: 1000 per source, oldest evicted); a gone or stopped/error/killed target answers `not delivered` and emits nothing. `/spawn` in a bound chat rebinds plain text to the new session. Each routed message gets a `Received. <label> is thinking...` placeholder (private chat, forum topic) that the session's next send edits in place. Pending button choices: 200 per source, oldest evicted first, die with the session. Attention pushes and reply contract: `v2/src/event-sources/telegram.ts`.
 
 ## Event log retention
 

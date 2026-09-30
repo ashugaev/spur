@@ -18,6 +18,7 @@ import {
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentEarlySubmitResendAllowed,
   agentSubmitAckPacing,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
@@ -197,7 +198,9 @@ import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
   editTelegramTopic,
+  formatTelegramSessionLabel,
   sendTelegramReply,
+  type TelegramReplySendResult,
 } from "./telegram-source-state.js";
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
@@ -216,6 +219,7 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  recordTelegramMessages,
   writeTelegramOffer,
   readTelegramReplyTarget,
   telegramBindingKey,
@@ -442,6 +446,7 @@ import {
   type SessionModeConfig,
   type TelegramChoice,
   type TelegramReplyTarget,
+  type TelegramSourceConfig,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -1701,6 +1706,7 @@ function telegramAgentInstructions(project: ProjectConfig | undefined): string |
     '- Offer choices: `spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
     "- A click and a typed reply both arrive as an ordinary user message in this session — a click carries the button value.",
     "- Ask this way when you need a decision from the user; do not wait silently.",
+    "- When the user asks to be notified or sent something in Telegram, send it with `spur source reply`.",
   ].join("\n");
 }
 
@@ -2661,8 +2667,19 @@ function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
 
 // Session label for Telegram text: id plus the agent title when the session has one.
 function telegramSessionLabel(session: Pick<SessionView, "id" | "slots">): string {
-  const title = sessionTitle(session);
-  return title ? `${session.id} — ${title}` : session.id;
+  return formatTelegramSessionLabel(session.id, sessionTitle(session));
+}
+
+interface TelegramReplyTargetChanges {
+  /** The placeholder this send edited; cleared only while it is still the recorded one. */
+  sentStatusMessageId?: number;
+  messageThreadId?: number;
+  lastReplyAt?: string;
+}
+
+interface ResolvedTelegramNotice {
+  target: TelegramReplyTarget;
+  source: TelegramSourceConfig;
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
@@ -6689,7 +6706,7 @@ export class SessionService {
     await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
   }
 
-  private resolveTelegramNotice(sessionId: string) {
+  private resolveTelegramNotice(sessionId: string): ResolvedTelegramNotice | null {
     const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (!target) return null;
     const source = this.config.projects[target.projectId]?.sources[target.sourceId];
@@ -6710,13 +6727,22 @@ export class SessionService {
     sessionId: string,
     topicSession: Pick<SessionView, "id" | "agent" | "state" | "slots">,
     text: string,
-    options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
+    options: {
+      updateTopicName?: boolean;
+      closeTopic?: boolean;
+      /** Target resolved before its state was deleted; omit to resolve now. */
+      resolved?: ResolvedTelegramNotice | null;
+    } = {},
   ): Promise<void> {
     try {
-      const resolved = this.resolveTelegramNotice(sessionId);
+      const resolved =
+        options.resolved !== undefined ? options.resolved : this.resolveTelegramNotice(sessionId);
       if (!resolved) return;
       const { target, source } = resolved;
-      await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
+      const result = await sendTelegramReply(source, target, text, {
+        topicName: telegramTopicName(topicSession),
+      });
+      this.recordTelegramSend(sessionId, target, result, { createIfMissing: false });
       if (target.messageThreadId !== undefined && target.chatId < 0) {
         if (options.closeTopic) {
           await closeTelegramTopic(source, target.chatId, target.messageThreadId);
@@ -6732,6 +6758,86 @@ export class SessionService {
     } catch (error) {
       this.logTelegramNoticeFailure(sessionId, "notice", error);
     }
+  }
+
+  /**
+   * Re-reads the reply target and merges into it: an inbound that landed a
+   * new placeholder while the send was in flight must survive. Only the
+   * placeholder that was sent is cleared. A target deleted meanwhile is
+   * recreated from `fallback` alone; without one nothing is written.
+   */
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: TelegramReplyTarget,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget;
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: null,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget | null;
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: TelegramReplyTarget | null,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget | null {
+    const current = readTelegramReplyTarget(this.config.dataDir, sessionId) ?? fallback;
+    if (!current) return null;
+    const { updatedAt: _updatedAt, statusMessageId, ...rest } = current;
+    const keptStatus =
+      statusMessageId !== changes.sentStatusMessageId ? statusMessageId : undefined;
+    const merged = {
+      ...rest,
+      ...(keptStatus !== undefined ? { statusMessageId: keptStatus } : {}),
+      ...(changes.messageThreadId !== undefined
+        ? { messageThreadId: changes.messageThreadId }
+        : {}),
+      ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
+    };
+    writeTelegramReplyTarget(this.config.dataDir, merged);
+    return { ...merged, updatedAt: nowIso() };
+  }
+
+  /**
+   * The one post-send writer: remembers the sent message ids for reply
+   * routing, then settles the reply target (placeholder consumed, created
+   * topic, reply stamp). A notice never recreates a deleted target.
+   */
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; createIfMissing: true },
+  ): TelegramReplyTarget;
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; createIfMissing: false },
+  ): TelegramReplyTarget | null;
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; createIfMissing: boolean },
+  ): TelegramReplyTarget | null {
+    recordTelegramMessages(
+      this.config.dataDir,
+      target.projectId,
+      target.sourceId,
+      { sessionId, chatId: target.chatId },
+      result.messageIds,
+    );
+    const changes: TelegramReplyTargetChanges = {
+      ...(result.statusMessageIdConsumed && target.statusMessageId !== undefined
+        ? { sentStatusMessageId: target.statusMessageId }
+        : {}),
+      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
+      ...(options.lastReplyAt !== undefined ? { lastReplyAt: options.lastReplyAt } : {}),
+    };
+    return options.createIfMissing
+      ? this.patchTelegramReplyTarget(sessionId, target, changes)
+      : this.patchTelegramReplyTarget(sessionId, null, changes);
   }
 
   private async buildPaneTail(tmuxSession: string): Promise<string> {
@@ -6754,15 +6860,10 @@ export class SessionService {
         view.id,
         view,
         `${telegramStatusEmoji("waiting")} ${telegramSessionLabel(view)} is waiting.`,
-        {
-          updateTopicName: true,
-        },
+        { updateTopicName: true, resolved },
       );
-      const { updatedAt: _updatedAt, ...rest } = target;
-      writeTelegramReplyTarget(this.config.dataDir, {
-        ...rest,
-        lastReplyAt: new Date().toISOString(),
-      });
+      // Stamped on every attempt, sent or failed: one nudge per inbound.
+      this.patchTelegramReplyTarget(view.id, null, { lastReplyAt: nowIso() });
     } catch (error) {
       this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
     }
@@ -11802,17 +11903,22 @@ export class SessionService {
         choices,
       });
     }
-    const result = await sendTelegramReply(source, target, message, {
-      topicName: telegramTopicName(view),
-      ...(choices.length > 0
-        ? {
-            buttons: choices.map((choice) => ({
-              text: choice.text,
-              callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
-            })),
-          }
-        : {}),
-    });
+    const result = await sendTelegramReply(
+      source,
+      target,
+      `${telegramSessionLabel(view)}\n${message}`,
+      {
+        topicName: telegramTopicName(view),
+        ...(choices.length > 0
+          ? {
+              buttons: choices.map((choice) => ({
+                text: choice.text,
+                callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
+              })),
+            }
+          : {}),
+      },
+    );
     // A buttonless reply supersedes the question it answers, so it retires the
     // pending offer — after the send, since a throw leaves the keyboard up.
     if (choices.length === 0) {
@@ -11822,13 +11928,10 @@ export class SessionService {
         choices: [],
       });
     }
-    const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
-    const replyTarget = {
-      ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
-      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
-      lastReplyAt: new Date().toISOString(),
-    };
-    writeTelegramReplyTarget(this.config.dataDir, replyTarget);
+    const replyTarget = this.recordTelegramSend(sessionId, target, result, {
+      lastReplyAt: nowIso(),
+      createIfMissing: true,
+    });
     // Covers a freshly created forum topic too: its key cannot already be taken.
     this.bindTelegramChatIfFree(replyTarget, sessionId);
     this.logEvent("source.reply.sent", {
@@ -12616,6 +12719,17 @@ export class SessionService {
     });
   }
 
+  private async earlySubmitResendAllowed(
+    session: Pick<SessionRecord, "agent" | "tmuxSession" | "worktreePath" | "agentSessionId">,
+  ): Promise<boolean> {
+    const panePid = await getTmuxPanePid(session.tmuxSession);
+    return agentEarlySubmitResendAllowed(session.agent, {
+      worktreePath: session.worktreePath,
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      ...(panePid !== null ? { panePid } : {}),
+    });
+  }
+
   private async writeAgentMessage(
     session: Pick<
       SessionRecord,
@@ -12648,8 +12762,13 @@ export class SessionService {
     if (!binding) {
       return "submitted";
     }
-    const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
+    const {
+      windowMs: ackWindowMs,
+      maxResends,
+      firstWindowMs,
+    } = agentSubmitAckPacing(session.agent, {
       freshLaunch,
+      slashCommand: message.trimStart().startsWith("/"),
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     // Set only when the mid-loop probe below observes a dead pane; reused for
@@ -12659,7 +12778,12 @@ export class SessionService {
     // own fresh:true comment).
     let knownDead = false;
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
+      const earlyWindow = attempt === 0 && firstWindowMs !== undefined;
+      lastResult = await this.waitForSubmitAck(
+        binding,
+        message,
+        earlyWindow ? firstWindowMs : ackWindowMs,
+      );
       if (lastResult.found) {
         return "submitted";
       }
@@ -12684,6 +12808,11 @@ export class SessionService {
             knownDead = true;
             break;
           }
+        }
+        // The short first window ends in an Enter only when the agent proves
+        // it is not showing a menu; otherwise the long window applies.
+        if (earlyWindow && !(await this.earlySubmitResendAllowed(session))) {
+          continue;
         }
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
@@ -13887,8 +14016,12 @@ export class SessionService {
         // missing forever. A skipped cleanup (a still-live desk sibling)
         // means the files are untouched, so the ids stay.
         startupAttachmentsCleaned = ranCleanup;
-        const replyTargetProjectId =
-          readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
+        const resolvedNotice = this.resolveTelegramNotice(sessionId);
+        const { heldBinding } = deleteTelegramSourceStateForSession(
+          this.config.dataDir,
+          resolvedNotice?.target.projectId ?? session.project,
+          sessionId,
+        );
         await this.pushTelegramNotice(
           sessionId,
           {
@@ -13897,10 +14030,9 @@ export class SessionService {
             state: "stopped",
             ...(session.slots ? { slots: session.slots } : {}),
           },
-          `Session ${telegramSessionLabel(session)} finished (${targetStatus}). This chat is unbound.`,
-          { closeTopic: session.selfDestruct?.enabled !== true },
+          `Session ${telegramSessionLabel(session)} finished (${targetStatus}).${heldBinding ? " This chat is unbound." : ""}`,
+          { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
         );
-        deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
       this.logManualStatusFailure(eventAction, targetStatus, sessionId, session.project, error);
@@ -14001,8 +14133,12 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
-      const replyTargetProjectId =
-        readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
+      const resolvedNotice = this.resolveTelegramNotice(sessionId);
+      const { heldBinding } = deleteTelegramSourceStateForSession(
+        this.config.dataDir,
+        resolvedNotice?.target.projectId ?? session.project,
+        sessionId,
+      );
       await this.pushTelegramNotice(
         sessionId,
         {
@@ -14011,10 +14147,9 @@ export class SessionService {
           state: "killed",
           ...(session.slots ? { slots: session.slots } : {}),
         },
-        `Session ${telegramSessionLabel(session)} finished (killed). This chat is unbound.`,
-        { closeTopic: session.selfDestruct?.enabled !== true },
+        `Session ${telegramSessionLabel(session)} finished (killed).${heldBinding ? " This chat is unbound." : ""}`,
+        { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
       );
-      deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
