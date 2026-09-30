@@ -19221,15 +19221,24 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     await vi.advanceTimersByTimeAsync(0);
     // The stored target vanishes (session finished) between the notice read and the settle read.
-    readTelegramReplyTargetMock.mockReset().mockReturnValueOnce({
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "agentChat",
-      chatId: -1001,
-      messageThreadId: 22,
-      lastInboundAt: "2026-03-18T10:04:00.000Z",
-      updatedAt: "2026-03-18T10:04:00.000Z",
+    let sent = false;
+    sendTelegramReplyMock.mockImplementation(async () => {
+      sent = true;
+      return { messageIds: [] };
     });
+    readTelegramReplyTargetMock.mockReset().mockImplementation(() =>
+      sent
+        ? null
+        : {
+            sessionId: "api-1",
+            projectId: "api",
+            sourceId: "agentChat",
+            chatId: -1001,
+            messageThreadId: 22,
+            lastInboundAt: "2026-03-18T10:04:00.000Z",
+            updatedAt: "2026-03-18T10:04:00.000Z",
+          },
+    );
 
     await driveWorkingToWaitingEdge();
 
