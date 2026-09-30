@@ -585,7 +585,7 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
     "",
     "Source: telegram. The requester only sees messages you send with:",
     '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
-    'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options.',
+    'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options. Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.',
     "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
   ].join("\n");
 }
