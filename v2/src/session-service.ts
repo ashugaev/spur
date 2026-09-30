@@ -6716,11 +6716,14 @@ export class SessionService {
     const label = telegramSessionLabel(session);
     const text =
       attention === "needs_input"
-        ? `${telegramStatusEmoji("needs_input")} ${label} needs input${paneTail}`
+        ? `${telegramStatusEmoji("needs_input")} ${label} needs input`
         : attention === "error"
-          ? `${telegramStatusEmoji("error")} ${label} error${paneTail}`
+          ? `${telegramStatusEmoji("error")} ${label} error`
           : `${telegramStatusEmoji("rate_limited")} ${label} rate limited`;
-    await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
+    await this.pushTelegramNotice(session.id, session, text, {
+      updateTopicName: true,
+      ...(paneTail ? { preformatted: paneTail } : {}),
+    });
   }
 
   private resolveTelegramNotice(sessionId: string): ResolvedTelegramNotice | null {
@@ -6747,6 +6750,8 @@ export class SessionService {
     options: {
       updateTopicName?: boolean;
       closeTopic?: boolean;
+      /** Raw pane tail, shown verbatim in a code block after the text. */
+      preformatted?: string;
       /** Target resolved before its state was deleted; omit to resolve now. */
       resolved?: ResolvedTelegramNotice | null;
     } = {},
@@ -6759,6 +6764,7 @@ export class SessionService {
       this.claimTelegramPlaceholder(sessionId, target);
       const result = await sendTelegramReply(source, target, text, {
         topicName: telegramTopicName(topicSession),
+        ...(options.preformatted ? { preformatted: options.preformatted } : {}),
       });
       this.recordTelegramSend(sessionId, target, result, {
         createIfMissing: false,
@@ -6922,8 +6928,7 @@ export class SessionService {
   }
 
   private async buildPaneTail(tmuxSession: string): Promise<string> {
-    const tail = (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
-    return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+    return (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
   }
 
   /**

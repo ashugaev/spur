@@ -1952,6 +1952,42 @@ describe("telegramSourceModule", () => {
     expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(601);
   });
 
+  it("keeps the Selected edit plain for an offer containing < and &", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, text: "a < b & c", chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    });
+
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(editMessageText.mock.calls[0]).toEqual(["a < b & c\n\nSelected: Yes"]);
+  });
+
   it("drops a DM placeholder when a click moves the session to a group", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);

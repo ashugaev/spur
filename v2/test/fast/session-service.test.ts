@@ -18852,7 +18852,10 @@ describe("SessionService", () => {
     );
     const text = sendTelegramReplyMock.mock.calls.at(-1)?.[2] as string;
     expect(text).toMatch(/^🔴 api-1 needs input/);
-    expect(text).toContain("```\nPlease confirm before I proceed.\n```");
+    expect(text).not.toContain("```");
+    expect(sendTelegramReplyMock.mock.calls.at(-1)?.[3]).toMatchObject({
+      preformatted: "Please confirm before I proceed.",
+    });
     expect(editTelegramTopicMock).toHaveBeenCalledWith(
       telegramSource,
       -1001,
