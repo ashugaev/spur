@@ -3009,6 +3009,16 @@ test.describe("D7d: Branch name normalization", () => {
 });
 
 test.describe("D7c: Background spawn lifecycle", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/preflight", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: null }),
+      });
+    });
+  });
+
   test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
   }) => {
@@ -3565,6 +3575,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
 
     await openSpawnModal(page, () => sessions);
+    const preflightResponse = page.waitForResponse("**/api/preflight");
     await fillSpawnForm(page, {
       prompt: placeholder.prompt,
       branch: placeholder.branch,
@@ -3583,6 +3594,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeChecked();
     await expect(page.getByText(/daemon down/i)).toBeVisible();
 
+    await preflightResponse;
     await spawnButton.click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
