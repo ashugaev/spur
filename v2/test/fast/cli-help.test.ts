@@ -266,6 +266,22 @@ describe("spur help", () => {
     expect(help).toContain("defaults to SPUR_SESSION");
   });
 
+  it("documents source poll-enable", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const pollEnable = source?.commands.find((command) => command.name() === "poll-enable");
+
+    expect(source).toBeDefined();
+    expect(pollEnable).toBeDefined();
+    if (!pollEnable) {
+      throw new Error("Expected source poll-enable command to be registered");
+    }
+
+    const help = pollEnable.helpInformation();
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
+  });
+
   it("documents exact session-memory commands without aliases", () => {
     const program = buildProgram();
     const sessionMemory = program.commands.find((command) => command.name() === "session-memory");

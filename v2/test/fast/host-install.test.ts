@@ -106,6 +106,7 @@ vi.mock("../../src/workspace.js", async () => {
 import {
   _formatLeakedSidecarsCheckForTests as formatLeakedSidecarsCheck,
   checkConfigRegistry,
+  checkGitHubPollDisabled,
   checkHostSkillSymlinks,
   checkServiceHealth,
   checkSpurOnPath,
@@ -117,6 +118,7 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
+import { recordGitHubPollDisabledSession } from "../../src/metadata.js";
 import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
@@ -2114,6 +2116,80 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
   });
 });
 
+describe("checkGitHubPollDisabled", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  // A13
+  it("passes with no disabled pairs", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+
+    const check = checkGitHubPollDisabled(dataDir);
+
+    expect(check.id).toBe("github-poll-disabled");
+    expect(check.ok).toBe(true);
+    expect(check.severity).toBe("warn");
+  });
+
+  // A13
+  it("reports every github poll-disabled pair with its PR number and disable date", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
+
+    // Read-only proof: a filesystem snapshot before and after the check must be
+    // byte-identical (see the "never writes" case below); this case only asserts
+    // reporting content.
+    const check = checkGitHubPollDisabled(dataDir);
+
+    expect(check.id).toBe("github-poll-disabled");
+    expect(check.ok).toBe(false);
+    expect(check.severity).toBe("warn");
+    expect(check.detail).toContain("api/pr-watch");
+    expect(check.detail).toContain("api-a1b2");
+    expect(check.detail).toContain("PR #42");
+    expect(check.fix).toBe("spur source poll-enable --session <id>");
+  });
+
+  // A13: read-only proof. Never compare mtimes (one-second granularity flakes) —
+  // walk the dataDir and diff file CONTENT before and after the check.
+  it("never writes to the registry it reads", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-c3d4", 43, 1_750_000_100_000);
+
+    function snapshot(): Map<string, string> {
+      const files = new Map<string, string>();
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else files.set(full, readFileSync(full, "utf-8"));
+        }
+      };
+      walk(dataDir);
+      return files;
+    }
+
+    const before = snapshot();
+    checkGitHubPollDisabled(dataDir);
+    const after = snapshot();
+
+    expect(after).toEqual(before);
+  });
+});
+
 describe("checkVersionDrift", () => {
   it("stays silent when the daemon was not reachable", () => {
     expect(checkVersionDrift(undefined)).toBeUndefined();
@@ -2226,6 +2302,40 @@ describe("spur doctor --json: config-registry per-path listing", () => {
         { path: deadPath, state: "dead" },
       ]),
     );
+  });
+
+  // A13: the check id appears in --json output once an instance config resolves.
+  it("carries the github-poll-disabled check through to the JSON doctor output", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-poll-disabled-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as { hostChecks?: Array<{ id: string }> };
+    expect(parsed.hostChecks?.some((check) => check.id === "github-poll-disabled")).toBe(true);
   });
 });
 

@@ -44,6 +44,7 @@
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
 - `POST /sessions/:id/send`
+- `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/source-reply`
 - `POST /sessions/:id/opened`

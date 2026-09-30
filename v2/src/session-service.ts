@@ -201,6 +201,7 @@ import {
 } from "./telegram-source-state.js";
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
+  clearGitHubPollDisabledSession,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -430,6 +431,7 @@ import {
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
+  type SourcePollEnableResponse,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -2885,6 +2887,15 @@ export class SessionService {
   // remove. Never set outside a test; a production `startServer` never
   // passes it.
   private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
+  // Set once by server.ts after startConfiguredSources returns (see
+  // setPollDisabledOverrideClearer). SessionService is constructed before any
+  // source handle exists, so this can't be a constructor option; unset here
+  // means enableSourcePoll falls back to the disk-only clear it always did.
+  // Kept as this narrow closure, not a reference to SourceGroupController
+  // itself, so session-service.ts never imports event-sources types.
+  private pollDisabledOverrideClearer:
+    | ((projectId: string, sourceId: string, sessionId: string) => number | null)
+    | undefined;
 
   constructor(
     configPath?: string,
@@ -2942,6 +2953,14 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(scan.config, scan.configPaths);
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
+  }
+
+  // Called once by server.ts's startAutomation, after startConfiguredSources
+  // returns a SourceGroupController. See pollDisabledOverrideClearer above.
+  setPollDisabledOverrideClearer(
+    clearer: (projectId: string, sourceId: string, sessionId: string) => number | null,
+  ): void {
+    this.pollDisabledOverrideClearer = clearer;
   }
 
   startBackgroundLoops(): void {
@@ -11737,6 +11756,47 @@ export class SessionService {
     };
   }
 
+  // Explicit re-enable for a session permanently disabled by a not-found PR (see
+  // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
+  // registry). Missing session throws SessionResourceNotFoundError (404 per daemon-api.md).
+  // Otherwise 200: unknown/unconfigured project, no github sources, or nothing disabled → cleared: [].
+  // Clears both layers per source: the durable disk registry (clearGitHubPollDisabledSession)
+  // and, via pollDisabledOverrideClearer, the live handle's in-process
+  // pendingPollDisabledOverrides entry a failed disk write would otherwise leave
+  // gating the session indefinitely. Reports a source as cleared if either layer had
+  // something to clear, even when the disk side alone is a no-op.
+  async enableSourcePoll(sessionId: string): Promise<SourcePollEnableResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const projectId = session.project;
+    const sources = this.config.projects[projectId]?.sources ?? {};
+    const cleared: { sourceId: string; prNumber: number }[] = [];
+    for (const [sourceId, source] of Object.entries(sources)) {
+      if (source.type !== "github") continue;
+      const diskPrNumber = clearGitHubPollDisabledSession(
+        this.config.dataDir,
+        projectId,
+        sourceId,
+        sessionId,
+      );
+      // Also drops the session's entry from the live handle's in-process
+      // override, if any — otherwise a session whose disk write previously
+      // failed stays gated (disk already empty, so diskPrNumber is null)
+      // until a rebind, the sweep, or handle recreation. See
+      // pollDisabledOverrideClearer and github.ts's
+      // clearPollDisabledOverride/pendingPollDisabledOverrides.
+      const overridePrNumber =
+        this.pollDisabledOverrideClearer?.(projectId, sourceId, sessionId) ?? null;
+      const prNumber = diskPrNumber ?? overridePrNumber;
+      if (prNumber !== null) {
+        cleared.push({ sourceId, prNumber });
+      }
+    }
+    return { ok: true, sessionId, projectId, cleared };
+  }
+
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
   }
@@ -14551,6 +14611,27 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    // Past both gates above (restorability, foreign-process): this restore is
+    // actually going to proceed, so clear the GitHub poll-disable registry for this
+    // session now, not earlier — a rejected restore (not restorable, or refused over
+    // a live foreign process) must stay a no-op for the caller AND leave the durable
+    // disable untouched, or a poll-eligible (running/stale-parked) session would pick
+    // up a spurious source.poll.disabled on its very next cycle. Re-probes the PR
+    // immediately instead of waiting on the bounded recheck window. Covers spur
+    // restore, spur reopen (funnels here via reopenLocked), and the automatic reboot
+    // restore (restoreRebootedSessions -> this.restore). Swallowed: a failed clear
+    // must never fail a restore, and the recheck window still recovers the session
+    // on its own.
+    try {
+      await this.enableSourcePoll(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.restore.poll_disable_clear_failed", {
+        level: "warn",
+        message: `Failed to clear GitHub poll-disable registry on restore for ${sessionId}: ${message}`,
+        details: { sessionId, message },
+      });
+    }
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the

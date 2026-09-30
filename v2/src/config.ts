@@ -703,6 +703,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? asOptionalPositiveInteger(raw["maxReviewBatchTargets"], `${label}.maxReviewBatchTargets`)
       : undefined;
+  const pollDisabledRecheckMs =
+    provider === "github"
+      ? asOptionalPositiveInteger(raw["pollDisabledRecheckMs"], `${label}.pollDisabledRecheckMs`)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -712,6 +716,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(draft !== undefined ? { draft } : {}),
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
     ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
+    ...(pollDisabledRecheckMs !== undefined ? { pollDisabledRecheckMs } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 

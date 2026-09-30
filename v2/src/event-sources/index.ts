@@ -197,5 +197,15 @@ export async function startConfiguredSources(
     async stop(): Promise<void> {
       await stopAll(startedSources);
     },
+    clearPollDisabledOverride(
+      projectId: string,
+      sourceId: string,
+      sessionId: string,
+    ): number | null {
+      const source = startedSources.find(
+        (entry) => entry.projectId === projectId && entry.sourceId === sourceId,
+      );
+      return source?.handle.clearPollDisabledOverride?.(sessionId) ?? null;
+    },
   };
 }

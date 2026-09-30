@@ -34,7 +34,7 @@ import {
   renderHostSkillWarnings,
 } from "./host-skills.js";
 import { writeStderr } from "./io.js";
-import { listSessions } from "./metadata.js";
+import { listGitHubPollDisabledEntries, listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
@@ -112,6 +112,33 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
       : {
           fix: "npm install -g --prefix ~/.local opencode-ai, or set SPUR_OPENCODE_BIN to an executable path",
         }),
+  };
+}
+
+// Read-only directory walk, zero writes (doctor's read-only contract, #600).
+// severity is static "warn" in both outcomes per the convention at cli.ts:
+// severity is the check's importance if it fails, not a flag that flips with the
+// outcome; the renderer only surfaces it once `ok` is false.
+export function checkGitHubPollDisabled(dataDir: string): HostInstallCheck {
+  const entries = listGitHubPollDisabledEntries(dataDir);
+  if (entries.length === 0) {
+    return {
+      id: "github-poll-disabled",
+      ok: true,
+      severity: "warn",
+      detail: "no GitHub sources have a session gated by a not-found PR",
+    };
+  }
+  const lines = entries.map((entry) => {
+    const since = entry.disabledAtMs > 0 ? new Date(entry.disabledAtMs).toISOString() : "unknown";
+    return `${entry.projectId}/${entry.sourceId} ${entry.sessionId} PR #${entry.prNumber} since ${since}`;
+  });
+  return {
+    id: "github-poll-disabled",
+    ok: false,
+    severity: "warn",
+    detail: `${entries.length} session(s) gated by a not-found PR:\n${lines.join("\n")}`,
+    fix: "spur source poll-enable --session <id>",
   };
 }
 

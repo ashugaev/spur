@@ -269,6 +269,10 @@ export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
   // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
   maxReviewBatchTargets?: number;
+  // How often a durably poll-disabled session (bound PR permanently not found) gets
+  // one bounded recheck request. Default 86400000 (24h, see
+  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+  pollDisabledRecheckMs?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -1268,6 +1272,13 @@ export interface SourceReplyResponse {
   sourceId: string;
   chatId: number;
   messageThreadId?: number;
+}
+
+export interface SourcePollEnableResponse {
+  ok: true;
+  sessionId: string;
+  projectId: string;
+  cleared: { sourceId: string; prNumber: number }[];
 }
 
 export type WakeTarget = "scheduled" | "interval" | "daily";
