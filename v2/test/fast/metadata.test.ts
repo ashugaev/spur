@@ -1171,12 +1171,15 @@ describe("session metadata PR migration", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
       submitUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+      submitRequeuedMessage: "typed once",
     });
     const first = readSession(dataDir, "api-1");
     if (!first) throw new Error("record missing");
     writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
 
     expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    // The re-queue budget survives a write, and so a restart.
+    expect(readSession(dataDir, "api-1")?.submitRequeuedMessage).toBe("typed once");
     expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
 
     const { submitUnconfirmedAt: _cleared, ...confirmed } = first;

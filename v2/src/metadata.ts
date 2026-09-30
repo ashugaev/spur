@@ -900,6 +900,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
     ...(submitUnconfirmedAt ? { submitUnconfirmedAt } : {}),
+    ...(typeof normalizedSession.submitRequeuedMessage === "string"
+      ? { submitRequeuedMessage: normalizedSession.submitRequeuedMessage }
+      : {}),
     ...(normalizedSession.queuedMessageTyped &&
     typeof normalizedSession.queuedMessageTyped.message === "string" &&
     typeof normalizedSession.queuedMessageTyped.typedAt === "string"

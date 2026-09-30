@@ -1032,19 +1032,27 @@ export interface SessionRecord {
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   /**
-   * ISO time of a launch or Send now whose submit never confirmed. Every
-   * typed send holds while set; cleared on the first transcript activity
-   * after it. Read from the legacy `launchUnconfirmedAt` on older records.
+   * ISO time of a launch or send whose submit never confirmed. Every typed
+   * send holds while set. A launch hold clears on the first transcript
+   * activity after it; a send's hold (with `queuedMessageTyped`) clears only
+   * on the agent's ack of that text. Read from the legacy
+   * `launchUnconfirmedAt` on older records.
    */
   submitUnconfirmedAt?: string;
   /**
-   * A queued message already typed into the pane (and so off the queue)
-   * whose submit ack is still pending. `ackBaseline` is the ack scan's
-   * pre-send transcript position, absent when the send had no ack scan. A
-   * daemon restart with this set and no ack past that position (or no
-   * position at all) puts the message back at the head.
+   * A message already typed into the pane (and so off the queue) whose
+   * submit ack is still pending, or never came (with `submitUnconfirmedAt`).
+   * `ackBaseline` is the ack scan's pre-send transcript position, absent when
+   * the send had no ack scan. A daemon restart with this set, no hold, and no
+   * ack past that position (or no position at all) puts the message back at
+   * the head.
    */
   queuedMessageTyped?: { message: string; typedAt: string; ackBaseline?: SubmitAckBaseline };
+  /**
+   * Text an unconfirmed send already put back at the queue head once. Its
+   * next unconfirmed submit releases the hold instead of re-queuing it again.
+   */
+  submitRequeuedMessage?: string;
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;

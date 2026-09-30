@@ -10404,9 +10404,14 @@ describe("SessionService", () => {
           sessionId: "api-1",
         }),
       );
-      // Counted as typed, not re-queued.
+      // Counted as typed, not re-queued; the marker stays with the hold.
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
-      expect(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
+      expect(sessions.get("api-1")?.queuedMessageTyped).toEqual(
+        expect.objectContaining({
+          message: "first",
+          typedAt: sessions.get("api-1")?.submitUnconfirmedAt,
+        }),
+      );
       await service.send("api-1", { message: "second", queue: true });
       const realTimers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
       await realTimers.setTimeout(1_500);
@@ -47806,7 +47811,11 @@ describe("SessionService", () => {
 
     // Every agent's classify path must set agentActivityAt: the hold clears
     // only on it, and an agent that never sets it blocks the session for good.
-    function mockAgentActivity(agent: "claude" | "codex" | "cursor" | "opencode", atMs: number) {
+    function mockAgentActivity(
+      agent: "claude" | "codex" | "cursor" | "opencode",
+      atMs: number,
+      state: "waiting" | "working" = "waiting",
+    ) {
       agentStateStrategyMock.mockImplementation((name: string) =>
         name === "codex"
           ? "hook"
@@ -47818,19 +47827,19 @@ describe("SessionService", () => {
       );
       if (agent === "codex") {
         readAgentHookStateMock.mockReturnValue({
-          state: "waiting",
+          state,
           updatedAt: new Date(atMs).toISOString(),
         });
       } else if (agent === "cursor") {
-        mockCursorJsonlState("waiting", { lastMtimeMs: atMs });
+        mockCursorJsonlState(state, { lastMtimeMs: atMs });
       } else if (agent === "opencode") {
         readOpenCodeStateMock.mockResolvedValue({
-          state: "waiting",
-          reason: "assistant completed",
+          state,
+          reason: state === "waiting" ? "assistant completed" : "assistant incomplete",
           activityMs: atMs,
         });
       } else {
-        mockClaudeJsonlState("waiting", { lastMtimeMs: atMs });
+        mockClaudeJsonlState(state, { lastMtimeMs: atMs });
       }
     }
 
@@ -47865,6 +47874,143 @@ describe("SessionService", () => {
         expect((await service.get("api-1")).submitUnconfirmedAt).toBeUndefined();
         expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
         expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+        service.dispose();
+      },
+    );
+
+    // A send's hold: the typed marker carries the text and the ack baseline.
+    const holdBaselines = {
+      claude: { agent: "claude", file: "/t/claude.jsonl", size: 10 },
+      codex: { agent: "codex", offsets: { "/t/rollout.jsonl": 10 } },
+      cursor: { agent: "cursor", file: "/t/cursor.jsonl", size: 10 },
+      opencode: { agent: "opencode", sessionId: "ses_1", after: null },
+    } as const;
+
+    function seedSendHold(
+      sessions: ReturnType<typeof createSessionStore>,
+      agent: "claude" | "codex" | "cursor" | "opencode",
+      extra: Partial<SessionRecord> = {},
+    ) {
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent,
+          launchCommand: agentLaunchCommands[agent],
+          agentSessionId: "ses_1",
+          submitUnconfirmedAt: PENDING_LAUNCH_AT,
+          queuedMessageTyped: {
+            message: "typed",
+            typedAt: PENDING_LAUNCH_AT,
+            ackBaseline: holdBaselines[agent],
+          },
+          queuedMessages: { messages: ["later"], awaitingPrompt: true },
+          ...extra,
+        }),
+      );
+    }
+
+    function mockHoldAckScan(found: boolean) {
+      const scan = vi.fn().mockResolvedValue({ found, lastScannedFile: null });
+      resumeAgentSubmitAckBindingMock.mockImplementation(
+        async (_agent: string, _ctx: unknown, baseline: unknown) => ({ baseline, scan }),
+      );
+      return scan;
+    }
+
+    async function deferredService() {
+      const { SessionService } = await loadSessionServiceModule();
+      return new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+    }
+
+    const holdAgents = ["claude", "codex", "cursor", "opencode"] as const;
+    const afterHold = Date.parse(PENDING_LAUNCH_AT) + 30_000;
+
+    it.each(holdAgents)(
+      "%s: a running turn's own records never clear a send's hold",
+      async (agent) => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, agent);
+        mockAgentActivity(agent, afterHold, "working");
+        const scan = mockHoldAckScan(false);
+        const service = await deferredService();
+
+        await service.get("api-1");
+        await service.get("api-1");
+        expect(scan).toHaveBeenCalledWith("typed");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        service.dispose();
+      },
+    );
+
+    it.each(holdAgents)("%s: the agent's ack of the typed text clears the hold", async (agent) => {
+      const sessions = createSessionStore();
+      seedSendHold(sessions, agent);
+      mockAgentActivity(agent, afterHold, "working");
+      mockHoldAckScan(true);
+      const service = await deferredService();
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+      expect(sessions.get("api-1")).not.toHaveProperty("queuedMessageTyped");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+      expect(eventsNamed("session.submit.confirmed")).toEqual([
+        expect.objectContaining({ details: { evidence: "ack" } }),
+      ]);
+      service.dispose();
+    });
+
+    it.each(holdAgents)(
+      "%s: a turn that ends with no ack re-queues the text at the head once",
+      async (agent) => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, agent);
+        mockAgentActivity(agent, afterHold, "waiting");
+        mockHoldAckScan(false);
+        const service = await deferredService();
+
+        await service.get("api-1");
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("queuedMessageTyped");
+        expect(record?.queuedMessages).toEqual({
+          messages: ["typed", "later"],
+          awaitingPrompt: false,
+        });
+        expect(record?.submitRequeuedMessage).toBe("typed");
+        expect(eventsNamed("session.message.requeued")).toEqual([
+          expect.objectContaining({ details: { reason: "submit_unconfirmed", messageLength: 5 } }),
+        ]);
+        service.dispose();
+      },
+    );
+
+    it.each(holdAgents)(
+      "%s: a second unacked submit of a re-queued text releases the hold across a restart, never re-queuing it",
+      async (agent) => {
+        const sessions = createSessionStore();
+        seedSendHold(sessions, agent, { submitRequeuedMessage: "typed" });
+        mockAgentActivity(agent, afterHold, "waiting");
+        mockHoldAckScan(false);
+        // A fresh daemon: boot recovery leaves a held marker to the settle.
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await vi.advanceTimersByTimeAsync(0);
+
+        await service.get("api-1");
+        await service.get("api-1");
+        const record = sessions.get("api-1");
+        expect(record?.submitUnconfirmedAt).toBeUndefined();
+        expect(record).not.toHaveProperty("submitRequeuedMessage");
+        expect(record?.queuedMessages?.messages ?? []).not.toContain("typed");
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(1);
+        expect(tmuxTexts()).not.toContain("typed");
         service.dispose();
       },
     );

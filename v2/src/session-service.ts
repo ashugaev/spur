@@ -33,6 +33,7 @@ import {
   readAgentConversation,
   resumeAgentSubmitAckBinding,
   setupAgentHooks,
+  type AgentSubmitAckContext,
   type SubmitAckBinding,
   type SubmitAckScanResult,
 } from "./agents/index.js";
@@ -2739,6 +2740,8 @@ export class SessionService {
   // Epoch ms at which the latest pane write to the session started
   // (recordPaneWrite); queuedDeliveryState's fence.
   private readonly paneWriteFenceAt = new Map<string, number>();
+  // Sessions whose unconfirmed-hold ack scan is running (settleSubmitHold).
+  private readonly submitHoldScans = new Set<string>();
   // Queued send() calls parked until the session's next queued pane write
   // (notifyQueuedPaneWrite) or their own attempt's end, capped at
   // QUEUED_SEND_PANE_WRITE_WAIT_MS.
@@ -9839,33 +9842,141 @@ export class SessionService {
     return { ...next, submitUnconfirmedAt: new Date(sentAt).toISOString() };
   }
 
-  // Clears submitUnconfirmedAt once the agent's transcript shows activity at
-  // or after the unconfirmed send: the prompt reached the agent. Called from
-  // the classification path, so any enrich, tick, or queue wait confirms it.
-  private confirmLaunchOnActivity(
+  // The submit-ack scan context for a session's pane: shared by the live
+  // send, the restart rebind, and the unconfirmed-hold settle.
+  private submitAckContext(
+    session: Pick<SessionRecord, "id" | "agent" | "worktreePath" | "agentSessionId">,
+  ): AgentSubmitAckContext {
+    return {
+      worktreePath: session.worktreePath,
+      codexSessionsDir: this.codexSessionsDir(session.id),
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      ...(session.agent === "cursor"
+        ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+        : {}),
+    };
+  }
+
+  // Settles submitUnconfirmedAt once the agent shows activity at or after it.
+  // Called from the classification path, so any enrich, tick, or queue wait
+  // settles it.
+  //   Launch hold (no typed marker): that activity confirms it.
+  //   Send hold (typed marker with its ack baseline): only the agent's ack of
+  //   that text confirms it; a busy turn's own records never do. The agent
+  //   back at its prompt, quiet past the queued-send grace, with no ack: the
+  //   text goes back to the queue head once (submitRequeuedMessage); a second
+  //   miss for the same text releases the hold (session.submit.released).
+  private async settleSubmitHold(
     session: SessionRecord,
+    state: SessionState,
     agentActivityAt: Date | null,
-  ): SessionRecord {
-    if (
-      !session.submitUnconfirmedAt ||
-      !agentActivityAt ||
-      agentActivityAt.getTime() < Date.parse(session.submitUnconfirmedAt)
-    ) {
+  ): Promise<SessionRecord> {
+    const holdAt = session.submitUnconfirmedAt;
+    if (!holdAt || !agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)) {
       return session;
     }
+    const typed = session.queuedMessageTyped;
+    if (!typed?.ackBaseline) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (!latest || latest.submitUnconfirmedAt !== holdAt) {
+        return latest ?? session;
+      }
+      return this.confirmSubmitHold(latest, "activity");
+    }
+    if (this.submitHoldScans.has(session.id)) {
+      return session;
+    }
+    this.submitHoldScans.add(session.id);
+    let acked: boolean;
+    try {
+      const binding = await resumeAgentSubmitAckBinding(
+        session.agent,
+        this.submitAckContext(session),
+        typed.ackBaseline,
+      );
+      acked = binding ? (await binding.scan(typed.message)).found : false;
+    } finally {
+      this.submitHoldScans.delete(session.id);
+    }
+    // One synchronous span from here: a concurrent settle sees this write.
     const latest = readSession(this.config.dataDir, session.id);
-    if (latest?.submitUnconfirmedAt !== session.submitUnconfirmedAt) {
+    if (
+      !latest ||
+      latest.submitUnconfirmedAt !== holdAt ||
+      latest.queuedMessageTyped?.typedAt !== typed.typedAt
+    ) {
       return latest ?? session;
     }
-    const { submitUnconfirmedAt: _confirmed, ...confirmed } = latest;
+    if (acked) {
+      return this.confirmSubmitHold(latest, "ack");
+    }
+    const turnEnded =
+      state === "waiting" &&
+      Date.now() - agentActivityAt.getTime() >= agentQueuedSendPromptGraceMs(session.agent);
+    return turnEnded ? this.requeueUnconfirmedSubmit(latest, typed.message) : latest;
+  }
+
+  private confirmSubmitHold(latest: SessionRecord, evidence: "activity" | "ack"): SessionRecord {
+    const {
+      submitUnconfirmedAt: _confirmed,
+      queuedMessageTyped: typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    const confirmed: SessionRecord = {
+      ...base,
+      ...(evidence === "activity" && typed ? { queuedMessageTyped: typed } : {}),
+      ...(requeued !== undefined && requeued !== typed?.message
+        ? { submitRequeuedMessage: requeued }
+        : {}),
+    };
     writeSession(this.config.dataDir, confirmed);
     this.logEvent("session.submit.confirmed", {
       level: "info",
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Unconfirmed prompt for ${session.id} confirmed by agent activity`,
+      sessionId: latest.id,
+      projectId: latest.project,
+      message:
+        evidence === "ack"
+          ? `Unconfirmed prompt for ${latest.id} confirmed by the agent's ack`
+          : `Unconfirmed prompt for ${latest.id} confirmed by agent activity`,
+      details: { evidence },
     });
     return confirmed;
+  }
+
+  private requeueUnconfirmedSubmit(latest: SessionRecord, message: string): SessionRecord {
+    const {
+      submitUnconfirmedAt: _held,
+      queuedMessageTyped: _typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    if (requeued === message) {
+      writeSession(this.config.dataDir, base);
+      this.logEvent("session.submit.released", {
+        level: "warn",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
+        details: { messageLength: message.length },
+      });
+      return base;
+    }
+    const record = withQueuedMessages(
+      { ...base, submitRequeuedMessage: message, updatedAt: nowIso() },
+      [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+      false,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.requeued", {
+      level: "warn",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message: `Re-queued an unconfirmed message for ${latest.id}: the agent's turn ended with no ack of it`,
+      details: { reason: "submit_unconfirmed", messageLength: message.length },
+    });
+    this.scheduleDeliveryRunner(latest.id);
+    return record;
   }
 
   // The one path for every spawn write after the placeholder: a kill that
@@ -12438,17 +12549,21 @@ export class SessionService {
   // the time the send resolves, and blind-writing it would erase a
   // concurrent append or resurrect an already-drained message.
   // An unacked write on a live agent may still sit in the composer: hold every
-  // pane writer, as for an unacked launch, until the transcript shows activity
-  // at or after sentAt; the banner's submit (Enter only) is the escape.
-  private withSubmitUnconfirmed(record: SessionRecord, sentAt: string): SessionRecord {
+  // pane writer until the agent acks the typed text (settleSubmitHold); the
+  // banner's submit (Enter only) is the escape. The typed marker carries the
+  // text and its ack baseline for that scan.
+  private withSubmitUnconfirmed(
+    record: SessionRecord,
+    typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
+  ): SessionRecord {
     this.logEvent("session.message.submit_unconfirmed", {
       level: "warn",
       sessionId: record.id,
       projectId: record.project,
-      message: `Sent a message to ${record.id} the agent has not confirmed; queued messages hold until the agent shows activity`,
+      message: `Sent a message to ${record.id} the agent has not confirmed; queued messages hold until the agent acks it`,
       details: { agent: record.agent },
     });
-    return { ...record, submitUnconfirmedAt: sentAt };
+    return { ...record, submitUnconfirmedAt: typed.typedAt, queuedMessageTyped: typed };
   }
 
   // Queue head, held for the prompt, on a fresh queue read: the next runner
@@ -12484,7 +12599,7 @@ export class SessionService {
   private async commitDeliveredSend(
     sessionId: string,
     readySession: SessionRecord,
-    unconfirmedSince: number | null,
+    unconfirmed: NonNullable<SessionRecord["queuedMessageTyped"]> | null,
   ): Promise<SessionRecord> {
     this.stateCache.delete(sessionId);
     const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
@@ -12497,10 +12612,7 @@ export class SessionService {
       queuedMessages(latest),
       latest.queuedMessages?.awaitingPrompt ?? false,
     );
-    const updated =
-      unconfirmedSince !== null
-        ? this.withSubmitUnconfirmed(delivered, new Date(unconfirmedSince).toISOString())
-        : delivered;
+    const updated = unconfirmed ? this.withSubmitUnconfirmed(delivered, unconfirmed) : delivered;
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     return persisted;
@@ -12586,13 +12698,19 @@ export class SessionService {
       }
       let recovered: SubmitAckTimeoutError | null = null;
       // Object, not a `let`: set inside the pane-write callback.
-      const pane: { pastedAt: number | null } = { pastedAt: null };
+      const pane: { typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null } = {
+        typed: null,
+      };
       try {
         await this.sendAgentMessage(readySession, message, {
           interrupt,
           interactive,
-          onPaneWritten: (_ackBaseline, pastedAt) => {
-            pane.pastedAt = pastedAt;
+          onPaneWritten: (ackBaseline, pastedAt) => {
+            pane.typed = {
+              message,
+              typedAt: new Date(pastedAt).toISOString(),
+              ...(ackBaseline ? { ackBaseline } : {}),
+            };
           },
         });
       } catch (error) {
@@ -12604,7 +12722,7 @@ export class SessionService {
       const persisted = await this.commitDeliveredSend(
         sessionId,
         readySession,
-        recovered ? (pane.pastedAt ?? Date.now()) : null,
+        recovered ? pane.typed : null,
       );
       if (recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -12899,15 +13017,7 @@ export class SessionService {
       const startedAt = Date.now();
       const binding = agentWaitsForSubmitAck(session.agent)
         ? await createAgentSubmitAckBinding(session.agent, {
-            worktreePath: session.worktreePath,
-            codexSessionsDir: join(
-              codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
-              "sessions",
-            ),
-            ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-            ...(session.agent === "cursor"
-              ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-              : {}),
+            ...this.submitAckContext(session),
             freshLaunch: false,
           })
         : null;
@@ -13005,15 +13115,9 @@ export class SessionService {
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) &&
       !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
-    const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
     const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
       ? await createAgentSubmitAckBinding(session.agent, {
-          worktreePath: session.worktreePath,
-          codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
-          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-          ...(session.agent === "cursor"
-            ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-            : {}),
+          ...this.submitAckContext(session),
           freshLaunch,
         })
       : null;
@@ -14465,6 +14569,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.submitUnconfirmedAt;
     delete record.queuedMessageTyped;
+    delete record.submitRequeuedMessage;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -15037,11 +15142,13 @@ export class SessionService {
       // id in readClaudeJsonlState's fallback lookup.
       this.claudeJsonlReaders.delete(session.id);
     }
-    // submitUnconfirmedAt dropped: the relaunch replaced the pane the old
-    // prompt was pending in.
+    // The hold and its typed marker dropped: the relaunch replaced the pane
+    // the old prompt was pending in.
     const {
       error: _ignoredError,
       submitUnconfirmedAt: _replacedLaunch,
+      queuedMessageTyped: _replacedTyped,
+      submitRequeuedMessage: _replacedRequeue,
       ...recoveredBase
     } = sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
@@ -15435,6 +15542,8 @@ export class SessionService {
         );
         delete recovered.stopReason;
         delete recovered.submitUnconfirmedAt;
+        delete recovered.queuedMessageTyped;
+        delete recovered.submitRequeuedMessage;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
           AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -15493,6 +15602,8 @@ export class SessionService {
     // The restore relaunched the agent with its own prompt; an old launch's
     // pending marker no longer describes the composer.
     delete restored.submitUnconfirmedAt;
+    delete restored.queuedMessageTyped;
+    delete restored.submitRequeuedMessage;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -16539,11 +16650,20 @@ export class SessionService {
     // The drain above is already on disk, and the typed marker clears here:
     // captureAgentSessionId anchors its own internal write on a fresh
     // readSession and must never observe the pre-drain queue or the marker.
-    const { queuedMessageTyped: typed, ...acked } =
-      readSession(this.config.dataDir, sessionId) ?? session;
-    // Counted as typed, never re-queued (no duplicate): the hold keeps the
-    // next queued message's line clear off a prompt the agent never took.
-    const updated = recovered && typed ? this.withSubmitUnconfirmed(acked, typed.typedAt) : acked;
+    const {
+      queuedMessageTyped: typed,
+      submitRequeuedMessage: requeued,
+      ...acked
+    } = readSession(this.config.dataDir, sessionId) ?? session;
+    // Counted as typed, never re-queued here (no duplicate): the hold keeps
+    // the next queued message's line clear off a prompt the agent never
+    // took, and settles on the agent's ack of it. An acked re-queued text
+    // spends its re-queue marker.
+    const kept =
+      requeued !== undefined && (recovered || requeued !== message)
+        ? { ...acked, submitRequeuedMessage: requeued }
+        : acked;
+    const updated = recovered && typed ? this.withSubmitUnconfirmed(kept, typed) : kept;
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
@@ -16610,9 +16730,12 @@ export class SessionService {
     await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       const typed = session?.queuedMessageTyped;
+      // A marker under a hold is settleSubmitHold's: it waits for the turn to
+      // end, and its re-queue budget survives the restart.
       if (
         !session ||
         !typed ||
+        submitPending(session) ||
         this.queuedDeliveryTyped.has(sessionId) ||
         this.queueDeliveryInFlight.has(sessionId)
       ) {
@@ -16626,14 +16749,7 @@ export class SessionService {
       const binding = typed.ackBaseline
         ? await resumeAgentSubmitAckBinding(
             session.agent,
-            {
-              worktreePath: session.worktreePath,
-              codexSessionsDir: this.codexSessionsDir(session.id),
-              ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-              ...(session.agent === "cursor"
-                ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
-                : {}),
-            },
+            this.submitAckContext(session),
             typed.ackBaseline,
           )
         : null;
@@ -18618,7 +18734,7 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
-    effectiveSession = this.confirmLaunchOnActivity(effectiveSession, agentActivityAt);
+    effectiveSession = await this.settleSubmitHold(effectiveSession, state, agentActivityAt);
 
     return {
       session: effectiveSession,

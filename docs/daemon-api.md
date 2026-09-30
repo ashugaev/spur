@@ -45,7 +45,7 @@
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
 - `POST /sessions/:id/send` — `queue: false` to an agent with no interrupt key (cursor) that is not waiting queues at the head instead, response `queuedAheadReason: "no_interrupt"`; same for queue flush
 - `POST /sessions/:id/answer`
-- `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
+- `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt. A launch hold clears on agent activity after it; a send's hold only on the agent's ack of that text. A turn ending with no ack puts the text back at the queue head once; a second miss releases the hold (`session.submit.released`)
 - `POST /sessions/:id/source-reply`
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
