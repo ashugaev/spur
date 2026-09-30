@@ -837,7 +837,7 @@ describe("startConfiguredTriggers", () => {
     const emit = (
       bus: EventBus,
       signals: ReviewSignal[],
-      overrides: { prUrl?: string; repo?: string } = {},
+      overrides: { prUrl?: string | undefined; repo?: string | undefined } = {},
     ) => {
       readGitHubSourceSnapshotMock.mockReturnValue(storedSnapshot(signals));
       bus.emit({
@@ -1055,13 +1055,24 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
-    it.each(["host", "repo", "same"])(
+    const contextChanges = [
+      "host",
+      "repo",
+      "same",
+      "URL to repo",
+      "repo to URL",
+      "matching URL to repo",
+      "matching repo to URL",
+    ];
+    it.each(contextChanges)(
       "retires absent exhausted accounting only when the %s context changes",
       async (change) => {
         const dataDir = mkdtempSync(join(tmpdir(), "spur-feedback-context-"));
         const autoPing = new AutoPingService(dataDir);
         const released = vi.spyOn(autoPing, "releaseOccurrenceReference");
-        let session = running("interrupt");
+        let session: ReturnType<typeof running> & {
+          pr?: { number: number; repo: string; url: string };
+        } = running("interrupt");
         const get = vi.fn().mockImplementation(async () => session);
         const deliver = vi.fn().mockRejectedValue(new Error("uncertain submit"));
         const { startConfiguredTriggers } = await loadTriggersModule();
@@ -1073,7 +1084,17 @@ describe("startConfiguredTriggers", () => {
           sessionService: { get, deliver } as never,
           logger: { warn: vi.fn() },
         });
-        const old = githubEvent("comment:2");
+        const oldEvent = githubEvent("comment:2");
+        const old = {
+          ...oldEvent,
+          data: {
+            ...oldEvent.data,
+            repo: change.endsWith("URL to repo") ? undefined : oldEvent.data.repo,
+            prUrl: change.endsWith("repo to URL") ? undefined : oldEvent.data.prUrl,
+          },
+        };
+        const replaced = change !== "same" && !change.startsWith("matching");
+        const partialChange = change === "URL to repo" || change === "repo to URL";
         const incoming = githubEvent();
         const { createSendBatchParser } = await import("../../src/send-batches.js");
         const parsed = createSendBatchParser("github", "api", "pr-watch")(incoming.data);
@@ -1109,10 +1130,20 @@ describe("startConfiguredTriggers", () => {
             },
           );
           session = running("stale");
+          if (change === "URL to repo")
+            session.pr = {
+              number: 42,
+              repo: "other/api",
+              url: "https://new.example/other/api/pull/42",
+            };
           refreshSignalsMock.mockImplementation(async (input) => {
-            if (change !== "same") {
-              expect(input.hostname).toBe(change === "host" ? "new.example" : "github.com");
-              expect(input.repo).toBe(change === "repo" ? "other/api" : "acme/api");
+            if (replaced) {
+              expect(input.hostname).toBe(
+                change === "host" || partialChange ? "new.example" : "github.com",
+              );
+              expect(input.repo).toBe(
+                change === "repo" || partialChange ? "other/api" : "acme/api",
+              );
               expect(input.signals.map((signal) => signal.key)).toEqual(["comment:1"]);
               expect(
                 pending()?.retryAccounting?.find((entry) => entry.itemKey === item.itemKey)
@@ -1126,15 +1157,22 @@ describe("startConfiguredTriggers", () => {
             }));
           });
           emit(bus, incoming.data.signals, {
-            prUrl:
-              change === "host"
-                ? "https://new.example/acme/api/pull/42"
-                : change === "repo"
-                  ? "https://github.com/other/api/pull/42"
-                  : incoming.data.prUrl,
-            repo: change === "repo" ? "other/api" : "acme/api",
+            prUrl: change.endsWith("URL to repo")
+              ? undefined
+              : change === "repo to URL"
+                ? "https://new.example/other/api/pull/42"
+                : change === "host"
+                  ? "https://new.example/acme/api/pull/42"
+                  : change === "repo"
+                    ? "https://github.com/other/api/pull/42"
+                    : incoming.data.prUrl,
+            repo: change.endsWith("repo to URL")
+              ? undefined
+              : change === "repo" || change === "URL to repo"
+                ? "other/api"
+                : "acme/api",
           });
-          if (change === "same")
+          if (!replaced)
             readGitHubSourceSnapshotMock.mockReturnValue(
               storedSnapshot([...old.data.signals, ...incoming.data.signals]),
             );
@@ -1147,7 +1185,9 @@ describe("startConfiguredTriggers", () => {
                 entry.itemKey.startsWith('["gitlab",42,'),
             ),
           ).toHaveLength(2);
-          if (change === "same") {
+          if (!replaced) {
+            expect(updated?.batch.autoPing?.items["comment:2"]).toBeDefined();
+            expect(released).not.toHaveBeenCalledWith(expect.any(String), old.occurrenceId);
             expect(
               updated?.retryAccounting?.find((entry) => entry.itemKey === item.itemKey)
                 ?.deliveryAttempts,

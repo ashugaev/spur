@@ -127,6 +127,78 @@ describe("live submission identity", () => {
     expect(queue.serialize()).toMatchObject({ prUrl: url, repo: "acme/api" });
   });
 
+  it.each(["URL to repo", "repo to URL"])(
+    "replaces conflicting partial identity: %s",
+    async (shape) => {
+      ghMock.mockReset().mockResolvedValue(JSON.stringify({ body: "current new context" }));
+      const queue = requireBatch(
+        parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "acme/api" })),
+        "queue",
+      );
+      queue.attachAutoPing({
+        occurrenceId: "old",
+        routeFingerprint: "route",
+        destination: { kind: "session", sessionId: "api-1" },
+        createGrant: () => "old-handle",
+      });
+      const newUrl = "https://new.example/other/api/pull/42";
+      const incoming = requireBatch(
+        parse(
+          githubEventData({
+            ...(shape === "URL to repo" ? { repo: "other/api" } : { prUrl: newUrl }),
+            signals: [{ key: "comment:2", kind: "comment", text: "new context" }],
+          }),
+        ),
+        "incoming",
+      );
+      expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
+      expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
+      expect(queue.serialize().autoPing?.items["comment:1"]).toBeUndefined();
+      if (shape === "URL to repo") {
+        expect(queue.serialize()).not.toHaveProperty("prUrl");
+        const unresolved = requireBatch(parse(queue.serialize()), "unresolved");
+        expect(await unresolved.refresh?.("/tmp/daemon-data")).toMatchObject([
+          { status: "failed" },
+        ]);
+        expect(ghMock).not.toHaveBeenCalled();
+      }
+      expect(
+        await queue.refresh?.("/tmp/daemon-data", { number: 42, repo: "other/api", url: newUrl }),
+      ).toMatchObject([{ status: "live" }]);
+      expect(queue.serialize()).toMatchObject({ repo: "other/api", prUrl: newUrl });
+      expect(ghMock).toHaveBeenCalledWith(
+        "/tmp/daemon-data",
+        "api",
+        "repos/other/api/issues/comments/2",
+        "--hostname",
+        "new.example",
+        "--cache",
+        "0s",
+      );
+    },
+  );
+
+  it.each(["URL to repo", "repo to URL"])("preserves compatible partial identity: %s", (shape) => {
+    const queue = requireBatch(
+      parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "ACME/api" })),
+      "queue",
+    );
+    const original = queue.retryItems();
+    const incoming = requireBatch(
+      parse(
+        githubEventData({
+          ...(shape === "URL to repo" ? { repo: "ACME/api" } : { prUrl: url }),
+          signals: [{ key: "comment:2", kind: "comment", text: "compatible" }],
+        }),
+      ),
+      "incoming",
+    );
+    expect(queue.merge(incoming)).toBeUndefined();
+    expect(queue.serialize()).toMatchObject({ prUrl: url });
+    expect(queue.retryItems().slice(0, 1)).toEqual(original);
+    expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:1", "comment:2"]);
+  });
+
   it.each(["missing", "number", "repo", "credentials", "malformed"])(
     "fails %s identity with zero requests",
     async (problem) => {

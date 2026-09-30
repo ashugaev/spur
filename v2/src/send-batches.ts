@@ -208,14 +208,20 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
 
   merge(incoming: SendBatch): { retiredItemPrefix: string } | undefined {
     const next = incoming as ReviewSendBatch;
+    const currentIdentity = this.knownIdentity();
+    const nextIdentity = next.knownIdentity();
     const changed =
       this.prNumber !== next.prNumber ||
-      (this.repo !== undefined &&
-        next.repo !== undefined &&
-        this.repo.toLowerCase() !== next.repo.toLowerCase()) ||
+      (currentIdentity.repo !== undefined &&
+        nextIdentity.repo !== undefined &&
+        currentIdentity.repo !== nextIdentity.repo) ||
+      (currentIdentity.hostname !== undefined &&
+        nextIdentity.hostname !== undefined &&
+        currentIdentity.hostname !== nextIdentity.hostname) ||
       (this.prUrl !== undefined &&
         next.prUrl !== undefined &&
-        this.identityKey() !== next.identityKey());
+        (!currentIdentity.hostname || !nextIdentity.hostname) &&
+        this.prUrl !== next.prUrl);
     const retiredItemPrefix = changed
       ? JSON.stringify([this.providerId, this.prNumber]).slice(0, -1) + ","
       : undefined;
@@ -236,14 +242,15 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     if (retiredItemPrefix) return { retiredItemPrefix };
   }
 
-  private identityKey(): string {
-    if (!this.prUrl) return "";
-    try {
-      const identity = githubFeedbackIdentity(this.prUrl, this.prNumber, this.repo);
-      return JSON.stringify([identity.hostname, identity.repo, this.prNumber]);
-    } catch {
-      return this.prUrl;
+  private knownIdentity(): { hostname?: string; repo?: string } {
+    if (this.prUrl) {
+      try {
+        return githubFeedbackIdentity(this.prUrl, this.prNumber, this.repo);
+      } catch {
+        // Invalid URLs remain queued for fail-closed resolution, not host inference.
+      }
     }
+    return this.repo === undefined ? {} : { repo: this.repo.toLowerCase() };
   }
 
   prune(dataDir: string): void {
