@@ -2970,8 +2970,8 @@ export class SessionService {
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
   private readonly telegramTypingInFlight = new Set<string>();
-  // Keyed by session id: no typing call before this time (Telegram 429 retry_after).
-  private readonly telegramTypingPausedUntil = new Map<string, number>();
+  // Keyed by chat id: no typing call before this time (Telegram 429 retry_after).
+  private readonly telegramTypingPausedUntil = new Map<number, number>();
   private readonly todoNudgeDisabled = new Map<
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
@@ -5755,8 +5755,8 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
-    for (const sessionId of this.telegramTypingPausedUntil.keys()) {
-      if (!liveIds.has(sessionId)) this.telegramTypingPausedUntil.delete(sessionId);
+    for (const [chatId, pausedUntil] of this.telegramTypingPausedUntil) {
+      if (pausedUntil <= Date.now()) this.telegramTypingPausedUntil.delete(chatId);
     }
     for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
       if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
@@ -6939,14 +6939,11 @@ export class SessionService {
    */
   private maybeSendTelegramTyping(sessionId: string): void {
     if (this.telegramTypingInFlight.has(sessionId)) return;
-    const pausedUntil = this.telegramTypingPausedUntil.get(sessionId);
-    if (pausedUntil !== undefined) {
-      if (Date.now() < pausedUntil) return;
-      this.telegramTypingPausedUntil.delete(sessionId);
-    }
     const resolved = this.resolveTelegramNotice(sessionId);
     if (!resolved) return;
     const { target, source } = resolved;
+    // Telegram rate-limits per chat, so a 429 pauses every session in that chat.
+    if (Date.now() < (this.telegramTypingPausedUntil.get(target.chatId) ?? 0)) return;
     if (target.lastInboundAt === undefined) return;
     if (target.lastReplyAt !== undefined && target.lastReplyAt >= target.lastInboundAt) return;
     if (Date.now() - Date.parse(target.lastInboundAt) > TELEGRAM_TYPING_MAX_MS) return;
@@ -6957,11 +6954,8 @@ export class SessionService {
     void sendTelegramChatAction(source, target.chatId, target.messageThreadId)
       .then(({ retryAfterMs }) => {
         if (retryAfterMs !== undefined) {
-          this.telegramTypingPausedUntil.set(sessionId, Date.now() + retryAfterMs);
+          this.telegramTypingPausedUntil.set(target.chatId, Date.now() + retryAfterMs);
         }
-      })
-      .catch(() => {
-        // sendTelegramChatAction never rejects; nothing to recover.
       })
       .finally(() => {
         this.telegramTypingInFlight.delete(sessionId);

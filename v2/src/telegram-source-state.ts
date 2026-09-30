@@ -312,7 +312,7 @@ export async function sendTelegramReply(
   const htmlChunks = renderTelegramHtml(rawChunks);
   const chunks: OutgoingChunk[] = rawChunks.map((plain, index) => ({
     plain,
-    html: htmlChunks[index] ?? escapeTelegramHtml(plain),
+    html: htmlChunks[index] as string,
   }));
   // A pane tail is shown verbatim in <pre>, never parsed as markdown.
   const tail = options.preformatted;

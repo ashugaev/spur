@@ -19128,7 +19128,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  function seedCodexNudgeSession(): void {
+  function seedCodexNudgeSession() {
     const codexSessions = createSessionStore();
     codexSessions.set("api-1", {
       id: "api-1",
@@ -19145,6 +19145,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     captureTmuxPaneMock.mockResolvedValue("Waiting on your next instruction.");
+    return codexSessions;
   }
 
   // Backs the reply-target mocks with one stored record, so a write is visible to the next read.
@@ -19304,7 +19305,7 @@ describe("SessionService", () => {
       const { config, telegramSource } = telegramProjectConfig();
       loadConfigMock.mockReturnValue(config);
       readTelegramReplyTargetMock.mockReturnValue(target);
-      seedCodexNudgeSession();
+      const store = seedCodexNudgeSession();
       readAgentHookStateMock.mockReturnValue({
         state: hookState,
         updatedAt: "2026-03-18T10:04:59.000Z",
@@ -19313,7 +19314,7 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       await vi.advanceTimersByTimeAsync(0);
       sendTelegramChatActionMock.mockClear();
-      return { service, telegramSource };
+      return { service, telegramSource, store };
     }
 
     it("sends typing each sweep while working on an unanswered inbound", async () => {
@@ -19373,6 +19374,26 @@ describe("SessionService", () => {
       await advanceSeconds(5);
 
       expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    it("pauses typing for every session in the rate-limited chat", async () => {
+      const { service, store } = await startWorking(inbound);
+      const first = store.get("api-1");
+      if (!first) throw new Error("missing seeded session");
+      store.set("api-2", { ...first, id: "api-2", tmuxSession: "api-2", branch: "api-2" });
+      readTelegramReplyTargetMock.mockImplementation((_dir: string, id: string) => ({
+        ...inbound,
+        sessionId: id,
+        messageThreadId: id === "api-1" ? 22 : 23,
+      }));
+      sendTelegramChatActionMock.mockResolvedValue({ retryAfterMs: 30_000 });
+
+      await advanceSeconds(5);
+      await advanceSeconds(5);
+
+      // One 429 for the chat silences the other session's thread too.
+      expect(sendTelegramChatActionMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
   });
