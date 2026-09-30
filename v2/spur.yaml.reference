@@ -80,6 +80,7 @@ projects:
       tg:
         type: telegram
         token: "example-telegram-bot-token-lowercase-only"
+        # Integers, or a "${VAR}" string holding a comma-separated list.
         allowedUsers:
           - 12345678
         allowedChats:

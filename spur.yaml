@@ -63,7 +63,8 @@ projects:
         type: telegram
         token: ${TELEGRAM_BOT_TOKEN}
         chatId: ${TELEGRAM_CHAT_ID}
-        allowedUsers: [444269670, 6211305103]
+        allowedUsers: ${TELEGRAM_ALLOWED_USERS}
+        allowedChats: ${TELEGRAM_ALLOWED_CHATS}
         autoSpawn:
           agent: opencode
           model: google/gemini-3.8-flash
