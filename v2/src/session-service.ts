@@ -5626,7 +5626,11 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
             await this.maybeNudgeTodo(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
@@ -6795,6 +6799,7 @@ export class SessionService {
 
   private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
+      this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
       session.pipeline?.status === "running"
@@ -12526,6 +12531,9 @@ export class SessionService {
               "sessions",
             ),
             ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            ...(session.agent === "cursor"
+              ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+              : {}),
             freshLaunch: false,
           })
         : null;
@@ -12626,6 +12634,9 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          ...(session.agent === "cursor"
+            ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+            : {}),
           freshLaunch,
         })
       : null;

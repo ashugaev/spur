@@ -54,8 +54,11 @@ interface CodexSessionLine {
     id?: string;
     phase?: string;
     role?: string;
+    source?: unknown;
+    thread_source?: string;
     type?: string;
   };
+  source?: unknown;
   threadId?: string;
   type?: string;
 }
@@ -91,6 +94,16 @@ function sessionMetaCwd(line: CodexSessionLine): string | null {
     return line.payload.cwd;
   }
   return null;
+}
+
+function isExplicitSubagentSessionMeta(line: CodexSessionLine): boolean {
+  if (line.type !== "session_meta") {
+    return false;
+  }
+  const source = line.payload?.source ?? line.source;
+  return (
+    line.payload?.thread_source === "subagent" || (isRecord(source) && isRecord(source["subagent"]))
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -262,6 +275,9 @@ async function readSessionMeta(
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        if (isExplicitSubagentSessionMeta(parsed)) {
+          continue;
+        }
         const cwd = sessionMetaCwd(parsed);
         const resumeId = sessionResumeId(parsed);
         if (resumeId && !threadId) {
