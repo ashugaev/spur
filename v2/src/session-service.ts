@@ -1702,11 +1702,11 @@ function telegramAgentInstructions(project: ProjectConfig | undefined): string |
   if (!delivers) return undefined;
   return [
     "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
-    '- Send them a message: `spur source reply "<message>"`.',
-    '- Offer choices: `spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
+    '- Send them a message: `"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"`.',
+    '- Offer choices: `"$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
     "- A click and a typed reply both arrive as an ordinary user message in this session — a click carries the button value.",
     "- Ask this way when you need a decision from the user; do not wait silently.",
-    "- When the user asks to be notified or sent something in Telegram, send it with `spur source reply`.",
+    '- When the user asks to be notified or sent something in Telegram, send it with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`.',
   ].join("\n");
 }
 

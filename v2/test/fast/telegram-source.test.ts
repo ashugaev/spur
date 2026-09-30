@@ -263,8 +263,8 @@ describe("wrapTelegramSpawnPrompt", () => {
       "",
       "",
       "Source: telegram. The requester only sees messages you send with:",
-      'spur source reply "<message>"',
-      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: spur source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options.',
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options.',
       "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
     ].join("\n");
     expect(wrapTelegramSpawnPrompt("fix the sidecar")).toBe(`fix the sidecar${suffix}`);
@@ -1038,7 +1038,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("fix the sidecar"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
@@ -1151,7 +1153,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("fix the sidecar"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(reply).toHaveBeenCalledWith("Spawning codex agent...");
     // The status message spawned via `reply` gets edited in place through the
     // callback ctx's `api`, not re-sent as a second `reply` — proves the
@@ -1221,7 +1225,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("review the branch"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning claude agent...");
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
   });
@@ -2287,7 +2293,9 @@ describe("telegramSourceModule", () => {
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("help me out"),
     });
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound: shp-1.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
