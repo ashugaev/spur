@@ -1145,6 +1145,15 @@ function unconfirmedSubmitHolds(message: string): boolean {
   return !message.trimStart().startsWith("/");
 }
 
+// The agent acked the text a failed-prompt notice names: the notice is stale.
+function withoutFailedSubmit(record: SessionRecord, ackedMessage: string | null): SessionRecord {
+  if (ackedMessage === null || record.submitFailedMessage?.message !== ackedMessage) {
+    return record;
+  }
+  const { submitFailedMessage: _acked, ...rest } = record;
+  return rest;
+}
+
 function submitPending(session: Pick<SessionRecord, "submitUnconfirmedAt">): boolean {
   return session.submitUnconfirmedAt !== undefined;
 }
@@ -9931,13 +9940,16 @@ export class SessionService {
       submitRequeuedMessage: requeued,
       ...base
     } = latest;
-    const confirmed: SessionRecord = {
-      ...base,
-      ...(evidence === "activity" && typed ? { queuedMessageTyped: typed } : {}),
-      ...(requeued !== undefined && requeued !== typed?.message
-        ? { submitRequeuedMessage: requeued }
-        : {}),
-    };
+    const confirmed = withoutFailedSubmit(
+      {
+        ...base,
+        ...(evidence === "activity" && typed ? { queuedMessageTyped: typed } : {}),
+        ...(requeued !== undefined && requeued !== typed?.message
+          ? { submitRequeuedMessage: requeued }
+          : {}),
+      },
+      evidence === "ack" && typed ? typed.message : null,
+    );
     writeSession(this.config.dataDir, confirmed);
     this.logEvent("session.submit.confirmed", {
       level: "info",
@@ -12659,15 +12671,19 @@ export class SessionService {
     sessionId: string,
     readySession: SessionRecord,
     unconfirmed: NonNullable<SessionRecord["queuedMessageTyped"]> | null,
+    ackedMessage: string | null,
   ): Promise<SessionRecord> {
     this.stateCache.delete(sessionId);
     const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
     const delivered = withQueuedMessages(
-      {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      },
+      withoutFailedSubmit(
+        {
+          ...readySession,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        ackedMessage,
+      ),
       queuedMessages(latest),
       latest.queuedMessages?.awaitingPrompt ?? false,
     );
@@ -12782,6 +12798,7 @@ export class SessionService {
         sessionId,
         readySession,
         recovered && unconfirmedSubmitHolds(message) ? pane.typed : null,
+        recovered ? null : message,
       );
       if (recovered) {
         this.logEvent("session.message.delivery_recovered", {
@@ -15224,6 +15241,7 @@ export class SessionService {
       submitUnconfirmedAt: _replacedLaunch,
       queuedMessageTyped: _replacedTyped,
       submitRequeuedMessage: _replacedRequeue,
+      submitFailedMessage: _replacedFailure,
       ...recoveredBase
     } = sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
@@ -15619,6 +15637,7 @@ export class SessionService {
         delete recovered.submitUnconfirmedAt;
         delete recovered.queuedMessageTyped;
         delete recovered.submitRequeuedMessage;
+        delete recovered.submitFailedMessage;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
           AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -15679,6 +15698,7 @@ export class SessionService {
     delete restored.submitUnconfirmedAt;
     delete restored.queuedMessageTyped;
     delete restored.submitRequeuedMessage;
+    delete restored.submitFailedMessage;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -16734,10 +16754,12 @@ export class SessionService {
     // the next queued message's line clear off a prompt the agent never
     // took, and settles on the agent's ack of it. An acked re-queued text
     // spends its re-queue marker.
-    const kept =
+    const kept = withoutFailedSubmit(
       requeued !== undefined && (recovered || requeued !== message)
         ? { ...acked, submitRequeuedMessage: requeued }
-        : acked;
+        : acked,
+      recovered ? null : message,
+    );
     const updated =
       recovered && typed && unconfirmedSubmitHolds(message)
         ? this.withSubmitUnconfirmed(kept, typed)

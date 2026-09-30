@@ -48241,7 +48241,12 @@ describe("SessionService", () => {
       sessions.set("api-1", runningSession({ submitUnconfirmedAt: PENDING_LAUNCH_AT }));
       sessions.set(
         "api-2",
-        runningSession({ id: "api-2", status: "stopped", submitUnconfirmedAt: PENDING_LAUNCH_AT }),
+        runningSession({
+          id: "api-2",
+          status: "stopped",
+          submitUnconfirmedAt: PENDING_LAUNCH_AT,
+          submitFailedMessage: { message: "lost", at: PENDING_LAUNCH_AT },
+        }),
       );
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
@@ -48255,6 +48260,124 @@ describe("SessionService", () => {
       await service.restore("api-2");
       expect(sessions.get("api-2")?.status).toBe("running");
       expect(sessions.get("api-2")?.submitUnconfirmedAt).toBeUndefined();
+      // The relaunched agent never had that composer: the notice goes too.
+      expect(sessions.get("api-2")).not.toHaveProperty("submitFailedMessage");
+      service.dispose();
+    });
+
+    it("clears a failed prompt once the agent acks that text, and keeps it for any other", async () => {
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 60_000 });
+      getTmuxSessionActivityMock.mockResolvedValue(new Date(Date.now() - 60_000));
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          queuedMessages: { messages: ["other"], awaitingPrompt: false },
+          submitFailedMessage: { message: "lost", at: PENDING_LAUNCH_AT },
+        }),
+      );
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+      createAgentSubmitAckBindingMock.mockImplementation(async () => ({ scan: vi.fn() }));
+
+      // Queued delivery of another text: the notice stays.
+      expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
+      expect(sessions.get("api-1")?.submitFailedMessage?.message).toBe("lost");
+      // Send now of the same text, acked: the notice clears.
+      await service.send("api-1", { message: "lost", queue: false });
+      expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+
+      // A queued delivery of the same text, acked, clears it too; the agent
+      // finished the Send now turn first.
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() + 1_000 });
+      vi.setSystemTime(new Date(Date.now() + 5_000));
+      sessions.set(
+        "api-1",
+        runningSession({
+          queuedMessages: { messages: ["lost"], awaitingPrompt: false },
+          submitFailedMessage: { message: "lost", at: PENDING_LAUNCH_AT },
+        }),
+      );
+      expect(await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1")).toBe(true);
+      expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+      service.dispose();
+    });
+
+    it("drops a failed prompt on a restore whose own prompt ack timed out on a live agent", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-2",
+        runningSession({
+          id: "api-2",
+          status: "stopped",
+          submitFailedMessage: { message: "lost", at: PENDING_LAUNCH_AT },
+        }),
+      );
+      const module = await loadSessionServiceModule();
+      const service = new module.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const send = vi.spyOn(sessionServiceInternals(service), "sendAgentMessage").mockRejectedValue(
+        new module.SubmitAckTimeoutError({
+          sessionId: "api-2",
+          agent: "claude",
+          lastScannedFile: null,
+          elapsedMs: 20_000,
+          processAlive: true,
+        }),
+      );
+
+      tmuxSessionExistsMock.mockResolvedValueOnce(false);
+      await service.restore("api-2");
+      expect(send).toHaveBeenCalled();
+      expect(sessions.get("api-2")?.status).toBe("running");
+      expect(sessions.get("api-2")).not.toHaveProperty("submitFailedMessage");
+      service.dispose();
+    });
+
+    it("drops a failed prompt when a send relaunches the stopped agent in place", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          agentSessionId: "session-uuid",
+          submitFailedMessage: { message: "lost", at: PENDING_LAUNCH_AT },
+        }),
+      );
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock.mockImplementation(async () => {
+        relaunched = true;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(async () => true);
+      const service = await createDisposedSessionService();
+
+      await service.send("api-1", { message: "after relaunch", queue: false });
+      expect(createTmuxSessionMock).toHaveBeenCalled();
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
+    });
+
+    it("clears a failed prompt when the settle finds the agent's ack of that text", async () => {
+      const sessions = createSessionStore();
+      seedSendHold(sessions, "claude", {
+        submitFailedMessage: { message: "typed", at: PENDING_LAUNCH_AT },
+      });
+      mockAgentActivity("claude", afterHold, "working");
+      mockHoldAckScan(true);
+      const service = await deferredService();
+
+      await service.get("api-1");
+      expect(sessions.get("api-1")).not.toHaveProperty("submitFailedMessage");
       service.dispose();
     });
 

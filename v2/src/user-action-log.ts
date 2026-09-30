@@ -266,6 +266,16 @@ function decodeAction(method: string, path: string, body: unknown): DecodedActio
     if (launchSubmit?.[1]) {
       return { action: "session.launch_submit", sessionId: launchSubmit[1] };
     }
+    const submitFailed = path.match(/^\/sessions\/([^/]+)\/submit-failed\/(retry|dismiss)$/);
+    if (submitFailed?.[1]) {
+      return {
+        action:
+          submitFailed[2] === "retry"
+            ? "session.submit_failed_retry"
+            : "session.submit_failed_dismiss",
+        sessionId: submitFailed[1],
+      };
+    }
     const sourceReply = path.match(/^\/sessions\/([^/]+)\/source-reply$/);
     if (sourceReply?.[1]) return { action: "session.source_reply", sessionId: sourceReply[1] };
     const pause = path.match(/^\/sessions\/([^/]+)\/pause$/);
