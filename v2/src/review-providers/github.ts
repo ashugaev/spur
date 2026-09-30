@@ -57,12 +57,14 @@ const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
 const GITHUB_REVIEW_BATCH_MAX_TARGETS = 50;
 const GITHUB_GRAPHQL_NODE_LIMIT = 500_000;
 const GITHUB_REVIEW_THREAD_COUNT = 100;
+const GITHUB_REVIEW_REQUEST_COUNT = 20;
 const GITHUB_CONNECTION_PAGE_SIZE = 100;
 const GITHUB_BOUND_PR_NODE_BUDGET =
   1 +
   GITHUB_CONNECTION_PAGE_SIZE +
   GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
-  GITHUB_CONNECTION_PAGE_SIZE * 2;
+  GITHUB_CONNECTION_PAGE_SIZE * 2 +
+  GITHUB_REVIEW_REQUEST_COUNT;
 const GITHUB_UNBOUND_PR_CANDIDATES = 5;
 const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
   GITHUB_UNBOUND_PR_CANDIDATES * (1 + GITHUB_BOUND_PR_NODE_BUDGET);
@@ -426,7 +428,8 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergea
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
-  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
+  reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
   const nodesPerTarget = bound ? GITHUB_BOUND_PR_NODE_BUDGET : GITHUB_UNBOUND_TARGET_NODE_BUDGET;
@@ -457,7 +460,7 @@ function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
     }
   }
   return {
-    query: `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} r:repository(owner:$owner,name:$name){${fields.join(" ")}}}`,
+    query: `query(${declarations.join(",")}){viewer{login} rateLimit{cost remaining resetAt} r:repository(owner:$owner,name:$name){${fields.join(" ")}}}`,
     aliases,
   };
 }
@@ -523,6 +526,20 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
     const author = isRecord(raw.author) ? readString(raw.author.login) : null;
     return [{ id, body, user: { login: author } }];
   });
+}
+
+// Logins with a PENDING review request on the PR, lowercased for comparison.
+// GitHub clears a reviewer's request when that reviewer submits a review and
+// re-adds it on a re-request, so presence in this set is the whole signal: the
+// snapshot diff turns each new appearance into one emit.
+function requestedReviewerLoginsFromPrNode(value: Record<string, unknown>): Set<string> {
+  const logins = new Set<string>();
+  for (const raw of connectionNodes(value.reviewRequests)) {
+    if (!isRecord(raw) || !isRecord(raw.requestedReviewer)) continue;
+    const login = readString(raw.requestedReviewer.login);
+    if (login) logins.add(login.toLowerCase());
+  }
+  return logins;
 }
 
 function summaryAndNode(
@@ -738,6 +755,7 @@ function collectSignalsFromNode(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  viewerLogin: string | null,
 ): GitHubCollectedSignals {
   const checks = checksFromPrNode(node);
   const reviewSignals = reviewSignalsFromComments(
@@ -756,6 +774,21 @@ function collectSignalsFromNode(
       ? null
       : summarizeFailingCi(checks);
   const snapshot = new Map<string, ReviewSignal>();
+  // Terminal PRs are excluded for the same reason approvals are: closing a PR
+  // does not clear its pending review requests, and a review on a dead PR is
+  // not work.
+  if (
+    viewerLogin &&
+    pr.state !== "MERGED" &&
+    pr.state !== "CLOSED" &&
+    requestedReviewerLoginsFromPrNode(node).has(viewerLogin.toLowerCase())
+  ) {
+    snapshot.set("review_requested", {
+      key: "review_requested",
+      kind: "review_requested",
+      text: `Review requested from ${viewerLogin} on this PR.`,
+    });
+  }
   if (pr.reviewDecision === "changes_requested") {
     snapshot.set("changes_requested", {
       key: "changes_requested",
@@ -1458,6 +1491,11 @@ async function runReviewRepoBatch(
     );
   }
   const repository = data.r;
+  // Root `viewer` rides in the same query as the PR aliases, so identifying the
+  // account this daemon authenticates as costs no extra request. Null (an old
+  // cached response, a token without the field) simply yields no
+  // review_requested signal.
+  const viewerLogin = isRecord(data.viewer) ? readString(data.viewer.login) : null;
   const invalidAliases = new Set(
     aliases
       .filter(
@@ -1582,6 +1620,7 @@ async function runReviewRepoBatch(
           dataDir,
           projectId,
           sourceId,
+          viewerLogin,
         ),
       });
     }

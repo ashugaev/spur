@@ -48,6 +48,7 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
   number: number;
   repo: string;
@@ -127,6 +128,7 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
+  titleSource?: SessionSlotTitleSource;
   links: SessionLink[];
   tags?: string[];
 }
@@ -155,6 +157,14 @@ export const REVIEW_SIGNAL_KINDS = [
   "merge_conflict",
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
+
+// GitHub-only signal kinds that report an occurrence, not a lifecycle state.
+// They are exempt from the lifecycle filter a session's first poll applies, so
+// an occurrence already pending when the session is first baselined still
+// emits. A poll with no prior snapshot at all emits nothing unless the source
+// asks for it (`runOnStart`), same as every other kind.
+export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
+export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
 
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
@@ -480,14 +490,14 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
 }
 
 export type AutoPingScope = "event" | "thread" | "subscription";
 
-export type AutoPingDestination = { kind: "session"; sessionId: string } | { kind: "trigger" };
+export type AutoPingDestination = { kind: "session"; sessionId: string };
 
 export type AutoPingThreadTarget =
   | { kind: "github-review-thread"; threadId: string }
@@ -506,7 +516,7 @@ export interface AutoPingRouteDescriptor {
   sourceId: string;
   sourceType: SourceType;
   eventName: string;
-  actionKind: "send" | "spawn";
+  actionKind: "send";
   destination: AutoPingDestination;
   spawnDeskGroup: boolean;
 }
@@ -1474,10 +1484,22 @@ export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
   setTitleIfAbsent?: boolean;
+  source?: SessionSlotTitleSource;
   links?: SessionLink[];
   unlinkLabels?: string[];
   tags?: string[];
   untags?: string[];
+}
+
+export type SessionSlotTitleResult = "updated" | "cleared" | "unchanged" | "blocked";
+
+export interface SessionSlotsUpdateResult {
+  titleResult: SessionSlotTitleResult;
+  message?: string;
+}
+
+export interface UpdateSessionSlotsResponse extends SessionView {
+  slotUpdate: SessionSlotsUpdateResult;
 }
 
 export interface ProjectListEntry {

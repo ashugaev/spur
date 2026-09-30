@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_PR_OCCURRENCE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -637,6 +638,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -809,7 +811,7 @@ function parseBacklog(
 
   // `spawn` (used by some live configs to document Take-spawn prompts) is
   // parsed and ignored here — no code path consumes it. See
-  // docs/configuration.md's backlog section.
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,

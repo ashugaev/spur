@@ -1,6 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession } from "./fixtures.js";
+import { test, expect, type Page, makeWorkingSession } from "./fixtures.js";
 
 const ARTIFACTS_DIR = process.env.SPUR_SESSION_ARTIFACTS_DIR ?? "screenshots";
 

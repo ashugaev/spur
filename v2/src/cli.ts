@@ -170,6 +170,7 @@ import {
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
@@ -749,11 +750,12 @@ function resolveAutoPingUnsubscribe(args: {
 }
 
 function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
-  const destination =
-    record.destination.kind === "session" ? record.destination.sessionId : record.destination.kind;
-  const parts = [record.suppressionId, record.scope, destination, record.createdAt].filter(
-    (part): part is string => typeof part === "string" && part.length > 0,
-  );
+  const parts = [
+    record.suppressionId,
+    record.scope,
+    record.destination.sessionId,
+    record.createdAt,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0);
   return parts.join("\t");
 }
 
@@ -1316,7 +1318,7 @@ function renderSidecarStopMessage(name: string, session: SidecarStopView): strin
   if (sidecarStop.outcome === "partial") {
     // ND-2: unverifiedPorts has two distinct causes (a probe that could not
     // run, or a port excluded as ambiguous against a non-terminal sibling —
-    // see docs/daemon-api.md's sidecar-stop route entry) — this message
+    // see the sidecars/:name/stop route handler in server.ts) — this message
     // names neither, rather than misattributing an ambiguous-ownership
     // exclusion to a missing OS tool.
     const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
@@ -1611,6 +1613,21 @@ function parseSlotLink(value: string): SessionLink {
     label: value.slice(0, index),
     url: value.slice(index + 1),
   };
+}
+
+// Guards against an older daemon replying with a plain SessionView (no
+// slotUpdate) despite the compile-time UpdateSessionSlotsResponse type —
+// this narrows the actual runtime value instead of trusting the cast.
+function slotUpdateMessage(session: unknown): string | undefined {
+  if (!session || typeof session !== "object" || !("slotUpdate" in session)) {
+    return undefined;
+  }
+  const slotUpdate = (session as { slotUpdate?: unknown }).slotUpdate;
+  if (!slotUpdate || typeof slotUpdate !== "object" || !("message" in slotUpdate)) {
+    return undefined;
+  }
+  const message = (slotUpdate as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
 }
 
 function currentSessionId(): string {
@@ -4394,8 +4411,13 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
-        success: (session) => `Updated slots for ${session.id}.`,
+          postJson<UpdateSessionSlotsResponse>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/slots`,
+            payload,
+            configPath,
+          ),
+        success: (session) => slotUpdateMessage(session) ?? `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });

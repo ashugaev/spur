@@ -122,6 +122,8 @@ export interface AgentSubmitAckContext {
   agentSessionId?: string;
   /** Send goes to an agent that just launched and has no transcript yet. */
   freshLaunch?: boolean;
+  /** Session-private cursor config dir, used to re-resolve a rotated chat id. */
+  cursorConfigDir?: string;
 }
 
 export interface SubmitAckScanResult {
@@ -567,6 +569,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
+            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
@@ -625,14 +628,8 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(
-  agent: AgentName,
-  prompt: string,
-  options?: AgentPlanOptions,
-  deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-) {
-  const plan = agentAdapter(agent).buildLaunchPlan(prompt, options);
-  return deferredSensitiveInitialMessage ? { ...plan, deferredSensitiveInitialMessage } : plan;
+export function buildAgentLaunchPlan(agent: AgentName, prompt: string, options?: AgentPlanOptions) {
+  return agentAdapter(agent).buildLaunchPlan(prompt, options);
 }
 
 export async function buildAgentRestorePlan(

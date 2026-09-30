@@ -2666,6 +2666,95 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {
+    // Regression: a no-from poll in flight when the user scrolls to the top
+    // used to win the race and overwrite `conversation`, which cleared the
+    // older-page spinner while the older page was still loading.
+    let tailCalls = 0;
+    let resolveHeldTail: ((value: Response) => void) | undefined;
+    const heldTail = new Promise<Response>((resolve) => {
+      resolveHeldTail = resolve;
+    });
+    const fetchedUrls: string[] = [];
+    let resolveOlderPage: ((value: Response) => void) | undefined;
+    const olderPagePromise = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") {
+        return olderPagePromise;
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        tailCalls += 1;
+        // Hold every tail poll after the first, so one is still in flight
+        // when the scroll fires.
+        if (tailCalls >= 2) return heldTail;
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    // Let the poll issue a second tail request, which the mock holds open.
+    await waitFor(() => expect(tailCalls).toBeGreaterThanOrEqual(2), { timeout: 6_000 });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    // The superseded tail poll lands now. Its payload must be discarded.
+    resolveHeldTail?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+    // Let that response commit before asserting. waitFor would be wrong here:
+    // the row is still present on its first poll and only disappears a tick
+    // later, so waitFor passes even when the payload was not discarded.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+    resolveOlderPage?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    });
+  });
+
   it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
     const fetchedUrls: string[] = [];
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {

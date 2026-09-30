@@ -275,11 +275,13 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -311,7 +313,6 @@ import {
 import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
-  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -468,6 +469,7 @@ import {
   type TagDefinition,
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type TodoActor,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
@@ -4093,7 +4095,12 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
+        if (
+          scheduledWake &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
+          Date.parse(scheduledWake.dueAt) <= now
+        ) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -4216,7 +4223,8 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
-          !this.memoryHold.engaged &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -4546,7 +4554,8 @@ export class SessionService {
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
-          this.memoryHold.engaged ||
+          (this.memoryHold.engaged &&
+            !(this.isLiveSessionRecord(session) && !isStaleParked(session))) ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -5535,7 +5544,11 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
             await this.maybeNudgeTodo(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
@@ -6704,6 +6717,7 @@ export class SessionService {
 
   private async maybeNudgeTodoLocked(session: SessionRecord): Promise<void> {
     if (
+      this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
       session.pipeline?.status === "running"
@@ -6864,7 +6878,7 @@ export class SessionService {
     }
     const project = this.config.projects[projectId];
     if (!project) {
-      throw new Error(`Unknown project: ${projectId}`);
+      throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
     }
     return project;
   }
@@ -9625,7 +9639,6 @@ export class SessionService {
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
       closeoutOwnerTransfer?: boolean;
-      sensitivePromptSuffix?: string;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -9979,12 +9992,7 @@ export class SessionService {
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
       };
-      const launchPlan = options?.sensitivePromptSuffix
-        ? buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions, {
-            text: options.sensitivePromptSuffix,
-            sensitive: true,
-          })
-        : buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -10119,25 +10127,6 @@ export class SessionService {
       }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
-      }
-
-      if (launchPlan.deferredSensitiveInitialMessage) {
-        stage = "prompt.sensitive_controls";
-        const controlsOutcome = await this.sendDeferredSensitiveInitialMessage(
-          runningRecord,
-          launchPlan.deferredSensitiveInitialMessage.text,
-        );
-        this.logEvent("session.spawn.sensitive_controls_sent", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Sent automatic ping controls to ${sessionId}`,
-          details: {
-            controlCount: (launchPlan.deferredSensitiveInitialMessage.text.match(/ap1_/g) ?? [])
-              .length,
-            outcome: controlsOutcome,
-          },
-        });
       }
 
       stage = "record.write";
@@ -10521,14 +10510,7 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
-    const nextState: WorkspaceState = {
-      ...state,
-      ...(state.manualTitleOverride || stored?.manualTitleOverride
-        ? { manualTitleOverride: true }
-        : {}),
-    };
-    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -10538,13 +10520,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (nextState.slots) {
-      mirrored.slots = nextState.slots;
+    if (state.slots) {
+      mirrored.slots = state.slots;
     } else {
       delete mirrored.slots;
     }
-    if (nextState.pr) {
-      mirrored.pr = nextState.pr;
+    if (state.pr) {
+      mirrored.pr = state.pr;
     } else {
       delete mirrored.pr;
     }
@@ -11334,7 +11316,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const property = this.wakeTargetProperty(request.target);
     const current = session[property];
@@ -11361,7 +11343,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (request.target === "scheduled") {
       await this.dispatchScheduledWakeNow(session);
@@ -11372,7 +11354,7 @@ export class SessionService {
     }
     const updated = readSession(this.config.dataDir, sessionId);
     if (!updated) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return this.enrich(updated);
   }
@@ -11572,7 +11554,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const {
       intervalWake: _intervalWake,
@@ -11680,7 +11662,7 @@ export class SessionService {
   private async cancelWakeLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
     const updated: SessionRecord = { ...base, updatedAt: nowIso() };
@@ -12443,6 +12425,9 @@ export class SessionService {
               "sessions",
             ),
             ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+            ...(session.agent === "cursor"
+              ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+              : {}),
             freshLaunch: false,
           })
         : null;
@@ -12543,6 +12528,9 @@ export class SessionService {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
           ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          ...(session.agent === "cursor"
+            ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+            : {}),
           freshLaunch,
         })
       : null;
@@ -12856,10 +12844,13 @@ export class SessionService {
     );
   }
 
-  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+  async updateSlots(
+    sessionId: string,
+    request: UpdateSessionSlotsRequest,
+  ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // Slots (title/links/tags/pr) are workspace-owned: mutations always land
     // on the workspace's own state, so every member sees the same slots.
@@ -12882,39 +12873,44 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
-    const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
+    // Whether a title write is a no-op once-only initializer (agent
+    // `--title-if-absent` against an already-set title) or a blocked manual
+    // lock (`titleSource === "manual"`) is decided in ONE place:
+    // `applyNormalizedSlotsUpdate`'s `blockedTitleEdit`/`hasExistingTitle`
+    // logic. Always pass the title through so that function sees it and can
+    // return "blocked" with `MANUAL_TITLE_LOCK_MESSAGE`; do not re-derive the
+    // block decision here.
     const hasGenericChanges =
-      (normalized.title !== undefined && !conditionalTitleBlocked) ||
+      normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
-    const slots = hasGenericChanges
-      ? applySlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined && !conditionalTitleBlocked
+    const applied: AppliedSlotsUpdate = hasGenericChanges
+      ? applyNormalizedSlotsUpdate(current.slots, {
+          ...(normalized.title !== undefined
             ? {
                 title: normalized.title,
                 ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
               }
             : {}),
-          ...(normalized.clearTitle ? { clearTitle: true } : {}),
-          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
-          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
-          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
-          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
+          clearTitle: normalized.clearTitle,
+          source: normalized.source,
+          links: genericLinks,
+          unlinkLabels: genericUnlinks,
+          tags: normalized.tags,
+          untags: normalized.untags,
         })
-      : current.slots;
+      : {
+          ...(current.slots ? { slots: current.slots } : {}),
+          result: { titleResult: "unchanged" },
+        };
+    const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
-      ...(current.manualTitleOverride ||
-      normalized.clearTitle ||
-      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
-        ? { manualTitleOverride: true }
-        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
@@ -12926,6 +12922,8 @@ export class SessionService {
       details: {
         title: displaySlots?.title ?? null,
         linkCount: displaySlots?.links.length ?? 0,
+        titleResult: applied.result.titleResult,
+        ...(applied.result.message ? { message: applied.result.message } : {}),
       },
     });
     // The API response is always the CALLER's view, never the workspace
@@ -12935,7 +12933,10 @@ export class SessionService {
       owner?.id === sessionId
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
-    return this.enrich(callerRecord);
+    return {
+      ...(await this.enrich(callerRecord)),
+      slotUpdate: applied.result,
+    };
   }
 
   async startSidecar(
@@ -13650,28 +13651,20 @@ export class SessionService {
   // Classifies a manual-status-gate refusal for the failure event. A ToDo
   // cause (empty ledger or unfinished work) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
-  // session is untouched. Exception: the `handoff` caller at the
-  // POST-SPAWN site (a successor session already exists at throw time, see
-  // the Handoff double-gate) stays `error` even on a ToDo cause; the
-  // `handoff` PRE-SPAWN gate throws before a successor exists and still
-  // demotes to `warn` like every other caller. Every other cause stays
-  // `error` with no `details`.
+  // session is untouched. Every other cause stays `error` with no `details`.
   private logManualStatusFailure(
     action: ManualStatusAction,
     targetStatus: ManualSessionStatus,
     sessionId: string,
     projectId: string,
     error: unknown,
-    site: "pre_spawn" | "post_spawn" = "pre_spawn",
   ): void {
     const message = error instanceof Error ? error.message : String(error);
     const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
-    const isPostSpawnHandoff = action === "handoff" && site === "post_spawn";
-    const level = isTodoCause && !isPostSpawnHandoff ? "warn" : "error";
-    const details =
-      isTodoCause && !isPostSpawnHandoff
-        ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
-        : undefined;
+    const level = isTodoCause ? "warn" : "error";
+    const details = isTodoCause
+      ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
+      : undefined;
     this.logEvent(`session.${action}.failed`, {
       level,
       sessionId,
@@ -13761,7 +13754,7 @@ export class SessionService {
     let startupAttachmentsCleaned = false;
 
     try {
-      if (targetStatus === "completed") {
+      if (targetStatus === "completed" && eventAction !== "handoff") {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const block = todoLedgerBlock(projection);
         // The ledger gates the agent, never the human: a person closing through
@@ -13804,14 +13797,7 @@ export class SessionService {
         deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
-      this.logManualStatusFailure(
-        eventAction,
-        targetStatus,
-        sessionId,
-        session.project,
-        error,
-        "post_spawn",
-      );
+      this.logManualStatusFailure(eventAction, targetStatus, sessionId, session.project, error);
       throw error;
     }
 
@@ -15700,9 +15686,10 @@ export class SessionService {
         const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
         if (carryTags.length > 0) {
           try {
-            spawned = await this.updateSlots(spawned.id, {
+            const { slotUpdate: _slotUpdate, ...spawnedView } = await this.updateSlots(spawned.id, {
               tags: carryTags,
             });
+            spawned = spawnedView;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logEvent("session.handoff.carry_slots_failed", {
@@ -15775,22 +15762,25 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
-    // While the memory hold is engaged, defer this attempt entirely: it
-    // would otherwise call ensureSessionReadyForSend, which can relaunch the
-    // session in place and write to its pane — real work this loop should
-    // not do under host memory pressure. Returning false is safe:
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+      return false;
+    }
+    // While the memory hold is engaged, defer this attempt for cold or
+    // stale-parked sessions: it would otherwise call ensureSessionReadyForSend,
+    // which can relaunch the session in place and write to its pane — real
+    // work this loop should not do under host memory pressure. Live running
+    // sessions proceed with delivery. Returning false is safe:
     // runDeliveryLoop treats true/false identically, and false is what every
     // other stays-queued path below returns.
-    if (this.memoryHold.engaged) {
+    if (
+      this.memoryHold.engaged &&
+      !(this.isLiveSessionRecord(session) && !isStaleParked(session))
+    ) {
       return false;
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      const session = readSession(this.config.dataDir, sessionId);
-      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
-        return false;
-      }
-
       let nextMessage: string | undefined;
       try {
         const readySession = await this.ensureSessionReadyForSend(session);

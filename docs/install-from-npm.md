@@ -1,6 +1,6 @@
 # Install from npm
 
-> Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
+> Scope: npm install guide. Caveman, no overhead.
 
 Run Spur on a fresh Linux server. This is the required path for coding-agent installs. Use source only for contributors/maintainers, and only when the user explicitly asks for source: [install-from-source.md](install-from-source.md).
 

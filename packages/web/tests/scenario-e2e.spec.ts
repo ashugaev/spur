@@ -1,6 +1,15 @@
-import { devices, test, expect, type Locator, type Page } from "playwright/test";
 import { join } from "node:path";
-import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
+import {
+  devices,
+  test,
+  expect,
+  type Locator,
+  type Page,
+  makeWorkingSession,
+  mockSessions,
+  installApiRouteGuardsOnContext,
+  type ProjectInfo,
+} from "./fixtures.js";
 
 type WorkingSession = ReturnType<typeof makeWorkingSession>;
 
@@ -746,6 +755,7 @@ test.describe("scenario migration E2E: terminal voice", () => {
 test.describe("scenario migration E2E: terminal touch scroll", () => {
   test("OpenCode terminal touch scroll sends position-aware SGR input", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     try {
       const session = makeWorkingSession({
