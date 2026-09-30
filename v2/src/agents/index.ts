@@ -47,6 +47,7 @@ import {
 } from "./opencode.js";
 import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
+import { readClaudeSessionStatus } from "../claude-session-status.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
   AgentName,
@@ -114,6 +115,11 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // overwrite the composer.
 const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
+// First ack window of a mid-session claude send. The TUI can swallow the submit
+// Enter while it renders a multi-line paste, and the 300s default window then
+// stalls the message for minutes. One Enter after 5s bounds that stall; the
+// remaining resends keep the long window.
+const CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS = 5_000;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -134,6 +140,14 @@ export interface SubmitAckScanResult {
 export interface SubmitAckPacing {
   windowMs: number;
   maxResends: number;
+  /** Window for the first scan only, when it should be shorter than `windowMs`. */
+  firstWindowMs?: number;
+}
+
+export interface AgentEarlyResendContext {
+  worktreePath: string;
+  agentSessionId?: string;
+  panePid?: number;
 }
 
 export interface SubmitAckBinding {
@@ -190,6 +204,13 @@ interface AgentAdapter {
   submitAckMaxResends: number;
   /** Pacing for the launch send only, for an agent that needs its own. */
   launchSubmitAck?: SubmitAckPacing;
+  /** First-window override for a mid-session send; needs `earlySubmitResendAllowed`. */
+  submitAckFirstWindowMs?: number;
+  /**
+   * Whether the Enter that ends the first (short) window is safe. False when
+   * the agent may be showing a menu that would take the keystroke.
+   */
+  earlySubmitResendAllowed?(ctx: AgentEarlyResendContext): Promise<boolean>;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
@@ -445,6 +466,18 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     launchSubmitAck: {
       windowMs: CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS,
       maxResends: CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
+    submitAckFirstWindowMs: CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS,
+    // Only a status file that proves a running or idle turn allows the early
+    // Enter; a permission prompt or a missing file could turn it into a menu pick.
+    earlySubmitResendAllowed: async (ctx) => {
+      const status = await readClaudeSessionStatus(
+        ctx.worktreePath,
+        ctx.agentSessionId,
+        undefined,
+        ctx.panePid !== undefined ? { panePid: ctx.panePid } : {},
+      );
+      return status?.state === "working" || status?.state === "waiting";
     },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
@@ -741,13 +774,27 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
 
 export function agentSubmitAckPacing(
   agent: AgentName,
-  options?: { freshLaunch?: boolean },
+  options?: { freshLaunch?: boolean; slashCommand?: boolean },
 ): SubmitAckPacing {
   const adapter = agentAdapter(agent);
   if (options?.freshLaunch === true && adapter.launchSubmitAck) {
     return adapter.launchSubmitAck;
   }
-  return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
+  // A slash command can open a menu, so the early Enter is never safe for it.
+  const firstWindowMs = options?.slashCommand === true ? undefined : adapter.submitAckFirstWindowMs;
+  return {
+    windowMs: adapter.submitAckWindowMs,
+    maxResends: adapter.submitAckMaxResends,
+    ...(firstWindowMs !== undefined ? { firstWindowMs } : {}),
+  };
+}
+
+export async function agentEarlySubmitResendAllowed(
+  agent: AgentName,
+  ctx: AgentEarlyResendContext,
+): Promise<boolean> {
+  const gate = agentAdapter(agent).earlySubmitResendAllowed;
+  return gate ? gate(ctx) : true;
 }
 
 /**
