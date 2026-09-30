@@ -5579,3 +5579,18 @@ describe("startConfiguredTriggers", () => {
     });
   });
 });
+
+describe("dropsQueuedSend", () => {
+  it("closes stopped, error, killed except a live server-error wedge and a memory-held stop", async () => {
+    const { dropsQueuedSend } = await loadTriggersModule();
+
+    expect(dropsQueuedSend({ state: "stopped", status: "stopped" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "killed", status: "killed" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "error", status: "errored" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "error", status: "running" }, false)).toBe(false);
+    expect(dropsQueuedSend({ state: "stopped", status: "stopped" }, true)).toBe(false);
+    expect(dropsQueuedSend({ state: "killed", status: "killed" }, true)).toBe(true);
+    expect(dropsQueuedSend({ state: "stale", status: "stopped" }, false)).toBe(false);
+    expect(dropsQueuedSend({ state: "waiting", status: "running" }, false)).toBe(false);
+  });
+});

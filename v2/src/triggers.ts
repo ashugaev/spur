@@ -127,7 +127,7 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
 // "still alive, just blocked" shape as rate_limited. Scoped to
 // status === "running" because a genuinely closed session (status stopped,
 // errored, or killed) can also carry state "error", and that case IS closed.
-function isLiveServerErrorWedge(session: SessionView): boolean {
+function isLiveServerErrorWedge(session: Pick<SessionView, "state" | "status">): boolean {
   return session.status === "running" && session.state === "error";
 }
 
@@ -566,6 +566,22 @@ function isDeliverableState(session: SessionView): boolean {
 // interrupt, so it must stay deliverable rather than dropping the batch.
 function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
+}
+
+/**
+ * True when a queued send to this session is dropped instead of delivered.
+ * A live server-error wedge and a stop caused by the memory hold are exempt:
+ * the hold's own pause must not destroy the batch it exists to cover.
+ */
+export function dropsQueuedSend(
+  session: Pick<SessionView, "state" | "status">,
+  memoryHeld: boolean,
+): boolean {
+  return (
+    isClosedState(session.state) &&
+    !isLiveServerErrorWedge(session) &&
+    !(session.state === "stopped" && memoryHeld)
+  );
 }
 
 // The rate-limit reactivation wakeup and the server-error reactivation wakeup
@@ -1098,11 +1114,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     // pausing would destroy the batch during the very episode this hold
     // exists to cover; a session still "stopped" once the hold clears falls
     // back to the ordinary closed_session drop below.
-    if (
-      isClosedState(session.state) &&
-      !isLiveServerErrorWedge(session) &&
-      !(session.state === "stopped" && memoryHoldEngaged())
-    ) {
+    if (dropsQueuedSend(session, memoryHoldEngaged())) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1283,11 +1295,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     // Same shed-pause exemption as flushPending: while the memory hold is
     // engaged a "stopped" session is deferred, not dropped.
-    if (
-      isClosedState(session.state) &&
-      !isLiveServerErrorWedge(session) &&
-      !(session.state === "stopped" && memoryHoldEngaged())
-    ) {
+    if (dropsQueuedSend(session, memoryHoldEngaged())) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",

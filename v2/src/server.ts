@@ -59,7 +59,11 @@ import {
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
-import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import {
+  dropsQueuedSend,
+  startConfiguredTriggers,
+  type TriggerGroupController,
+} from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
 import { getVersion } from "./version.js";
 import {
@@ -746,6 +750,7 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
+            ...(dropsQueuedSend(session, service.memoryHoldEngaged()) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
           const session = await service.spawn(request);

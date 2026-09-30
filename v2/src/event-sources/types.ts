@@ -27,6 +27,8 @@ export interface SourceSessionListItem {
   agent: string;
   state: string;
   title?: string;
+  /** Present when a message sent to this session would be dropped (stopped, error, killed). */
+  inactive?: true;
 }
 
 export interface SourceSpawnSessionRequest {
