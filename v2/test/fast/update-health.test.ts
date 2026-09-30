@@ -38,12 +38,21 @@ describe("probeDaemonIdentity", () => {
     { version: "1.2.0", pid: undefined, expectedPid: 42, ok: false },
     { version: "1.2.0", pid: 42, expectedPid: undefined, ok: false },
     { version: "1.2.0", pid: 0, expectedPid: 0, ok: false },
-  ])("checks version=$version pid=$pid MainPID=$expectedPid", async ({ version, pid, expectedPid, ok }) => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ version, pid }))));
-    expect(await probeDaemonIdentity(makeTargets({ daemon: 12345, web: 12346 }).daemon, {
-      version: "1.2.0", pid: expectedPid,
-    })).toEqual(ok ? { ok: true } : { ok: false, reason: "identity-mismatch" });
-  });
+  ])(
+    "checks version=$version pid=$pid MainPID=$expectedPid",
+    async ({ version, pid, expectedPid, ok }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(JSON.stringify({ version, pid }))),
+      );
+      expect(
+        await probeDaemonIdentity(makeTargets({ daemon: 12345, web: 12346 }).daemon, {
+          version: "1.2.0",
+          pid: expectedPid,
+        }),
+      ).toEqual(ok ? { ok: true } : { ok: false, reason: "identity-mismatch" });
+    },
+  );
 });
 
 // Regression guard for the doctor read-only invariant: `spur doctor` must

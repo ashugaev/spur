@@ -314,7 +314,10 @@ export async function unitStateWith(scope: SystemdScope, unit: string): Promise<
   }
 }
 
-export async function unitMainPidWith(scope: SystemdScope, unit: string): Promise<number | undefined> {
+export async function unitMainPidWith(
+  scope: SystemdScope,
+  unit: string,
+): Promise<number | undefined> {
   const [, ...scopeArgs] = scope.ctl;
   try {
     const { stdout } = await execFileAsync("systemctl", [
@@ -325,7 +328,7 @@ export async function unitMainPidWith(scope: SystemdScope, unit: string): Promis
       "MainPID",
       "--value",
     ]);
-    const pid = Number.parseInt(stdout.toString().trim(), 10);
+    const pid = Number(stdout.toString().trim());
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return undefined;

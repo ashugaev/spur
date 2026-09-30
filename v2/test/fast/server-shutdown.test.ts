@@ -116,7 +116,9 @@ describe("summarizeActiveResources", () => {
     const disposeService = vi.spyOn(SessionService.prototype, "dispose");
     const disposeAutoPing = vi.spyOn(AutoPingService.prototype, "dispose");
     try {
-      await expect(startServer(configPath, { info: () => undefined, warn: () => undefined })).rejects.toMatchObject({ code: "EADDRINUSE" });
+      await expect(
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      ).rejects.toMatchObject({ code: "EADDRINUSE" });
       expect(disposeService).toHaveBeenCalledOnce();
       expect(disposeAutoPing).toHaveBeenCalledOnce();
     } finally {

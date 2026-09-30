@@ -34,11 +34,15 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart` refuse a non-default `--config` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`). Auto-start forks a detached daemon unless `$SPUR_SESSION`/`$SPUR_SIDECAR_NAME` is set or `$SPUR_DISABLE_AUTOSTART=1`. Registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: production-slot, session-context and managed-unit auto-start guards in `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
 
 ## init
 
 `spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
+
+## update
+
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
 
 ## spawn
 
