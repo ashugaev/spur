@@ -1331,6 +1331,20 @@ async function routeTelegramPrompt(
 }
 
 /**
+ * A message waits in the queue unless the agent is idle (waiting, or parked
+ * and woken by the send); the placeholder says so instead of claiming thought.
+ */
+function placeholderText(label: string, state: string): string {
+  if (state === "needs_input") {
+    return `Received. ${label} needs input in its terminal; your message is queued.`;
+  }
+  if (state === "working" || state === "rate_limited" || state === "error") {
+    return `Received. ${label} is busy; your message is queued.`;
+  }
+  return `Received. ${label} is thinking...`;
+}
+
+/**
  * Hands a routed prompt to one live session: posts the thinking placeholder,
  * records it as the reply target, then emits. A session that would drop the
  * message gets a notice instead, so the user never waits on a dead agent.
@@ -1349,7 +1363,7 @@ async function deliverRoutedPrompt(
   }
   let statusMessageId: number | undefined;
   try {
-    statusMessageId = extractMessageId(await ctx.reply(`Received. ${label} is thinking...`));
+    statusMessageId = extractMessageId(await ctx.reply(placeholderText(label, session.state)));
   } catch (error) {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,

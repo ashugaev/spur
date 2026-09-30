@@ -1906,6 +1906,29 @@ describe("telegramSourceModule", () => {
     ]);
   });
 
+  it.each([
+    ["working", "Received. api-1 is busy; your message is queued."],
+    ["rate_limited", "Received. api-1 is busy; your message is queued."],
+    ["error", "Received. api-1 is busy; your message is queued."],
+    ["needs_input", "Received. api-1 needs input in its terminal; your message is queued."],
+    ["waiting", "Received. api-1 is thinking..."],
+    ["stale", "Received. api-1 is thinking..."],
+  ])("words the placeholder for a %s session", async (state, expected) => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state }]);
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith(expected);
+  });
+
   it("leaves a placeholder in another chat untouched when the session is reached elsewhere", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -1988,7 +2011,7 @@ describe("telegramSourceModule", () => {
 
     await bot.emitText(textCtx);
 
-    expect(textCtx.reply).toHaveBeenCalledWith("Received. api-2 is thinking...");
+    expect(textCtx.reply).toHaveBeenCalledWith("Received. api-2 is busy; your message is queued.");
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
       expect.objectContaining({ sessionId: "api-2", text: "hello agent" }),
