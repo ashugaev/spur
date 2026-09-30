@@ -113,6 +113,7 @@ ALWAYS-ON RULES
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
   Skill found stale, wrong, or missing a rule while using it: fix it in the same change. Never leave a known-wrong instruction for the next agent.
   Never fix a problem outside the current request. Covers an unrelated bug found along the way, and review feedback that arrives after its PR merged. Two carve-outs, both stated above: a stale or wrong skill rule hit while using it, and a CI failure on your own PR — fix those in the same change. Otherwise file a GitHub issue for it before close-out; procedure in `.claude/skills/github/SKILL.md`. An agent without shell access reports it to manager instead.
+  Triage GitHub issues on creation, reopening, and worker selection per ISSUE PRIORITY in `.claude/skills/github/SKILL.md`.
   Log Spur-operation friction with `spur agent-issue log`: friction blocking your operation of Spur, never a code defect in this repo. Boundary and usage: `docs/commands.md`.
   Keep Spur skill byte-minimal: general user-facing actions and capabilities plus canonical references; runtime and interface details live in owning docs or source.
   No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text or colon labels.
