@@ -3964,6 +3964,12 @@ test.describe("S5: Runtime sidebar", () => {
           budget: 2_000,
           exhausted: false,
         },
+        tokenBudgetView: {
+          budget: 2_000,
+          knownTotalTokens: 1_234,
+          exhausted: false,
+          enforced: true,
+        },
       }),
       makeWorkingSession({
         id: "detail-s5-token-unavailable",
@@ -4007,6 +4013,7 @@ test.describe("S5: Runtime sidebar", () => {
           budget: 100,
           exhausted: true,
         },
+        tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: false, enforced: true },
       }),
       makeWorkingSession({
         id: "detail-s5-cursor-measured",
@@ -4019,6 +4026,7 @@ test.describe("S5: Runtime sidebar", () => {
           totalTokens: 100,
           exhausted: false,
         },
+        tokenBudgetView: { knownTotalTokens: 100, exhausted: false, enforced: true },
       }),
     ];
     for (const session of sessions) await mockSessionDetail(page, session);
@@ -4027,7 +4035,7 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByLabel("Tokens: unavailable")).toHaveText("—");
     await capture("idle");
     await page.goto("/sessions/detail-s5-token-available");
-    await expect(page.getByText("1K / 2K")).toBeVisible();
+    await expect(page.getByText("1.2K / 2K")).toBeVisible();
     await page.getByLabel("Tokens: 1,234").focus();
     await expect(page.getByRole("tooltip")).toContainText("Cache read");
     await capture("available-focus");
@@ -4206,7 +4214,7 @@ test.describe("S5: Runtime sidebar", () => {
       release?.();
       await expect(page.getByText("100 / 100")).toBeVisible();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();
-      await expect(page.getByText("Limit ignored", { exact: true })).toBeVisible();
+      await expect(page.getByText("100 of 100 · 100% · limit ignored")).toBeVisible();
       await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
       await capture("resumed");
       const video = page.video();
@@ -4234,7 +4242,7 @@ test.describe("S5: Runtime sidebar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByLabel("Tokens: at least 20").focus();
-    await expect(page.getByText("Unavailable · earlier usage unknown")).toBeVisible();
+    await expect(page.getByText("Budget not enforced · earlier usage unknown")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
@@ -4269,9 +4277,9 @@ test.describe("S5: Runtime sidebar", () => {
     const count = page.getByLabel("Tokens: at least 20");
     await expect(count).toHaveText("≥20 / 100");
     await count.focus();
-    await expect(page.getByText("Limit ignored · pre-flight usage unknown")).toBeVisible();
+    await expect(page.getByText("20 of 100 · 20% · limit ignored")).toBeVisible();
     await expect(page.getByRole("tooltip").getByRole("table")).toHaveCount(0);
-    await expect(page.getByText("Unavailable · pre-flight usage unknown")).toHaveCount(0);
+    await expect(page.getByText("Budget not enforced · pre-flight usage unknown")).toHaveCount(0);
     await expect(page.getByPlaceholder("Message...")).toBeEnabled();
     const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
     if (artifacts) {

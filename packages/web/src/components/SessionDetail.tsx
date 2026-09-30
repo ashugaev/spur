@@ -3571,22 +3571,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ["Worktree", session.worktree ? "isolated" : "shared"],
                     ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                     ["Workspace", session.workspaceExists ? "present" : "missing"],
-                    ["Tokens", <TokenCount key="tokens" session={session} sidebar />],
+                    ["Tokens", <TokenCount session={session} sidebar />],
                     ...(wakeSummary && wakeCountdown
-                      ? ([
+                      ? [
                           ["Wake", wakeSummary.label],
                           ["Next wake", wakeCountdown],
-                        ] as Array<[string, string]>)
+                        ]
                       : []),
                     ...(wakeSummary?.intervalMs
-                      ? ([
-                          ["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)],
-                        ] as Array<[string, string]>)
+                      ? [["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]]
                       : []),
                     ...(wakeSummary?.dailyAt
-                      ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
-                          [string, string]
-                        >)
+                      ? [["Wake daily at", wakeSummary.dailyAt.join(", ")]]
                       : []),
                   ] as Array<[string, ReactNode]>
                 ).map(([label, value]) => (

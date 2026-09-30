@@ -97,9 +97,9 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
     },
   ]);
   await page.reload();
-  await expect(count).toHaveAttribute("style", "color: var(--color-text-secondary);");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
   await count.focus();
-  await expect(page.getByRole("tooltip")).toContainText("Limit ignored");
+  await expect(page.getByRole("tooltip")).toContainText("limit ignored");
   await page.screenshot({ path: testInfo.outputPath("override.png") });
 });
 
@@ -134,11 +134,24 @@ test("token count shows budget tone and isolated hover card, hides on mobile", a
   await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
   await count.hover();
   await expect(page.getByRole("tooltip").getByRole("row", { name: "Total 100 700" })).toBeVisible();
-  await page.setViewportSize({ width: 640, height: 844 });
-  await count.hover();
-  await expect
-    .poll(async () => (await page.getByRole("tooltip").boundingBox())?.x)
-    .toBeGreaterThanOrEqual(0);
+  await expect(page.locator(".data-row").first().getByRole("tooltip")).toHaveCount(1);
+  await page.mouse.move(0, 0);
+  await page
+    .locator(".data-row")
+    .first()
+    .hover({ position: { x: 5, y: 5 } });
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  for (const width of [640, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await count.hover();
+    await expect
+      .poll(async () => {
+        const bounds = await page.getByRole("tooltip").boundingBox();
+        const viewportWidth = page.viewportSize()?.width ?? 0;
+        return bounds ? bounds.x >= 0 && bounds.x + bounds.width <= viewportWidth : false;
+      })
+      .toBe(true);
+  }
   const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
   if (artifacts) {
     mkdirSync(join(artifacts, "token-count"), { recursive: true });

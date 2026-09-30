@@ -5796,13 +5796,14 @@ describe("SessionDetail token usage", () => {
         budget: 2000,
         exhausted: false,
       },
+      tokenBudgetView: { budget: 2000, knownTotalTokens: 1234, exhausted: false, enforced: true },
     });
 
     render(<SessionDetail sessionId="api-a1" />);
 
     expect(await screen.findByText("Tokens")).toBeInTheDocument();
     fireEvent.focus(screen.getByLabelText("Tokens: 1,234"));
-    expect(screen.getByText("1K / 2K")).toBeInTheDocument();
+    expect(screen.getByText("1.2K / 2K")).toBeInTheDocument();
     expect(screen.getByText("Cache read")).toBeInTheDocument();
     expect(screen.getByText("300")).toBeInTheDocument();
     expect(screen.getByText("Cache write 5m")).toBeInTheDocument();
@@ -5926,7 +5927,7 @@ describe("SessionDetail token usage", () => {
 
     fireEvent.focus(await screen.findByLabelText("Tokens: at least 20"));
     expect(screen.getByText("≥20 / 100")).toBeInTheDocument();
-    expect(screen.getByText("Unavailable · main usage unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Budget not enforced · main usage unavailable")).toBeInTheDocument();
   });
 
   it("marks unsupported live sessions as unenforced", async () => {
@@ -5957,9 +5958,14 @@ describe("SessionDetail token usage", () => {
         totalTokens: 100,
         exhausted: false,
       } as const,
+      { knownTotalTokens: 100, exhausted: false, enforced: true },
       "100",
     ],
-    [{ status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const, "—"],
+    [
+      { status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const,
+      undefined,
+      "—",
+    ],
     [
       {
         status: "unavailable",
@@ -5969,6 +5975,7 @@ describe("SessionDetail token usage", () => {
         exhausted: false,
         unenforced: false,
       } as const,
+      undefined,
       "—",
     ],
     [
@@ -5980,15 +5987,19 @@ describe("SessionDetail token usage", () => {
         totalTokens: 1234,
         exhausted: false,
       } as const,
-      "1K",
+      { knownTotalTokens: 1234, exhausted: false, enforced: true },
+      "1.2K",
     ],
-  ])("renders token status %# without assuming a budget", async (tokenUsageView, label) => {
-    stubFetch({ tokenUsageView });
+  ])(
+    "renders token status %# without assuming a budget",
+    async (tokenUsageView, tokenBudgetView, label) => {
+      stubFetch({ tokenUsageView, tokenBudgetView });
 
-    render(<SessionDetail sessionId="api-a1" />);
+      render(<SessionDetail sessionId="api-a1" />);
 
-    expect(await screen.findByText(label)).toBeInTheDocument();
-  });
+      expect(await screen.findByText(label)).toBeInTheDocument();
+    },
+  );
 
   it("hides Restore when the token budget is exhausted", async () => {
     stubFetch({
@@ -6082,7 +6093,7 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("110 / 100")).toBeInTheDocument();
     fireEvent.focus(screen.getByLabelText("Tokens: 110"));
-    expect(screen.getByText("Limit ignored")).toBeInTheDocument();
+    expect(screen.getByText("110 of 100 · 110% · limit ignored")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
   });
@@ -6101,8 +6112,10 @@ describe("SessionDetail token usage", () => {
     render(<SessionDetail sessionId="api-a1" />);
     expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
     fireEvent.focus(screen.getByLabelText("Tokens: at least 20"));
-    expect(screen.getByText("Limit ignored · pre-flight usage unknown")).toBeInTheDocument();
-    expect(screen.queryByText("Unavailable · pre-flight usage unknown")).not.toBeInTheDocument();
+    expect(screen.getByText("20 of 100 · 20% · limit ignored")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Budget not enforced · pre-flight usage unknown"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {
@@ -6119,6 +6132,7 @@ describe("SessionDetail token usage", () => {
         budget: 100,
         exhausted: true,
       },
+      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: false, enforced: true },
     });
 
     render(<SessionDetail sessionId="api-a1" />);

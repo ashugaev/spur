@@ -15,6 +15,57 @@ const usage: SpurSessionView["tokenUsageView"] = {
 };
 
 describe("TokenCount", () => {
+  it("shows known usage without an enforcement warning when no budget is configured", () => {
+    render(
+      <TokenCount
+        session={{
+          status: "running",
+          tokenUsageView: usage,
+          tokenBudgetView: {
+            knownTotalTokens: 800,
+            exhausted: false,
+            enforced: false,
+            reason: "legacy_unknown",
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: 800");
+    expect(count).toHaveTextContent(/^800$/);
+    expect(count).toHaveAttribute("style", "color: var(--color-text-secondary);");
+    fireEvent.focus(count);
+    expect(screen.getByRole("tooltip")).not.toHaveTextContent("Budget not enforced");
+  });
+
+  it("keeps zero unknown usage diagnostics without an enforcement warning or budget", () => {
+    render(
+      <TokenCount
+        session={{
+          status: "running",
+          tokenBudgetView: {
+            knownTotalTokens: 0,
+            exhausted: false,
+            enforced: false,
+            reason: "preflight_unknown",
+          },
+          preflightTokenUsageView: {
+            status: "unknown",
+            attemptCount: 1,
+            unknownAttemptCount: 1,
+            providerIterationCount: 0,
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: unavailable");
+    expect(count).toHaveTextContent("—");
+    expect(count).toHaveAttribute("style", "color: var(--color-text-tertiary);");
+    expect(count).toHaveAttribute("tabindex", "0");
+    fireEvent.focus(count);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Pre-flight statusunknown");
+    expect(screen.getByRole("tooltip")).not.toHaveTextContent("Budget not enforced");
+  });
+
   it("keeps unknown pre-flight diagnostics available without a measured total", () => {
     render(
       <TokenCount
@@ -56,8 +107,8 @@ describe("TokenCount", () => {
     const count = screen.getByLabelText("Tokens: at least 800");
     expect(count).toHaveTextContent("≥800 / 1K");
     fireEvent.focus(count);
-    expect(screen.getByText("Limit ignored · pre-flight usage unknown")).toBeInTheDocument();
-    expect(screen.queryByText(/Unavailable ·/)).not.toBeInTheDocument();
+    expect(screen.getByText("800 of 1K · 80% · limit ignored")).toBeInTheDocument();
+    expect(screen.queryByText(/Budget not enforced ·/)).not.toBeInTheDocument();
   });
   it("rounds the count to integer K and preserves footer precision", () => {
     render(
@@ -92,7 +143,13 @@ describe("TokenCount", () => {
         sidebar
         session={{
           status: "running",
-          tokenUsageView: { ...usage, totalTokens, budget: totalTokens },
+          tokenUsageView: { ...usage, totalTokens },
+          tokenBudgetView: {
+            budget: totalTokens,
+            knownTotalTokens: totalTokens,
+            exhausted: false,
+            enforced: true,
+          },
         }}
       />,
     );
@@ -106,7 +163,15 @@ describe("TokenCount", () => {
     ["stopped", "Token budget reached"],
     ["budget_limited", "Stopped by token budget"],
   ] as const)("reports lifecycle truth for %s", (status, footer) => {
-    render(<TokenCount session={{ status, tokenUsageView: { ...usage, exhausted: true } }} />);
+    render(
+      <TokenCount
+        session={{
+          status,
+          tokenUsageView: { ...usage, exhausted: true },
+          tokenBudgetView: { knownTotalTokens: 800, exhausted: false, enforced: true },
+        }}
+      />,
+    );
     fireEvent.focus(screen.getByLabelText("Tokens: 800"));
     expect(screen.getByRole("tooltip")).toHaveTextContent(footer);
     if (footer === "Token budget reached")
@@ -132,12 +197,12 @@ describe("TokenCount", () => {
     const count = screen.getByLabelText("Tokens: 800");
     expect(count).toHaveAttribute(
       "style",
-      `color: var(--color-${overridden ? "text-secondary" : "status-error"});`,
+      `color: var(--color-${overridden ? "status-attention" : "status-error"});`,
     );
     expect(count.classList.contains("font-bold")).toBe(!overridden);
     fireEvent.focus(count);
     expect(
-      screen.getByText(overridden ? "Limit ignored" : "Token budget reached"),
+      screen.getByText(overridden ? "800 of 1K · 80% · limit ignored" : "Token budget reached"),
     ).toBeInTheDocument();
   });
 
@@ -176,6 +241,7 @@ describe("TokenCount", () => {
             providerIterationCount: 1,
             byProvider: {},
           },
+          tokenBudgetView: { knownTotalTokens: 1000, exhausted: false, enforced: true },
         }}
       />,
     );
@@ -225,6 +291,57 @@ describe("TokenCount", () => {
     fireEvent.focus(count);
     if (exhausted) expect(screen.getByText("Stopped by token budget")).toBeInTheDocument();
     if (!enforced)
-      expect(screen.getByText("Unavailable · pre-flight usage unknown")).toBeInTheDocument();
+      expect(
+        screen.getByText("Budget not enforced · pre-flight usage unknown"),
+      ).toBeInTheDocument();
+  });
+
+  it("overridden budget with exhausted main usage is not hit", () => {
+    render(
+      <TokenCount
+        session={{
+          status: "running",
+          tokenUsageView: { ...usage, exhausted: true },
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 110,
+            exhausted: false,
+            enforced: false,
+            overridden: true,
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: 110");
+    expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+    fireEvent.focus(count);
+    expect(screen.queryByText("Stopped by token budget")).not.toBeInTheDocument();
+    expect(screen.queryByText("Token budget reached")).not.toBeInTheDocument();
+    expect(screen.getByText("110 of 100 · 110% · limit ignored")).toBeInTheDocument();
+  });
+
+  it("absent tokenBudgetView wins over exhausted usage", () => {
+    render(
+      <TokenCount session={{ status: "running", tokenUsageView: { ...usage, exhausted: true } }} />,
+    );
+    const count = screen.getByLabelText("Tokens: unavailable");
+    expect(count).toHaveTextContent("—");
+  });
+
+  it("left alignment anchors the card at left-0", () => {
+    render(
+      <TokenCount
+        align="left"
+        session={{
+          status: "running",
+          tokenUsageView: usage,
+          tokenBudgetView: { knownTotalTokens: 800, exhausted: false, enforced: true },
+        }}
+      />,
+    );
+    fireEvent.focus(screen.getByLabelText("Tokens: 800"));
+    const card = screen.getByRole("tooltip");
+    expect(card.className).toContain("left-0");
+    expect(card.className).not.toContain("right-0");
   });
 });

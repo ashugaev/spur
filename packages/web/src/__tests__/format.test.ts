@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatBytes,
   formatRelativeTime,
+  formatTokenCount,
   getSessionSubtitle,
   getSessionTitle,
   humanizeBranch,
@@ -111,6 +112,21 @@ describe("formatBytes", () => {
 
   it("renders MB values with one decimal", () => {
     expect(formatBytes(1024 * 1024)).toBe("1.0 MB");
+  });
+});
+
+describe("formatTokenCount", () => {
+  it("rounds default output to the nearest unit", () => {
+    expect(formatTokenCount(980)).toBe("980");
+    expect(formatTokenCount(4100)).toBe("4.1K");
+    expect(formatTokenCount(184200)).toBe("184K");
+    expect(formatTokenCount(1200000)).toBe("1.2M");
+  });
+
+  it("keeps one decimal of precision in detail mode", () => {
+    expect(formatTokenCount(184200, true)).toBe("184.2K");
+    expect(formatTokenCount(22400, true)).toBe("22.4K");
+    expect(formatTokenCount(500000, true)).toBe("500K");
   });
 });
 

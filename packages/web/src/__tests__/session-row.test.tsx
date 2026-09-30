@@ -539,6 +539,27 @@ describe("SessionRow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows the compact token total without budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          tokenBudgetView: {
+            budget: 500000,
+            knownTotalTokens: 184200,
+            exhausted: false,
+            enforced: true,
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByText("184K")).toBeInTheDocument();
+    expect(screen.queryByText(/500K/)).not.toBeInTheDocument();
+  });
+
   it("allows restore when pre-flight usage is unknown under a budget", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
     render(
