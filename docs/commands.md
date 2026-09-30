@@ -34,7 +34,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart`: production-slot, session-context and managed-unit auto-start guards in `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: `v2/src/cli.ts`; auto-start, session-context and managed-unit guards: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
 
 ## init
 
