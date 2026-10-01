@@ -48873,6 +48873,38 @@ describe("SessionService", () => {
       return { promise, resolve };
     }
 
+    it("lets a kill during launched-error runtime probing win", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const held = holdSpawnAtReady();
+      const runtimeProbe = deferred<{
+        present: boolean;
+        unresponsive: boolean;
+      }>();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const spawning = service.spawn({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalled());
+      const probesBeforeFailure = getTmuxSessionPresenceMock.mock.calls.length;
+      getTmuxSessionPresenceMock.mockImplementationOnce(() => runtimeProbe.promise);
+      held.fail(new Error("agent never became ready"));
+      await vi.waitFor(() => {
+        expect(getTmuxSessionPresenceMock.mock.calls.length).toBeGreaterThan(probesBeforeFailure);
+      });
+
+      await service.kill("api-1", { skipPrCheck: true, force: true });
+      runtimeProbe.resolve({ present: true, unresponsive: false });
+
+      await expect(spawning).rejects.toThrow("agent never became ready");
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      expect(eventsNamed("session.runtime.errored")).toEqual([]);
+      expect(eventsNamed("session.spawn.failed")[0]?.details).toMatchObject({
+        killedDuringSpawn: true,
+      });
+      service.dispose();
+    });
+
     async function expectKilledSpawnLeftAlone(
       sessions: Map<string, SessionRecord>,
       tmuxCreates: number,

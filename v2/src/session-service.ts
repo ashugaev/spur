@@ -10980,8 +10980,8 @@ export class SessionService {
         launchedRecord = launchCandidate;
       }
       if (launchedRecord && !(sessionId && this.spawnWasKilled(sessionId))) {
-        await this.retainLaunchedError(launchedRecord, error);
-        throw error;
+        const retained = await this.retainLaunchedError(launchedRecord, error);
+        if (retained.status !== "killed") throw error;
       }
       if (sessionId && project && placeholderWritten && agent) {
         // This catch wraps every stage from tmux.create through record.write,
@@ -12044,8 +12044,8 @@ export class SessionService {
         launchedRecord = launchCandidate;
       }
       if (launchedRecord && !this.spawnWasKilled(sessionId)) {
-        await this.retainLaunchedError(launchedRecord, error);
-        return "completed";
+        const retained = await this.retainLaunchedError(launchedRecord, error);
+        if (retained.status !== "killed") return "completed";
       }
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
       const finalAttempt =
@@ -19128,9 +19128,10 @@ export class SessionService {
     session: SessionRecord,
     error: unknown,
   ): Promise<SessionRecord> {
-    const latest = readSession(this.config.dataDir, session.id);
     const message = error instanceof Error ? error.message : String(error);
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
+    const latest = readSession(this.config.dataDir, session.id);
+    if (latest?.status === "killed") return latest;
     const retained: SessionRecord = {
       ...withQueuedMessages(
         { ...session, ...latest, launchCommand: session.launchCommand },
