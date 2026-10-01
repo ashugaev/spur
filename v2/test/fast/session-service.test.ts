@@ -21490,7 +21490,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         event: "session.message.delivery_failed",
         sessionId: "api-1",
-        message: expect.stringContaining("timed out"),
+        message: expect.stringContaining("runtime probe (tmux or ps) timed out"),
       }),
     );
   });

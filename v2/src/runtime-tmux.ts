@@ -680,11 +680,9 @@ interface PsRow {
 
 interface PsSnapshot {
   rows: PsRow[];
-  readable: boolean;
-  // Same meaning as FleetSessionSnapshot.unresponsive: only true when
-  // `readable` is false because the `ps` fork was killed by its own timeout,
-  // never for a nonzero exit, a maxBuffer overrun, or an empty-but-healthy
-  // table. `rows` is empty whenever this is true.
+  // True only when the `ps` fork was killed by its own timeout, never for a
+  // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
+  // is empty whenever this is true.
   unresponsive: boolean;
 }
 
@@ -747,9 +745,9 @@ function getPsSnapshot(): Promise<PsSnapshot> {
           };
         })
         .filter((row): row is PsRow => row !== null);
-      return { rows, readable: true, unresponsive: false };
+      return { rows, unresponsive: false };
     } catch (error) {
-      return { rows: [], readable: false, unresponsive: isProbeTimeoutKill(error) };
+      return { rows: [], unresponsive: isProbeTimeoutKill(error) };
     }
   });
 }

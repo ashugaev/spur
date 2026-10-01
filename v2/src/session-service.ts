@@ -15308,7 +15308,7 @@ export class SessionService {
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
-        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+        `Session ${session.id}'s runtime probe (tmux or ps) timed out; runtime state unknown, not attempting recovery`,
       );
     }
 
@@ -18604,7 +18604,7 @@ export class SessionService {
           level: "warn",
           sessionId: session.id,
           projectId: session.project,
-          message: `Skipped reconciling ${session.id}: tmux probe timed out, runtime state unknown`,
+          message: `Skipped reconciling ${session.id}: runtime probe (tmux or ps) timed out, runtime state unknown`,
           details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
         });
         return { session, runtime: confirmedRuntime };
