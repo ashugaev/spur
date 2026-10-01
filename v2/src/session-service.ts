@@ -1021,6 +1021,10 @@ export class SubmitAckTimeoutError extends Error {
   readonly lastScannedFile: string | null;
   readonly elapsedMs: number;
   readonly processAlive: boolean;
+  // True when the liveness read could not report (list-panes killed by its
+  // own timeout), so processAlive:false is not evidence of death. Ambiguous =
+  // refuse recovery, never kill. Never set together with processAlive:true.
+  readonly probeUnresponsive: boolean;
 
   constructor(args: {
     sessionId: string;
@@ -1028,6 +1032,7 @@ export class SubmitAckTimeoutError extends Error {
     lastScannedFile: string | null;
     elapsedMs: number;
     processAlive: boolean;
+    probeUnresponsive: boolean;
   }) {
     super(`Timed out waiting for agent submit acknowledgment for ${args.sessionId}`);
     this.name = "SubmitAckTimeoutError";
@@ -1035,6 +1040,7 @@ export class SubmitAckTimeoutError extends Error {
     this.lastScannedFile = args.lastScannedFile;
     this.elapsedMs = args.elapsedMs;
     this.processAlive = args.processAlive;
+    this.probeUnresponsive = args.probeUnresponsive;
   }
 }
 
@@ -1045,6 +1051,12 @@ export class SubmitAckTimeoutError extends Error {
 // definition, shared by the drain and by flush.
 function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
   return error instanceof SubmitAckTimeoutError && error.processAlive;
+}
+
+// The liveness read could not report: not delivered, and not evidence of a
+// dead agent either. Callers must not kill the pane on this.
+function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
+  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -1616,7 +1628,9 @@ async function agentProcessAlive(
 // and an object return there would silently read as "always alive" (tsc
 // cannot catch it; only eslint no-unnecessary-condition would). Keeps
 // agentProcessAlive's signature and all nine call sites unchanged.
-type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+type AgentProcessProbe =
+  | { alive: false; unresponsive: boolean }
+  | { alive: true; via: "matcher" | "pane_child" };
 
 // Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
 // second isProcessRunningInTmux read: two separate top-level calls would each
@@ -1637,7 +1651,7 @@ async function probeAgentProcess(
     ...(foreign ? { paneChildFallback: true } : {}),
   });
   if (!result.alive) {
-    return { alive: false };
+    return { alive: false, unresponsive: result.unresponsive };
   }
   return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
@@ -13520,18 +13534,19 @@ export class SessionService {
       // genuinely dropped Enter (agents/index.ts) without reinstating
       // cursor's old 65s hold.
       let result: SubmitAckScanResult = { found: false, lastScannedFile: null };
-      // Set only when a mid-loop probe observes a dead pane; a confirmed-dead
-      // agent does not come back inside one send, so the loop stops resending
-      // into it instead of burning the rest of the budget. Never set on a
+      // Set only when a mid-loop probe reads not-alive; a dead agent does not
+      // come back inside one send, so the loop stops resending into it instead
+      // of burning the rest of the budget. Keeps unresponsive so an ambiguous
+      // read is not laundered into a plain death verdict. Never set on a
       // live result — see the probe's own fresh:true comment below.
-      let knownDead = false;
+      let latchedNotAlive: Extract<AgentProcessProbe, { alive: false }> | null = null;
       for (let attempt = 0; attempt <= DEFERRED_CONTROLS_MAX_RESENDS; attempt += 1) {
         result = await this.waitForSubmitAck(binding, message, DEFERRED_CONTROLS_ACK_WINDOW_MS);
         if (result.found) return "submitted" as const;
         if (attempt < DEFERRED_CONTROLS_MAX_RESENDS) {
           // fresh:true — a stale cached hit would report an agent that just
           // died as alive.
-          const alive = await agentProcessAlive(
+          const probe = await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -13539,8 +13554,8 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!alive) {
-            knownDead = true;
+          if (!probe.alive) {
+            latchedNotAlive = probe;
             break;
           }
           await sendSubmitKeyToTmux(session.tmuxSession);
@@ -13548,17 +13563,19 @@ export class SessionService {
       }
       // fresh:true — a cached hit could report an agent that just died as
       // alive; this value decides throw vs. treat-as-delivered. Skipped when
-      // already confirmed dead mid-loop.
-      const processAlive = knownDead
-        ? false
-        : await agentProcessAlive(
-            {
-              tmuxSession: session.tmuxSession,
-              agent: session.agent,
-              launchCommand: session.launchCommand,
-            },
-            { fresh: true },
-          );
+      // already non-alive mid-loop.
+      const finalProbe =
+        latchedNotAlive ??
+        (await probeAgentProcess(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        ));
+      const processAlive = finalProbe.alive;
+      const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
       const elapsedMs = Date.now() - startedAt;
       if (processAlive) {
         this.logEvent("session.controls.delivery_recovered", {
@@ -13585,6 +13602,7 @@ export class SessionService {
         lastScannedFile: result.lastScannedFile,
         elapsedMs,
         processAlive: false,
+        probeUnresponsive,
       });
     });
   }
@@ -13661,12 +13679,12 @@ export class SessionService {
       slashCommand: message.trimStart().startsWith("/"),
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    // Set only when the mid-loop probe below observes a dead pane; reused for
-    // the post-loop processAlive check so a confirmed-dead agent is not
-    // re-probed. Never set on a live result — a live pane can still die before
-    // the next check, so "alive" is never cached, only "dead" (see the probe's
-    // own fresh:true comment).
-    let knownDead = false;
+    // Set only when the mid-loop probe below reads not-alive; reused for the
+    // post-loop check so that agent is not re-probed. Carries `unresponsive`
+    // so an ambiguous read is not laundered into a plain death verdict. Never
+    // set on a live result — a live pane can still die before the next check,
+    // so "alive" is never cached (see the probe's own fresh:true comment).
+    let latchedNotAlive: Extract<AgentProcessProbe, { alive: false }> | null = null;
     // The last scan that missed the text read the transcript before the agent
     // recorded it. An interrupted turn can close after the paste (the agent
     // takes the input once its abort lands), so on an ack the queue fence
@@ -13701,7 +13719,7 @@ export class SessionService {
         // { fresh: true } is mandatory — a stale cached hit would report an
         // agent that just died as alive.
         if (session.agent === "cursor" || interactive || freshLaunch) {
-          const alive = await agentProcessAlive(
+          const probe = await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -13709,8 +13727,8 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!alive) {
-            knownDead = true;
+          if (!probe.alive) {
+            latchedNotAlive = probe;
             break;
           }
         }
@@ -13725,16 +13743,18 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = knownDead
-      ? false
-      : await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
-            agent: session.agent,
-            launchCommand: session.launchCommand,
-          },
-          { fresh: true },
-        );
+    const finalProbe =
+      latchedNotAlive ??
+      (await probeAgentProcess(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      ));
+    const processAlive = finalProbe.alive;
+    const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
     const elapsedMs = Date.now() - startedAt;
     // Interactive callers own the live-timeout policy (delivered + warn), so
     // they get the typed timeout, never this silent cursor pass. Neither does
@@ -13767,6 +13787,7 @@ export class SessionService {
         elapsedMs,
         ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
+        probeUnresponsive,
       },
     });
     if (
@@ -13790,6 +13811,7 @@ export class SessionService {
       lastScannedFile: lastResult.lastScannedFile,
       elapsedMs,
       processAlive,
+      probeUnresponsive,
     });
   }
 
@@ -16122,13 +16144,28 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      // An unresponsive liveness read is not evidence of death: killing here
+      // would destroy a live agent whose tmux server was merely slow (#904).
+      if (!isAmbiguousSubmitAckTimeout(error)) {
+        await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
+        ...(isAmbiguousSubmitAckTimeout(error)
+          ? {
+              details: {
+                reason: "submit_ack_timeout",
+                agent: error.agent,
+                elapsedMs: error.elapsedMs,
+                processAlive: false,
+                probeUnresponsive: true,
+              },
+            }
+          : {}),
       });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
@@ -17947,7 +17984,7 @@ export class SessionService {
             },
             { fresh },
           )
-        : { alive: false };
+        : { alive: false, unresponsive: false };
     // Fires once on the transition into the pane-child fallback answering
     // ALIVE instead of every readRuntimeSnapshot call — see
     // paneChildFallbackNotified's own comment for the event-volume math.

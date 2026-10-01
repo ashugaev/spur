@@ -226,7 +226,7 @@ const probeTmuxProcessMatchMock =
       sessionName: string,
       matchers: string[],
       options?: { fresh?: boolean; paneChildFallback?: boolean },
-    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+    ) => Promise<{ alive: boolean; matchedByName: boolean; unresponsive: boolean }>
   >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
@@ -1298,6 +1298,11 @@ type SessionServiceInternals = {
   deliveryRuns: Map<string, Promise<void>>;
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
+  deliverPreparedLocked(
+    sessionId: string,
+    message: string,
+    options: { entryPoint: "send" | "deliver" | "flush"; recoverOnLiveAckTimeout?: boolean },
+  ): Promise<unknown>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
   enrichWithClassified(
     session: SessionRecord,
@@ -1648,7 +1653,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (sessionName, matchers, options) => {
         const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
-        return { alive, matchedByName: alive };
+        return { alive, matchedByName: alive, unresponsive: false };
       });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
@@ -2568,6 +2573,7 @@ describe("SessionService", () => {
           lastScannedFile: null,
           elapsedMs: 20_000,
           processAlive: true,
+          probeUnresponsive: false,
         }),
       );
 
@@ -7639,6 +7645,82 @@ describe("SessionService", () => {
     );
   });
 
+  it("submit ack timeout with an unresponsive liveness probe throws probeUnresponsive, never a bare dead read", async () => {
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/some/file.jsonl",
+    });
+
+    const error = await sessionServiceInternals(service)
+      .sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SubmitAckTimeoutError);
+    expect(error).toMatchObject({ processAlive: false, probeUnresponsive: true });
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        details: expect.objectContaining({ processAlive: false, probeUnresponsive: true }),
+      }),
+    );
+  });
+
+  it("submit ack cursor mid-loop unresponsive probe breaks after one window with zero Enter resends and carries probeUnresponsive", async () => {
+    const cursorScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "cursor" ? { scan: cursorScanMock } : null,
+    );
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
+
+    const { SessionService, SubmitAckTimeoutError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/some/chat.jsonl" });
+
+    const error = await sessionServiceInternals(service)
+      .sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "cursor",
+          launchCommand: "agent --force --sandbox disabled",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SubmitAckTimeoutError);
+    expect(error).toMatchObject({ processAlive: false, probeUnresponsive: true });
+    expect(waitForAckMock).toHaveBeenCalledTimes(1);
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    // Latched: the post-loop read reuses the mid-loop result, no second probe.
+    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("continues cursor delivery when submit ack times out but the agent process is live", async () => {
     const cursorScanMock = vi
       .fn()
@@ -9938,6 +10020,103 @@ describe("SessionService", () => {
     const deliveredAgain = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
     expect(deliveredAgain).toBe(true);
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("deliver keeps the queued message and never recovers when the submit ack liveness probe was unresponsive", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["first queued"],
+        awaitingPrompt: false,
+      },
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    // Alive for the readiness checks, unresponsive only at the post-send read.
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValueOnce({ alive: true, matchedByName: true, unresponsive: false })
+      .mockResolvedValueOnce({ alive: true, matchedByName: true, unresponsive: false })
+      .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_failed",
+        level: "error",
+        sessionId: "api-1",
+      }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.delivery_recovered" }),
+    );
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+  });
+
+  it("deliverPreparedLocked with recoverOnLiveAckTimeout rethrows and logs failed, never recovered, when the submit ack liveness probe was unresponsive", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    // Alive for the readiness checks, unresponsive only once the pane write
+    // has happened (the post-send read).
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? { alive: false, matchedByName: false, unresponsive: true }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    await expect(
+      sessionServiceInternals(service).deliverPreparedLocked("api-1", "hello", {
+        entryPoint: "flush",
+        recoverOnLiveAckTimeout: true,
+      }),
+    ).rejects.toMatchObject({ name: "SubmitAckTimeoutError", probeUnresponsive: true });
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.failed", sessionId: "api-1" }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.delivery_recovered" }),
+    );
   });
 
   it("survives a pre-delivery throw from ensureSessionReadyForSend (missing workspace): queue retained, one delivery_failed logged, no exception escapes (BLOCKING 2)", async () => {
@@ -15930,6 +16109,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: false,
+      unresponsive: false,
     }));
 
     const service = await createDisposedSessionService();
@@ -15965,6 +16145,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: mode === "matcher",
+      unresponsive: false,
     }));
 
     const service = await createDisposedSessionService();
@@ -16002,6 +16183,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: false,
+      unresponsive: false,
     }));
 
     const { SessionService } = await loadSessionServiceModule();
@@ -31589,6 +31771,66 @@ describe("SessionService", () => {
         event: "session.restore.failed",
         level: "error",
         sessionId: "api-1",
+      }),
+    );
+  });
+
+  it("restore does not kill the pane when the submit ack liveness probe was unresponsive", async () => {
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage: "restore prompt",
+      readyMarkers: ["❯"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let restoredTmuxCreated = false;
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    createAgentSubmitAckBindingMock.mockResolvedValue({
+      scan: vi.fn(),
+    });
+    tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
+    // Alive through the restore readiness checks, unresponsive only once the
+    // restore message has been written (the post-send read).
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? { alive: false, matchedByName: false, unresponsive: true }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+
+    const service = await createDisposedSessionService();
+
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/some/claude.jsonl",
+    });
+
+    await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
+    // The dead-pane twin of this case kills twice (pre-launch teardown plus
+    // the failure kill); the ambiguous read must skip the failure kill.
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.restore.failed",
+        level: "error",
+        sessionId: "api-1",
+        details: expect.objectContaining({ probeUnresponsive: true, processAlive: false }),
       }),
     );
   });
@@ -49540,6 +49782,7 @@ describe("SessionService", () => {
           lastScannedFile: null,
           elapsedMs: 20_000,
           processAlive: true,
+          probeUnresponsive: false,
         }),
       );
 
