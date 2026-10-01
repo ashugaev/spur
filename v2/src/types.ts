@@ -177,6 +177,8 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+/** Callback-data prefix for an agent-offered inline button. */
+export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
@@ -331,6 +333,8 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
+  /** Destination for agent-initiated sends from a session with no inbound Telegram message. */
+  chatId?: number;
   autoSpawn?: TelegramAutoSpawnConfig;
 }
 
@@ -348,10 +352,32 @@ export interface TelegramBinding {
   sessionId: string;
 }
 
+/** One pending inline-button choice offered by an agent, awaiting a click. */
+export interface TelegramChoice {
+  token: string;
+  /** All choices from one agent send share this; a click consumes the whole offer. */
+  offerId: string;
+  sessionId: string;
+  chatId: number;
+  messageThreadId?: number;
+  text: string;
+  value: string;
+  expiresAt: string;
+}
+
+/** A bot message and the session that sent it, so a user reply routes back there. */
+export interface TelegramMessageOwner {
+  chatId: number;
+  messageId: number;
+  sessionId: string;
+}
+
 export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;
   statusMessageId?: number;
+  /** Last forum-topic name applied for this session; a rename happens only when the computed name differs. */
+  topicName?: string;
   lastInboundAt?: string;
   lastReplyAt?: string;
   updatedAt: string;
@@ -1279,6 +1305,15 @@ export interface SpawnSessionRequest {
   subscriptions?: SubscribeSessionStatesRequest[];
 }
 
+/**
+ * Telegram chat a source-initiated spawn came from. Internal to the daemon:
+ * only the source adapter passes it (spawn options), never the HTTP body.
+ */
+export type TelegramSpawnOrigin = Pick<
+  TelegramReplyTarget,
+  "projectId" | "sourceId" | "chatId" | "messageThreadId"
+>;
+
 export interface SendMessageAttachment {
   name: string;
   data: string; // base64
@@ -1291,8 +1326,14 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface SourceReplyButton {
+  text: string;
+  value: string;
+}
+
 export interface SourceReplyRequest {
   message: string;
+  buttons?: SourceReplyButton[];
 }
 
 export interface SourceReplyResponse {
@@ -1303,6 +1344,7 @@ export interface SourceReplyResponse {
   sourceId: string;
   chatId: number;
   messageThreadId?: number;
+  buttons?: number;
 }
 
 export type WakeTarget = "scheduled" | "interval" | "daily";

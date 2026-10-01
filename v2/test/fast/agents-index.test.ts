@@ -13,7 +13,9 @@ const {
   readFileMock,
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
+  readClaudeSessionStatusMock,
 } = vi.hoisted(() => ({
+  readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
   ensureClaudeRestrictWritesSettingsMock: vi.fn(),
   captureCodexRolloutBaselineMock: vi.fn(),
@@ -55,6 +57,10 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
+vi.mock("../../src/claude-session-status.js", () => ({
+  readClaudeSessionStatus: readClaudeSessionStatusMock,
+}));
+
 vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
   ...(await importOriginal<typeof CursorSubmitAckModule>()),
   captureCursorSubmitBaseline: captureCursorSubmitBaselineMock,
@@ -62,6 +68,7 @@ vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
 }));
 
 import {
+  agentEarlySubmitResendAllowed,
   agentHasLaunchSubmitAck,
   agentSubmitAckPacing,
   buildAgentLaunchPlan,
@@ -569,12 +576,36 @@ describe("createAgentSubmitAckBinding", () => {
 });
 
 describe("agentSubmitAckPacing", () => {
-  it("shortens the claude window for a launch send only", () => {
-    expect(agentSubmitAckPacing("claude")).toEqual({ windowMs: 300_000, maxResends: 2 });
+  it("gives a mid-session claude send a 5s first window and keeps the long resend window", () => {
+    expect(agentSubmitAckPacing("claude")).toEqual({
+      firstWindowMs: 5_000,
+      windowMs: 300_000,
+      maxResends: 2,
+    });
     expect(agentSubmitAckPacing("claude", { freshLaunch: true })).toEqual({
       windowMs: 5_000,
       maxResends: 2,
     });
+  });
+
+  it("gives a claude slash command no early first window", () => {
+    expect(agentSubmitAckPacing("claude", { slashCommand: true })).toEqual({
+      windowMs: 300_000,
+      maxResends: 2,
+    });
+  });
+
+  it("allows the early Enter only while the claude status file shows a working or waiting turn", async () => {
+    const ctx = { worktreePath: "/tmp/wt", agentSessionId: "sid-1" };
+
+    readClaudeSessionStatusMock.mockResolvedValueOnce({ state: "waiting" });
+    await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(true);
+    readClaudeSessionStatusMock.mockResolvedValueOnce({ state: "working" });
+    await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(true);
+    readClaudeSessionStatusMock.mockResolvedValueOnce({ state: "needs_input" });
+    await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(false);
+    readClaudeSessionStatusMock.mockResolvedValueOnce(null);
+    await expect(agentEarlySubmitResendAllowed("claude", ctx)).resolves.toBe(false);
   });
 
   it("reports launch-send pacing for claude and codex only", () => {
@@ -613,6 +644,7 @@ describe("agentSubmitAckPacing", () => {
       windowMs: 10_000,
       maxResends: 2,
     });
+    expect(agentSubmitAckPacing("cursor")).toEqual({ windowMs: 5_000, maxResends: 12 });
   });
 });
 

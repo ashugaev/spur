@@ -6,6 +6,7 @@ import {
   type SessionRecord,
   type SourceConfig,
   type SourceType,
+  type TelegramSpawnOrigin,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -27,6 +28,8 @@ export interface SourceSessionListItem {
   agent: string;
   state: string;
   title?: string;
+  /** Present when a message sent to this session would be dropped (stopped, error, killed). */
+  inactive?: true;
 }
 
 export interface SourceSpawnSessionRequest {
@@ -35,6 +38,8 @@ export interface SourceSpawnSessionRequest {
   agent?: AgentName;
   model?: string;
   selfDestruct?: SelfDestructConfig;
+  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 export interface SourceProjectListItem {
