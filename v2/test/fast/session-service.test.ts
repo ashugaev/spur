@@ -24061,10 +24061,11 @@ describe("SessionService", () => {
           pgid: 999_999_999,
           starttime: 1,
         });
-        // No write may have dropped the identity on the way through.
+        // AC3: no write on the way through may have touched either map.
         for (const [, record] of writeSessionMock.mock.calls) {
           if (record.id === "api-1") {
             expect(record.sidecarProcs?.dev).toBeDefined();
+            expect(record.sidecarPorts?.dev).toEqual({ SPUR_RESERVED_PORT_DEV: 4100 });
           }
         }
 
@@ -24085,7 +24086,7 @@ describe("SessionService", () => {
         "refuses the pane leg when the pane read is unresponsive, %s",
         async (_label, identity) => {
           loadConfigMock.mockReturnValue(devSidecarProjectConfig());
-          seedApiOne({ identity });
+          const sessions = seedApiOne({ identity });
           getSidecarTmuxPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
           getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: true });
 
@@ -24100,6 +24101,10 @@ describe("SessionService", () => {
           expect(refusal).toBeInstanceOf(SidecarProbeUnresponsiveError);
           expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--dev");
           expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+          if (identity) {
+            // The paneDead branch's clearSidecarProcEntry must not have run.
+            expect(sessions.get("api-1")?.sidecarProcs?.dev).toBeDefined();
+          }
 
           // AC6: one read per helper for this sidecar's own name. Filtered to
           // "dev", since reservation scans probe OTHER sessions' sidecar names.

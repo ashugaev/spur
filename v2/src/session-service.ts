@@ -899,7 +899,6 @@ export class SidecarPortConflictError extends Error {
 // conflict. Retryable by construction — thrown before any side effect.
 export class SidecarProbeUnresponsiveError extends Error {
   readonly statusCode = 503;
-  readonly code = "sidecar_probe_unresponsive";
 }
 
 export class OpenPrActionRequiredError extends Error {
