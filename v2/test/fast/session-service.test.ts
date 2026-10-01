@@ -226,7 +226,7 @@ const probeTmuxProcessMatchMock =
       sessionName: string,
       matchers: string[],
       options?: { fresh?: boolean; paneChildFallback?: boolean },
-    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+    ) => Promise<{ alive: boolean; matchedByName: boolean; unresponsive: boolean }>
   >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
@@ -1309,6 +1309,15 @@ type SessionServiceInternals = {
   confirmAgentExited(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean>;
+  readRuntimeSnapshot(
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    options?: { fresh?: boolean },
+  ): Promise<{
+    runtimeAlive: boolean;
+    paneUsable: boolean;
+    processAlive: boolean;
+    probeUnresponsive: boolean;
+  }>;
   runAttentionMonitor(baseline: boolean): Promise<void>;
   pollAttentionStates(baseline: boolean): Promise<void>;
   attentionMonitorRunning: boolean;
@@ -1648,7 +1657,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (sessionName, matchers, options) => {
         const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
-        return { alive, matchedByName: alive };
+        return { alive, matchedByName: alive, unresponsive: false };
       });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
@@ -15930,6 +15939,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: false,
+      unresponsive: false,
     }));
 
     const service = await createDisposedSessionService();
@@ -15965,6 +15975,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: mode === "matcher",
+      unresponsive: false,
     }));
 
     const service = await createDisposedSessionService();
@@ -16002,6 +16013,7 @@ describe("SessionService", () => {
     probeTmuxProcessMatchMock.mockImplementation(async () => ({
       alive: true,
       matchedByName: false,
+      unresponsive: false,
     }));
 
     const { SessionService } = await loadSessionServiceModule();
@@ -21377,6 +21389,110 @@ describe("SessionService", () => {
     // ensureSessionReadyForSend duplicate.
     expect(isProcessRunningInTmuxMock).not.toHaveBeenCalled();
     service.dispose();
+  });
+
+  // Issue #903: tmux answers on both legs, the ps fork is timeout-killed. The
+  // probe mock hides WHICH fork failed (ps vs the second list-panes -a), so
+  // this pins the session-service plumbing only; the runtime-tmux AC10 test
+  // pins the second-fork fix.
+  const PS_TIMED_OUT = { alive: false, matchedByName: false, unresponsive: true };
+
+  it("AC4: a timeout-killed ps fork with healthy tmux legs reads probeUnresponsive:true", async () => {
+    probeTmuxProcessMatchMock.mockReset().mockResolvedValue(PS_TIMED_OUT);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await expect(
+      sessionServiceInternals(service).readRuntimeSnapshot(runningSession({ id: "api-1" })),
+    ).resolves.toMatchObject({
+      runtimeAlive: true,
+      paneUsable: true,
+      processAlive: false,
+      probeUnresponsive: true,
+    });
+  });
+
+  it("AC4: an empty-but-healthy ps result (exit 0, no match) stays probeUnresponsive:false", async () => {
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: false });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await expect(
+      sessionServiceInternals(service).readRuntimeSnapshot(runningSession({ id: "api-1" })),
+    ).resolves.toMatchObject({ processAlive: false, probeUnresponsive: false });
+  });
+
+  it("AC5: confirmAgentExited returns false when the fresh second sample's ps fork is timeout-killed", async () => {
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValueOnce({ alive: false, matchedByName: false, unresponsive: false })
+      .mockResolvedValueOnce(PS_TIMED_OUT);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await expect(
+      sessionServiceInternals(service).confirmAgentExited(runningSession({ id: "api-1" })),
+    ).resolves.toBe(false);
+    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("AC7: a ps timeout kill leaves a running record untouched and logs probe_unresponsive", async () => {
+    readSessionMock.mockReturnValue(runningSession({ id: "api-1" }));
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+
+    probeTmuxProcessMatchMock.mockReset().mockResolvedValue(PS_TIMED_OUT);
+    logSpurEventMock.mockClear();
+    const second = await service.get("api-1");
+
+    expect(second.status).toBe("running");
+    expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.runtime.probe_unresponsive",
+        sessionId: "api-1",
+      }),
+    );
+    service.dispose();
+  });
+
+  it("AC8: a ps timeout kill makes send-side recovery throw without killing or relaunching", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      ...runningSession({ id: "api-1" }),
+      queuedMessages: { messages: ["first queued"], awaitingPrompt: false },
+    });
+    probeTmuxProcessMatchMock.mockReset().mockResolvedValue(PS_TIMED_OUT);
+
+    const delivered = await sessionServiceInternals(service).tryDeliverQueuedMessage("api-1");
+
+    expect(delivered).toBe(true);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({
+        event: "session.message.delivery_failed",
+        sessionId: "api-1",
+        message: expect.stringContaining("timed out"),
+      }),
+    );
   });
 
   it("runs a bound service and persists its optional port", async () => {
@@ -48444,6 +48560,29 @@ describe("SessionService", () => {
         );
         tmuxSessionExistsMock.mockResolvedValue(true);
         isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) =>
+              entry.event === "session.reaper.live_under_terminal" && entry.sessionId === "api-1",
+          ),
+        ).toBe(true);
+        service.dispose();
+      });
+
+      it("AC6 (#903): never kills a terminal session's tmux while the ps fork is timeout-killed", async () => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1", status: "completed" }));
+        tmuxSessionExistsMock.mockResolvedValue(true);
+        probeTmuxProcessMatchMock
+          .mockReset()
+          .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
 
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

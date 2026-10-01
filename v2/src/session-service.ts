@@ -1096,10 +1096,11 @@ interface SessionRuntimeSnapshot {
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
-  // True only when a `runtimeAlive`/`paneUsable` false reading came from a
-  // tmux probe killed by its own timeout (isTmuxTimeoutKill), never from a
-  // confirmed-absent tmux server. reconcileUnexpectedStop must not treat this
-  // reading as proof the runtime is gone.
+  // True only when a `runtimeAlive`/`paneUsable`/`processAlive` false reading
+  // came from a probe fork (tmux list-windows, list-panes, or ps) killed by
+  // its own timeout (isProbeTimeoutKill), never from a confirmed-absent tmux
+  // server or process. reconcileUnexpectedStop must not treat this reading as
+  // proof the runtime is gone.
   probeUnresponsive: boolean;
 }
 interface SessionStateResult {
@@ -1616,7 +1617,9 @@ async function agentProcessAlive(
 // and an object return there would silently read as "always alive" (tsc
 // cannot catch it; only eslint no-unnecessary-condition would). Keeps
 // agentProcessAlive's signature and all nine call sites unchanged.
-type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+type AgentProcessProbe =
+  | { alive: false; unresponsive: boolean }
+  | { alive: true; via: "matcher" | "pane_child" };
 
 // Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
 // second isProcessRunningInTmux read: two separate top-level calls would each
@@ -1637,7 +1640,7 @@ async function probeAgentProcess(
     ...(foreign ? { paneChildFallback: true } : {}),
   });
   if (!result.alive) {
-    return { alive: false };
+    return { alive: false, unresponsive: result.unresponsive };
   }
   return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
@@ -17947,7 +17950,7 @@ export class SessionService {
             },
             { fresh },
           )
-        : { alive: false };
+        : { alive: false, unresponsive: false };
     // Fires once on the transition into the pane-child fallback answering
     // ALIVE instead of every readRuntimeSnapshot call — see
     // paneChildFallbackNotified's own comment for the event-volume math.
@@ -17969,12 +17972,13 @@ export class SessionService {
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
     const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
+    const processUnresponsive = !processProbe.alive && processProbe.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive: processProbe.alive,
       tmuxActivityAt,
-      probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
+      probeUnresponsive: sessionsUnresponsive || panesUnresponsive || processUnresponsive,
     };
   }
 
