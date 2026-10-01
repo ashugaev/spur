@@ -48139,28 +48139,34 @@ describe("SessionService", () => {
     });
 
     describe("wake is admissible only for zero-slot record shapes", () => {
-      async function sendToDeadPane(stopReason: "memory_shed" | undefined) {
-        // Cap of 1 with a live occupier: any gated wake is over the cap.
+      async function sendToDeadPane(
+        stopReason: "memory_shed" | undefined,
+        options: { status?: "stopped" | "running"; occupier?: boolean; cap?: number } = {},
+      ) {
+        // Default: cap of 1 with a live occupier, so any gated wake is over the cap.
+        const withOccupier = options.occupier ?? true;
         loadConfigMock.mockReturnValue({
           ...baseConfig(),
-          admission: { ...baseConfig().admission, maxLiveSessions: 1 },
+          admission: { ...baseConfig().admission, maxLiveSessions: options.cap ?? 1 },
         });
         mockClaudeJsonlState("waiting");
         const sessions = createSessionStore();
-        sessions.set(
-          "occupier",
-          sessionRecord({ id: "occupier", status: "running", tmuxSession: "occupier" }),
-        );
+        if (withOccupier) {
+          sessions.set(
+            "occupier",
+            sessionRecord({ id: "occupier", status: "running", tmuxSession: "occupier" }),
+          );
+        }
         sessions.set(
           "api-1",
           sessionRecord({
             id: "api-1",
-            status: "stopped",
+            status: options.status ?? "stopped",
             ...(stopReason ? { stopReason } : {}),
             tmuxSession: "api-1",
           }),
         );
-        const relaunchedTmux = new Set<string>(["occupier"]);
+        const relaunchedTmux = new Set<string>(withOccupier ? ["occupier"] : []);
         tmuxSessionExistsMock.mockImplementation(async (name: string) => relaunchedTmux.has(name));
         createTmuxSessionMock.mockImplementation(
           async ({ sessionName }: { sessionName: string }) => {
@@ -48172,7 +48178,7 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
           deferBackgroundLoops: true,
         });
-        return { service, SessionAdmissionDeniedError };
+        return { service, sessions, SessionAdmissionDeniedError };
       }
 
       it("denies a delivery-driven wake of a memory_shed record over the cap and never relaunches", async () => {
@@ -48187,6 +48193,29 @@ describe("SessionService", () => {
 
       it("still relaunches a plain stopped record (dead-pane recovery) over the cap", async () => {
         const { service } = await sendToDeadPane(undefined);
+
+        await service.send("api-1", { message: "resume work" });
+
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        service.dispose();
+      });
+
+      it("clears memory_shed when a wake is admitted, so the running record carries no stopReason", async () => {
+        const { service, sessions } = await sendToDeadPane("memory_shed", { cap: 2 });
+
+        await service.send("api-1", { message: "resume work" });
+
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(sessions.get("api-1")?.stopReason).toBeUndefined();
+        service.dispose();
+      });
+
+      it("relaunches a running record with a residual memory_shed marker at the cap (no self-count)", async () => {
+        const { service } = await sendToDeadPane("memory_shed", {
+          status: "running",
+          occupier: false,
+        });
 
         await service.send("api-1", { message: "resume work" });
 

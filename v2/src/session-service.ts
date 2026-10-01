@@ -9671,6 +9671,12 @@ export class SessionService {
     // preceded this call, so isStaleParked (which requires
     // status==="stopped") would always return false here and silently
     // disable the sidecar replay.
+    if (record.stopReason === "memory_shed") {
+      // No sidecars to replay; the wake only has to clear the marker so the
+      // running record never carries it (the wake gate keys on it).
+      const { stopReason: _clearedShed, ...awake } = record;
+      return awake;
+    }
     if (record.stopReason !== "stale_timeout") {
       return record;
     }
@@ -15362,7 +15368,10 @@ export class SessionService {
     // Thrown before anything below touches the pane (killAgentPaneAndConfirmExit
     // runs inside relaunchSessionInPlace, further down) so a refusal never
     // kills a live process or does any destructive work.
-    if (isStaleParked(session) || session.stopReason === "memory_shed") {
+    if (
+      isStaleParked(session) ||
+      (session.status === "stopped" && session.stopReason === "memory_shed")
+    ) {
       this.assertAdmissible(session.project, "wake");
     }
 
