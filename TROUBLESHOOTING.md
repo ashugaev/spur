@@ -55,3 +55,7 @@ Spur's default runtime requires `tmux`. Install it, then rerun setup:
 ```bash
 bash scripts/setup.sh
 ```
+
+## Session stays `spawning` with a shell prompt in the pane
+
+The agent launches through your login + interactive shell rc (`$SHELL -lic`). An rc prompt on startup (oh-my-zsh `Would you like to update? [Y/n]`) blocks it. Answer in the session's web terminal before the agent's ready timeout, or the spawn fails. Permanent fix: your rc tool's non-interactive update mode.

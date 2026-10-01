@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -518,6 +521,7 @@ describe("runtime-tmux shared probe cache", () => {
       sessionName: "fresh-api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: mkdtempSync(join(tmpdir(), "spur-launch-script-test-")),
     });
 
     // Without invalidation this would still serve the stale cached `false`

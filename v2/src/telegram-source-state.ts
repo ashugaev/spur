@@ -1,3 +1,4 @@
+import { escapeTelegramHtml, renderTelegramHtml } from "./telegram-markdown.js";
 import type { TelegramReplyTarget, TelegramSourceConfig } from "./types.js";
 
 interface TelegramApiResponse<T> {
@@ -16,6 +17,33 @@ interface TelegramForumTopic {
 export interface TelegramReplySendResult {
   messageThreadId?: number;
   statusMessageIdConsumed?: boolean;
+  /** Ids of every message the reply produced or edited, in send order. */
+  messageIds: number[];
+}
+
+/** First line of every agent-authored Telegram message: `<id> — <title>`, or `<id>` alone. */
+export function formatTelegramSessionLabel(id: string, title?: string): string {
+  return title ? `${id} — ${title}` : id;
+}
+
+/** One inline button: `text` is what the user sees, `callbackData` what the click carries back. */
+export interface TelegramInlineButton {
+  text: string;
+  callbackData: string;
+}
+
+interface TelegramInlineKeyboard {
+  inline_keyboard: { text: string; callback_data: string }[][];
+}
+
+/** One button per row: labels are agent-authored and can be long. */
+function inlineKeyboard(buttons: TelegramInlineButton[]): TelegramInlineKeyboard | undefined {
+  if (buttons.length === 0) return undefined;
+  return {
+    inline_keyboard: buttons.map((button) => [
+      { text: button.text, callback_data: button.callbackData },
+    ]),
+  };
 }
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
@@ -52,6 +80,7 @@ async function callTelegram<T>(
   config: Pick<TelegramSourceConfig, "token">,
   method: string,
   body: Record<string, unknown>,
+  options: { retry?: false } = {},
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -77,10 +106,40 @@ async function callTelegram<T>(
           : undefined,
       );
     } catch (error) {
-      const delayMs = retryDelay(error, attempt);
+      const delayMs = options.retry === false ? null : retryDelay(error, attempt);
       if (delayMs === null) throw error;
       await sleep(delayMs);
     }
+  }
+}
+
+/**
+ * One "typing" indicator, lasting about five seconds in the chat. Fire and
+ * forget: never retries, never throws. A 429 reports how long to stay quiet.
+ */
+export async function sendTelegramChatAction(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageThreadId?: number,
+): Promise<{ retryAfterMs?: number }> {
+  try {
+    await callTelegram(
+      config,
+      "sendChatAction",
+      {
+        chat_id: chatId,
+        action: "typing",
+        ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      },
+      { retry: false },
+    );
+    return {};
+  } catch (error) {
+    return error instanceof TelegramApiError &&
+      error.status === 429 &&
+      error.retryAfterMs !== undefined
+      ? { retryAfterMs: error.retryAfterMs }
+      : {};
   }
 }
 
@@ -105,15 +164,17 @@ export async function editTelegramTopic(
   chatId: number,
   messageThreadId: number,
   name: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await callTelegram(config, "editForumTopic", {
       chat_id: chatId,
       message_thread_id: messageThreadId,
       name,
     });
-  } catch {
-    // Best-effort; topic rename failures should never block a Telegram notice.
+    return true;
+  } catch (error) {
+    // The topic already carries this name: as good as applied.
+    return error instanceof TelegramApiError && error.description.includes("TOPIC_NOT_MODIFIED");
   }
 }
 
@@ -132,15 +193,41 @@ export async function closeTelegramTopic(
   }
 }
 
+/**
+ * Splits at the last newline inside the limit, else at the limit, moved back
+ * one unit when it would cut a surrogate pair.
+ */
 function splitTelegramText(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > TELEGRAM_MESSAGE_LIMIT) {
-    chunks.push(remaining.slice(0, TELEGRAM_MESSAGE_LIMIT));
-    remaining = remaining.slice(TELEGRAM_MESSAGE_LIMIT);
+    const newline = remaining.lastIndexOf("\n", TELEGRAM_MESSAGE_LIMIT - 1);
+    if (newline > 0) {
+      chunks.push(remaining.slice(0, newline));
+      remaining = remaining.slice(newline + 1);
+      continue;
+    }
+    const highSurrogate = /[\uD800-\uDBFF]/.test(remaining.charAt(TELEGRAM_MESSAGE_LIMIT - 1));
+    const cut = highSurrogate ? TELEGRAM_MESSAGE_LIMIT - 1 : TELEGRAM_MESSAGE_LIMIT;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
   }
   chunks.push(remaining);
   return chunks;
+}
+
+/** One outgoing message: the HTML to send, and the raw text to fall back to. */
+interface OutgoingChunk {
+  html: string;
+  plain: string;
+}
+
+function isParseError(error: unknown): boolean {
+  return (
+    error instanceof TelegramApiError &&
+    error.status === 400 &&
+    error.description.toLowerCase().includes("can't parse entities")
+  );
 }
 
 function isNotModifiedError(error: unknown): boolean {
@@ -150,43 +237,144 @@ function isNotModifiedError(error: unknown): boolean {
   );
 }
 
-async function sendTelegramMessage(
+async function sendPlainTelegramMessage(
   config: Pick<TelegramSourceConfig, "token">,
   chatId: number,
   text: string,
   messageThreadId?: number,
-): Promise<void> {
-  await callTelegram(config, "sendMessage", {
+  replyMarkup?: TelegramInlineKeyboard,
+  parseMode?: "HTML",
+): Promise<number | undefined> {
+  const sent = await callTelegram<{ message_id?: unknown } | undefined>(config, "sendMessage", {
     chat_id: chatId,
     text,
+    ...(parseMode ? { parse_mode: parseMode } : {}),
     ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   });
+  return Number.isInteger(sent?.message_id) ? (sent?.message_id as number) : undefined;
+}
+
+/** Sends the HTML form; a parse rejection resends the raw text once. */
+async function sendTelegramMessage(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  chunk: OutgoingChunk,
+  messageThreadId?: number,
+  replyMarkup?: TelegramInlineKeyboard,
+): Promise<number | undefined> {
+  try {
+    return await sendPlainTelegramMessage(
+      config,
+      chatId,
+      chunk.html,
+      messageThreadId,
+      replyMarkup,
+      "HTML",
+    );
+  } catch (error) {
+    if (!isParseError(error)) throw error;
+    return sendPlainTelegramMessage(config, chatId, chunk.plain, messageThreadId, replyMarkup);
+  }
+}
+
+/** Edits with the HTML form; a parse rejection retries the edit once as raw text. */
+async function editTelegramMessage(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  messageId: number,
+  chunk: OutgoingChunk,
+  replyMarkup?: TelegramInlineKeyboard,
+): Promise<void> {
+  const edit = (text: string, parseMode?: "HTML"): Promise<unknown> =>
+    callTelegram(config, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  try {
+    await edit(chunk.html, "HTML");
+  } catch (error) {
+    if (!isParseError(error)) throw error;
+    await edit(chunk.plain);
+  }
 }
 
 export async function sendTelegramReply(
   config: Pick<TelegramSourceConfig, "token">,
   target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId" | "statusMessageId">,
   text: string,
-  options: { topicName?: string } = {},
+  options: { topicName?: string; buttons?: TelegramInlineButton[]; preformatted?: string } = {},
 ): Promise<TelegramReplySendResult> {
-  const chunks = splitTelegramText(text);
-  const firstChunk = chunks[0] ?? "";
-  if (target.statusMessageId !== undefined) {
-    try {
-      await callTelegram(config, "editMessageText", {
-        chat_id: target.chatId,
-        message_id: target.statusMessageId,
-        text: firstChunk,
-      });
-    } catch (error) {
-      if (!isNotModifiedError(error)) {
-        await sendTelegramMessage(config, target.chatId, firstChunk, target.messageThreadId);
+  const rawChunks = splitTelegramText(text);
+  const htmlChunks = renderTelegramHtml(rawChunks);
+  const chunks: OutgoingChunk[] = rawChunks.map((plain, index) => ({
+    plain,
+    html: htmlChunks[index] as string,
+  }));
+  // A pane tail is shown verbatim in <pre>, never parsed as markdown.
+  const tail = options.preformatted;
+  if (tail) {
+    const last = chunks.at(-1);
+    if (last && last.plain.length + 1 + tail.length <= TELEGRAM_MESSAGE_LIMIT) {
+      last.plain += `\n${tail}`;
+      last.html += `\n<pre>${escapeTelegramHtml(tail)}</pre>`;
+    } else {
+      for (const part of splitTelegramText(tail)) {
+        chunks.push({ plain: part, html: `<pre>${escapeTelegramHtml(part)}</pre>` });
       }
     }
-    for (const chunk of chunks.slice(1)) {
-      await sendTelegramMessage(config, target.chatId, chunk, target.messageThreadId);
+  }
+  const firstChunk = chunks[0] ?? { plain: "", html: "" };
+  // The keyboard rides the last chunk, so the buttons sit under the full message.
+  const keyboard = inlineKeyboard(options.buttons ?? []);
+  const chunkMarkup = (index: number): TelegramInlineKeyboard | undefined =>
+    index === chunks.length - 1 ? keyboard : undefined;
+  const firstChunkMarkup = chunkMarkup(0);
+  const messageIds: number[] = [];
+  const collect = (id: number | undefined): void => {
+    if (id !== undefined) messageIds.push(id);
+  };
+  if (target.statusMessageId !== undefined) {
+    try {
+      await editTelegramMessage(
+        config,
+        target.chatId,
+        target.statusMessageId,
+        firstChunk,
+        firstChunkMarkup,
+      );
+      messageIds.push(target.statusMessageId);
+    } catch (error) {
+      if (isNotModifiedError(error)) {
+        messageIds.push(target.statusMessageId);
+      } else {
+        // The edit failed for good: send new, as plain text (no second HTML attempt).
+        collect(
+          await sendPlainTelegramMessage(
+            config,
+            target.chatId,
+            firstChunk.plain,
+            target.messageThreadId,
+            firstChunkMarkup,
+          ),
+        );
+      }
     }
-    return { statusMessageIdConsumed: true };
+    for (const [index, chunk] of chunks.slice(1).entries()) {
+      collect(
+        await sendTelegramMessage(
+          config,
+          target.chatId,
+          chunk,
+          target.messageThreadId,
+          chunkMarkup(index + 1),
+        ),
+      );
+    }
+    return { statusMessageIdConsumed: true, messageIds };
   }
 
   const createdThreadId =
@@ -194,8 +382,10 @@ export async function sendTelegramReply(
       ? await createTelegramTopic(config, target.chatId, options.topicName)
       : null;
   const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
-  for (const chunk of chunks) {
-    await sendTelegramMessage(config, target.chatId, chunk, messageThreadId);
+  for (const [index, chunk] of chunks.entries()) {
+    collect(
+      await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index)),
+    );
   }
-  return messageThreadId !== undefined ? { messageThreadId } : {};
+  return messageThreadId !== undefined ? { messageThreadId, messageIds } : { messageIds };
 }

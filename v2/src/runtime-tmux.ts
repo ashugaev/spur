@@ -1,11 +1,11 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
+import { agentInterruptKeys, agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -851,6 +851,21 @@ export interface TmuxProcessMatch {
 // same rationale as tmuxSessionExists's `fresh`: a session created after the
 // last fleet-pane snapshot is invisible to it until the cache naturally
 // expires, which would wrongly fail a post-create recovery/restore check.
+// Walks the parent chain from pid; true when it reaches one of the pane pids
+// (the pane pid itself counts). Bounded against a ps snapshot cycle.
+function descendsFromPane(
+  pid: number,
+  panePids: ReadonlySet<number>,
+  ppidByPid: ReadonlyMap<number, number>,
+): boolean {
+  let current: number | undefined = pid;
+  for (let depth = 0; current !== undefined && current > 1 && depth < 64; depth += 1) {
+    if (panePids.has(current)) return true;
+    current = ppidByPid.get(current);
+  }
+  return false;
+}
+
 export async function probeTmuxProcessMatch(
   sessionName: string,
   processMatchers: string[],
@@ -884,8 +899,37 @@ export async function probeTmuxProcessMatch(
     if (diagnostic) {
       return { alive: false, matchedByName: false, diagnostic };
     }
+    // tpgid on the row whose pid IS a pane pid is that tty's foreground
+    // process group, shared by every process attached to the tty.
+    const allPanePids = entry?.allPanePids ?? [];
+    const panePids = new Set(allPanePids);
+    const fgPgidByTty = new Map<string, number>();
+    for (const row of rows) {
+      if (panePids.has(row.pid) && ttySet.has(row.tty)) {
+        fgPgidByTty.set(row.tty, row.tpgid);
+      }
+    }
+    const ppidByPid = new Map(rows.map((row) => [row.pid, row.ppid]));
     for (const row of rows) {
       if (!ttySet.has(row.tty)) {
+        continue;
+      }
+      // A name match counts only in the tty's foreground group: a pane
+      // whose agent wrapper died leaves the shell in the foreground, and an
+      // orphaned agent binary still on the tty in the background must not
+      // read alive, or a send lands in the shell. Unresolvable foreground
+      // group (no pane-pid row, unparseable tpgid): name match alone.
+      const fgPgid = fgPgidByTty.get(row.tty);
+      if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
+        continue;
+      }
+      // And only under the pane's own shell. When the wrapper dies, the
+      // orphaned binary keeps the job's process group, and the tty's
+      // foreground group stays that job until the shell takes the terminal
+      // back: it passed the check above while the pane already showed the
+      // shell, and a send typed into it. Reparented to init or a subreaper,
+      // it no longer descends from the pane pid.
+      if (panePids.size > 0 && !descendsFromPane(row.pid, panePids, ppidByPid)) {
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
@@ -905,15 +949,7 @@ export async function probeTmuxProcessMatch(
     // background helper is not. fgPgid per tty is read off the row whose pid
     // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
     // pgid, shared by every process attached to that tty.
-    const allPanePids = entry?.allPanePids ?? [];
     if (options?.paneChildFallback && allPanePids.length > 0) {
-      const panePids = new Set(allPanePids);
-      const fgPgidByTty = new Map<string, number>();
-      for (const row of rows) {
-        if (panePids.has(row.pid) && ttySet.has(row.tty)) {
-          fgPgidByTty.set(row.tty, row.tpgid);
-        }
-      }
       for (const row of rows) {
         if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
           continue;
@@ -972,16 +1008,17 @@ function invalidateFleetProbeCaches(): void {
   psSnapshotCache.clear();
 }
 
+export const AGENT_LAUNCH_SCRIPT_NAME = "agent-launch.sh";
+
 export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
-  agent?: AgentName;
+  /** Session tool dir; holds the launch script, removed with the session. */
+  launchScriptDir: string;
   env?: Record<string, string>;
 }): Promise<void> {
-  const sessionTarget = exactSessionTarget(input.sessionName);
-  const envArgs = buildEnvArgs(input.env);
-
+  const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
@@ -992,25 +1029,46 @@ export async function createTmuxSession(input: {
     input.sessionName,
     "-c",
     input.cwd,
-    ...envArgs,
+    ...buildEnvArgs(input.env),
+    buildAgentPaneShellCommand(scriptPath),
   ]);
   invalidateFleetProbeCaches();
-  await sleep(300);
+}
 
+// The launch lives in a file, not on the tmux command line: tmux refuses a
+// new-session command past about 16KB, and opencode carries the whole task
+// prompt in its launch. Owner-only: the launch can carry env assignments
+// with credentials. A relaunch replaces the script with a fresh 0600 inode
+// (exclusive-create temp, then rename), never rewrites the old one in place:
+// an open handle or hard link to the previous file never sees the new launch.
+function writeAgentLaunchScript(dir: string, launchCommand: string): string {
+  mkdirSync(dir, { recursive: true });
+  const scriptPath = join(dir, AGENT_LAUNCH_SCRIPT_NAME);
+  const tempPath = join(dir, `.${AGENT_LAUNCH_SCRIPT_NAME}.${randomUUID()}.tmp`);
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand, {
-      ...(input.agent ? { agent: input.agent } : {}),
-    });
+    writeFileSync(tempPath, `${launchCommand}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, scriptPath);
   } catch (error) {
-    try {
-      await tmux("kill-session", "-t", sessionTarget);
-    } catch {
-      // Best effort only.
-    } finally {
-      invalidateFleetProbeCaches();
-    }
+    rmSync(tempPath, { force: true });
     throw error;
   }
+  return scriptPath;
+}
+
+// The agent pane runs the launch as its shell's own command, never as
+// keystrokes typed into a shell that may not be reading yet: an rc-file
+// prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
+// codex started as `ODEX_HOME=...` on the default home and Spur never saw
+// its rollout. The login+interactive shell keeps the user's rc environment
+// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
+// waits visibly in the pane instead of corrupting the command. Sourcing the
+// script keeps the agent a direct child of the pane shell, and the pane
+// drops to the same login shell when the agent exits.
+export function buildAgentPaneShellCommand(scriptPath: string): string {
+  // tmux sets SHELL in every pane's environment to the shell it starts.
+  const shell = '"$SHELL"';
+  return `exec ${shell} -lic ${shellEscape(`. ${shellEscape(scriptPath)}; exec ${shell} -l`)}`;
 }
 
 // Non-agent panes (sidecars, project services, the Claude OAuth login pane)
@@ -1295,24 +1353,42 @@ export async function sendSensitiveMessageToTmux(
   }
 }
 
+const INTERRUPT_KEY_GAP_MS = 200;
+const INTERRUPT_SETTLE_MS = 500;
+
+/**
+ * Sends the agent's interrupt key sequence and waits for the turn to settle.
+ * Returns false when the agent has no interrupt key, so nothing was sent.
+ */
+export async function sendInterruptKeysToTmux(
+  sessionName: string,
+  agent: AgentName,
+): Promise<boolean> {
+  const keys = agentInterruptKeys(agent);
+  if (keys.length === 0) {
+    return false;
+  }
+  const target = exactPaneTarget(sessionName);
+  for (const [index, key] of keys.entries()) {
+    if (index > 0) {
+      await sleep(INTERRUPT_KEY_GAP_MS);
+    }
+    await tmux("send-keys", "-t", target, key);
+  }
+  await sleep(INTERRUPT_SETTLE_MS);
+  return true;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean; agent?: AgentName },
+  options?: { agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const useBracketedPaste =
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  const sendInterruptKey =
-    options?.interrupt === true &&
-    options.agent !== undefined &&
-    agentSendsInterruptKey(options.agent);
-  if (sendInterruptKey) {
-    await tmux("send-keys", "-t", target, "C-c");
-    await sleep(500);
-  }
   // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
   // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
   // C-u and Enter would otherwise be interpreted by the copy buffer and never
@@ -1416,9 +1492,11 @@ export async function waitForTmuxReady(
       pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
     }
     if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
-      if (cursorTrustConfirmAttempts > 0) {
-        await sleep(CURSOR_READY_SETTLE_DELAY_MS);
-      }
+      // Cursor can draw its input box before the box takes keystrokes: a
+      // launch prompt pasted at first sight of it was lost (live, 1 in 10
+      // spawns), leaving an empty composer. Same settle as after a trust
+      // confirm.
+      await sleep(CURSOR_READY_SETTLE_DELAY_MS);
       return;
     }
     if (readyMarkers.every((marker) => capture.includes(marker))) {

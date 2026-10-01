@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const MAX_VISIBLE_TOASTS = 5;
+const SUCCESS_TOAST_DISMISS_MS = 2_500;
+const ERROR_TOAST_DISMISS_MS = 8_000;
 
 export interface ToastEntry {
   id: number;
@@ -32,7 +34,12 @@ export function useToasts() {
   );
 
   const showToast = useCallback(
-    (tone: ToastEntry["tone"], title: string, detail?: string, autoDismissMs?: number) => {
+    (
+      tone: ToastEntry["tone"],
+      title: string,
+      detail: string | undefined,
+      autoDismissMs: number,
+    ) => {
       nextIdRef.current += 1;
       const id = nextIdRef.current;
       setToasts((current) => {
@@ -43,7 +50,7 @@ export function useToasts() {
         }
         return next.slice(-MAX_VISIBLE_TOASTS);
       });
-      if (autoDismissMs !== undefined && typeof window !== "undefined") {
+      if (typeof window !== "undefined") {
         const timer = window.setTimeout(() => {
           timersRef.current.delete(id);
           setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -56,12 +63,13 @@ export function useToasts() {
   );
 
   const showSuccessToast = useCallback(
-    (title: string, detail?: string) => showToast("success", title, detail, 2500),
+    (title: string, detail?: string) =>
+      showToast("success", title, detail, SUCCESS_TOAST_DISMISS_MS),
     [showToast],
   );
 
   const showErrorToast = useCallback(
-    (title: string, detail?: string) => showToast("error", title, detail),
+    (title: string, detail?: string) => showToast("error", title, detail, ERROR_TOAST_DISMISS_MS),
     [showToast],
   );
 

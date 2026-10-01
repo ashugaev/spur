@@ -18,14 +18,17 @@ const inactiveConfig: ActivityConfig = {
   text: "var(--color-text-secondary)",
 };
 
+const workingConfig: ActivityConfig = {
+  label: "working",
+  dot: "var(--color-status-working)",
+  bg: "var(--color-dot-bg-working)",
+  text: "var(--color-status-working)",
+  pulse: true,
+};
+
 const activityConfig: Record<string, ActivityConfig> = {
-  working: {
-    label: "working",
-    dot: "var(--color-status-working)",
-    bg: "var(--color-dot-bg-working)",
-    text: "var(--color-status-working)",
-    pulse: true,
-  },
+  working: workingConfig,
+  starting: { ...workingConfig, label: "starting" },
   waiting: {
     label: "waiting",
     dot: "var(--color-status-attention)",
