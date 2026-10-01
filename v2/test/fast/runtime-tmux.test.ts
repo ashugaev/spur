@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
+import type { getProcessPresenceInTmux as GetProcessPresenceInTmux } from "../../src/runtime-tmux.js";
 import { createTempDir } from "../helpers/common.js";
 
 type ExecFileAsync = (
@@ -32,7 +33,7 @@ const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.
 // Asserts the `alive` half of getProcessPresenceInTmux against the freshly
 // imported module (the suite resets modules per test).
 async function isProcessRunningInTmux(
-  ...args: Parameters<typeof import("../../src/runtime-tmux.js").getProcessPresenceInTmux>
+  ...args: Parameters<typeof GetProcessPresenceInTmux>
 ): Promise<boolean> {
   const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
   return (await getProcessPresenceInTmux(...args)).alive;
@@ -906,7 +907,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -932,7 +932,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     // Name matchers alone miss the wrapper-exec'd binary.
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
     expect(
@@ -957,7 +956,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     expect(await isProcessRunningInTmux("intelas-c007", ["claude"])).toBe(false);
     expect(
       await isProcessRunningInTmux("intelas-c007", ["claude"], { paneChildFallback: true }),
@@ -974,7 +972,6 @@ describe("runtime-tmux", () => {
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
-
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1006,7 +1003,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).toBe(false);
@@ -1032,7 +1028,6 @@ describe("runtime-tmux", () => {
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
-
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1063,7 +1058,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).toBe(false);
@@ -1089,7 +1083,6 @@ describe("runtime-tmux", () => {
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
-
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1123,7 +1116,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-
     expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
   });
 
@@ -1149,7 +1141,6 @@ describe("runtime-tmux", () => {
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
-
 
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher

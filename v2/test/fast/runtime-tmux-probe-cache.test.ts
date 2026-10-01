@@ -1,5 +1,6 @@
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { getProcessPresenceInTmux as GetProcessPresenceInTmux } from "../../src/runtime-tmux.js";
 
 type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
@@ -20,7 +21,7 @@ const sessionNames = Array.from({ length: SESSION_COUNT }, (_, i) => `api-${i}`)
 // Asserts the `alive` half of getProcessPresenceInTmux against the freshly
 // imported module (the suite resets modules per test).
 async function isProcessRunningInTmux(
-  ...args: Parameters<typeof import("../../src/runtime-tmux.js").getProcessPresenceInTmux>
+  ...args: Parameters<typeof GetProcessPresenceInTmux>
 ): Promise<boolean> {
   const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
   return (await getProcessPresenceInTmux(...args)).alive;

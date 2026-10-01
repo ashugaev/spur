@@ -1193,6 +1193,11 @@ type SessionServiceInternals = {
   deliveryRuns: Map<string, Promise<void>>;
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
+  deliverPreparedLocked(
+    sessionId: string,
+    message: string,
+    options: { entryPoint: "send" | "deliver" | "flush"; recoverOnLiveAckTimeout?: boolean },
+  ): Promise<unknown>;
   maybeNudgeTodo(session: SessionRecord): Promise<void>;
   confirmAgentExited(
     session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
@@ -7817,6 +7822,47 @@ describe("SessionService", () => {
       expect.objectContaining({ event: "session.message.delivery_recovered" }),
     );
     expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["first queued"]);
+  });
+
+  it("deliverPreparedLocked with recoverOnLiveAckTimeout rethrows and logs failed, never recovered, when the submit ack liveness probe was unresponsive", async () => {
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession());
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: vi.fn() } : null,
+    );
+    // Alive for the readiness checks, unresponsive only once the pane write
+    // has happened (the post-send read).
+    getProcessPresenceInTmuxMock
+      .mockReset()
+      .mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? { alive: false, unresponsive: true }
+          : { alive: true, unresponsive: false },
+      );
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/x.jsonl",
+    });
+
+    await expect(
+      sessionServiceInternals(service).deliverPreparedLocked("api-1", "hello", {
+        entryPoint: "flush",
+        recoverOnLiveAckTimeout: true,
+      }),
+    ).rejects.toMatchObject({ name: "SubmitAckTimeoutError", probeUnresponsive: true });
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.failed", sessionId: "api-1" }),
+    );
+    expect(logSpurEventMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ event: "session.message.delivery_recovered" }),
+    );
   });
 
   it("survives a pre-delivery throw from ensureSessionReadyForSend (missing workspace): queue retained, one delivery_failed logged, no exception escapes (BLOCKING 2)", async () => {
