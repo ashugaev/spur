@@ -346,6 +346,17 @@ describe("buildUserActionRecord decoder", () => {
     expect(typeof result?.ts).toBe("string");
   });
 
+  it("decodes a failed prompt's retry and dismiss with sessionId", () => {
+    expect(build({ path: "/sessions/demo-1/submit-failed/retry" })).toMatchObject({
+      action: "session.submit_failed_retry",
+      sessionId: "demo-1",
+    });
+    expect(build({ path: "/sessions/demo-1/submit-failed/dismiss" })).toMatchObject({
+      action: "session.submit_failed_dismiss",
+      sessionId: "demo-1",
+    });
+  });
+
   it("decodes session.reopen with sessionId", () => {
     expect(build({ path: "/sessions/demo-1/reopen" })).toMatchObject({
       action: "session.reopen",

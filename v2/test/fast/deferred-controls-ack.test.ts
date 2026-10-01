@@ -202,6 +202,7 @@ const findForeignAgentProcessesForSessionMock = vi.fn(() =>
 );
 const killTmuxSessionTreeMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const sendInterruptKeysToTmuxMock = vi.fn();
 const sendSensitiveMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
 const sendMenuSelectionKeysMock = vi.fn();
@@ -411,6 +412,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   readCursorJsonlState: readCursorJsonlStateMock,
+  configureCursorTurnEndedStore: vi.fn(),
+  resolveCursorBuild: () => "test-build",
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {
@@ -687,6 +690,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
     sendMessageToTmux: sendMessageToTmuxMock,
+    sendInterruptKeysToTmux: sendInterruptKeysToTmuxMock,
     sendSensitiveMessageToTmux: sendSensitiveMessageToTmuxMock,
     sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
     sendMenuSelectionKeys: sendMenuSelectionKeysMock,
@@ -1335,6 +1339,7 @@ describe("SessionService", () => {
       .mockResolvedValue({ status: "unavailable" });
     killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
     sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);

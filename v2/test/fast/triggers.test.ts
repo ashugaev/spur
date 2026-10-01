@@ -1288,7 +1288,7 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
-    it.each(["rate_limit", "memory_guard", "cap", "general"])(
+    it.each(["rate_limit", "memory_guard", "cap", "launch_pending", "general"])(
       "refunds only actual submissions on %s, never failed lookups or deletion",
       async (reason) => {
         const signals: ReviewSignal[] = [
@@ -1309,17 +1309,19 @@ describe("startConfiguredTriggers", () => {
           ),
         );
         const { startConfiguredTriggers } = await loadTriggersModule();
-        const { SessionRateLimitedError, SessionAdmissionDeniedError } =
+        const { SessionRateLimitedError, SessionAdmissionDeniedError, LaunchPromptPendingError } =
           await import("../../src/session-service.js");
         const error =
           reason === "rate_limit"
             ? new SessionRateLimitedError("limited")
-            : reason === "general"
-              ? new Error("uncertain submit")
-              : new SessionAdmissionDeniedError(
-                  "held",
-                  reason === "memory_guard" ? "memory_guard" : "cap",
-                );
+            : reason === "launch_pending"
+              ? new LaunchPromptPendingError("Submit pending", "2026-03-18T10:04:00.000Z")
+              : reason === "general"
+                ? new Error("uncertain submit")
+                : new SessionAdmissionDeniedError(
+                    "held",
+                    reason === "memory_guard" ? "memory_guard" : "cap",
+                  );
         const get = vi.fn().mockResolvedValue(running("interrupt"));
         const deliver = vi.fn().mockRejectedValue(error);
         const bus = new EventBus();
@@ -1347,6 +1349,8 @@ describe("startConfiguredTriggers", () => {
             expect(record?.admissionCapRetryAt).toBeGreaterThan(Date.now());
             expect(record?.admissionCapRetryAt).toBeLessThanOrEqual(Date.now() + 40_000);
           } else expect(record?.admissionCapRetryAt).toBeUndefined();
+          if (reason === "launch_pending")
+            expect(record?.suppressedHoldAt).toBe("2026-03-18T10:04:00.000Z");
           expect(record?.admissionCapDenials).toBe(reason === "cap" ? 3 : 2);
           expect(
             record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
@@ -5838,6 +5842,97 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("suppresses a delivery refused over a pending launch prompt without spending an attempt", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const { LaunchPromptPendingError } = await import("../../src/session-service.js");
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValue(new LaunchPromptPendingError("Agent has not confirmed the launch prompt"));
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deletePendingSendBatchMock).not.toHaveBeenCalled();
+      const events = logSpurEventMock.mock.calls.map(([, entry]) => entry.event);
+      expect(events).toContain("trigger.send.suppressed_launch_pending");
+      expect(events).not.toContain("trigger.send.failed");
+      const record = readPendingSendBatchesMock().get("api:send:api-1") as PersistedPendingBatch;
+      expect(record.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(true);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("logs a launch-pending suppression once per hold across flush ticks and a restart", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const { LaunchPromptPendingError } = await import("../../src/session-service.js");
+    let holdAt = "2026-03-18T10:04:00.000Z";
+    const deliverMock = vi.fn(async () => {
+      throw new LaunchPromptPendingError("Agent has not confirmed the last prompt", holdAt);
+    });
+    const deps = {
+      config: config() as never,
+      sessionService: { get: getMock, deliver: deliverMock } as never,
+      logger: { warn: vi.fn() },
+    };
+    const suppressions = (): number =>
+      logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "trigger.send.suppressed_launch_pending",
+      ).length;
+    const bus = new EventBus();
+    let controller = startConfiguredTriggers({ ...deps, bus });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(deliverMock.mock.calls.length).toBeGreaterThan(3);
+      expect(suppressions()).toBe(1);
+
+      // Daemon restart: the persisted batch still names the logged hold.
+      await controller.stop();
+      const callsBeforeRestart = deliverMock.mock.calls.length;
+      controller = startConfiguredTriggers({ ...deps, bus: new EventBus() });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(deliverMock.mock.calls.length).toBeGreaterThan(callsBeforeRestart);
+      expect(suppressions()).toBe(1);
+
+      // A new hold is a new instance: logged once more.
+      holdAt = "2026-03-18T10:30:00.000Z";
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(suppressions()).toBe(2);
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("leaves the pending batch intact and logs a suppression event when delivery is rate limited", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
@@ -6550,5 +6645,230 @@ describe("startConfiguredTriggers", () => {
         await controller.stop();
       }
     });
+  });
+
+  describe("interactive (telegram) send window", () => {
+    function telegramConfig() {
+      return {
+        dataDir: DATA_DIR,
+        projects: {
+          api: {
+            sources: { tg: { type: "telegram" } },
+            triggers: {
+              chat: { source: "tg", event: "telegram:message", send: { interrupt: false } },
+            },
+          },
+        },
+      };
+    }
+
+    function telegramEvent(messageId: number, text: string) {
+      return {
+        name: "telegram:message",
+        occurrenceId: `tg-${messageId}`,
+        projectId: "api",
+        sourceId: "tg",
+        data: { sessionId: "api-1", chatId: 123, userId: 7, messageId, text },
+      };
+    }
+
+    function waitingSession(lastActivityAt: string, state = "waiting") {
+      return {
+        id: "api-1",
+        status: "running",
+        state,
+        lastActivityAt,
+        workspaceExists: true,
+      };
+    }
+
+    async function startTelegram(getMock: ReturnType<typeof vi.fn>) {
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: telegramConfig() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      return { bus, controller, deliverMock };
+    }
+
+    it("delivers a telegram message to a waiting agent 2s after it arrives", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(deliverMock).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(101);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        expect(deliverMock).toHaveBeenCalledWith("api-1", expect.stringContaining("hello there"), {
+          interrupt: false,
+        });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("merges telegram messages inside the 2s window into one delivery", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "first part"));
+        await vi.advanceTimersByTimeAsync(500);
+        const timersAfterFirst = vi.getTimerCount();
+        bus.emit(telegramEvent(2, "second part"));
+        await vi.advanceTimersByTimeAsync(0);
+        // A merge adds no flush timer.
+        expect(vi.getTimerCount()).toBe(timersAfterFirst);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        const text = deliverMock.mock.calls[0]?.[1] as string;
+        expect(text).toContain("first part");
+        expect(text).toContain("second part");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("holds a telegram message until 2s after the agent's last activity", async () => {
+      const getMock = vi
+        .fn()
+        .mockResolvedValue(waitingSession(new Date(Date.now() + 1_500).toISOString()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(2_100);
+        expect(deliverMock).not.toHaveBeenCalled();
+        // The timer waits for the activity gate (3.5s), not the 5s tick.
+        await vi.advanceTimersByTimeAsync(1_500);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("delivers a telegram batch once when the timer and the flush tick both fire", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "hello there"));
+        await vi.advanceTimersByTimeAsync(12_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("restored telegram batch uses the 2s window", async () => {
+      const persisted: PersistedPendingBatch = {
+        queueKey: "api:chat:api-1",
+        projectId: "api",
+        triggerId: "chat",
+        sourceId: "tg",
+        batch: {
+          kind: "telegram",
+          sessionId: "api-1",
+          messages: [
+            { sessionId: "api-1", chatId: 123, userId: 7, messageId: 1, text: "restored hello" },
+          ],
+        },
+      };
+      readPendingSendBatchesMock.mockReturnValue(new Map([[persisted.queueKey, persisted]]));
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { controller, deliverMock } = await startTelegram(getMock);
+      try {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining("restored hello"),
+          { interrupt: false },
+        );
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("stop clears a pending telegram flush timer", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      bus.emit(telegramEvent(1, "hello there"));
+      await vi.advanceTimersByTimeAsync(0);
+      await controller.stop();
+      getMock.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(getMock).not.toHaveBeenCalled();
+    });
+
+    it("merges events that arrive while the agent works into one follow-up delivery", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "text 1"));
+        await vi.advanceTimersByTimeAsync(2_100);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+
+        getMock.mockResolvedValue(waitingSession(new Date().toISOString(), "working"));
+        await vi.advanceTimersByTimeAsync(900);
+        bus.emit(telegramEvent(2, "text 2"));
+        await vi.advanceTimersByTimeAsync(1_000);
+        bus.emit(telegramEvent(3, "text 3"));
+        await vi.advanceTimersByTimeAsync(1_000);
+        bus.emit(telegramEvent(4, "text 4"));
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+
+        getMock.mockResolvedValue(waitingSession(new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deliverMock).toHaveBeenCalledTimes(2);
+        const second = deliverMock.mock.calls[1]?.[1] as string;
+        expect(second).toContain("text 2");
+        expect(second).toContain("text 3");
+        expect(second).toContain("text 4");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("keeps the 30s window for non-telegram batches", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const deliverMock = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get: getMock, deliver: deliverMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliverMock).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+  });
+});
+
+describe("dropsQueuedSend", () => {
+  it("closes stopped, error, killed except a live server-error wedge and a memory-held stop", async () => {
+    const { dropsQueuedSend } = await loadTriggersModule();
+
+    expect(dropsQueuedSend({ state: "stopped", status: "stopped" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "killed", status: "killed" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "error", status: "errored" }, false)).toBe(true);
+    expect(dropsQueuedSend({ state: "error", status: "running" }, false)).toBe(false);
+    expect(dropsQueuedSend({ state: "stopped", status: "stopped" }, true)).toBe(false);
+    expect(dropsQueuedSend({ state: "killed", status: "killed" }, true)).toBe(true);
+    expect(dropsQueuedSend({ state: "stale", status: "stopped" }, false)).toBe(false);
+    expect(dropsQueuedSend({ state: "waiting", status: "running" }, false)).toBe(false);
   });
 });
