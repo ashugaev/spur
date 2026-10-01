@@ -714,86 +714,116 @@ export async function isProcessRunningInTmux(
   processMatchers: string[],
   options?: { fresh?: boolean; paneChildFallback?: boolean },
 ): Promise<boolean> {
+  return (await probeProcessPresenceInTmux(sessionName, processMatchers, options)).alive;
+}
+
+// Same read as isProcessRunningInTmux, plus whether the list-panes leg was
+// killed by its own timeout. ONE getFleetPaneSnapshot() feeds both values, so a
+// caller never needs a second fork to learn why `alive` is false. The flag is
+// captured before the catch so a later ps rejection cannot erase it.
+async function probeProcessPresenceInTmux(
+  sessionName: string,
+  processMatchers: string[],
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
+): Promise<{ alive: boolean; unresponsive: boolean }> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
   }
+  let unresponsive = false;
   try {
-    const { panes } = await getFleetPaneSnapshot();
-    const entry = panes.get(sessionName);
-    const ttys = entry?.allTtys ?? [];
-    if (ttys.length === 0) {
-      return false;
+    const snapshot = await getFleetPaneSnapshot();
+    unresponsive = snapshot.unresponsive;
+    const alive = await isProcessInPaneSnapshot(
+      snapshot.panes,
+      sessionName,
+      processMatchers,
+      options?.paneChildFallback,
+    );
+    return { alive, unresponsive };
+  } catch {
+    return { alive: false, unresponsive };
+  }
+}
+
+export const getProcessPresenceInTmux = probeProcessPresenceInTmux;
+
+async function isProcessInPaneSnapshot(
+  panes: Map<string, FleetPaneEntry>,
+  sessionName: string,
+  processMatchers: string[],
+  paneChildFallback: boolean | undefined,
+): Promise<boolean> {
+  const entry = panes.get(sessionName);
+  const ttys = entry?.allTtys ?? [];
+  if (ttys.length === 0) {
+    return false;
+  }
+  const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
+  const processRes = processMatchers
+    .filter((matcher) => matcher.trim().length > 0)
+    .map(
+      (matcher) => new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
+    );
+  if (processRes.length === 0) {
+    return false;
+  }
+  const rows = await getPsSnapshot();
+  for (const row of rows) {
+    if (!ttySet.has(row.tty)) {
+      continue;
     }
-    const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
-    const processRes = processMatchers
-      .filter((matcher) => matcher.trim().length > 0)
-      .map(
-        (matcher) =>
-          new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
-      );
-    if (processRes.length === 0) {
-      return false;
+    if (processRes.some((processRe) => processRe.test(row.args))) {
+      return true;
     }
-    const rows = await getPsSnapshot();
+  }
+  // Pane-child fallback (issue #806, hardened against #857 P1): a
+  // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
+  // the agent's canonical process names never matches pass 1 above. Only
+  // reached when the caller has determined the launch binary is foreign to
+  // the agent (session-service's agentProcessAlive). "Any direct child of
+  // the pane shell" was too wide: after the agent exits, a persistent shell
+  // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
+  // is still a direct child and kept the session reading ALIVE forever.
+  // The gate is instead the tty's current foreground process group: a live
+  // agent (or its wrapper) is the pane's foreground job, a leftover
+  // background helper is not. fgPgid per tty is read off the row whose pid
+  // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
+  // pgid, shared by every process attached to that tty.
+  const allPanePids = entry?.allPanePids ?? [];
+  if (paneChildFallback && allPanePids.length > 0) {
+    const panePids = new Set(allPanePids);
+    const fgPgidByTty = new Map<string, number>();
     for (const row of rows) {
-      if (!ttySet.has(row.tty)) {
+      if (panePids.has(row.pid) && ttySet.has(row.tty)) {
+        fgPgidByTty.set(row.tty, row.tpgid);
+      }
+    }
+    for (const row of rows) {
+      if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
         continue;
       }
-      if (processRes.some((processRe) => processRe.test(row.args))) {
+      const fgPgid = fgPgidByTty.get(row.tty);
+      // Fail CLOSED on an unresolvable foreground group. Reaching this needs
+      // either the pane pid's own row absent from this ps snapshot, or an
+      // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
+      // means the tty's controlling process is gone — and the kernel then
+      // dissociates that tty from every surviving session member, so their
+      // tty reads `?` and they never pass the ttySet guard above. A live
+      // agent therefore cannot be one of these rows. Admitting one on
+      // parentage alone re-admits the leftover-helper class this gate
+      // exists to exclude (#806 -> #857 P1), and a false ALIVE here
+      // send-keys the user's prose into a shell prompt. Excludes THIS ROW
+      // only; other rows and the session's other ttys still evaluate.
+      if (fgPgid === undefined || fgPgid <= 0) {
+        continue;
+      }
+      if (row.pgid === fgPgid) {
         return true;
       }
     }
-    // Pane-child fallback (issue #806, hardened against #857 P1): a
-    // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
-    // the agent's canonical process names never matches pass 1 above. Only
-    // reached when the caller has determined the launch binary is foreign to
-    // the agent (session-service's agentProcessAlive). "Any direct child of
-    // the pane shell" was too wide: after the agent exits, a persistent shell
-    // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
-    // is still a direct child and kept the session reading ALIVE forever.
-    // The gate is instead the tty's current foreground process group: a live
-    // agent (or its wrapper) is the pane's foreground job, a leftover
-    // background helper is not. fgPgid per tty is read off the row whose pid
-    // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
-    // pgid, shared by every process attached to that tty.
-    const allPanePids = entry?.allPanePids ?? [];
-    if (options?.paneChildFallback && allPanePids.length > 0) {
-      const panePids = new Set(allPanePids);
-      const fgPgidByTty = new Map<string, number>();
-      for (const row of rows) {
-        if (panePids.has(row.pid) && ttySet.has(row.tty)) {
-          fgPgidByTty.set(row.tty, row.tpgid);
-        }
-      }
-      for (const row of rows) {
-        if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
-          continue;
-        }
-        const fgPgid = fgPgidByTty.get(row.tty);
-        // Fail CLOSED on an unresolvable foreground group. Reaching this needs
-        // either the pane pid's own row absent from this ps snapshot, or an
-        // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
-        // means the tty's controlling process is gone — and the kernel then
-        // dissociates that tty from every surviving session member, so their
-        // tty reads `?` and they never pass the ttySet guard above. A live
-        // agent therefore cannot be one of these rows. Admitting one on
-        // parentage alone re-admits the leftover-helper class this gate
-        // exists to exclude (#806 -> #857 P1), and a false ALIVE here
-        // send-keys the user's prose into a shell prompt. Excludes THIS ROW
-        // only; other rows and the session's other ttys still evaluate.
-        if (fgPgid === undefined || fgPgid <= 0) {
-          continue;
-        }
-        if (row.pgid === fgPgid) {
-          return true;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
   }
+  return false;
 }
 
 // Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic

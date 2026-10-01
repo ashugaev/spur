@@ -234,7 +234,7 @@ import {
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
-  isProcessRunningInTmux,
+  getProcessPresenceInTmux,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
@@ -884,6 +884,11 @@ export class SubmitAckTimeoutError extends Error {
   readonly lastScannedFile: string | null;
   readonly elapsedMs: number;
   readonly processAlive: boolean;
+  // True when the liveness read could not report (list-panes killed by its
+  // own timeout), so processAlive:false is not evidence of death. Policy: a
+  // leg that cannot report is ambiguous; ambiguous = refuse recovery, never
+  // kill. Never set together with processAlive:true.
+  readonly probeUnresponsive: boolean;
 
   constructor(args: {
     sessionId: string;
@@ -891,6 +896,7 @@ export class SubmitAckTimeoutError extends Error {
     lastScannedFile: string | null;
     elapsedMs: number;
     processAlive: boolean;
+    probeUnresponsive: boolean;
   }) {
     super(`Timed out waiting for agent submit acknowledgment for ${args.sessionId}`);
     this.name = "SubmitAckTimeoutError";
@@ -898,6 +904,7 @@ export class SubmitAckTimeoutError extends Error {
     this.lastScannedFile = args.lastScannedFile;
     this.elapsedMs = args.elapsedMs;
     this.processAlive = args.processAlive;
+    this.probeUnresponsive = args.probeUnresponsive;
   }
 }
 
@@ -908,6 +915,12 @@ export class SubmitAckTimeoutError extends Error {
 // definition, shared by the drain and by flush.
 function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
   return error instanceof SubmitAckTimeoutError && error.processAlive;
+}
+
+// The liveness read could not report: not delivered, and not evidence of a
+// dead agent either. Callers must not kill the pane on this.
+function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
+  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -1395,9 +1408,16 @@ async function agentProcessAlive(
   input: { tmuxSession: string; agent: AgentName; launchCommand: string },
   options?: { fresh?: boolean },
 ): Promise<boolean> {
+  return (await agentProcessPresence(input, options)).alive;
+}
+
+async function agentProcessPresence(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<{ alive: boolean; unresponsive: boolean }> {
   const matchers = agentProcessMatchers(input.agent, input.launchCommand);
   const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
-  return isProcessRunningInTmux(input.tmuxSession, matchers, {
+  return getProcessPresenceInTmux(input.tmuxSession, matchers, {
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
@@ -11216,12 +11236,12 @@ export class SessionService {
       freshLaunch,
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    // Set only when the mid-loop probe below observes a dead pane; reused for
-    // the post-loop processAlive check so a confirmed-dead agent is not
-    // re-probed. Never set on a live result — a live pane can still die before
-    // the next check, so "alive" is never cached, only "dead" (see the probe's
-    // own fresh:true comment).
-    let knownDead = false;
+    // Set only when the mid-loop probe below observes a non-alive pane (dead,
+    // or unresponsive = ambiguous); reused for the post-loop check so it is
+    // not re-probed and the unresponsive flag survives to the throw. Never set
+    // on a live result — a live pane can still die before the next check, so
+    // "alive" is never cached (see the probe's own fresh:true comment).
+    let latchedNotAlive: { alive: boolean; unresponsive: boolean } | null = null;
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
       lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
       if (lastResult.found) {
@@ -11236,7 +11256,7 @@ export class SessionService {
         // is mandatory — a stale cached hit would report an agent that just
         // died as alive.
         if (session.agent === "cursor") {
-          const alive = await agentProcessAlive(
+          const presence = await agentProcessPresence(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -11244,8 +11264,8 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!alive) {
-            knownDead = true;
+          if (!presence.alive) {
+            latchedNotAlive = presence;
             break;
           }
         }
@@ -11255,16 +11275,18 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = knownDead
-      ? false
-      : await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
-            agent: session.agent,
-            launchCommand: session.launchCommand,
-          },
-          { fresh: true },
-        );
+    const presence =
+      latchedNotAlive ??
+      (await agentProcessPresence(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      ));
+    const processAlive = presence.alive;
+    const probeUnresponsive = presence.unresponsive;
     const elapsedMs = Date.now() - startedAt;
     if (session.agent === "cursor" && processAlive) {
       this.logEvent("session.submit.recovered", {
@@ -11292,6 +11314,7 @@ export class SessionService {
         elapsedMs,
         ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
+        probeUnresponsive,
       },
     });
     if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
@@ -11310,6 +11333,7 @@ export class SessionService {
       lastScannedFile: lastResult.lastScannedFile,
       elapsedMs,
       processAlive,
+      probeUnresponsive,
     });
   }
 
@@ -13470,7 +13494,7 @@ export class SessionService {
       // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
       // path after this block intentionally keeps its own warmup.
       this.restoreWarmupUntil.delete(sessionId);
-      if (error instanceof SubmitAckTimeoutError && error.processAlive) {
+      if (isRecoveredSubmitAckTimeout(error)) {
         const { error: _ignoredError, ...recoveredBase } = current;
         // No finishStaleWake here: this branch is only reachable through the
         // submit-ack wait of restore()'s own message, which a stale-parked
@@ -13517,13 +13541,26 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      if (!isAmbiguousSubmitAckTimeout(error)) {
+        await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
+        ...(isAmbiguousSubmitAckTimeout(error)
+          ? {
+              details: {
+                reason: "submit_ack_timeout",
+                agent: error.agent,
+                elapsedMs: error.elapsedMs,
+                processAlive: false,
+                probeUnresponsive: true,
+              },
+            }
+          : {}),
       });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }

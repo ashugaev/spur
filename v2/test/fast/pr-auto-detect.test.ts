@@ -133,6 +133,12 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   })),
   getTmuxPanePresence: vi.fn(async () => ({ dead: false, unresponsive: false })),
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
+  getProcessPresenceInTmux: vi.fn(
+    async (...args: Parameters<typeof isProcessRunningInTmuxMock>) => ({
+      alive: await isProcessRunningInTmuxMock(...args),
+      unresponsive: false,
+    }),
+  ),
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
