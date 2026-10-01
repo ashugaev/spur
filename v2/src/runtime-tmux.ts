@@ -1503,3 +1503,13 @@ export async function createTmuxSidecarSession(input: {
 export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
   return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
 }
+
+// Presence + unresponsiveness for a sidecar's tmux name off ONE read, for
+// callers that must tell "confirmed absent" from "could not read" before
+// acting destructively. Same non-`fresh` behavior as sidecarTmuxAlive.
+export async function getSidecarTmuxPresence(
+  sessionId: string,
+  sidecarName: string,
+): Promise<{ present: boolean; unresponsive: boolean }> {
+  return getTmuxSessionPresence(sidecarTmuxSession(sessionId, sidecarName));
+}

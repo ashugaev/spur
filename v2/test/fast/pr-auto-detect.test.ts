@@ -130,6 +130,9 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),
   sidecarTmuxAlive: vi.fn(),
+  // Behavior-identical to the inline sidecarTmuxAlive above (which resolves
+  // undefined, i.e. falsy `present`); `unresponsive` is never exercised here.
+  getSidecarTmuxPresence: vi.fn(async () => ({ present: false, unresponsive: false })),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
