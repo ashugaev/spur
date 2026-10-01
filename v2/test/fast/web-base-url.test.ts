@@ -52,6 +52,20 @@ describe("resolveWebBaseUrl", () => {
     expect(url).toBe("http://127.0.0.1:5642");
   });
 
+  // The outer CLI + daemon round trip measured 4-12s on a loaded host; a 5s
+  // budget answered "disabled" with the UI alive.
+  it("waits past 5s for a slow sidecar registry call", { timeout: 15_000 }, async () => {
+    const dir = await createTempDir("spur-sidecar-slow-");
+    const row = JSON.stringify([{ sidecar: "isolated-ui", port: 5642, alive: true }]);
+    await writeFile(
+      join(dir, "spur-sidecar"),
+      `#!/usr/bin/env bash\nsleep 6\nprintf '%s' '${row}'\n`,
+      { mode: 0o755 },
+    );
+    const url = await resolveWebBaseUrl(5555, { SPUR_SESSION_TOOL_DIR: dir });
+    expect(url).toBe("http://127.0.0.1:5642");
+  });
+
   it("resolves to null when the isolated-ui reservation is not alive (sidecar stopped)", async () => {
     const toolDir = await makeFakeSpurSidecar(
       JSON.stringify([

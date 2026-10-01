@@ -5,6 +5,10 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+// The ports call crosses the outer instance's CLI and daemon (measured 4-12s);
+// voice runs detached from the update loop, so waiting this long blocks nothing.
+const SIDECAR_PORTS_TIMEOUT_MS = 30_000;
+
 // Default ports, kept in a dependency-free leaf module so both the config
 // loader and the systemd/unit health code read the same number without an
 // import cycle (`update-health.ts` already imports `config.ts` for
@@ -85,7 +89,7 @@ export async function resolveWebBaseUrl(
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(sidecarCli, ["ports", "--name", "isolated-ui", "--json"], {
-      timeout: 5000,
+      timeout: SIDECAR_PORTS_TIMEOUT_MS,
     }));
   } catch {
     return null;
