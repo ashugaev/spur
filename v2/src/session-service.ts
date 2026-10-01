@@ -1399,7 +1399,7 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
 
-// Single point through which every liveness read of isProcessRunningInTmux
+// Single point through which every liveness read of getProcessPresenceInTmux
 // passes, so the pane-child fallback gate (issue #806) cannot drift from the
 // matcher list: it depends on the SAME (agent, launchCommand) pair used to
 // build the matchers, which varies per call site (record vs. a recovery/
@@ -12152,7 +12152,7 @@ export class SessionService {
   // restore(), the resume-fallback inside it, and switchAuth all reuse the
   // SAME tmux session name and session id for the pane they create next, so
   // a survivor of the kill below is indistinguishable from its own
-  // replacement to every existing probe (isProcessRunningInTmux keys on tty,
+  // replacement to every existing probe (getProcessPresenceInTmux keys on tty,
   // confirmAgentExited keys on tmux session name — neither can tell them
   // apart). Capturing the pane's own process tree BEFORE the kill, then
   // polling those exact pids after it, is the only way to know the kill

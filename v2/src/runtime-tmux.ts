@@ -217,11 +217,11 @@ interface FleetPaneEntry {
   activePaneDead: boolean;
   activePanePid: number | null;
   // Every pane's tty across the whole session (what `=name` with no window
-  // targeted before batching) — isProcessRunningInTmux needs all of them
+  // targeted before batching) — getProcessPresenceInTmux needs all of them
   // since the agent process can be in any pane/window of the session.
   allTtys: string[];
   // Every pane's pid across the whole session — the pane-child fallback in
-  // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
+  // getProcessPresenceInTmux uses these to recognize a wrapper-exec'd agent by
   // parentage (ppid is a pane pid) when name matching misses (issue #806).
   allPanePids: number[];
 }
@@ -245,7 +245,7 @@ const FLEET_PANE_CACHE_KEY = "panes";
 
 // Fleet-wide pane state in ONE fork (`list-panes -a`) instead of one
 // `list-panes`/`display-message #{pane_dead}` per session. tmuxPaneDead,
-// getTmuxPanePid, and isProcessRunningInTmux's tty lookup all reroute through
+// getTmuxPanePid, and getProcessPresenceInTmux's tty lookup all reroute through
 // this cached snapshot.
 function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
   return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
@@ -301,7 +301,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
 }
 
 // `fresh` busts the shared fleet-pane cache before reading — same rationale
-// as tmuxSessionExists's/isProcessRunningInTmux's `fresh`.
+// as tmuxSessionExists's/getProcessPresenceInTmux's `fresh`.
 export async function tmuxPaneDead(
   sessionName: string,
   options?: { fresh?: boolean },
@@ -611,12 +611,12 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // execFile's default maxBuffer (1 MiB) truncates a large process table
 // instead of erroring; the catch below would then treat the truncation the
 // same as a genuine ps failure and return []. That makes the only caller,
-// isProcessRunningInTmux, misclassify every live agent in the fleet as dead —
+// getProcessPresenceInTmux, misclassify every live agent in the fleet as dead —
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
+// RESIDUAL (#857 P1, scoped): getProcessPresenceInTmux's pane-child fallback
 // fails CLOSED, per row, when a candidate row's tty has no resolvable
 // foreground process group — see the fgPgid check there. This residual is
 // about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec

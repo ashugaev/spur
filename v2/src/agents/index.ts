@@ -266,11 +266,11 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 
 // RESIDUAL 1: a wrapper whose own filename IS the canonical name (a script named
 // `claude` on PATH that execs .../versions/2.1.251) leaves this gate CLOSED, so that
-// host stays false-DEAD in isProcessRunningInTmux. Accepted: SPUR_<AGENT>_BIN is not
+// host stays false-DEAD in getProcessPresenceInTmux. Accepted: SPUR_<AGENT>_BIN is not
 // used as a second gate condition because its common use is pointing at an off-PATH
 // binary whose basename IS canonical, and opening the fallback there trades zero gain
 // for a possible hang (see RESIDUAL 2).
-// RESIDUAL 2: when this gate is open, isProcessRunningInTmux's pane-child fallback
+// RESIDUAL 2: when this gate is open, getProcessPresenceInTmux's pane-child fallback
 // gates on the tty's foreground process group (tpgid), not "any direct child of the
 // pane shell" (#857 P1: that wider rule kept reading ALIVE off a persistent shell
 // helper — gitstatusd, a `sleep 300 &` job — left behind after the agent exited).
