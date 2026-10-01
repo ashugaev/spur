@@ -17,6 +17,15 @@ vi.mock("node:child_process", () => ({
 const SESSION_COUNT = 50;
 const sessionNames = Array.from({ length: SESSION_COUNT }, (_, i) => `api-${i}`);
 
+// Asserts the `alive` half of getProcessPresenceInTmux against the freshly
+// imported module (the suite resets modules per test).
+async function isProcessRunningInTmux(
+  ...args: Parameters<typeof import("../../src/runtime-tmux.js").getProcessPresenceInTmux>
+): Promise<boolean> {
+  const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
+  return (await getProcessPresenceInTmux(...args)).alive;
+}
+
 // Mirrors readRuntimeSnapshot's per-session probe order in session-service.ts,
 // isolated from SessionService so it exercises the real runtime-tmux.ts
 // caches (session-service.test.ts mocks the whole module, so it never
@@ -26,8 +35,7 @@ async function simulateReadRuntimeSnapshot(sessionName: string): Promise<{
   paneUsable: boolean;
   processAlive: boolean;
 }> {
-  const { tmuxSessionExists, tmuxPaneDead, isProcessRunningInTmux } =
-    await import("../../src/runtime-tmux.js");
+  const { tmuxSessionExists, tmuxPaneDead } = await import("../../src/runtime-tmux.js");
   const runtimeAlive = await tmuxSessionExists(sessionName);
   const paneUsable = runtimeAlive ? !(await tmuxPaneDead(sessionName)) : false;
   const processAlive =
@@ -107,7 +115,7 @@ describe("runtime-tmux shared probe cache", () => {
 
   it("keeps a cached probe result identical to what a live probe returned in the same TTL window", async () => {
     installFleetTmuxMock();
-    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionActivity, isProcessRunningInTmux } =
+    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionActivity } =
       await import("../../src/runtime-tmux.js");
 
     const sessionName = "api-3";
@@ -297,8 +305,7 @@ describe("runtime-tmux shared probe cache", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { tmuxPaneDead, getTmuxPanePid, isProcessRunningInTmux } =
-      await import("../../src/runtime-tmux.js");
+    const { tmuxPaneDead, getTmuxPanePid } = await import("../../src/runtime-tmux.js");
 
     // Active pane (row 3) is alive with pid 333 — not the inactive window's
     // dead pane (row 1) nor the active window's non-active split pane (row 2).
@@ -432,8 +439,7 @@ describe("runtime-tmux shared probe cache", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { tmuxSessionExists, isProcessRunningInTmux, listTmuxSessionNames } =
-      await import("../../src/runtime-tmux.js");
+    const { tmuxSessionExists, listTmuxSessionNames } = await import("../../src/runtime-tmux.js");
 
     await expect(listTmuxSessionNames()).resolves.toEqual(new Set());
     await expect(tmuxSessionExists("api-1")).resolves.toBe(false);

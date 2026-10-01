@@ -709,19 +709,11 @@ export async function getFleetSessionRssBytes(
 // same rationale as tmuxSessionExists's `fresh`: a session created after the
 // last fleet-pane snapshot is invisible to it until the cache naturally
 // expires, which would wrongly fail a post-create recovery/restore check.
-export async function isProcessRunningInTmux(
-  sessionName: string,
-  processMatchers: string[],
-  options?: { fresh?: boolean; paneChildFallback?: boolean },
-): Promise<boolean> {
-  return (await probeProcessPresenceInTmux(sessionName, processMatchers, options)).alive;
-}
-
-// Same read as isProcessRunningInTmux, plus whether the list-panes leg was
+// Process-presence read plus whether the list-panes leg was
 // killed by its own timeout. ONE getFleetPaneSnapshot() feeds both values, so a
 // caller never needs a second fork to learn why `alive` is false. The flag is
 // captured before the catch so a later ps rejection cannot erase it.
-async function probeProcessPresenceInTmux(
+export async function getProcessPresenceInTmux(
   sessionName: string,
   processMatchers: string[],
   options?: { fresh?: boolean; paneChildFallback?: boolean },
@@ -745,8 +737,6 @@ async function probeProcessPresenceInTmux(
     return { alive: false, unresponsive };
   }
 }
-
-export const getProcessPresenceInTmux = probeProcessPresenceInTmux;
 
 async function isProcessInPaneSnapshot(
   panes: Map<string, FleetPaneEntry>,

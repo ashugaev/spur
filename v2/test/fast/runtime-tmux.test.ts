@@ -29,6 +29,15 @@ vi.mock("node:timers/promises", () => ({
 
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
 
+// Asserts the `alive` half of getProcessPresenceInTmux against the freshly
+// imported module (the suite resets modules per test).
+async function isProcessRunningInTmux(
+  ...args: Parameters<typeof import("../../src/runtime-tmux.js").getProcessPresenceInTmux>
+): Promise<boolean> {
+  const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
+  return (await getProcessPresenceInTmux(...args)).alive;
+}
+
 describe("runtime-tmux", () => {
   const originalSkipCodexSubmitAck = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   const originalSystemdScope = process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
@@ -820,7 +829,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
     await isProcessRunningInTmux("api-1", ["node"]);
 
     const psCall = execFileAsyncMock.mock.calls.find(([file]) => file === "ps");
@@ -850,7 +858,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
     const { agentProcessMatchers } = await import("../../src/agents/index.js");
 
     // Today's bug: only the wrapper's own basename as a matcher, and `exec`
@@ -899,7 +906,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
     expect(
@@ -926,7 +932,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     // Name matchers alone miss the wrapper-exec'd binary.
     expect(await isProcessRunningInTmux("intelas-c007", ["codex"])).toBe(false);
@@ -952,7 +957,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(await isProcessRunningInTmux("intelas-c007", ["claude"])).toBe(false);
     expect(
@@ -971,7 +975,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1003,7 +1006,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1031,7 +1033,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1062,7 +1063,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1090,7 +1090,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(
       await isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
@@ -1124,7 +1123,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     expect(await isProcessRunningInTmux("s", ["codex"], { paneChildFallback: true })).toBe(true);
   });
@@ -1152,7 +1150,6 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
 
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
