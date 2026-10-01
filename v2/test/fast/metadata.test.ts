@@ -1,17 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveSessions,
   deletePendingSendBatch,
+  deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
+  hasPendingTelegramSend,
   listSessions,
   readCommentSeenRegistry,
   readPendingSendBatches,
+  readPendingSendBatch,
+  readReviewSourceSnapshot,
+  writeReviewSourceSnapshot,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  readTelegramChoices,
   readTelegramReplyTarget,
   readWorkItemLifecycles,
   readSession,
@@ -20,12 +26,23 @@ import {
   recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
+  findTelegramChoice,
+  findTelegramMessageSession,
+  recordTelegramMessages,
+  takeTelegramChoice,
+  writeTelegramOffer,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
+  updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
-import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
+import type {
+  PersistedPendingBatch,
+  SessionRecord,
+  SubmitAckBaseline,
+  TelegramChoice,
+} from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -41,6 +58,25 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("work-item registry", () => {
+  it("round-trips confirmed conflict clear IDs and rejects malformed IDs", async () => {
+    const dataDir = await newDataDir();
+    const snapshot = {
+      prNumber: 42,
+      signals: new Map(),
+      mergeConflictClearId: "12345678-1234-1234-1234-123456789012",
+    };
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", snapshot);
+    expect(readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toEqual(
+      snapshot,
+    );
+    writeReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1", {
+      ...snapshot,
+      mergeConflictClearId: "bad",
+    });
+    expect(() => readReviewSourceSnapshot(dataDir, "github", "api", "pr-watch", "api-1")).toThrow(
+      "Invalid merge-conflict clear identifier",
+    );
+  });
   it("round-trips recorded ids", async () => {
     const dataDir = await newDataDir();
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
@@ -211,7 +247,9 @@ describe("telegram source state", () => {
       chatId: 1,
     });
 
-    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: true,
+    });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
       { chatId: 2, sessionId: "api-2" },
@@ -219,8 +257,206 @@ describe("telegram source state", () => {
     expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: false,
+    });
+  });
+
+  it("records telegram message owners per source, upserts, and evicts the oldest past 1000", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [1, 2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, [2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, []);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBe("api-1");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 2)).toBe("api-2");
+    expect(findTelegramMessageSession(dataDir, "api", "other", 5, 1)).toBeNull();
+
+    const ids = Array.from({ length: 1000 }, (_, index) => 100 + index);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-3", chatId: 5 }, ids);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 100)).toBe("api-3");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1099)).toBe("api-3");
+  });
+
+  it("finds a message owner only in its own chat", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 6, 7)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBe("api-1");
+  });
+
+  it("treats a corrupt telegram message file as empty", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+    writeFileSync(join(dataDir, "source-state", "telegram", "api", "messages", "tg.json"), "{");
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBeNull();
+  });
+
+  it("finds a pending choice without consuming it", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
+
+    expect(findTelegramChoice(dataDir, "api", "tg", "t1", 999)).toBeNull();
+    expect(findTelegramChoice(dataDir, "api", "tg", "t1", -1001)).toMatchObject({ token: "t1" });
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(1);
+  });
+
+  it("consumes the whole offer on the first taken choice", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "t1", offerId: "offer-1", value: "yes" }),
+        choice({ token: "t2", offerId: "offer-1", value: "no" }),
+        choice({ token: "t3", offerId: "offer-2", value: "later" }),
+      ]),
+    );
+
+    // A click from a chat the offer was not sent to consumes nothing.
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", 999)).toBeNull();
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(3);
+
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", -1001)).toMatchObject({ value: "yes" });
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual(["t3"]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t2", -1001)).toBeNull();
+  });
+
+  it("retires the session's previous offer in the same chat", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "old-a", offerId: "offer-1" }),
+        choice({ token: "old-b", offerId: "offer-1" }),
+      ]),
+    );
+    // Another session's offer in the same chat is untouched.
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "other", offerId: "offer-other", sessionId: "api-2" })]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "new-a", offerId: "offer-2" })]),
+    );
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "other",
+      "new-a",
+    ]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "old-a", -1001)).toBeNull();
+  });
+
+  it("retires the pending offer when a reply carries no buttons", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
+
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(0);
+  });
+
+  it("drops expired choices and caps the store", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "stale", expiresAt: new Date(Date.now() - 1_000).toISOString() }),
+        choice({ token: "fresh" }),
+      ]),
+    );
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "fresh",
+    ]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "stale", -1001)).toBeNull();
+
+    // One offer per session, so the cap is only reachable across sessions.
+    for (let index = 0; index < 199; index += 1) {
+      writeTelegramOffer(
+        dataDir,
+        "api",
+        "tg",
+        offerOf([
+          choice({ token: `t${index}`, offerId: `offer-${index}`, sessionId: `bulk-${index}` }),
+        ]),
+      );
+    }
+    // 199 singles + a 3-button offer crosses the 200 cap; the young offer must
+    // survive intact, so whole old offers go instead of a partial slice.
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf(
+        ["a", "b", "c"].map((suffix) =>
+          choice({ token: `last-${suffix}`, offerId: "offer-last", sessionId: "api-last" }),
+        ),
+      ),
+    );
+    const stored = readTelegramChoices(dataDir, "api", "tg");
+    expect(stored.length).toBeLessThanOrEqual(200);
+    expect(stored.filter((entry) => entry.offerId === "offer-last")).toHaveLength(3);
+    expect(stored.some((entry) => entry.token === "fresh")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t0")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t198")).toBe(true);
+  });
+
+  it("removes a session's pending choices with the rest of its telegram state", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "mine", sessionId: "api-1" })]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "theirs", sessionId: "api-2" })], "api-2"),
+    );
+
+    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "theirs",
+    ]);
   });
 });
+
+function offerOf(choices: TelegramChoice[], sessionId = "api-1", chatId = -1001) {
+  return { sessionId, chatId, choices };
+}
+
+function choice(
+  overrides: Partial<TelegramChoice> & Pick<TelegramChoice, "token">,
+): TelegramChoice {
+  return {
+    offerId: "offer-1",
+    sessionId: "api-1",
+    chatId: -1001,
+    text: "Yes",
+    value: "yes",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    ...overrides,
+  };
+}
 
 function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
   return {
@@ -287,6 +523,31 @@ function telegramPendingBatch(
 }
 
 describe("pending send batches", () => {
+  it("round-trips retry tombstones and rejects malformed present accounting", async () => {
+    const dataDir = await newDataDir();
+    const entry = {
+      itemKey: "item",
+      fingerprint: "a".repeat(64),
+      deliveryAttempts: 8,
+      ciAttempts: 0,
+      nextAttemptAt: 1234,
+    };
+    const record = reviewPendingBatch({ retryAccounting: [entry] });
+    recordPendingSendBatch(dataDir, record);
+    expect(readPendingSendBatches(dataDir).get(record.queueKey)?.retryAccounting).toEqual([entry]);
+    for (const invalid of [
+      { ...entry, deliveryAttempts: 9 },
+      { ...entry, ciAttempts: -1 },
+      { ...entry, fingerprint: "bad" },
+      { ...entry, nextAttemptAt: "tomorrow" },
+    ]) {
+      writeFileSync(
+        join(dataDir, "pending-send-batches.json"),
+        JSON.stringify({ records: [{ ...record, retryAccounting: [invalid] }] }),
+      );
+      expect(readPendingSendBatches(dataDir).size).toBe(0);
+    }
+  });
   it("returns an empty map when the file is missing", async () => {
     const dataDir = await newDataDir();
     expect(readPendingSendBatches(dataDir).size).toBe(0);
@@ -323,6 +584,46 @@ describe("pending send batches", () => {
     const record = reviewPendingBatch();
     recordPendingSendBatch(dataDir, record);
     expect(readPendingSendBatches(dataDir).get(record.queueKey)).toEqual(record);
+    expect(statSync(join(dataDir, "pending-send-batches.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("updates and deletes only the matching work revision and claim", async () => {
+    const dataDir = await newDataDir();
+    const record = reviewPendingBatch({ workId: "work-1", revision: 3 });
+    recordPendingSendBatch(dataDir, record);
+    const claimed = {
+      ...record,
+      revision: 4,
+      claim: {
+        controllerId: "controller-1",
+        routeLeaseId: "lease-1",
+        claimId: "claim-1",
+        claimedAt: "2026-09-01T00:00:00.000Z",
+      },
+    };
+
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 2 }, claimed),
+    ).toBe(false);
+    expect(
+      updatePendingSendBatchConditional(dataDir, { workId: "work-1", revision: 3 }, claimed),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toEqual(claimed);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "foreign-claim",
+      }),
+    ).toBe(false);
+    expect(
+      deletePendingSendBatchConditional(dataDir, {
+        workId: "work-1",
+        revision: 4,
+        claimId: "claim-1",
+      }),
+    ).toBe(true);
+    expect(readPendingSendBatch(dataDir, "work-1")).toBeNull();
   });
 
   it("round-trips a service batch record", async () => {
@@ -425,6 +726,75 @@ describe("session workspaceId normalization", () => {
 
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-9");
   });
+
+  it("preserves explicit closeout ownership through a write/read round-trip", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      workspaceId: "api-1",
+      tmuxSession: "api-2",
+      closeoutOwner: true,
+    });
+
+    expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(true);
+  });
+
+  it.each([undefined, -1, 0, 3, 4, 1.5, "3"])(
+    "validates automatic reminder counters: %s",
+    async (attempts) => {
+      const dataDir = await newDataDir();
+      writeSession(dataDir, {
+        ...legacyBase,
+        id: "api-2",
+        tmuxSession: "api-2",
+        serverErrorReactivationAttempts: attempts,
+        todoNudge: { fingerprint: "a".repeat(64), attempts },
+      } as SessionRecord);
+      const restored = readSession(dataDir, "api-2");
+      const valid =
+        typeof attempts === "number" &&
+        Number.isInteger(attempts) &&
+        attempts >= 0 &&
+        attempts <= 3;
+      expect(restored?.serverErrorReactivationAttempts).toBe(valid ? attempts : undefined);
+      expect(restored?.todoNudge).toEqual(
+        valid ? { fingerprint: "a".repeat(64), attempts } : undefined,
+      );
+    },
+  );
+
+  it("drops a malformed ToDo reminder fingerprint", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...legacyBase,
+      id: "api-2",
+      tmuxSession: "api-2",
+      todoNudge: { fingerprint: "invalid", attempts: 3 },
+    });
+    expect(readSession(dataDir, "api-2")?.todoNudge).toBeUndefined();
+  });
+
+  it.each([
+    { name: "exclusive writable worktree", overrides: {}, expected: true },
+    { name: "restricted worktree", overrides: { restrictWrites: true }, expected: false },
+    { name: "shared checkout", overrides: { worktree: false }, expected: false },
+    { name: "reused workspace", overrides: { workspaceId: "api-1" }, expected: false },
+    { name: "malformed ownership", overrides: { closeoutOwner: "yes" }, expected: true },
+  ])(
+    "derives conservative ownership for a legacy $name record",
+    async ({ overrides, expected }) => {
+      const dataDir = await newDataDir();
+      writeSession(dataDir, {
+        ...legacyBase,
+        ...overrides,
+        id: "api-2",
+        tmuxSession: "api-2",
+      } as SessionRecord);
+
+      expect(readSession(dataDir, "api-2")?.closeoutOwner).toBe(expected);
+    },
+  );
 });
 
 describe("staleSidecars", () => {
@@ -996,6 +1366,165 @@ describe("session metadata PR migration", () => {
       expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
     ]);
   });
+
+  it("keeps submitUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      submitUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+      submitRequeuedMessage: "typed once",
+      submitFailedMessage: { message: "typed twice", at: "2026-03-18T10:01:30.000Z" },
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    // The re-queue budget survives a write, and so a restart.
+    expect(readSession(dataDir, "api-1")?.submitRequeuedMessage).toBe("typed once");
+    expect(readSession(dataDir, "api-1")?.submitFailedMessage).toEqual({
+      message: "typed twice",
+      at: "2026-03-18T10:01:30.000Z",
+    });
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+
+    const { submitUnconfirmedAt: _cleared, ...confirmed } = first;
+    writeSession(dataDir, confirmed);
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBeUndefined();
+  });
+
+  it("migrates a hold persisted under the old launchUnconfirmedAt name, writing only the new one", async () => {
+    const dataDir = await newDataDir();
+    const legacy = {
+      id: "api-1",
+      project: "api",
+      agent: "codex" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      launchUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+    };
+    writeSession(dataDir, legacy as unknown as SessionRecord);
+
+    const migrated = readSession(dataDir, "api-1");
+    expect(migrated?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(migrated).not.toHaveProperty("launchUnconfirmedAt");
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+  });
+
+  it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    const typed = {
+      message: "typed text",
+      typedAt: "2026-03-18T10:00:30.000Z",
+      ackBaseline: { agent: "codex" as const, offsets: { "/s/rollout.jsonl": 120 } },
+    };
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessageTyped: typed,
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual(typed);
+    expect(listSessions(dataDir)[0]?.queuedMessageTyped).toEqual(typed);
+
+    const { queuedMessageTyped: _cleared, ...acked } = first;
+    writeSession(dataDir, acked);
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toBeUndefined();
+  });
+
+  it("keeps every agent's ack baseline shape on the typed marker and drops a malformed one alone", async () => {
+    const dataDir = await newDataDir();
+    const base = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const typedAt = "2026-03-18T10:00:30.000Z";
+    const baselines: SubmitAckBaseline[] = [
+      { agent: "claude", file: "/c.jsonl", size: 7 },
+      { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
+      { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
+      { agent: "opencode", sessionId: "ses_1", after: null },
+    ];
+    for (const ackBaseline of baselines) {
+      writeSession(dataDir, {
+        ...base,
+        queuedMessageTyped: { message: "m", typedAt, ackBaseline },
+      });
+      expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({
+        message: "m",
+        typedAt,
+        ackBaseline,
+      });
+    }
+    const malformed = { agent: "claude", size: "x" } as unknown as {
+      agent: "claude";
+      file: string;
+      size: number;
+    };
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // A malformed rotation entry drops alone; the pinned offset survives.
+    const badRotation = {
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+      rotated: { file: 3 },
+    } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: badRotation },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+    });
+  });
 });
 
 const sessionBase = {
@@ -1245,5 +1774,62 @@ describe("listSessions record cache", () => {
 
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
     expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+  });
+});
+
+describe("hasPendingTelegramSend", () => {
+  const telegramRecord = (
+    queueKey: string,
+    sessionId: string,
+    claimed = false,
+  ): PersistedPendingBatch => ({
+    queueKey,
+    projectId: "api",
+    triggerId: "chat",
+    sourceId: "tg",
+    batch: {
+      kind: "telegram",
+      sessionId,
+      messages: [{ sessionId, chatId: 1, userId: 2, messageId: 3, text: "hi" }],
+    },
+    ...(claimed
+      ? {
+          claim: {
+            controllerId: "c",
+            routeLeaseId: "l",
+            claimId: "id",
+            claimedAt: "2026-01-01T00:00:00.000Z",
+          },
+        }
+      : {}),
+  });
+
+  it("matches only telegram batches for that session", async () => {
+    const dataDir = await newDataDir();
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+    recordPendingSendBatch(dataDir, {
+      queueKey: "api:review:api-1",
+      projectId: "api",
+      triggerId: "review",
+      sourceId: "pr",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr",
+        sessionId: "api-1",
+        prNumber: 1,
+        prTitle: "t",
+        signals: [],
+      },
+    });
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-2", "api-2"));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1", true));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(true);
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
   });
 });

@@ -1,7 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { test, expect, type Page } from "playwright/test";
 import {
+  test,
+  expect,
+  type Page,
   makeCompletedSession,
   makeWorkingSession,
   mockSessions,

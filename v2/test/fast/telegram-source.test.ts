@@ -7,7 +7,17 @@ import type {
 } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
-import { writeTelegramBindings } from "../../src/metadata.js";
+import {
+  findTelegramChoice,
+  findTelegramMessageSession,
+  readTelegramBindings,
+  readTelegramChoices,
+  readTelegramReplyTarget,
+  recordTelegramMessages,
+  writeTelegramBindings,
+  writeTelegramOffer,
+  writeTelegramReplyTarget,
+} from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
@@ -253,7 +263,8 @@ describe("wrapTelegramSpawnPrompt", () => {
       "",
       "",
       "Source: telegram. The requester only sees messages you send with:",
-      'spur source reply "<message>"',
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options. Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.',
       "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
     ].join("\n");
     expect(wrapTelegramSpawnPrompt("fix the sidecar")).toBe(`fix the sidecar${suffix}`);
@@ -306,6 +317,26 @@ describe("telegramSourceModule", () => {
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"sourceId": "telegram"');
   });
 
+  it("omits messageThreadId for bound main-chat messages", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    await mkdir(dataDir, { recursive: true });
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    await bot.emitText(
+      telegramContext({ chat: { id: 123 }, message_thread_id: undefined, text: "hello main" }),
+    );
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.not.objectContaining({ messageThreadId: expect.any(Number) }),
+    );
+  });
+
   it("shows project selection when /watch or /agents has no session id", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -335,6 +366,322 @@ describe("telegramSourceModule", () => {
         ],
       },
     });
+  });
+
+  it("delivers an agent button click to the offering session and kills the offer", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Yes",
+          value: "yes, deploy",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+        {
+          token: "tok1",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Later",
+          value: "wait",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          text: "Deploy now?",
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Sent: Yes");
+    expect(editMessageText).toHaveBeenCalledWith("Deploy now?\n\nSelected: Yes");
+    expect(emit).toHaveBeenCalledWith("telegram:message", {
+      sessionId: "api-1",
+      chatId: -1001,
+      messageThreadId: 22,
+      userId: 123,
+      username: "alek",
+      messageId: 90,
+      text: "yes, deploy",
+    });
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+      messageThreadId: 22,
+    });
+
+    // The sibling button is dead: the click consumed the whole offer.
+    emit.mockClear();
+    answerCallbackQuery.mockClear();
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok1",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+      editMessageText,
+    });
+    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("takes the forum thread from the clicked message, not the stale offer", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    // A stale thread on the stored choice must lose to the clicked message's own.
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 11,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, message_thread_id: 5678, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({ messageThreadId: 5678 });
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ messageThreadId: 5678 }),
+    );
+  });
+
+  it("carries an unconsumed status message across a click", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: 123,
+      statusMessageId: 77,
+      lastReplyAt: "2026-03-18T10:02:00.000Z",
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: 123,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: 123,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: 123 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    });
+
+    // A click posts no status message; dropping the pending one would orphan it.
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toMatchObject({
+      statusMessageId: 77,
+      lastReplyAt: "2026-03-18T10:02:00.000Z",
+    });
+  });
+
+  it("tells a click that lost the race the choice is gone", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    // A buttonless reply retiring the offer between the peek and the take is the
+    // only way the take loses; listSessions is the await that opens the window.
+    const listSessions = vi.fn().mockImplementation(() => {
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [],
+      });
+      return Promise.resolve([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    });
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+
+    // Never "Sent" for a click that delivered nothing.
+    expect(answerCallbackQuery).toHaveBeenCalledWith("This choice is no longer active.");
+    expect(answerCallbackQuery).not.toHaveBeenCalledWith("Sent: Yes");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("delivers the click even when acknowledging it fails", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      // Telegram expires callback queries; a rejected ack must not eat the click.
+      answerCallbackQuery: vi.fn().mockRejectedValue(new Error("query is too old")),
+    });
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "yes" }),
+    );
+    expect(readTelegramChoices(dataDir, "api", "telegram")).toHaveLength(0);
+  });
+
+  it("drops an agent button click for an unknown token, a foreign chat, or a dead session", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:missing",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+
+    // A token from another chat must not fire, and stays unconsumed.
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 91, chat: { id: 123 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("This choice is no longer active.");
+
+    // Right chat, but the offering session is gone.
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 92, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+    expect(answerCallbackQuery).toHaveBeenLastCalledWith("Session is no longer active.");
+    expect(emit).not.toHaveBeenCalled();
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+    // The offer survives a dead lookup: consuming it would strand the question.
+    expect(readTelegramChoices(dataDir, "api", "telegram").map((entry) => entry.token)).toEqual([
+      "tok0",
+    ]);
   });
 
   it("navigates project sessions with status emojis and back button", async () => {
@@ -691,7 +1038,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("fix the sidecar"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
@@ -804,7 +1153,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("fix the sidecar"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(reply).toHaveBeenCalledWith("Spawning codex agent...");
     // The status message spawned via `reply` gets edited in place through the
     // callback ctx's `api`, not re-sent as a second `reply` — proves the
@@ -874,7 +1225,9 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("review the branch"),
       }),
     );
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning claude agent...");
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
   });
@@ -972,6 +1325,31 @@ describe("telegramSourceModule", () => {
         prompt: expect.stringContaining("fix the sidecar"),
       }),
     );
+  });
+
+  it("hands the DM it was spawned from to the daemon as the agent's reply origin", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, { listProjects });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({
+        text: "/spawn claude do X",
+        chat: { id: 123 },
+        message_thread_id: undefined,
+      }),
+    );
+
+    expect(spawnSession.mock.calls[0]?.[0]?.telegramOrigin).toEqual({
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: 123,
+    });
   });
 
   it("a second /spawn with an inline task overwrites the pending record instead of stacking a spawn", async () => {
@@ -1410,7 +1788,7 @@ describe("telegramSourceModule", () => {
     expect(emit).not.toHaveBeenCalled();
   });
 
-  it("acks bound messages and stores the ack for editing by source replies", async () => {
+  it("posts a thinking placeholder naming the agent and records it for reply routing", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
@@ -1422,7 +1800,7 @@ describe("telegramSourceModule", () => {
 
     await bot.emitText(textCtx);
 
-    expect(textCtx.reply).toHaveBeenCalledWith("Sent to Spur agent.");
+    expect(textCtx.reply).toHaveBeenCalledWith("Received. api-1 is thinking...");
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
       expect.objectContaining({ text: "hello agent" }),
@@ -1435,6 +1813,553 @@ describe("telegramSourceModule", () => {
       "api-1.json",
     );
     await expect(readFile(replyTargetPath, "utf8")).resolves.toContain('"statusMessageId": 77');
+    expect(findTelegramMessageSession(dataDir, "api", "telegram", 123, 77)).toBe("api-1");
+  });
+
+  it("marks a superseded placeholder as received", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const first = telegramContext({ chat: { id: 123 } });
+    first.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(first);
+    const second = telegramContext({ chat: { id: 123 } });
+    second.reply.mockResolvedValueOnce({ message_id: 78 });
+
+    await bot.emitText(second);
+
+    expect(second.api.editMessageText).toHaveBeenCalledWith(123, 77, "Received.");
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(78);
+  });
+
+  it("records the new placeholder before editing the superseded one", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const first = telegramContext({ chat: { id: 123 } });
+    first.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(first);
+    const second = telegramContext({ chat: { id: 123 } });
+    second.reply.mockResolvedValueOnce({ message_id: 78 });
+    const recordedDuringEdit: (number | undefined)[] = [];
+    second.api.editMessageText.mockImplementation(async () => {
+      recordedDuringEdit.push(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId);
+    });
+
+    await bot.emitText(second);
+
+    expect(second.api.editMessageText).toHaveBeenCalledWith(123, 77, "Received.");
+    expect(recordedDuringEdit).toEqual([78]);
+  });
+
+  it("does not edit a placeholder an agent reply already claimed", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const first = telegramContext({ chat: { id: 123 } });
+    first.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(first);
+    // The agent claims the placeholder (clears it) before it starts editing it.
+    const claimed = readTelegramReplyTarget(dataDir, "api-1");
+    if (!claimed) throw new Error("missing reply target");
+    const { statusMessageId: _claimed, updatedAt: _updatedAt, ...withoutStatus } = claimed;
+    writeTelegramReplyTarget(dataDir, withoutStatus);
+    const second = telegramContext({ chat: { id: 123 } });
+    second.reply.mockResolvedValueOnce({ message_id: 78 });
+
+    await bot.emitText(second);
+
+    expect(second.api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it("tells the user a replied-to session is not active and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi.fn().mockResolvedValue([
+      { id: "api-1", project: "api", agent: "codex", state: "waiting" },
+      { id: "api-2", project: "api", agent: "claude", state: "stopped", inactive: true },
+    ]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId: 123 }, [500]);
+    const textCtx = telegramContext({
+      chat: { id: 123 },
+      message_thread_id: undefined,
+      reply_to_message: { message_id: 500 },
+    });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith("api-2 is not active. Message not delivered.");
+    expect(emit).not.toHaveBeenCalled();
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+      { chatId: 123, sessionId: "api-1" },
+    ]);
+  });
+
+  it.each([
+    ["working", "Received. api-1 is busy; your message is queued."],
+    ["rate_limited", "Received. api-1 is busy; your message is queued."],
+    ["error", "Received. api-1 is busy; your message is queued."],
+    ["needs_input", "Received. api-1 needs input in its terminal; your message is queued."],
+    ["waiting", "Received. api-1 is thinking..."],
+    ["stale", "Received. api-1 is thinking..."],
+  ])("words the placeholder for a %s session", async (state, expected) => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state }]);
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith(expected);
+  });
+
+  it("leaves a placeholder in another chat untouched when the session is reached elsewhere", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const dm = telegramContext({ chat: { id: 123 } });
+    dm.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(dm);
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-1", chatId: 456 }, [500]);
+    const group = telegramContext({
+      chat: { id: 456 },
+      message_thread_id: undefined,
+      reply_to_message: { message_id: 500 },
+    });
+    group.reply.mockResolvedValueOnce({ message_id: 601 });
+
+    await bot.emitText(group);
+
+    expect(group.api.editMessageText).not.toHaveBeenCalled();
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(601);
+  });
+
+  it("keeps the Selected edit plain for an offer containing < and &", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const editMessageText = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, text: "a < b & c", chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    });
+
+    expect(editMessageText).toHaveBeenCalledTimes(1);
+    expect(editMessageText.mock.calls[0]).toEqual(["a < b & c\n\nSelected: Yes"]);
+  });
+
+  it("drops a DM placeholder when a click moves the session to a group", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", chat: { id: 123 } }));
+    const dm = telegramContext({ chat: { id: 123 } });
+    dm.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(dm);
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(77);
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const target = readTelegramReplyTarget(dataDir, "api-1");
+    expect(target?.chatId).toBe(-1001);
+    expect(target?.statusMessageId).toBeUndefined();
+    expect(dm.api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it("routes a reply to a bot message to the session that sent it, ahead of the chat binding", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId: 123 }, [500]);
+    const textCtx = telegramContext({
+      chat: { id: 123 },
+      message_thread_id: undefined,
+      reply_to_message: { message_id: 500 },
+    });
+    textCtx.reply.mockResolvedValueOnce({ message_id: 601 });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith("Received. api-2 is busy; your message is queued.");
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-2", text: "hello agent" }),
+    );
+    expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBe(601);
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+      { chatId: 123, sessionId: "api-1" },
+    ]);
+  });
+
+  it("routes a group reply to an old agent's message by the thread binding, not the message owner", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    recordTelegramMessages(
+      dataDir,
+      "api",
+      "telegram",
+      { sessionId: "api-2", chatId: -1001 },
+      [500],
+    );
+
+    await bot.emitText(telegramContext({ reply_to_message: { message_id: 500 } }));
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1" }),
+    );
+  });
+
+  it("lets a spawn take over a bound group thread: the old agent is detached and told so", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, { listProjects });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+      messageThreadId: 22,
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const spawnCtx = telegramContext({ text: "/spawn claude do X" });
+
+    await bot.emitText(spawnCtx);
+
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-3" },
+    ]);
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+    expect(readTelegramReplyTarget(dataDir, "api-3")?.chatId).toBe(-1001);
+    expect(readTelegramChoices(dataDir, "api", "telegram")).toEqual([]);
+    expect(spawnCtx.reply).toHaveBeenCalledWith("api-3 took over this thread from api-1.");
+  });
+
+  it("detaches a displaced agent from the taken thread only, not from other threads or chats", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValue({ id: "api-3", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, { listProjects });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    // The displaced agent's latest reply target is a different thread of the same group.
+    writeTelegramReplyTarget(dataDir, {
+      sessionId: "api-1",
+      projectId: "api",
+      sourceId: "telegram",
+      chatId: -1001,
+      messageThreadId: 99,
+    });
+    const offer = (chatId: number, token: string) => ({
+      token,
+      offerId: `offer-${token}`,
+      sessionId: "api-1",
+      chatId,
+      text: "Yes",
+      value: "yes",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [offer(-1001, "here")],
+    });
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -2002,
+      choices: [offer(-2002, "elsewhere")],
+    });
+
+    await bot.emitText(telegramContext({ text: "/spawn claude do X" }));
+
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.messageThreadId).toBe(99);
+    expect(readTelegramChoices(dataDir, "api", "telegram").map((choice) => choice.token)).toEqual([
+      "elsewhere",
+    ]);
+  });
+
+  it("falls back to the chat binding when the replied-to message is unknown", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    await bot.emitText(telegramContext({ reply_to_message: { message_id: 501 } }));
+
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1" }),
+    );
+  });
+
+  it("tells the user a replied-to session is gone and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-9", chatId: 123 }, [500]);
+    const textCtx = telegramContext({
+      chat: { id: 123 },
+      message_thread_id: undefined,
+      reply_to_message: { message_id: 500 },
+    });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith(
+      "Spur session api-9 is gone. Message not delivered.",
+    );
+    expect(emit).not.toHaveBeenCalled();
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toEqual([
+      { chatId: 123, sessionId: "api-1" },
+    ]);
+  });
+
+  it("tells the user a bound session is not active and emits nothing", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([
+        { id: "api-1", project: "api", agent: "codex", state: "stopped", inactive: true },
+      ]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    const textCtx = telegramContext();
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.reply).toHaveBeenCalledWith("api-1 is not active. Message not delivered.");
+    expect(emit).not.toHaveBeenCalled();
+    expect([...readTelegramBindings(dataDir, "api", "telegram").values()]).toHaveLength(1);
+  });
+
+  it("keeps two agents in one DM: /spawn rebinds plain text, reply-to reaches the first", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-3", project: "api", agent: "claude", state: "working" })
+      .mockResolvedValueOnce({ id: "api-4", project: "api", agent: "claude", state: "working" });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const listSessions = vi.fn().mockResolvedValue([
+      { id: "api-3", project: "api", agent: "claude", state: "waiting" },
+      { id: "api-4", project: "api", agent: "claude", state: "waiting" },
+    ]);
+    const emit = vi.fn();
+    const { bot } = await startSource(dataDir, emit, spawnSession, { listProjects, listSessions });
+    if (!bot) throw new Error("missing bot");
+    const spawnA = telegramContext({ text: "/spawn claude task A", chat: { id: 123 } });
+    spawnA.reply.mockResolvedValueOnce({ message_id: 40 });
+    await bot.emitText(spawnA);
+    const spawnB = telegramContext({ text: "/spawn claude task B", chat: { id: 123 } });
+    spawnB.reply.mockResolvedValueOnce({ message_id: 41 });
+    await bot.emitText(spawnB);
+
+    await bot.emitText(telegramContext({ text: "plain", chat: { id: 123 } }));
+    await bot.emitText(
+      telegramContext({ text: "to A", chat: { id: 123 }, reply_to_message: { message_id: 40 } }),
+    );
+
+    expect(emit).toHaveBeenNthCalledWith(
+      1,
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-4", text: "plain" }),
+    );
+    expect(emit).toHaveBeenNthCalledWith(
+      2,
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-3", text: "to A" }),
+    );
+    // A private chat holds many agents: the first keeps its target, nobody is told they were displaced.
+    expect(readTelegramReplyTarget(dataDir, "api-3")).not.toBeNull();
+    expect(spawnB.reply).not.toHaveBeenCalledWith(expect.stringContaining("took over"));
+  });
+
+  it("rejects a button click for an inactive session and keeps the offer", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([
+        { id: "api-1", project: "api", agent: "codex", state: "stopped", inactive: true },
+      ]);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { listSessions });
+    if (!bot) throw new Error("missing bot");
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined);
+
+    await bot.emitCallback({
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: { message_id: 90, chat: { id: -1001 } },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery,
+    });
+
+    expect(answerCallbackQuery).toHaveBeenCalledWith("api-1 is not active.");
+    expect(emit).not.toHaveBeenCalled();
+    expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+  });
+
+  it("keeps lastInboundAt behind an agent reply when the spawn bind runs, and a real inbound re-arms it", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawnSession = vi.fn().mockImplementation(async () => {
+      // What the daemon does mid-spawn: pre-write the target, then the agent replies.
+      writeTelegramReplyTarget(dataDir, {
+        sessionId: "api-3",
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: 123,
+        lastInboundAt: "2000-01-01T00:00:00.000Z",
+        lastReplyAt: "2000-01-02T00:00:00.000Z",
+      });
+      return { id: "api-3", project: "api", agent: "claude", state: "working" };
+    });
+    const listProjects = vi.fn().mockResolvedValue([{ id: "api", name: "api" }]);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-3", project: "api", agent: "claude", state: "waiting" }]);
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      listProjects,
+      listSessions,
+    });
+    if (!bot) throw new Error("missing bot");
+
+    await bot.emitText(
+      telegramContext({
+        text: "/spawn claude do X",
+        chat: { id: 123 },
+        message_thread_id: undefined,
+      }),
+    );
+
+    expect(readTelegramReplyTarget(dataDir, "api-3")).toMatchObject({
+      lastInboundAt: "2000-01-01T00:00:00.000Z",
+      lastReplyAt: "2000-01-02T00:00:00.000Z",
+    });
+
+    await bot.emitText(
+      telegramContext({ text: "next", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+
+    const afterInbound = readTelegramReplyTarget(dataDir, "api-3");
+    expect((afterInbound?.lastInboundAt ?? "") > (afterInbound?.lastReplyAt ?? "")).toBe(true);
+    expect(afterInbound?.lastReplyAt).toBe("2000-01-02T00:00:00.000Z");
   });
 
   it("stamps lastInboundAt when forwarding a bound inbound message", async () => {
@@ -1467,30 +2392,36 @@ describe("telegramSourceModule", () => {
     expect(new Date(persisted.lastInboundAt ?? "").toString()).not.toBe("Invalid Date");
   });
 
-  it("does not store group acks as editable reply targets", async () => {
+  it("stores the placeholder for a forum topic and a DM but not for a group main chat", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const { bot, emit } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
 
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
-    const textCtx = telegramContext();
-    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+    const topic = telegramContext();
+    topic.reply.mockResolvedValueOnce({ message_id: 77 });
+    await bot.emitText(topic);
+    expect(readTelegramReplyTarget(dataDir, "api-1")?.statusMessageId).toBe(77);
 
-    await bot.emitText(textCtx);
+    await bot.emitText(
+      telegramContext({ text: "/watch api-2", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    const dm = telegramContext({ chat: { id: 123 }, message_thread_id: undefined });
+    dm.reply.mockResolvedValueOnce({ message_id: 78 });
+    await bot.emitText(dm);
+    expect(readTelegramReplyTarget(dataDir, "api-2")?.statusMessageId).toBe(78);
+
+    await bot.emitText(telegramContext({ text: "/watch web-1", message_thread_id: undefined }));
+    const groupMain = telegramContext({ message_thread_id: undefined });
+    groupMain.reply.mockResolvedValueOnce({ message_id: 79 });
+    await bot.emitText(groupMain);
 
     expect(emit).toHaveBeenCalledWith(
       "telegram:message",
-      expect.objectContaining({ text: "hello agent" }),
+      expect.objectContaining({ sessionId: "web-1" }),
     );
-    const replyTargetPath = join(
-      dataDir,
-      "source-state",
-      "telegram",
-      "reply-targets",
-      "api-1.json",
-    );
-    await expect(readFile(replyTargetPath, "utf8")).resolves.not.toContain('"statusMessageId"');
+    expect(readTelegramReplyTarget(dataDir, "web-1")?.statusMessageId).toBeUndefined();
   });
 
   it("still emits bound messages when the Telegram ack fails", async () => {
@@ -1577,7 +2508,7 @@ describe("telegramSourceModule", () => {
       enabled: true,
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
     },
   };
@@ -1603,11 +2534,20 @@ describe("telegramSourceModule", () => {
     expect(spawnSession).toHaveBeenCalledWith({
       project: "spur-shepherd",
       agent: "opencode",
-      model: "google/gemini-3.7-flash",
+      model: "google/gemini-3.8-flash",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("help me out"),
+      // The agent may reply before this handler binds; the daemon writes the target from this.
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
-    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain('spur source reply "<message>"');
+    expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
+      '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    );
     expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound: shp-1.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
@@ -1959,6 +2899,32 @@ describe("telegramSourceModule voice notes", () => {
     });
   });
 
+  it("routes a voice reply to a bot message to the session that sent it", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(
+      telegramContext({ text: "/watch api-1", chat: { id: 123 }, message_thread_id: undefined }),
+    );
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId: 123 }, [500]);
+
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    await bot.emitVoice(
+      telegramVoiceContext({
+        chat: { id: 123 },
+        message_thread_id: undefined,
+        reply_to_message: { message_id: 500 },
+      }),
+    );
+
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-2", text: "fix the sidecar" }),
+    );
+  });
+
   it("A2: spawns via wrapTelegramSpawnPrompt when no binding exists", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -1999,6 +2965,12 @@ describe("telegramSourceModule voice notes", () => {
       project: "api",
       agent: "codex",
       prompt: wrapTelegramSpawnPrompt("fix the sidecar"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
   });
 
@@ -2033,6 +3005,12 @@ describe("telegramSourceModule voice notes", () => {
       agent: "opencode",
       selfDestruct: { enabled: true },
       prompt: expect.stringContaining("fix the sidecar"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
     });
 
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");

@@ -1,11 +1,11 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { agentSendMode, agentSendsInterruptKey } from "./agents/index.js";
+import { agentInterruptKeys, agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS } from "./npm-prefix.js";
@@ -30,6 +30,8 @@ import type { AgentName } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+const SENSITIVE_TMUX_CLOSE_WAIT_MS = 1_000;
+const SENSITIVE_TMUX_CLEANUP_ATTEMPTS = 3;
 
 // ── Shared short-TTL runtime-probe cache ──
 // With ~183 sessions, the dashboard-cache tick (every 2s in session-service.ts,
@@ -168,6 +170,19 @@ export async function listTmuxSessionNames(): Promise<Set<string>> {
   return (await getFleetSessionSnapshot()).names;
 }
 
+// Busts the fleet-wide cache and forces exactly one fresh fork, populating
+// the single shared entry for every plain (non-fresh) tmuxSessionExists /
+// sidecarTmuxAlive call made right after — those reuse this one fetch
+// instead of each forcing their own. For a caller that needs one genuinely
+// fresh read shared across a whole batch of liveness checks (e.g. scanning
+// N foreign reservations for staleness), never N independent `{fresh:
+// true}` calls, which would each discard the previous call's still-fresh
+// entry and re-fork.
+export async function refreshTmuxFleetSnapshot(): Promise<void> {
+  fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
+  await getFleetSessionSnapshot();
+}
+
 // `fresh` busts the shared fleet-existence cache before reading, forcing one
 // independent fork instead of reusing whatever the last ~2s tick saw. Only
 // for rare imperative callers that need a genuine re-sample (e.g. a retry
@@ -217,11 +232,11 @@ interface FleetPaneEntry {
   activePaneDead: boolean;
   activePanePid: number | null;
   // Every pane's tty across the whole session (what `=name` with no window
-  // targeted before batching) — getProcessPresenceInTmux needs all of them
+  // targeted before batching) — isProcessRunningInTmux needs all of them
   // since the agent process can be in any pane/window of the session.
   allTtys: string[];
   // Every pane's pid across the whole session — the pane-child fallback in
-  // getProcessPresenceInTmux uses these to recognize a wrapper-exec'd agent by
+  // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
   // parentage (ppid is a pane pid) when name matching misses (issue #806).
   allPanePids: number[];
 }
@@ -245,7 +260,7 @@ const FLEET_PANE_CACHE_KEY = "panes";
 
 // Fleet-wide pane state in ONE fork (`list-panes -a`) instead of one
 // `list-panes`/`display-message #{pane_dead}` per session. tmuxPaneDead,
-// getTmuxPanePid, and getProcessPresenceInTmux's tty lookup all reroute through
+// getTmuxPanePid, and isProcessRunningInTmux's tty lookup all reroute through
 // this cached snapshot.
 function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
   return memoizedProbe(fleetPaneCache, FLEET_PANE_CACHE_KEY, async () => {
@@ -301,7 +316,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
 }
 
 // `fresh` busts the shared fleet-pane cache before reading — same rationale
-// as tmuxSessionExists's/getProcessPresenceInTmux's `fresh`.
+// as tmuxSessionExists's/isProcessRunningInTmux's `fresh`.
 export async function tmuxPaneDead(
   sessionName: string,
   options?: { fresh?: boolean },
@@ -381,6 +396,52 @@ async function tmux(...args: string[]): Promise<string> {
     timeout: TMUX_COMMAND_TIMEOUT_MS,
   });
   return stdout.trimEnd();
+}
+
+export type SensitiveTmuxOperation =
+  | "load-buffer"
+  | "paste-buffer"
+  | "scrub-buffer"
+  | "delete-buffer"
+  | "prove-buffer-absent";
+
+export class SensitiveTmuxTransportError extends Error {
+  readonly code: string;
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+
+  constructor(args: { code: string; operation: SensitiveTmuxOperation; sessionName: string }) {
+    super(
+      `Sensitive tmux transport failed during ${args.operation} for session "${args.sessionName}" (${args.code})`,
+    );
+    this.name = "SensitiveTmuxTransportError";
+    this.code = args.code;
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+  }
+}
+
+export class SensitiveTmuxCleanupError extends Error {
+  readonly operation: SensitiveTmuxOperation;
+  readonly sessionName: string;
+  readonly primaryCode: string;
+  readonly cleanupCode: string;
+
+  constructor(args: {
+    operation: SensitiveTmuxOperation;
+    sessionName: string;
+    primaryCode: string;
+    cleanupCode: string;
+  }) {
+    super(
+      `Sensitive tmux cleanup failed during ${args.operation} for session "${args.sessionName}" (${args.cleanupCode}; primary ${args.primaryCode})`,
+    );
+    this.name = "SensitiveTmuxCleanupError";
+    this.operation = args.operation;
+    this.sessionName = args.sessionName;
+    this.primaryCode = args.primaryCode;
+    this.cleanupCode = args.cleanupCode;
+  }
 }
 
 // Node's execFile `timeout` option sends SIGTERM and reports `killed: true`,
@@ -526,18 +587,33 @@ export function captureTmuxPane(
   sessionName: string,
   lines = 200,
   options?: { fresh?: boolean },
-): Promise<string> {
+): Promise<string | null> {
   const key = `${sessionName}:${lines}`;
   if (options?.fresh) {
     capturePaneCache.delete(key);
   }
   // The fetch throws on a real capture failure (rather than swallowing it
   // into "") so memoizedProbe's evict-on-reject never caches a transient
-  // failure as a stable empty result for the rest of the TTL window.
+  // failure as a stable empty result for the rest of the TTL window. The
+  // catch here yields `null` — "could not look" — kept distinct from `""`,
+  // a real capture that saw a blank pane. Every caller must treat `null` as
+  // no observation; use `captureTmuxPaneOrEmpty` below for display-only
+  // callers that are fine collapsing the distinction.
   return memoizedProbe(capturePaneCache, key, () => {
     const target = exactPaneTarget(sessionName);
     return tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
-  }).catch(() => "");
+  }).catch(() => null);
+}
+
+// Display-only convenience: collapses "could not look" into "", the same
+// value a blank pane would produce. Never feed this into a rate-limit or
+// menu detector — those must see `null` to skip taking an observation.
+export async function captureTmuxPaneOrEmpty(
+  sessionName: string,
+  lines = 200,
+  options?: { fresh?: boolean },
+): Promise<string> {
+  return (await captureTmuxPane(sessionName, lines, options)) ?? "";
 }
 
 // Test-only introspection: capturePaneCache is keyed per (session, lines), so
@@ -611,12 +687,12 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // execFile's default maxBuffer (1 MiB) truncates a large process table
 // instead of erroring; the catch below would then treat the truncation the
 // same as a genuine ps failure and return []. That makes the only caller,
-// getProcessPresenceInTmux, misclassify every live agent in the fleet as dead —
+// isProcessRunningInTmux, misclassify every live agent in the fleet as dead —
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-// RESIDUAL (#857 P1, scoped): getProcessPresenceInTmux's pane-child fallback
+// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
 // fails CLOSED, per row, when a candidate row's tty has no resolvable
 // foreground process group — see the fgPgid check there. This residual is
 // about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec
@@ -705,83 +781,67 @@ export async function getFleetSessionRssBytes(
   return rssBytesBySessionId;
 }
 
+// Typed result of a single pane/ps fetch, so a caller that needs to know
+// WHICH pass answered ALIVE (session-service's probeAgentProcess, issue #871
+// P2) can read it off one snapshot instead of issuing a second, separately
+// memoized call: memoizedProbe's TTL runs from fetch START (:78, :92), so a
+// probe that itself takes >2s (getPsSnapshot's own timeout is 5s, :696)
+// leaves the cache already expired by the time a second top-level call
+// checks it, forking again and comparing two different instants.
+export interface TmuxProcessMatch {
+  alive: boolean;
+  matchedByName: boolean;
+}
+
 // `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —
 // same rationale as tmuxSessionExists's `fresh`: a session created after the
 // last fleet-pane snapshot is invisible to it until the cache naturally
 // expires, which would wrongly fail a post-create recovery/restore check.
-// Process-presence read plus whether the list-panes leg was
-// killed by its own timeout. ONE getFleetPaneSnapshot() feeds both values, so a
-// caller never needs a second fork to learn why `alive` is false. The flag is
-// captured before the catch so a later ps rejection cannot erase it.
-export async function getProcessPresenceInTmux(
+// Walks the parent chain from pid; true when it reaches one of the pane pids
+// (the pane pid itself counts). Bounded against a ps snapshot cycle.
+function descendsFromPane(
+  pid: number,
+  panePids: ReadonlySet<number>,
+  ppidByPid: ReadonlyMap<number, number>,
+): boolean {
+  let current: number | undefined = pid;
+  for (let depth = 0; current !== undefined && current > 1 && depth < 64; depth += 1) {
+    if (panePids.has(current)) return true;
+    current = ppidByPid.get(current);
+  }
+  return false;
+}
+
+export async function probeTmuxProcessMatch(
   sessionName: string,
   processMatchers: string[],
   options?: { fresh?: boolean; paneChildFallback?: boolean },
-): Promise<{ alive: boolean; unresponsive: boolean }> {
+): Promise<TmuxProcessMatch> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
   }
-  let unresponsive = false;
   try {
-    const snapshot = await getFleetPaneSnapshot();
-    unresponsive = snapshot.unresponsive;
-    const alive = await isProcessInPaneSnapshot(
-      snapshot.panes,
-      sessionName,
-      processMatchers,
-      options?.paneChildFallback,
-    );
-    return { alive, unresponsive };
-  } catch {
-    return { alive: false, unresponsive };
-  }
-}
-
-async function isProcessInPaneSnapshot(
-  panes: Map<string, FleetPaneEntry>,
-  sessionName: string,
-  processMatchers: string[],
-  paneChildFallback: boolean | undefined,
-): Promise<boolean> {
-  const entry = panes.get(sessionName);
-  const ttys = entry?.allTtys ?? [];
-  if (ttys.length === 0) {
-    return false;
-  }
-  const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
-  const processRes = processMatchers
-    .filter((matcher) => matcher.trim().length > 0)
-    .map(
-      (matcher) => new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
-    );
-  if (processRes.length === 0) {
-    return false;
-  }
-  const rows = await getPsSnapshot();
-  for (const row of rows) {
-    if (!ttySet.has(row.tty)) {
-      continue;
+    const { panes } = await getFleetPaneSnapshot();
+    const entry = panes.get(sessionName);
+    const ttys = entry?.allTtys ?? [];
+    if (ttys.length === 0) {
+      return { alive: false, matchedByName: false };
     }
-    if (processRes.some((processRe) => processRe.test(row.args))) {
-      return true;
+    const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
+    const processRes = processMatchers
+      .filter((matcher) => matcher.trim().length > 0)
+      .map(
+        (matcher) =>
+          new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
+      );
+    if (processRes.length === 0) {
+      return { alive: false, matchedByName: false };
     }
-  }
-  // Pane-child fallback (issue #806, hardened against #857 P1): a
-  // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
-  // the agent's canonical process names never matches pass 1 above. Only
-  // reached when the caller has determined the launch binary is foreign to
-  // the agent (session-service's agentProcessAlive). "Any direct child of
-  // the pane shell" was too wide: after the agent exits, a persistent shell
-  // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
-  // is still a direct child and kept the session reading ALIVE forever.
-  // The gate is instead the tty's current foreground process group: a live
-  // agent (or its wrapper) is the pane's foreground job, a leftover
-  // background helper is not. fgPgid per tty is read off the row whose pid
-  // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
-  // pgid, shared by every process attached to that tty.
-  const allPanePids = entry?.allPanePids ?? [];
-  if (paneChildFallback && allPanePids.length > 0) {
+    const rows = await getPsSnapshot();
+    // tpgid on the row whose pid IS a pane pid is that tty's foreground
+    // process group, shared by every process attached to the tty.
+    const allPanePids = entry?.allPanePids ?? [];
     const panePids = new Set(allPanePids);
     const fgPgidByTty = new Map<string, number>();
     for (const row of rows) {
@@ -789,31 +849,85 @@ async function isProcessInPaneSnapshot(
         fgPgidByTty.set(row.tty, row.tpgid);
       }
     }
+    const ppidByPid = new Map(rows.map((row) => [row.pid, row.ppid]));
     for (const row of rows) {
-      if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
+      if (!ttySet.has(row.tty)) {
         continue;
       }
+      // A name match counts only in the tty's foreground group: a pane
+      // whose agent wrapper died leaves the shell in the foreground, and an
+      // orphaned agent binary still on the tty in the background must not
+      // read alive, or a send lands in the shell. Unresolvable foreground
+      // group (no pane-pid row, unparseable tpgid): name match alone.
       const fgPgid = fgPgidByTty.get(row.tty);
-      // Fail CLOSED on an unresolvable foreground group. Reaching this needs
-      // either the pane pid's own row absent from this ps snapshot, or an
-      // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
-      // means the tty's controlling process is gone — and the kernel then
-      // dissociates that tty from every surviving session member, so their
-      // tty reads `?` and they never pass the ttySet guard above. A live
-      // agent therefore cannot be one of these rows. Admitting one on
-      // parentage alone re-admits the leftover-helper class this gate
-      // exists to exclude (#806 -> #857 P1), and a false ALIVE here
-      // send-keys the user's prose into a shell prompt. Excludes THIS ROW
-      // only; other rows and the session's other ttys still evaluate.
-      if (fgPgid === undefined || fgPgid <= 0) {
+      if (fgPgid !== undefined && fgPgid > 0 && row.pgid !== fgPgid) {
         continue;
       }
-      if (row.pgid === fgPgid) {
-        return true;
+      // And only under the pane's own shell. When the wrapper dies, the
+      // orphaned binary keeps the job's process group, and the tty's
+      // foreground group stays that job until the shell takes the terminal
+      // back: it passed the check above while the pane already showed the
+      // shell, and a send typed into it. Reparented to init or a subreaper,
+      // it no longer descends from the pane pid.
+      if (panePids.size > 0 && !descendsFromPane(row.pid, panePids, ppidByPid)) {
+        continue;
+      }
+      if (processRes.some((processRe) => processRe.test(row.args))) {
+        return { alive: true, matchedByName: true };
       }
     }
+    // Pane-child fallback (issue #806, hardened against #857 P1): a
+    // SPUR_*_BIN wrapper that exec's a binary whose filename is not one of
+    // the agent's canonical process names never matches pass 1 above. Only
+    // reached when the caller has determined the launch binary is foreign to
+    // the agent (session-service's agentProcessAlive). "Any direct child of
+    // the pane shell" was too wide: after the agent exits, a persistent shell
+    // helper it (or the shell) spawned — gitstatusd, a `sleep 300 &` job —
+    // is still a direct child and kept the session reading ALIVE forever.
+    // The gate is instead the tty's current foreground process group: a live
+    // agent (or its wrapper) is the pane's foreground job, a leftover
+    // background helper is not. fgPgid per tty is read off the row whose pid
+    // IS a pane pid — tpgid there is the tty's controlling-terminal foreground
+    // pgid, shared by every process attached to that tty.
+    if (options?.paneChildFallback && allPanePids.length > 0) {
+      for (const row of rows) {
+        if (!ttySet.has(row.tty) || panePids.has(row.pid)) {
+          continue;
+        }
+        const fgPgid = fgPgidByTty.get(row.tty);
+        // Fail CLOSED on an unresolvable foreground group. Reaching this needs
+        // either the pane pid's own row absent from this ps snapshot, or an
+        // unparseable tpgid (getPsSnapshot normalizes it to -1). Row-absent
+        // means the tty's controlling process is gone — and the kernel then
+        // dissociates that tty from every surviving session member, so their
+        // tty reads `?` and they never pass the ttySet guard above. A live
+        // agent therefore cannot be one of these rows. Admitting one on
+        // parentage alone re-admits the leftover-helper class this gate
+        // exists to exclude (#806 -> #857 P1), and a false ALIVE here
+        // send-keys the user's prose into a shell prompt. Excludes THIS ROW
+        // only; other rows and the session's other ttys still evaluate.
+        if (fgPgid === undefined || fgPgid <= 0) {
+          continue;
+        }
+        if (row.pgid === fgPgid) {
+          return { alive: true, matchedByName: false };
+        }
+      }
+    }
+    return { alive: false, matchedByName: false };
+  } catch {
+    return { alive: false, matchedByName: false };
   }
-  return false;
+}
+
+// Thin boolean wrapper, kept byte-identical in signature and return type:
+// 169 boolean mock occurrences in session-service.test.ts depend on it.
+export async function isProcessRunningInTmux(
+  sessionName: string,
+  processMatchers: string[],
+  options?: { fresh?: boolean; paneChildFallback?: boolean },
+): Promise<boolean> {
+  return (await probeTmuxProcessMatch(sessionName, processMatchers, options)).alive;
 }
 
 // Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic
@@ -829,16 +943,17 @@ function invalidateFleetProbeCaches(): void {
   psSnapshotCache.clear();
 }
 
+export const AGENT_LAUNCH_SCRIPT_NAME = "agent-launch.sh";
+
 export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
-  agent?: AgentName;
+  /** Session tool dir; holds the launch script, removed with the session. */
+  launchScriptDir: string;
   env?: Record<string, string>;
 }): Promise<void> {
-  const sessionTarget = exactSessionTarget(input.sessionName);
-  const envArgs = buildEnvArgs(input.env);
-
+  const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   await runTmuxNewSession([
     ...withTmuxSocketArgs([]),
     "-f",
@@ -849,25 +964,46 @@ export async function createTmuxSession(input: {
     input.sessionName,
     "-c",
     input.cwd,
-    ...envArgs,
+    ...buildEnvArgs(input.env),
+    buildAgentPaneShellCommand(scriptPath),
   ]);
   invalidateFleetProbeCaches();
-  await sleep(300);
+}
 
+// The launch lives in a file, not on the tmux command line: tmux refuses a
+// new-session command past about 16KB, and opencode carries the whole task
+// prompt in its launch. Owner-only: the launch can carry env assignments
+// with credentials. A relaunch replaces the script with a fresh 0600 inode
+// (exclusive-create temp, then rename), never rewrites the old one in place:
+// an open handle or hard link to the previous file never sees the new launch.
+function writeAgentLaunchScript(dir: string, launchCommand: string): string {
+  mkdirSync(dir, { recursive: true });
+  const scriptPath = join(dir, AGENT_LAUNCH_SCRIPT_NAME);
+  const tempPath = join(dir, `.${AGENT_LAUNCH_SCRIPT_NAME}.${randomUUID()}.tmp`);
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand, {
-      ...(input.agent ? { agent: input.agent } : {}),
-    });
+    writeFileSync(tempPath, `${launchCommand}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, scriptPath);
   } catch (error) {
-    try {
-      await tmux("kill-session", "-t", sessionTarget);
-    } catch {
-      // Best effort only.
-    } finally {
-      invalidateFleetProbeCaches();
-    }
+    rmSync(tempPath, { force: true });
     throw error;
   }
+  return scriptPath;
+}
+
+// The agent pane runs the launch as its shell's own command, never as
+// keystrokes typed into a shell that may not be reading yet: an rc-file
+// prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
+// codex started as `ODEX_HOME=...` on the default home and Spur never saw
+// its rollout. The login+interactive shell keeps the user's rc environment
+// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
+// waits visibly in the pane instead of corrupting the command. Sourcing the
+// script keeps the agent a direct child of the pane shell, and the pane
+// drops to the same login shell when the agent exits.
+export function buildAgentPaneShellCommand(scriptPath: string): string {
+  // tmux sets SHELL in every pane's environment to the shell it starts.
+  const shell = '"$SHELL"';
+  return `exec ${shell} -lic ${shellEscape(`. ${shellEscape(scriptPath)}; exec ${shell} -l`)}`;
 }
 
 // Non-agent panes (sidecars, project services, the Claude OAuth login pane)
@@ -966,24 +1102,228 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
 
 const DEFAULT_SUBMIT_DELAY_MS = 300;
 
+function sensitiveErrorCode(error: unknown, fallback: string): string {
+  if (typeof error === "object" && error !== null) {
+    const code = "code" in error ? error.code : undefined;
+    if (typeof code === "string" && code.length > 0) {
+      return code;
+    }
+  }
+  return fallback;
+}
+
+function makeSensitiveTransportError(
+  sessionName: string,
+  operation: SensitiveTmuxOperation,
+  code: string,
+): SensitiveTmuxTransportError {
+  return new SensitiveTmuxTransportError({ sessionName, operation, code });
+}
+
+async function runTmuxWithStdin(
+  args: string[],
+  input: string,
+  context: { sessionName: string; operation: SensitiveTmuxOperation },
+): Promise<void> {
+  const child = spawn("tmux", withTmuxSocketArgs(args), { stdio: ["pipe", "ignore", "pipe"] });
+  const primaryError: { value: SensitiveTmuxTransportError | null } = { value: null };
+  child.stderr.on("data", () => {});
+  const recordError = (code: string) => {
+    primaryError.value ??= makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      code,
+    );
+  };
+  const closePromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
+  child.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_child_error"));
+  });
+  child.stdin.once("error", (error: unknown) => {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    child.stdin.destroy();
+  });
+
+  try {
+    child.stdin.end(input, "utf8");
+  } catch (error) {
+    recordError(sensitiveErrorCode(error, "sensitive_tmux_stdin_failed"));
+    try {
+      child.stdin.end();
+    } catch {
+      // Ignore close failures; the child close barrier is authoritative.
+    }
+    child.stdin.destroy();
+  }
+
+  const closeState = { closed: false };
+  const closeObserver = closePromise.then((closeResult) => {
+    closeState.closed = true;
+    return closeResult;
+  });
+  await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  const signalableChild = child as { pid: unknown; kill(signal: NodeJS.Signals): boolean };
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGTERM");
+    await Promise.race([closeObserver, sleep(SENSITIVE_TMUX_CLOSE_WAIT_MS)]);
+  }
+  if (!closeState.closed && typeof signalableChild.pid === "number") {
+    signalableChild.kill("SIGKILL");
+  }
+  const result = await closeObserver;
+
+  if (primaryError.value !== null) {
+    throw primaryError.value;
+  }
+  if (result.signal) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `signal_${result.signal}`,
+    );
+  }
+  if (result.code !== 0) {
+    throw makeSensitiveTransportError(
+      context.sessionName,
+      context.operation,
+      `exit_${result.code ?? "unknown"}`,
+    );
+  }
+}
+
+async function sensitiveBufferAbsent(bufferName: string): Promise<boolean> {
+  try {
+    const output = await tmux("list-buffers", "-F", "#{buffer_name}");
+    return !output.split("\n").some((line) => line.trim() === bufferName);
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupSensitiveTmuxBuffer(
+  sessionName: string,
+  bufferName: string,
+  primaryError: SensitiveTmuxTransportError,
+): Promise<void> {
+  let lastCleanupError: SensitiveTmuxTransportError | null = null;
+  for (let attempt = 0; attempt < SENSITIVE_TMUX_CLEANUP_ATTEMPTS; attempt++) {
+    try {
+      await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], "", {
+        sessionName,
+        operation: "scrub-buffer",
+      });
+    } catch {
+      // Delete/absence proof decides whether cleanup succeeded.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch (error) {
+      lastCleanupError = makeSensitiveTransportError(
+        sessionName,
+        "delete-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_delete_failed"),
+      );
+    }
+    if (await sensitiveBufferAbsent(bufferName)) {
+      return;
+    }
+  }
+  const cleanupError =
+    lastCleanupError ??
+    makeSensitiveTransportError(sessionName, "scrub-buffer", "sensitive_tmux_cleanup_not_started");
+  throw new SensitiveTmuxCleanupError({
+    sessionName,
+    operation: cleanupError.operation,
+    primaryCode: primaryError.code,
+    cleanupCode: cleanupError.code,
+  });
+}
+
+export async function sendSensitiveMessageToTmux(
+  sessionName: string,
+  message: string,
+  options: { agent: AgentName },
+): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const useBracketedPaste =
+    agentSendMode(options.agent) === "bracketed_paste" &&
+    !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+  const bufferName = `spur-sensitive-${randomUUID()}`;
+
+  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
+  await tmux("send-keys", "-t", target, "C-u");
+  try {
+    await runTmuxWithStdin(["load-buffer", "-b", bufferName, "-"], message, {
+      sessionName,
+      operation: "load-buffer",
+    });
+    const args = ["paste-buffer", "-b", bufferName, "-t", target, "-d"];
+    if (useBracketedPaste) {
+      args.splice(1, 0, "-p");
+    }
+    try {
+      await tmux(...args);
+    } catch (error) {
+      const primaryError = makeSensitiveTransportError(
+        sessionName,
+        "paste-buffer",
+        sensitiveErrorCode(error, "sensitive_tmux_paste_failed"),
+      );
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, primaryError);
+      throw primaryError;
+    }
+    if (!useBracketedPaste) {
+      await sleep(DEFAULT_SUBMIT_DELAY_MS);
+    }
+    await tmux("send-keys", "-t", target, "Enter");
+  } catch (error) {
+    if (error instanceof SensitiveTmuxTransportError && error.operation === "load-buffer") {
+      await cleanupSensitiveTmuxBuffer(sessionName, bufferName, error);
+    }
+    throw error;
+  }
+}
+
+const INTERRUPT_KEY_GAP_MS = 200;
+const INTERRUPT_SETTLE_MS = 500;
+
+/**
+ * Sends the agent's interrupt key sequence and waits for the turn to settle.
+ * Returns false when the agent has no interrupt key, so nothing was sent.
+ */
+export async function sendInterruptKeysToTmux(
+  sessionName: string,
+  agent: AgentName,
+): Promise<boolean> {
+  const keys = agentInterruptKeys(agent);
+  if (keys.length === 0) {
+    return false;
+  }
+  const target = exactPaneTarget(sessionName);
+  for (const [index, key] of keys.entries()) {
+    if (index > 0) {
+      await sleep(INTERRUPT_KEY_GAP_MS);
+    }
+    await tmux("send-keys", "-t", target, key);
+  }
+  await sleep(INTERRUPT_SETTLE_MS);
+  return true;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean; agent?: AgentName },
+  options?: { agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const useBracketedPaste =
     options?.agent !== undefined &&
     agentSendMode(options.agent) === "bracketed_paste" &&
     !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
-  const sendInterruptKey =
-    options?.interrupt === true &&
-    options.agent !== undefined &&
-    agentSendsInterruptKey(options.agent);
-  if (sendInterruptKey) {
-    await tmux("send-keys", "-t", target, "C-c");
-    await sleep(500);
-  }
   // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
   // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
   // C-u and Enter would otherwise be interpreted by the copy buffer and never
@@ -1075,16 +1415,18 @@ export async function waitForTmuxReady(
     // Cursor trust-confirm retries. Back off to reduce pressure on the shared
     // tmux server when several agents start concurrently, with per-session
     // jitter so batch spawns don't stay phase-aligned.
-    const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
+    const capture = await captureTmuxPaneOrEmpty(sessionName, 200, { fresh: true });
     const paneChanged = capture !== lastCapture;
     lastCapture = capture;
     if (paneChanged) {
       pollDelayMs = AGENT_READY_POLL_INITIAL_MS;
     }
     if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
-      if (cursorTrustConfirmAttempts > 0) {
-        await sleep(CURSOR_READY_SETTLE_DELAY_MS);
-      }
+      // Cursor can draw its input box before the box takes keystrokes: a
+      // launch prompt pasted at first sight of it was lost (live, 1 in 10
+      // spawns), leaving an empty composer. Same settle as after a trust
+      // confirm.
+      await sleep(CURSOR_READY_SETTLE_DELAY_MS);
       return;
     }
     if (readyMarkers.every((marker) => capture.includes(marker))) {

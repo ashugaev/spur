@@ -14,6 +14,8 @@ import {
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
+import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
+import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
@@ -24,13 +26,16 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
+import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -88,6 +93,7 @@ import {
 } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
+import { usePoll } from "@/hooks/usePoll";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -115,8 +121,10 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarPortConflictCandidate,
   type SpurSidecarStopResponse,
   type SpurSessionView,
+  type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
@@ -141,6 +149,21 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+// Two failing portIds can share an overlapping declared range and both name
+// the same numeric port as a candidate — one <option> per portId would
+// render duplicate values in the busy-port <select>. Keep the first
+// occurrence only.
+function dedupeConflictCandidatesByPort(
+  candidates: SpurSidecarPortConflictCandidate[],
+): SpurSidecarPortConflictCandidate[] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.port)) return false;
+    seen.add(candidate.port);
+    return true;
+  });
 }
 
 function splitSessionLinks(
@@ -174,25 +197,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function WakeIcon({ recurring }: { recurring: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M12 8v5l3 2" />
-      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -236,6 +240,16 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+      <circle cx="8" cy="2.5" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13.5" r="1.5" />
     </svg>
   );
 }
@@ -1608,6 +1622,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1747,53 +1765,64 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     dismissLoadErrorToast();
   }, [dismissLoadErrorToast, sessionId]);
 
-  const loadSession = useCallback(async () => {
-    const requestedSessionId = sessionId;
-    const requestId = loadRequestIdRef.current + 1;
-    loadRequestIdRef.current = requestId;
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
-        cache: "no-store",
-      });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
+  const applySessionUpdate = useCallback((next: DashboardSession) => {
+    loadRequestIdRef.current += 1;
+    setSession(next);
+  }, []);
+
+  const fetchSession = useCallback(
+    async (signal: AbortSignal) => {
+      const requestedSessionId = sessionId;
+      const requestId = loadRequestIdRef.current + 1;
+      loadRequestIdRef.current = requestId;
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
+          cache: "no-store",
+          signal,
+        });
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+        }
+        const payload = (await response.json()) as SpurSessionView;
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const nextSession = toDashboardSession(payload);
+        setSession(nextSession);
+        setError(null);
+        dismissLoadErrorToast();
+      } catch (loadError) {
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const message = errorMessage(loadError, "Failed to load session");
+        if (sessionRef.current?.id !== requestedSessionId) {
+          setSession(null);
+          setError(message);
+          return;
+        }
+        if (lastLoadErrorToastRef.current?.message === message) return;
+        dismissLoadErrorToast();
+        const id = showErrorToast(message);
+        lastLoadErrorToastRef.current = { id, message };
       }
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
-      }
-      const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const nextSession = toDashboardSession(payload);
-      setSession(nextSession);
-      setError(null);
-      dismissLoadErrorToast();
-    } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const message = errorMessage(loadError, "Failed to load session");
-      if (sessionRef.current?.id !== requestedSessionId) {
-        setSession(null);
-        setError(message);
-        return;
-      }
-      if (lastLoadErrorToastRef.current?.message === message) return;
-      dismissLoadErrorToast();
-      const id = showErrorToast(message);
-      lastLoadErrorToastRef.current = { id, message };
-    }
-  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+    },
+    [dismissLoadErrorToast, sessionId, showErrorToast],
+  );
+  const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1818,14 +1847,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => ({ catalog: tagCatalog, applyTags }),
     [tagCatalog, applyTags],
   );
-
-  useEffect(() => {
-    void loadSession();
-    const timer = setInterval(() => {
-      void loadSession();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -1853,32 +1874,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionId,
   ]);
 
-  const loadConversation = useCallback(async () => {
-    if (!session) {
-      setConversation(null);
-      return;
-    }
-    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
-    try {
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
-        { cache: "no-store" },
-      );
-      if (res.ok) {
-        setConversation((await res.json()) as ConversationResponse);
-      } else {
+  const fetchConversation = useCallback(
+    async (signal: AbortSignal) => {
+      if (!session) {
         setConversation(null);
+        return;
       }
-    } catch {
-      setConversation(null);
-    }
-  }, [session?.agent, sessionId, fromIndex]);
-
-  useEffect(() => {
-    void loadConversation();
-    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadConversation]);
+      const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+          { cache: "no-store", signal },
+        );
+        if (!res.ok) {
+          if (!signal.aborted) setConversation(null);
+          return;
+        }
+        const payload = (await res.json()) as ConversationResponse;
+        if (!signal.aborted) setConversation(payload);
+      } catch {
+        if (!signal.aborted) setConversation(null);
+      }
+    },
+    [session?.agent, sessionId, fromIndex],
+  );
+  const loadConversation = usePoll(fetchConversation, POLL_INTERVAL_MS);
 
   const handleLoadOlder = useCallback(() => {
     const startIndex = conversation?.startIndex ?? 0;
@@ -1942,6 +1962,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
+  // Send now / flush to an agent with no interrupt key while it works: the
+  // daemon queued the message at the head instead of typing it.
+  const showQueuedAheadToast = (payload: unknown) => {
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      (payload as { queuedAheadReason?: unknown }).queuedAheadReason === "no_interrupt"
+    ) {
+      const agent = session?.agent ?? "agent";
+      showSuccessToast(
+        `${agent.charAt(0).toUpperCase()}${agent.slice(1)} can't be interrupted — sends when the turn ends`,
+      );
+    }
+  };
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -1993,6 +2028,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         setMessage("");
         setAttachments([]);
+        // A 200 Send now the agent never acked: typed, not confirmed; the
+        // banner holds further sends until the agent shows activity.
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          typeof (payload as { submitUnconfirmedAt?: unknown }).submitUnconfirmedAt === "string"
+        ) {
+          showErrorToast("Sent, agent hasn't confirmed yet");
+        }
+        showQueuedAheadToast(payload);
       }
       await loadSession();
       return true;
@@ -2025,6 +2070,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) {
         throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
       }
+      showQueuedAheadToast(payload);
       await loadSession();
     } catch (queueError) {
       showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));
@@ -2273,7 +2319,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           const conflict = await readSidecarPortConflict(response.clone());
           if (conflict) {
             setSidecarPortConflict(conflict);
-            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            // Never default onto a clearable:false candidate — it renders
+            // disabled in the dropdown, and submitting it is a silent
+            // repeat 409 (a port already claimed by a sibling portId in the
+            // same attempt never enters the clear path).
+            setSelectedClearPort(
+              conflict.candidates.find((candidate) => candidate.clearable !== false)?.port ?? null,
+            );
             return;
           }
         }
@@ -2408,7 +2460,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [error, session, title]);
 
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
-
+  const openTitleEditor = useCallback(() => {
+    if (!session) return;
+    // Always prefill with the title currently shown in the <h1> — the
+    // derived/fallback string when the session has no stored title, not an
+    // empty input.
+    setTitleDraft(title);
+    setTitleEditing(true);
+  }, [session, title]);
+  const closeTitleEditor = useCallback(() => {
+    setTitleEditing(false);
+  }, []);
+  const sessionMenu = useAnchoredMenu({
+    open: sessionMenuOpen,
+    onClose: () => setSessionMenuOpen(false),
+    contentDeps: [],
+    preferredSide: "below",
+    align: "end",
+  });
+  const updateManualTitle = useCallback(
+    async (nextTitle: string | null) => {
+      if (!session || titleSaving) return;
+      setTitleSaving(true);
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: nextTitle }),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to update title"));
+        }
+        const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
+        applySessionUpdate(toDashboardSession(payload));
+        setTitleEditing(false);
+        setTitleDraft("");
+      } catch (titleError) {
+        showErrorToast(errorMessage(titleError, "Failed to update title"));
+      } finally {
+        setTitleSaving(false);
+      }
+    },
+    [session, sessionId, titleSaving, showErrorToast, applySessionUpdate],
+  );
+  const saveTitleDraft = useCallback(() => {
+    const trimmed = titleDraft.trim();
+    void updateManualTitle(trimmed.length > 0 ? trimmed : null);
+  }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
@@ -2418,6 +2516,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
+  // The daemon queues a send to a spawning session and refuses Send now (409).
+  const sessionStarting = session?.status === "spawning";
+  // The daemon refuses every immediate send (409) while the last prompt is
+  // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
+  const launchPending = Boolean(session?.submitUnconfirmedAt);
+  const sendNowBlocked = sessionStarting || launchPending;
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
 
@@ -2680,7 +2784,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [showErrorToast, showSuccessToast],
   );
 
-  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  // Same clearable:false skip as the 409 handler that sets selectedClearPort
+  // (readSidecarPortConflict's caller): if selectedClearPort is null (every
+  // candidate was clearable:false, so the handler set null), this fallback
+  // must not silently re-enable Clear/Retry onto a disabled option.
+  const conflictClearPort =
+    selectedClearPort ??
+    sidecarPortConflict?.candidates.find((candidate) => candidate.clearable !== false)?.port ??
+    null;
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
@@ -2715,6 +2826,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
+            {titleEditing ? (
+              <TitleEditDialog
+                draft={titleDraft}
+                saving={titleSaving}
+                onDraftChange={setTitleDraft}
+                onSave={saveTitleDraft}
+                onCancel={closeTitleEditor}
+              />
+            ) : null}
             {promptView &&
             (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
@@ -2832,39 +2952,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
             <TagsContext.Provider value={tagsContextValue}>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {displayState ? (
+                  <ActivityDot activity={sessionStarting ? "starting" : displayState} />
+                ) : null}
                 {session.branch ? (
                   <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                     {session.branch}
                   </span>
                 ) : null}
-                {wakeSummary ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                    title={
-                      wakeSummary.kind === "interval"
-                        ? "Interval wake scheduled"
-                        : wakeSummary.kind === "daily"
-                          ? "Daily wake scheduled"
-                          : "Wake scheduled"
-                    }
-                  >
-                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                    <span>{wakeSummary.label.toLowerCase()}</span>
-                    <span className="font-mono text-[var(--color-text-primary)]">
-                      {wakeCountdown}
-                    </span>
-                    {wakeSummary.intervalMs ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        every {formatIntervalDuration(wakeSummary.intervalMs)}
-                      </span>
-                    ) : null}
-                    {wakeSummary.dailyAt ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        daily {wakeSummary.dailyAt.join(", ")}
-                      </span>
-                    ) : null}
-                  </span>
+                {session && getWakeSummary(session) ? (
+                  <WakeControls
+                    onRefresh={loadSession}
+                    onSessionUpdated={applySessionUpdate}
+                    session={session}
+                    showErrorToast={showErrorToast}
+                    showSuccessToast={showSuccessToast}
+                  />
                 ) : null}
                 {surfacedLinks.map((link) => (
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
@@ -3028,6 +3131,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
+            <div className="relative" ref={sessionMenu.containerRef}>
+              <button
+                aria-expanded={sessionMenuOpen}
+                aria-haspopup="menu"
+                aria-label="More session actions"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => setSessionMenuOpen((value) => !value)}
+                ref={sessionMenu.buttonRef}
+                type="button"
+              >
+                <KebabIcon />
+              </button>
+              {sessionMenuOpen ? (
+                <div
+                  aria-label="Session actions"
+                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  ref={sessionMenu.menuRef}
+                  role="menu"
+                  style={sessionMenu.menuStyle}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                    onClick={() => {
+                      setSessionMenuOpen(false);
+                      openTitleEditor();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Change title
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {/* Content */}
@@ -3052,7 +3189,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
-              session.queuedMessages.awaitingPrompt ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -3078,7 +3214,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                   label={`Send queued message #${index + 1} now`}
                                   busyLabel={`Sending queued message #${index + 1}…`}
                                   busy={flushBusy}
-                                  disabled={busyAction !== null}
+                                  disabled={sendNowBlocked || busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
                                   }
@@ -3153,6 +3289,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
+                    {launchPending ? (
+                      <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
+                    ) : null}
+                    {session.submitFailedMessage ? (
+                      <SubmitFailedBanner
+                        sessionId={sessionId}
+                        message={session.submitFailedMessage.message}
+                        onResolved={loadSession}
+                      />
+                    ) : null}
                     <FileAttachmentTextarea
                       attachments={attachments}
                       clearLabel="Clear message"
@@ -3167,7 +3313,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }
                         if (isPrimarySubmitHotkey(event)) {
                           event.preventDefault();
-                          void doSend({ queue: false, interrupt: true });
+                          void doSend(
+                            sendNowBlocked ? { queue: true } : { queue: false, interrupt: true },
+                          );
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -3189,6 +3337,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
                           <VoiceStatusHint voice={voice} />
+                        ) : sessionStarting ? (
+                          "Session is starting. Queued messages send after launch."
                         ) : null}
                       </span>
                       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3223,7 +3373,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
-                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                            sendNowBlocked ||
+                            busyAction !== null ||
+                            (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
@@ -3782,15 +3934,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => (
-                        <option
-                          key={`${candidate.portId}:${candidate.port}`}
-                          value={candidate.port}
-                        >
-                          {candidate.portId}:{candidate.port}
-                          {candidate.owner ? ` — ${candidate.owner}` : ""}
-                        </option>
-                      ))}
+                      {dedupeConflictCandidatesByPort(sidecarPortConflict.candidates).map(
+                        (candidate) => {
+                          const label = candidate.reservedBy
+                            ? `reserved by ${candidate.reservedBy}`
+                            : candidate.holder
+                              ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                              : candidate.owner && candidate.owner !== "external"
+                                ? candidate.owner
+                                : "holder unknown";
+                          return (
+                            <option
+                              key={`${candidate.portId}:${candidate.port}`}
+                              disabled={candidate.clearable === false}
+                              value={candidate.port}
+                            >
+                              {candidate.portId}:{candidate.port} — {label}
+                            </option>
+                          );
+                        },
+                      )}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">

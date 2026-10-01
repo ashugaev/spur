@@ -57,7 +57,7 @@ async function isStillSameProcess(
   return (await readIdentity(ref.pid)) === ref.identity;
 }
 
-// Same word-boundary matching getProcessPresenceInTmux (runtime-tmux.ts) uses,
+// Same word-boundary matching isProcessRunningInTmux (runtime-tmux.ts) uses,
 // applied to the whole process table instead of a tty-filtered slice — this
 // module deliberately never touches tmux (see the module header of the
 // caller-supplies-panePid contract below).

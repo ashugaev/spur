@@ -137,7 +137,22 @@ async function expectSidecarPortConflict(
   } catch {
     throw new Error(`Expected JSON sidecar port conflict payload: ${caught.message}`);
   }
-  expect(payload).toEqual(expected);
+  const actual = payload as SidecarPortConflictPayload;
+  expect(actual.code).toBe(expected.code);
+  expect(actual.sidecarName).toBe(expected.sidecarName);
+  expect(actual.candidates).toHaveLength(expected.candidates.length);
+  for (let i = 0; i < expected.candidates.length; i += 1) {
+    const candidate = actual.candidates[i];
+    expect(candidate).toMatchObject(expected.candidates[i] as object);
+    if (!candidate) continue;
+    if (candidate.reservedBy !== undefined) {
+      expect(candidate.reservedBy).toContain("/");
+    }
+    if (candidate.holder !== undefined) {
+      expect(candidate.holder.pid).toBeTypeOf("number");
+      expect(candidate.holder.cwd === null || typeof candidate.holder.cwd === "string").toBe(true);
+    }
+  }
 }
 
 function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
@@ -480,6 +495,48 @@ async function listenOnAllInterfaces(
       resolve();
     });
   });
+}
+
+function isAddrInUse(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EADDRINUSE"
+  );
+}
+
+async function bindConsecutiveFreePortRange(): Promise<{
+  occupiedServer: ReturnType<typeof createServer>;
+  freePortGuard: ReturnType<typeof createServer>;
+  range: { start: number; end: number };
+}> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const occupiedServer = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const freePortGuard = createServer();
+    try {
+      await listenOnAllInterfaces(occupiedServer, 0);
+      const address = occupiedServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected a bound TCP address for runtime test");
+      }
+      if (address.port === 65_535) {
+        await closeServer(occupiedServer);
+        continue;
+      }
+      const range = { start: address.port, end: address.port + 1 };
+      await listenOnAllInterfaces(freePortGuard, range.end);
+      return { occupiedServer, freePortGuard, range };
+    } catch (error) {
+      await closeServer(occupiedServer);
+      await closeServer(freePortGuard);
+      if (attempt >= 2 || !isAddrInUse(error)) throw error;
+    }
+  }
+  throw new Error("Failed to bind consecutive TCP ports for runtime test");
 }
 
 async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
@@ -2499,7 +2556,7 @@ projects:
     await expect(
       context.execCli(["--config", configPath, "send", spawned.id, "after complete"]),
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining(`Session is not running: ${spawned.id}`),
+      stderr: expect.stringContaining(`Session has ended (completed): ${spawned.id}`),
     });
   });
 
@@ -2986,6 +3043,7 @@ projects:
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
+      titleSource: "agent",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
@@ -5720,19 +5778,11 @@ projects:
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
-    const reservedRange = await findConsecutiveFreePorts();
-    const occupiedServer = createServer((_request, response) => {
-      response.writeHead(204);
-      response.end();
-    });
-    const freePortGuard = createServer();
-    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
-    try {
-      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
-    } catch (error) {
-      await closeServer(occupiedServer);
-      throw error;
-    }
+    const {
+      occupiedServer,
+      freePortGuard,
+      range: reservedRange,
+    } = await bindConsecutiveFreePortRange();
 
     try {
       const context = await createRuntimeTestContext(port);
@@ -5791,6 +5841,7 @@ projects:
               env: "SPUR_RESERVED_PORT_DEV",
               port: reservedRange.end,
               owner: first.id,
+              reservedBy: `${first.id}/dev`,
             },
           ],
         },
@@ -5861,6 +5912,7 @@ projects:
             env: "SPUR_RESERVED_PORT_DEV",
             port: 4700,
             owner: first.id,
+            reservedBy: `${first.id}/dev`,
           },
         ],
       },

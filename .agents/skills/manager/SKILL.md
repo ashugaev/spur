@@ -25,6 +25,7 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
   3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off. See `docs/workflow-technical-updates.md`.
 
   Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
+  Telegram source, agent sends, or Telegram suffix touched   manager runs `telegram-e2e` after `tester`, before close-out
   New/changed visible `packages/web` UI                 manager runs `design-author` in the main Claude session before `architect` (only place `DesignSync` works, never a Task subagent); hard-stop before implementation; non-Claude runtime or no `DesignSync`: consume-only, else route to a Claude session, never stall
   Visible change in `packages/web`                      `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes
   `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, `.cursor/BUGBOT.md` touched   `skill-writer` (caveman pass) before `reviewer`
@@ -49,7 +50,7 @@ PROCESS
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
-  4  Single-cycle gates: each gate runs once. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns once more. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns once more. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate once, no fix cycle first. Downstream gates run only when their input changed. Second pass still failing or still silent: name the gate in the run report's Missing section, no further retry.
+  4  Gate retry cap: each gate runs at most 5 times: initial pass plus up to 4 fix/rerun cycles. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Fifth pass still failing or still silent: name the gate in the run report's Missing section, no further retry.
 
 RULES
 

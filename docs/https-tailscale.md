@@ -1,5 +1,7 @@
 # HTTPS over Tailscale
 
+> Scope: HTTPS setup over Tailscale for voice and clipboard. Caveman, no overhead.
+
 Browsers block microphone access (`getUserMedia`) over plain HTTP, `localhost` excepted. Tailnet hostname over HTTP → [voice input](voice.md) dead, and terminal copy silently no-ops (`navigator.clipboard` is secure-context only). Rest of the UI works.
 
 `tailscale serve` terminates TLS with a Let's Encrypt cert issued through the tailnet and renews itself. No cert files, no timer, no reverse proxy. Tailnet-only — `serve` is not `funnel`.

@@ -1,5 +1,4 @@
-import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, mockSessions } from "./fixtures.js";
+import { test, expect, type Page, makeWorkingSession, mockSessions } from "./fixtures.js";
 
 async function mockRecoveringTerminal(page: Page) {
   await page.addInitScript(() => {

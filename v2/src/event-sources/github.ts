@@ -1,4 +1,5 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
+import { randomUUID } from "node:crypto";
 import { logSpurEvent } from "../event-log.js";
 import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
 import {
@@ -525,7 +526,22 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
           // Built once, handed to both the in-memory map and the on-disk write so
           // the two copies cannot desync.
-          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          const priorSnapshot = snapshots.get(session.id);
+          const priorClearId =
+            priorSnapshot?.prNumber === collected.data.prNumber
+              ? priorSnapshot.mergeConflictClearId
+              : undefined;
+          const mergeConflictClearId =
+            !next.has("merge_conflict") && (!priorClearId || previous?.has("merge_conflict"))
+              ? randomUUID()
+              : priorClearId;
+          const nextSnapshot: ReviewSnapshot = {
+            prNumber: collected.data.prNumber,
+            signals: next,
+            ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
+          };
+          if (mergeConflictClearId !== undefined)
+            collected.data.mergeConflictClearId = mergeConflictClearId;
           snapshots.set(session.id, nextSnapshot);
           writeReviewSourceSnapshot(
             deps.dataDir,
@@ -535,20 +551,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             session.id,
             nextSnapshot,
           );
-
-          if (restoreReplayRequested) {
-            const mergeConflictSignal = next.get("merge_conflict");
-            if (mergeConflictSignal) {
-              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
-            }
-            clearGitHubMergeConflictRestoreReplay(
-              deps.dataDir,
-              deps.projectId,
-              deps.sourceId,
-              session.id,
-            );
-            continue;
-          }
 
           const baselined = lifecycleBaselined.has(session.id);
           if (!baselined) {
@@ -564,6 +566,20 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           const toEmit = baselined
             ? candidates
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (
+              mergeConflictSignal &&
+              !toEmit.some((signal) => signal.key === mergeConflictSignal.key)
+            )
+              toEmit.push(mergeConflictSignal);
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+          }
           if (toEmit.length > 0) {
             emitSignalsByKind(deps, collected.data, toEmit);
           }

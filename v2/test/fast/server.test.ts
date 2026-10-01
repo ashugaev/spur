@@ -1,21 +1,28 @@
 import * as fs from "node:fs";
+import * as hostMemory from "../../src/host-memory.js";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { logSpurEvent, readEventLog } from "../../src/event-log.js";
+import { logSpurEvent, readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
+import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
+  buildForeignAgentProcessMessage,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
+  SessionStartingError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -42,6 +49,139 @@ describe("startServer", () => {
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
+  const autoPingServerTest = async (): Promise<void> => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+        "    sources:",
+        "      pr-watch:",
+        "        type: github",
+        '        query: "is:pr is:open"',
+        "    triggers:",
+        "      notify:",
+        "        source: pr-watch",
+        "        event: github:comment",
+        "        send: {}",
+      ].join("\n"),
+      "utf8",
+    );
+    writeSession(dataDir, {
+      id: "demo-1",
+      project: "demo",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "main",
+      worktree: false,
+      worktreePath: repoDir,
+      tmuxSession: "demo-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    });
+    const policy = new AutoPingService(dataDir);
+    const routeFingerprint = autoPingRouteFingerprint({
+      version: 1,
+      projectId: "demo",
+      triggerId: "notify",
+      sourceId: "pr-watch",
+      sourceType: "github",
+      eventName: "github:comment",
+      actionKind: "send",
+      destination: { kind: "session", sessionId: "demo-1" },
+      spawnDeskGroup: false,
+    });
+    policy.registerRoute(routeFingerprint, {
+      version: 1,
+      projectId: "demo",
+      triggerId: "notify",
+      sourceId: "pr-watch",
+      sourceType: "github",
+      eventName: "github:comment",
+      actionKind: "send",
+      destination: { kind: "session", sessionId: "demo-1" },
+      spawnDeskGroup: false,
+    });
+    const grant = policy.createGrant({
+      scope: "event",
+      routeFingerprint,
+      destination: { kind: "session", sessionId: "demo-1" },
+      target: { kind: "occurrence", occurrenceId: "occurrence-1" },
+      actorSessionId: "demo-1",
+    });
+    policy.dispose();
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    const headers = {
+      "content-type": "application/json",
+      "x-spur-origin": "cli",
+      "x-spur-caller-session": "demo-1",
+    };
+
+    try {
+      for (const suffix of ["unsubscribe", "suppression/resume"]) {
+        const malformed = await fetch(
+          `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${suffix}`,
+          { method: "POST", headers, body: "{" },
+        );
+        expect(malformed.status).toBe(400);
+        await expect(malformed.json()).resolves.toMatchObject({
+          error: { code: "invalid_request", message: expect.any(String) },
+        });
+      }
+      const unsubscribe = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ scope: "event", handle: grant.handle }),
+        },
+      );
+      expect(unsubscribe.status).toBe(200);
+      const created = (await unsubscribe.json()) as {
+        record: { suppressionId: string };
+        created: boolean;
+      };
+      expect(created.created).toBe(true);
+
+      const list = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions`, {
+        headers,
+      });
+      expect(list.status).toBe(200);
+      await expect(list.json()).resolves.toMatchObject({
+        records: [{ suppressionId: created.record.suppressionId, scope: "event" }],
+      });
+
+      const resume = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/${created.record.suppressionId}/resume`,
+        { method: "POST", headers, body: "{}" },
+      );
+      expect(resume.status).toBe(200);
+      await expect(resume.json()).resolves.toMatchObject({ records: [], removed: true });
+    } finally {
+      await server.stop();
+      resetEventLogCollapse();
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
   it("serves runtime info and stops cleanly in-process", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -65,12 +205,21 @@ describe("startServer", () => {
       "utf8",
     );
 
-    const server = await startServer(configPath, {
-      info: () => undefined,
-      warn: () => undefined,
+    // Pin the host sensors; lifecycle assertions must not depend on runner pressure.
+    const memorySpy = vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+      totalBytes: 64_000_000_000,
+      availableBytes: 32_000_000_000,
+      swapTotalBytes: 8_000_000_000,
+      swapFreeBytes: 8_000_000_000,
     });
-
+    const cgroupSpy = vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+    const pressureSpy = vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+    let server: StartedServer | undefined;
     try {
+      server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
       const response = await fetch(`http://127.0.0.1:${port}/info`);
       expect(response.status).toBe(200);
       const info = (await response.json()) as { port: number; version?: unknown };
@@ -83,17 +232,16 @@ describe("startServer", () => {
       const missing = await fetch(`http://127.0.0.1:${port}/missing`);
       expect(missing.status).toBe(404);
     } finally {
-      await server.stop();
+      try {
+        await server?.stop();
+      } finally {
+        memorySpy.mockRestore();
+        cgroupSpy.mockRestore();
+        pressureSpy.mockRestore();
+      }
     }
 
-    // Host memory pressure fires these on a loaded runner and not on an idle
-    // box. This test pins the startup/shutdown sequence, not memory behavior.
-    const hostMemoryEvents = new Set([
-      "daemon.memory.unbounded",
-      "daemon.memory.shed",
-      "daemon.memory.shed.failed",
-    ]);
-    const events = readEventLog(dataDir).filter((entry) => !hostMemoryEvents.has(entry.event));
+    const events = readEventLog(dataDir);
     expect(events[0]).toMatchObject({
       event: "daemon.registry.count",
       details: { read: 1, worktreeInternalDropped: 0 },
@@ -117,6 +265,8 @@ describe("startServer", () => {
     });
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
+
+  it("redeems, lists, and resumes an actor-bound auto-ping suppression", autoPingServerTest);
 
   it("POST /sidecars/sweep defaults to report-only — reap absent kills nothing", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
@@ -952,6 +1102,9 @@ describe("startServer", () => {
           portId: "http",
           env: "SPUR_RESERVED_PORT_DEV",
           port: 3000,
+          owner: "external",
+          holder: { pid: 4242, cwd: "/tmp/foo" },
+          clearable: false,
         },
       ]);
     };
@@ -976,6 +1129,9 @@ describe("startServer", () => {
             portId: "http",
             env: "SPUR_RESERVED_PORT_DEV",
             port: 3000,
+            owner: "external",
+            holder: { pid: 4242, cwd: "/tmp/foo" },
+            clearable: false,
           },
         ],
       });
@@ -1353,6 +1509,160 @@ describe("startServer", () => {
     }
   });
 
+  it("routes a failed prompt's retry and dismiss to the service, and a missing one to 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const original = SessionService.prototype.resolveSubmitFailure;
+    const calls: Array<[string, string]> = [];
+    SessionService.prototype.resolveSubmitFailure = async function mockResolve(sessionId, action) {
+      calls.push([sessionId, action]);
+      if (sessionId === "demo-2") {
+        throw new LaunchPromptPendingError(`No failed prompt for ${sessionId}`);
+      }
+      return { id: sessionId } as never;
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+    const post = (path: string) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+    try {
+      expect((await post("/sessions/demo-1/submit-failed/retry")).status).toBe(200);
+      expect((await post("/sessions/demo-1/submit-failed/dismiss")).status).toBe(200);
+      const missing = await post("/sessions/demo-2/submit-failed/retry");
+      expect(missing.status).toBe(409);
+      await expect(missing.json()).resolves.toEqual({ error: "No failed prompt for demo-2" });
+      expect(calls).toEqual([
+        ["demo-1", "retry"],
+        ["demo-1", "dismiss"],
+        ["demo-2", "retry"],
+      ]);
+    } finally {
+      SessionService.prototype.resolveSubmitFailure = original;
+      await server.stop();
+    }
+  });
+
+  it("maps a send, flush, or answer refused by session status to 409 with the message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const originalSend = SessionService.prototype.send;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const originalAnswer = SessionService.prototype.answerQuestion;
+    SessionService.prototype.send = async function mockSend(sessionId, request) {
+      if (request.message === "foreign") {
+        throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(sessionId, 4242));
+      }
+      throw new SessionStartingError(`Session is still starting: ${sessionId}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(sessionId) {
+      throw new SessionEndedError(`Session has ended (killed): ${sessionId}`);
+    };
+    SessionService.prototype.answerQuestion = async function mockAnswer(sessionId) {
+      throw new SessionEndedError(`Session has ended (completed): ${sessionId}`);
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+
+    const post = (path: string, body: unknown) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const starting = await post("/sessions/demo-1/send", {
+        message: "hi",
+        queue: false,
+        interrupt: true,
+      });
+      expect(starting.status).toBe(409);
+      await expect(starting.json()).resolves.toEqual({
+        error: "Session is still starting: demo-1",
+      });
+
+      // The agent already runs outside its pane (a killed wrapper, status
+      // still running): refused, nothing typed.
+      const foreign = await post("/sessions/demo-1/send", {
+        message: "foreign",
+        queue: false,
+        interrupt: true,
+      });
+      expect(foreign.status).toBe(409);
+      await expect(foreign.json()).resolves.toEqual({
+        error: buildForeignAgentProcessMessage("demo-1", 4242),
+      });
+
+      const ended = await post("/sessions/demo-1/queue/flush", { message: "hi" });
+      expect(ended.status).toBe(409);
+      await expect(ended.json()).resolves.toEqual({ error: "Session has ended (killed): demo-1" });
+
+      const answered = await post("/sessions/demo-1/answer", { optionIndex: 0 });
+      expect(answered.status).toBe(409);
+      await expect(answered.json()).resolves.toEqual({
+        error: "Session has ended (completed): demo-1",
+      });
+    } finally {
+      SessionService.prototype.send = originalSend;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      SessionService.prototype.answerQuestion = originalAnswer;
+      await server.stop();
+    }
+  });
+
   it("maps queue remove/flush 404 (not queued) and 409 (delivery in flight), and 400 on an empty message", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1500,6 +1810,56 @@ describe("startServer", () => {
       SessionService.prototype.removeQueuedMessage = originalRemove;
       SessionService.prototype.flushQueuedMessage = originalFlush;
       await server.stop();
+    }
+  });
+
+  it("never forwards a telegramOrigin from the POST /sessions body to spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSpawn = SessionService.prototype.spawn;
+    const spawnArgs: unknown[][] = [];
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      SessionService.prototype.spawn = async function mockSpawn(...args: unknown[]) {
+        spawnArgs.push(args);
+        throw new Error("stop after capture");
+      };
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+
+      await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          telegramOrigin: { projectId: "demo", sourceId: "tg", chatId: 999 },
+        }),
+      });
+
+      expect(spawnArgs).toHaveLength(1);
+      // Options (2nd argument) carry the internal origin; the HTTP route passes none.
+      expect(spawnArgs[0]?.[1]).toBeUndefined();
+    } finally {
+      SessionService.prototype.spawn = originalSpawn;
+      await server?.stop();
     }
   });
 
@@ -1776,6 +2136,192 @@ describe("startServer", () => {
     } finally {
       SessionService.prototype.scheduleWake = scheduleWake;
       SessionService.prototype.cancelWake = cancelWake;
+      await server.stop();
+    }
+  });
+
+  it("routes targeted wake message updates and rejects invalid update bodies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const updateWakeMessage = SessionService.prototype.updateWakeMessage;
+    const updateRequests: unknown[] = [];
+    SessionService.prototype.updateWakeMessage = async function mockUpdateWakeMessage(
+      _sessionId,
+      request,
+    ) {
+      updateRequests.push(request);
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        intervalWake: {
+          nextDueAt: "2026-04-15T00:10:00.000Z",
+          intervalMs: 600_000,
+          message: "Updated CI",
+          stopCondition: "CI is green",
+        },
+        artifacts: [],
+        services: [],
+        sidecars: [],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const updateResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+      });
+      expect(updateResponse.status).toBe(200);
+      await expect(updateResponse.json()).resolves.toMatchObject({
+        intervalWake: { message: "Updated CI" },
+      });
+      expect(updateRequests).toEqual([{ target: "interval", message: "Updated CI" }]);
+
+      const blankResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", message: "   " }),
+      });
+      expect(blankResponse.status).toBe(400);
+      await expect(blankResponse.json()).resolves.toEqual({
+        error: "message must be a non-empty string",
+      });
+
+      const mixedResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", message: "Updated CI", intervalMs: 600_000 }),
+      });
+      expect(mixedResponse.status).toBe(400);
+      await expect(mixedResponse.json()).resolves.toEqual({
+        error: "intervalMs cannot be combined with target",
+      });
+    } finally {
+      SessionService.prototype.updateWakeMessage = updateWakeMessage;
+      await server.stop();
+    }
+  });
+
+  it("routes targeted wake dispatch and rejects invalid dispatch bodies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const dispatchWake = SessionService.prototype.dispatchWake;
+    const dispatchRequests: unknown[] = [];
+    SessionService.prototype.dispatchWake = async function mockDispatchWake(_sessionId, request) {
+      dispatchRequests.push(request);
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "running",
+        state: "waiting",
+        runtimeAlive: true,
+        workspaceExists: true,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        intervalWake: {
+          nextDueAt: "2026-04-15T00:20:00.000Z",
+          intervalMs: 600_000,
+          message: "Updated CI",
+          stopCondition: "CI is green",
+        },
+        artifacts: [],
+        services: [],
+        sidecars: [],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const dispatchResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", dispatch: true }),
+      });
+      expect(dispatchResponse.status).toBe(200);
+      expect(dispatchRequests).toEqual([{ target: "interval", dispatch: true }]);
+
+      const mixedResponse = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/wake`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target: "interval", dispatch: true, message: "Updated CI" }),
+      });
+      expect(mixedResponse.status).toBe(400);
+      await expect(mixedResponse.json()).resolves.toEqual({
+        error: "message cannot be combined with dispatch",
+      });
+    } finally {
+      SessionService.prototype.dispatchWake = dispatchWake;
       await server.stop();
     }
   });

@@ -238,4 +238,35 @@ describe("todo error branches log http.request.failed", () => {
       SessionService.prototype.mutateTodo = originalMutateTodo;
     }
   });
+
+  it("logs a warn event for an auto-ping failure", async () => {
+    const { configPath, dataDir, port } = await setupConfig();
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    runningServers.push(server);
+    const response = await fetch(
+      `http://127.0.0.1:${port}/sessions/demo-1/auto-ping-suppressions/unsubscribe`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-spur-origin": "ui" },
+        body: JSON.stringify({ scope: "event", handle: "h-1" }),
+      },
+    );
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("session_not_found");
+    expect(body.error.message).toBe("Auto-ping target session not found");
+
+    const events = readEventLog(dataDir);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "http.request.failed",
+          level: "warn",
+          method: "POST",
+          path: "/sessions/demo-1/auto-ping-suppressions/unsubscribe",
+          message: "Auto-ping target session not found",
+        }),
+      ]),
+    );
+  });
 });

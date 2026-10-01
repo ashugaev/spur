@@ -354,6 +354,111 @@ describe("SessionDetail wake markers", () => {
     expect(screen.getByText("Wake stop condition")).toBeInTheDocument();
     expect(screen.getByText("Daily checks done")).toBeInTheDocument();
   });
+
+  it("opens wake controls, saves a message, and wakes now without touching composer state", async () => {
+    let intervalWakeMessage = "Check CI";
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      const method = init?.method ?? "GET";
+
+      if (url === "/api/sessions/api-a1" && method === "GET") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: intervalWakeMessage,
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/wake" && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as {
+          target: string;
+          message?: string;
+          dispatch?: boolean;
+        };
+        if (body.dispatch === true) {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                intervalWake: {
+                  nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                  intervalMs: 300_000,
+                  message: intervalWakeMessage,
+                  stopCondition: "CI is green",
+                },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        intervalWakeMessage = body.message ?? intervalWakeMessage;
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              intervalWake: {
+                nextDueAt: new Date(Date.now() + 300_000).toISOString(),
+                intervalMs: 300_000,
+                message: intervalWakeMessage,
+                stopCondition: "CI is green",
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url} ${method}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Interval wake scheduled" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Interval wake scheduled" }));
+    const messageField = screen.getByLabelText("Interval wake message");
+    fireEvent.change(messageField, { target: { value: "Updated CI" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save message" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/wake",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ target: "interval", message: "Updated CI" }),
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Wake now" })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Wake now" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/wake",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ target: "interval", dispatch: true }),
+        }),
+      );
+    });
+
+    expect(screen.getByPlaceholderText("Message...")).toHaveValue("");
+  });
 });
 
 describe("SessionDetail voice input", () => {
@@ -2141,6 +2246,124 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("labels port-conflict candidates by reservedBy, holder, or unknown, and disables an unclearable one", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            code: "sidecar_port_busy",
+            sidecarName: "dev",
+            candidates: [
+              {
+                portId: "http",
+                env: "PORT",
+                port: 3000,
+                owner: "api-other",
+                reservedBy: "api-other/dev",
+              },
+              {
+                portId: "http",
+                env: "PORT",
+                port: 3001,
+                owner: "external",
+                holder: { pid: 4242, cwd: "/tmp/foo" },
+              },
+              { portId: "http", env: "PORT", port: 3002, owner: "external" },
+              {
+                portId: "http",
+                env: "PORT",
+                port: 3003,
+                owner: "external",
+                clearable: false,
+              },
+            ],
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(":3000")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Port busy" });
+    expect(
+      within(dialog).getByRole("option", { name: "http:3000 — reserved by api-other/dev" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("option", { name: "http:3001 — pid 4242 (/tmp/foo)" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("option", { name: "http:3002 — holder unknown" }),
+    ).toBeInTheDocument();
+    const unclearable = within(dialog).getByRole("option", {
+      name: "http:3003 — holder unknown",
+    });
+    expect(unclearable).toBeDisabled();
+  });
+
+  it("defaults the clear-port selection to the first clearable candidate, skipping a leading clearable:false one", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [
+              { name: "dev", alive: false, ports: [{ id: "http", env: "PORT", port: 3000 }] },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            code: "sidecar_port_busy",
+            sidecarName: "dev",
+            candidates: [
+              { portId: "http", env: "PORT", port: 3000, owner: "external", clearable: false },
+              { portId: "http", env: "PORT", port: 3001, owner: "external" },
+            ],
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText(":3000")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start sidecar dev" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Port busy" });
+    expect(within(dialog).getByRole("combobox", { name: "Busy port for sidecar dev" })).toHaveValue(
+      "3001",
+    );
+  });
+
   it("stops a live sidecar from the icon button", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -2443,6 +2666,95 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the loading row when a tail poll issued before the scroll resolves mid-flight", async () => {
+    // Regression: a no-from poll in flight when the user scrolls to the top
+    // used to win the race and overwrite `conversation`, which cleared the
+    // older-page spinner while the older page was still loading.
+    let tailCalls = 0;
+    let resolveHeldTail: ((value: Response) => void) | undefined;
+    const heldTail = new Promise<Response>((resolve) => {
+      resolveHeldTail = resolve;
+    });
+    const fetchedUrls: string[] = [];
+    let resolveOlderPage: ((value: Response) => void) | undefined;
+    const olderPagePromise = new Promise<Response>((resolve) => {
+      resolveOlderPage = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      fetchedUrls.push(url);
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation?from=100") {
+        return olderPagePromise;
+      }
+      if (url.startsWith("/api/sessions/api-a1/conversation")) {
+        tailCalls += 1;
+        // Hold every tail poll after the first, so one is still in flight
+        // when the scroll fires.
+        if (tailCalls >= 2) return heldTail;
+        return new Response(
+          JSON.stringify(
+            conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Original prompt")).toBeInTheDocument();
+    });
+
+    // Let the poll issue a second tail request, which the mock holds open.
+    await waitFor(() => expect(tailCalls).toBeGreaterThanOrEqual(2), { timeout: 6_000 });
+
+    const scrollEl = screen.getByTestId("conversation-scroll");
+    Object.defineProperty(scrollEl, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollEl, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scrollEl, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scrollEl);
+
+    await waitFor(() => {
+      expect(fetchedUrls.some((url) => url === "/api/sessions/api-a1/conversation?from=100")).toBe(
+        true,
+      );
+    });
+
+    // The superseded tail poll lands now. Its payload must be discarded.
+    resolveHeldTail?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 200, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+    // Let that response commit before asserting. waitFor would be wrong here:
+    // the row is still present on its first poll and only disappears a tick
+    // later, so waitFor passes even when the payload was not discarded.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+
+    resolveOlderPage?.(
+      new Response(
+        JSON.stringify(conversationFixture({ startIndex: 100, totalEntries: 500, hasMore: true })),
+        { status: 200 },
+      ),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Loading older messages")).not.toBeInTheDocument();
+    });
+  });
+
   it("resets to a no-from conversation fetch on a session switch after loading an older page", async () => {
     const fetchedUrls: string[] = [];
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2621,16 +2933,6 @@ describe("SessionDetail voice input", () => {
   });
 
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
-    const intervalCallbacks: Array<() => void | Promise<void>> = [];
-    const setIntervalSpy = vi
-      .spyOn(global, "setInterval")
-      .mockImplementation((handler: TimerHandler) => {
-        if (typeof handler === "function") {
-          intervalCallbacks.push(handler as () => void);
-        }
-        return 1 as unknown as ReturnType<typeof setInterval>;
-      });
-    const clearIntervalSpy = vi.spyOn(global, "clearInterval").mockImplementation(() => {});
     const scrollTo = vi.fn();
     const scrollToDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
     const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(
@@ -2679,16 +2981,15 @@ describe("SessionDetail voice input", () => {
 
       await screen.findByRole("heading", { name: /dialog/i });
 
-      expect(intervalCallbacks.length).toBeGreaterThan(0);
-      await act(async () => {
-        await Promise.all(intervalCallbacks.map((callback) => callback()));
-      });
-
-      await waitFor(() => {
-        expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
-      });
+      // The next poll tick lands the working-state conversation.
+      await waitFor(
+        () => {
+          expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
+        },
+        { timeout: 6_000 },
+      );
       expect(scrollTo).toHaveBeenCalledWith({ top: 420, behavior: "smooth" });
-      expect(sessionRequests).toBeGreaterThan(1);
+      await waitFor(() => expect(sessionRequests).toBeGreaterThan(1), { timeout: 6_000 });
     } finally {
       if (scrollToDescriptor) {
         Object.defineProperty(HTMLElement.prototype, "scrollTo", scrollToDescriptor);
@@ -2696,8 +2997,6 @@ describe("SessionDetail voice input", () => {
       if (scrollHeightDescriptor) {
         Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDescriptor);
       }
-      setIntervalSpy.mockRestore();
-      clearIntervalSpy.mockRestore();
     }
   });
 
@@ -2936,6 +3235,126 @@ describe("SessionDetail voice input", () => {
     expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("First line");
   });
 
+  it("says a Send now the agent has not confirmed was sent, not delivered", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify(sessionFixture({ submitUnconfirmedAt: "2026-04-02T10:00:05.000Z" })),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+    fireEvent.change(textarea, { target: { value: "Maybe lost" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    expect(await screen.findByText("Sent, agent hasn't confirmed yet")).toBeInTheDocument();
+  });
+
+  it.each(["retry", "dismiss"] as const)(
+    "shows a prompt the agent never confirmed and %s posts to the daemon",
+    async (action) => {
+      const posts: string[] = [];
+      let failed = true;
+      vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture(
+                failed
+                  ? {
+                      submitFailedMessage: {
+                        message: "/pr-comments-fix 986",
+                        at: "2026-04-02T10:00:05.000Z",
+                      },
+                    }
+                  : {},
+              ),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        if (url.startsWith("/api/sessions/api-a1/submit-failed/") && init?.method === "POST") {
+          posts.push(url);
+          failed = false;
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByText("Agent did not confirm: “/pr-comments-fix 986”"),
+      ).toBeInTheDocument();
+      fireEvent.click(
+        screen.getByRole("button", { name: action === "retry" ? "Retry" : "Dismiss" }),
+      );
+      await waitFor(() => {
+        expect(posts).toEqual([`/api/sessions/api-a1/submit-failed/${action}`]);
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(/Agent did not confirm/)).not.toBeInTheDocument();
+      });
+    },
+  );
+
+  it("says a cursor Send now the daemon queued ahead sends when the turn ends", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture({ agent: "cursor" })), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ agent: "cursor" }),
+            queuedAheadReason: "no_interrupt",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+    fireEvent.change(textarea, { target: { value: "After the turn" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+
+    expect(
+      await screen.findByText("Cursor can't be interrupted — sends when the turn ends"),
+    ).toBeInTheDocument();
+  });
+
   it("sends immediately without queue when clicking Send now", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -2973,6 +3392,201 @@ describe("SessionDetail voice input", () => {
     });
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("");
+    });
+  });
+
+  describe("while the launch prompt is pending", () => {
+    function mockPendingLaunchFetch() {
+      let pending = true;
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                state: "waiting",
+                queuedMessages: { messages: ["Held follow-up"], awaitingPrompt: true },
+                ...(pending ? { submitUnconfirmedAt: "2026-04-02T10:00:05.000Z" } : {}),
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/launch/submit" && init?.method === "POST") {
+          pending = false;
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      return fetchMock;
+    }
+
+    it("shows the hold, blocks Send now and row send, and queues from the hotkey", async () => {
+      const fetchMock = mockPendingLaunchFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByText(/Agent has not confirmed the last prompt/),
+      ).toBeInTheDocument();
+      const textarea = screen.getByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Later" } });
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Send queued message #1 now" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeEnabled();
+
+      fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Later", queue: true }),
+        });
+      });
+    });
+
+    it("submits the pending prompt from the banner and clears the hold", async () => {
+      const fetchMock = mockPendingLaunchFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Submit prompt" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/launch/submit", {
+          method: "POST",
+        });
+      });
+      await waitFor(() => {
+        expect(screen.queryByText(/Agent has not confirmed the last prompt/)).toBeNull();
+      });
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url) === "/api/sessions/api-a1/send"),
+      ).toBe(false);
+    });
+  });
+
+  describe("while the session is spawning", () => {
+    function mockSpawningSessionFetch(
+      sendResponse: () => Response = () => new Response(JSON.stringify({ ok: true })),
+    ) {
+      return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(sessionFixture({ status: "spawning", runtimeAlive: false })),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+          return sendResponse();
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+    }
+
+    it("labels the session starting, keeps Queue, and disables Send now with the reason", async () => {
+      mockSpawningSessionFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Queued while starting" } });
+
+      expect(screen.getByText("starting")).toBeInTheDocument();
+      expect(screen.queryByText("working")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+    });
+
+    it("disables sending a queued row now while keeping its remove button", async () => {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(
+            JSON.stringify(
+              sessionFixture({
+                status: "spawning",
+                runtimeAlive: false,
+                queuedMessages: { messages: ["Queued while starting"], awaitingPrompt: true },
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), {
+            status: 200,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(
+        await screen.findByRole("button", { name: "Send queued message #1 now" }),
+      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Remove queued message #1" })).toBeEnabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+    });
+
+    it("queues from the primary hotkey instead of sending now", async () => {
+      const fetchMock = mockSpawningSessionFetch();
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Queued by hotkey" } });
+      fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "Queued by hotkey", queue: true }),
+        });
+      });
+    });
+
+    it("shows the daemon's refusal message when a send is rejected", async () => {
+      mockSpawningSessionFetch(
+        () =>
+          new Response(JSON.stringify({ error: "Session is still starting: api-a1" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+      render(<SessionDetail sessionId="api-a1" />);
+
+      const textarea = await screen.findByPlaceholderText(/^Message\.\.\./);
+      fireEvent.change(textarea, { target: { value: "Refused" } });
+      fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+
+      expect(await screen.findByText("Session is still starting: api-a1")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message\.\.\./)).toHaveValue("Refused");
     });
   });
 
@@ -3025,7 +3639,7 @@ describe("SessionDetail voice input", () => {
           JSON.stringify({
             ...sessionFixture(),
             queuedMessages: {
-              messages: [],
+              messages: ["Queued follow-up"],
               awaitingPrompt: true,
             },
           }),
@@ -3047,7 +3661,7 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByRole("heading", { name: /queued messages/i })).toBeInTheDocument();
     });
     expect(screen.getByText(/queued messages will send automatically/i)).toBeInTheDocument();
-    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
   });
 
   it("hides queued messages when the queue is empty and not awaiting a prompt", async () => {
@@ -3213,6 +3827,121 @@ describe("SessionDetail queue controls", () => {
       expect(screen.getByLabelText("Send queued message #1 now")).not.toHaveAttribute("aria-busy");
     });
     fetchMock.mockRestore();
+  });
+});
+
+describe("SessionDetail polling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function titledSession(title: string, messages: string[] = []) {
+    return new Response(
+      JSON.stringify(
+        sessionFixture({
+          slots: { title, links: [] },
+          queuedMessages: { messages, awaitingPrompt: false },
+        }),
+      ),
+      { status: 200 },
+    );
+  }
+
+  function otherPollResponse(url: string): Response {
+    if (url === "/api/sessions/api-a1/conversation") {
+      return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+    }
+    if (url === "/api/runtime/voice") {
+      return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }
+
+  it("keeps one session poll in flight and applies a response slower than the poll interval", async () => {
+    let sessionRequests = 0;
+    let resolveSlow: ((response: Response) => void) | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionRequests += 1;
+        if (sessionRequests === 1) return titledSession("First title");
+        return new Promise<Response>((resolve) => {
+          resolveSlow = resolve;
+        });
+      }
+      return otherPollResponse(url);
+    });
+
+    vi.useFakeTimers();
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(document.title).toBe("First title");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(sessionRequests).toBe(2);
+    // Five poll intervals pass while the second request hangs: no new request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(sessionRequests).toBe(2);
+
+    resolveSlow?.(titledSession("Slow title"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(document.title).toBe("Slow title");
+  });
+
+  it("aborts an in-flight session poll and refreshes the queue right after a Queue send", async () => {
+    let sent = false;
+    let sessionRequests = 0;
+    let heldPollSignal: AbortSignal | undefined;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionRequests += 1;
+        if (sent) return titledSession("Session", ["Queued follow up"]);
+        if (sessionRequests === 1) return titledSession("Session");
+        const signal = init?.signal ?? undefined;
+        heldPollSignal = signal;
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        sent = true;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return otherPollResponse(url);
+    });
+
+    vi.useFakeTimers();
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(heldPollSignal?.aborted).toBe(false);
+
+    fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+      target: { value: "Queued follow up" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(heldPollSignal?.aborted).toBe(true);
+    expect(
+      within(screen.getByRole("list", { name: "Queued messages list" })).getByText(
+        "Queued follow up",
+      ),
+    ).toBeInTheDocument();
   });
 });
 
@@ -5645,7 +6374,7 @@ describe("SessionDetail favicon", () => {
     });
 
     // Fake timers must be active before the component mounts so the polling
-    // `setInterval` it registers is one we can advance deterministically.
+    // timer it registers is one we can advance deterministically.
     vi.useFakeTimers();
     try {
       render(<SessionDetail sessionId="api-a1" />);

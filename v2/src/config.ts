@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_PR_OCCURRENCE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -214,6 +215,14 @@ function asOptionalPositiveInteger(value: unknown, label: string): number | unde
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
+function asOptionalInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer`);
   }
   return value;
 }
@@ -637,6 +646,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -804,7 +814,7 @@ function parseBacklog(
 
   // `spawn` (used by some live configs to document Take-spawn prompts) is
   // parsed and ignored here — no code path consumes it. See
-  // docs/configuration.md's backlog section.
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,
@@ -916,6 +926,70 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   };
 }
 
+/** Integer, or a `${VAR}` string resolving to one, so a chat id can stay out of a shared config. */
+/**
+ * Strict digits: `Number("")` is 0 and `Number("0x10")` is 16 — both would pass
+ * validation and fail later inside Telegram.
+ */
+function telegramIdToken(value: string, label: string): number {
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return parsed;
+}
+
+function resolveTelegramEnvValue(
+  raw: string,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+/** Integer, or a `${VAR}` string resolving to one, so an id stays out of a shared config. */
+function parseTelegramChatId(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalInteger(raw, label);
+  }
+  return telegramIdToken(resolveTelegramEnvValue(raw, label, projectEnv), label);
+}
+
+/**
+ * Integer array, or a `${VAR}` string resolving to a comma-separated list, so
+ * user and chat ids stay out of a shared config.
+ */
+function parseTelegramIdList(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number[] | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalIntegerArray(raw, label);
+  }
+  const ids = resolveTelegramEnvValue(raw, label, projectEnv)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => telegramIdToken(entry, label));
+  if (ids.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return ids;
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -928,8 +1002,20 @@ function parseTelegramSource(
   if (token === undefined) {
     throw new Error(`${label}.token could not be resolved from the environment`);
   }
-  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
-  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  const allowedUsers = parseTelegramIdList(
+    raw["allowedUsers"],
+    `${label}.allowedUsers`,
+    projectEnv,
+  );
+  const allowedChats = parseTelegramIdList(
+    raw["allowedChats"],
+    `${label}.allowedChats`,
+    projectEnv,
+  );
+  const chatId = parseTelegramChatId(raw["chatId"], `${label}.chatId`, projectEnv);
+  if (chatId !== undefined && allowedChats !== undefined && !allowedChats.includes(chatId)) {
+    throw new Error(`${label}.chatId must be listed in ${label}.allowedChats`);
+  }
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
@@ -940,6 +1026,7 @@ function parseTelegramSource(
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    ...(chatId !== undefined ? { chatId } : {}),
     autoSpawn,
   };
 }
@@ -1818,6 +1905,47 @@ function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
   };
 }
 
+// Destructive (T2 profile/revision dirs, T3 build caches, npm per-key clean)
+// like sessionGc, so it ships off — installing this change changes no host
+// behavior until an operator opts in.
+export const DEFAULT_DISK_BUDGET: AppConfig["diskBudget"] = {
+  enabled: false,
+  intervalMinutes: 360,
+  warnAttributableGb: 60,
+  npmCacheMaxGb: 20,
+  buildCacheOlderThanDays: 14,
+  maxWorktreesPerSweep: 20,
+};
+
+// Instance-only, same footgun as sessionGc/sidecarGc/authRotation: parsed
+// only when mode === "instance", so a per-project diskBudget block is
+// silently ignored.
+function parseDiskBudget(value: unknown): AppConfig["diskBudget"] {
+  if (value === undefined) {
+    return DEFAULT_DISK_BUDGET;
+  }
+  const root = asObject(value, "diskBudget");
+  return {
+    enabled:
+      asOptionalBoolean(root["enabled"], "diskBudget.enabled") ?? DEFAULT_DISK_BUDGET.enabled,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "diskBudget.intervalMinutes") ??
+      DEFAULT_DISK_BUDGET.intervalMinutes,
+    warnAttributableGb:
+      asNonNegativeNumber(root["warnAttributableGb"], "diskBudget.warnAttributableGb") ??
+      DEFAULT_DISK_BUDGET.warnAttributableGb,
+    npmCacheMaxGb:
+      asNonNegativeNumber(root["npmCacheMaxGb"], "diskBudget.npmCacheMaxGb") ??
+      DEFAULT_DISK_BUDGET.npmCacheMaxGb,
+    buildCacheOlderThanDays:
+      asNonNegativeNumber(root["buildCacheOlderThanDays"], "diskBudget.buildCacheOlderThanDays") ??
+      DEFAULT_DISK_BUDGET.buildCacheOlderThanDays,
+    maxWorktreesPerSweep:
+      asOptionalPositiveInteger(root["maxWorktreesPerSweep"], "diskBudget.maxWorktreesPerSweep") ??
+      DEFAULT_DISK_BUDGET.maxWorktreesPerSweep,
+  };
+}
+
 // Opt-in only: this key can make the daemon self-update. Default must stay
 // false so an untouched host never switches versions on its own.
 const DEFAULT_AUTO_UPDATE = false;
@@ -2213,6 +2341,7 @@ function parseConfigFile(
         ? parseArtifactRetention(root["artifactRetention"])
         : DEFAULT_ARTIFACT_RETENTION,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
+    diskBudget: mode === "instance" ? parseDiskBudget(root["diskBudget"]) : DEFAULT_DISK_BUDGET,
     admission: parseAdmission(root["admission"], mode),
     staleAfterMinutes:
       mode === "instance"

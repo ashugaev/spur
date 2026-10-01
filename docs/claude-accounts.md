@@ -1,5 +1,7 @@
 # Claude accounts
 
+> Scope: Claude account rotation and per-session credential switch. Caveman, no overhead.
+
 Rotate multiple claude login accounts across the rate limit. Each account: isolated `CLAUDE_CONFIG_DIR` in a runtime store (`<dataDir>/claude-accounts.json` + `<dataDir>/claude-accounts/<id>/`), never declared in config.
 
 ## Accounts UI

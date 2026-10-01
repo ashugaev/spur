@@ -6,28 +6,35 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
   agentHasLaunchSubmitAck,
+  agentInterruptKeys,
   agentLaunchUsesForeignBinary,
   agentProcessMatchers,
   agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
+  agentEarlySubmitResendAllowed,
   agentSubmitAckPacing,
   agentWaitsForSubmitAck,
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
+  DEFERRED_CONTROLS_ACK_WINDOW_MS,
+  DEFERRED_CONTROLS_MAX_RESENDS,
   findAgentSessionId,
+  invalidateAgentState,
   parseAgentName,
   readAgentConversation,
+  resumeAgentSubmitAckBinding,
   setupAgentHooks,
+  type AgentSubmitAckContext,
   type SubmitAckBinding,
   type SubmitAckScanResult,
 } from "./agents/index.js";
@@ -112,10 +119,12 @@ import {
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
+  hasClaudeRecoveryAfter,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
 import { readClaudeSessionStatus } from "./claude-session-status.js";
+import { redactAutoPingHandles } from "./auto-ping.js";
 import {
   type HistoryCaptureStamp,
   AGENT_HISTORY_ARTIFACT_PREFIX,
@@ -182,12 +191,21 @@ import {
   NPM_GLOBALCONFIG_ENV_LOWER,
   npmPinConfigPath,
 } from "./npm-prefix.js";
-import { clearPortListener, hasEstablishedConnections, isHostPortFree } from "./port-probe.js";
+import {
+  clearPortListener,
+  findListenerPids,
+  hasEstablishedConnections,
+  isHostPortFree,
+} from "./port-probe.js";
+import { readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
   editTelegramTopic,
+  formatTelegramSessionLabel,
+  sendTelegramChatAction,
   sendTelegramReply,
+  type TelegramReplySendResult,
 } from "./telegram-source-state.js";
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
@@ -197,7 +215,9 @@ import {
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
+  deleteTelegramReplyTarget,
   deleteTelegramSourceStateForSession,
+  hasPendingTelegramSend,
   listActiveServiceProblems,
   readAvailableBacklogItems,
   listServiceInstances,
@@ -206,7 +226,10 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  recordTelegramMessages,
+  writeTelegramOffer,
   readTelegramReplyTarget,
+  telegramBindingKey,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeServiceInstance,
@@ -223,6 +246,7 @@ import {
 } from "./session-mode.js";
 import {
   captureTmuxPane,
+  captureTmuxPaneOrEmpty,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -234,14 +258,18 @@ import {
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
-  getProcessPresenceInTmux,
+  isProcessRunningInTmux,
+  probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
   listTmuxSessionNames,
+  refreshTmuxFleetSnapshot,
   sendSubmitKeyToTmux,
   sendMenuSelectionKeys,
   setTmuxSocketName,
+  sendInterruptKeysToTmux,
   sendMessageToTmux,
+  sendSensitiveMessageToTmux,
   tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
@@ -260,11 +288,13 @@ import {
   AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   TODO_TOOL_NAME,
+  applyNormalizedSlotsUpdate,
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  type AppliedSlotsUpdate,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -293,9 +323,9 @@ import {
   resolveSessionCleanupContext,
   type SessionCleanupContext,
 } from "./session-gc.js";
+import { readDiskBudgetReport } from "./disk-budget.js";
 import {
   deleteWorkspaceState,
-  readWorkspaceState,
   resolveWorkspaceState,
   writeWorkspaceState,
   type WorkspaceState,
@@ -399,6 +429,9 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
@@ -411,6 +444,7 @@ import {
   type SidecarPortConflictCandidate,
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
+  type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SidecarPortView,
@@ -418,9 +452,16 @@ import {
   type SessionMemoryListResponse,
   type SessionMemoryRecordResponse,
   type SessionModeConfig,
+  type TelegramChoice,
+  type TelegramReplyTarget,
+  type TelegramSourceConfig,
+  type TelegramSpawnOrigin,
+  TELEGRAM_CHOICE_CALLBACK_PREFIX,
+  TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
+  type SubmitAckBaseline,
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
@@ -448,7 +489,9 @@ import {
   type TagDefinition,
   type TranscriptEntry,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type TodoActor,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
   type TodoMutationRequest,
   type TodoProjection,
 } from "./types.js";
@@ -461,7 +504,14 @@ import {
   todoLedgerBlock,
   unfinishedTodo,
 } from "./todo.js";
-import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
+import { cursorShowsReadyPrompt } from "./cursor-state.js";
+import {
+  configureCursorTurnEndedStore,
+  readCursorJsonlState,
+  resolveCursorBuild,
+  type CursorJsonlReaderState,
+} from "./cursor-jsonl-state.js";
+import { resolveAgentExecutable } from "./agents/executable.js";
 import {
   formatNestedSidecarStartError,
   MAX_SIDECAR_DEPTH,
@@ -515,7 +565,15 @@ const MEMORY_SHED_SESSION_GRACE_MS = 12_000;
 const MEMORY_SHED_EMERGENCY_CAP_BYTES = 2 * 1024 * 1024 * 1024;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
+// classifySessionRecord (called from inside both waitForQueuedMessage and
+// waitForPipelineStep) runs reconcileUnexpectedStop and
+// reconcileStaleErroredSession, so the loop can heal its own record on every
+// pass -- the stopped-before-sleep return bounds nothing on its own.
+const DELIVERY_HEAL_CONTINUE_LIMIT = 3;
 const STATE_HOLD_MS = 4_000;
+// Bound on queuedDeliveryState's fence: a write the agent never records (an
+// Enter over an empty composer) stops holding the queue after this.
+const PANE_WRITE_FENCE_MS = 30_000;
 // Codex turns that hang after their tool calls complete (model inference dies between/after tools)
 // pin state to "working" forever. The rollout JSONL emits no deterministic mid-inference liveness
 // signal: token_count event_msg lines fire only at response-step (tool-batch) boundaries, never
@@ -534,6 +592,15 @@ const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
 export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+// Quiet time after the agent's last transcript write before a queued message
+// is typed. The state gate already requires "waiting"; this only lets the TUI
+// finish rendering the turn it just closed. A swallowed Enter is recovered by
+// the submit-ack resend loop. The trigger batching window above stays 30s.
+export const QUEUED_MESSAGE_SETTLE_MS = 2_000;
+// Longest a queued send() waits for the delivery runner's pane write before
+// answering with the message still queued. Never covers the submit ack.
+export const QUEUED_SEND_PANE_WRITE_WAIT_MS = 3_000;
+const CURSOR_TURN_ENDED_STORE_FILE = "cursor-turn-ended.json";
 
 export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
@@ -575,6 +642,25 @@ const BACKGROUND_SPAWN_READY_TIMEOUT_MS = 120_000;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const TODO_NUDGE_BACKOFF_BASE_MS = 2 * 60 * 1000;
 const TODO_NUDGE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+// Shared derivation, one path for every collapseWindowMs-scaled backoff
+// (todo nudge, sidecar start-conflict refusal): a tiny configured
+// collapseWindowMs must never shrink a backoff below its fixed floor, and
+// the cap must never fall below the (possibly derived-up) base.
+function backoffBaseMs(fixedFloorMs: number, collapseWindowMs: number): number {
+  return Math.max(fixedFloorMs, collapseWindowMs * 2);
+}
+function backoffCapMs(fixedCapMs: number, base: number): number {
+  return Math.max(fixedCapMs, base);
+}
+// Bounded, self-clearing sidecar-start port-conflict refusal (measured
+// incident: 21/22 conflicts were foreign and self-cleared within 53
+// minutes; a permanent latch would have killed the one attempt that later
+// succeeded). base > collapseWindowMs, cap >= base, deadline >= cap — all
+// derived so a wide configured collapseWindowMs can never let the deadline
+// fire on the very first conflict.
+const SIDECAR_START_CONFLICT_BACKOFF_BASE_MS = 60_000;
+const SIDECAR_START_CONFLICT_BACKOFF_MAX_MS = 900_000;
+const SIDECAR_START_CONFLICT_DEADLINE_MS = 1_800_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
@@ -605,6 +691,8 @@ const CODEX_MCP_DIALOG_OVERRIDE_TTL_MS = 15_000;
 // Same outlast-the-sweep-gap reasoning as CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
 // for the claude compaction spinner override.
 const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
+// Same outlast-the-sweep-gap reasoning for cursor ready prompt override.
+const CURSOR_PANE_READY_OVERRIDE_TTL_MS = 15_000;
 // Ceiling on how far past its own parsed resetAtMs a live usage-limit menu can
 // still re-confirm rate_limited. parseRateLimitResetAtMs (rate-limit-detect.ts)
 // only encodes a time-of-day and rolls at most a full day (DAY_MS) forward
@@ -616,6 +704,12 @@ const CLAUDE_COMPACTING_OVERRIDE_TTL_MS = 15_000;
 // the session is left free to fall through to whatever state the structured
 // source (jsonl/status) actually reports.
 const CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS = 24 * 60 * 60 * 1000;
+// Bounds how long the reactivation guard can skip its clear on sustained
+// capture failure (SCHEDULED_WAKE_POLL_INTERVAL_MS ticks). Fail-closed exists
+// to not type into a possibly-live modal and to let a later tick retry — not
+// to pin an episode forever. 60 consecutive one-second ticks (~1 min) of
+// unbroken capture failure is a tmux-level fault, not a transient fork loss.
+const RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS = 60;
 const REAP_INTERVAL_MS = 5 * 60 * 1000;
 // Fixed tick cadence for the session GC sweep; the actual sweep frequency is
 // gated inside the tick by sessionGc.intervalMinutes (re-read from
@@ -879,16 +973,54 @@ export class QueueDeliveryInFlightError extends Error {
   readonly statusCode = 409;
 }
 
+// The agent process was gone right before the pane write, so the text would
+// have landed in the pane's shell instead of the agent.
+export class AgentExitedBeforeSendError extends Error {
+  readonly statusCode = 409;
+}
+
+// An immediate send, flush, or answer reached a session whose spawn has not
+// finished. A queued send is accepted instead (see sendLocked).
+export class SessionStartingError extends Error {
+  readonly statusCode = 409;
+}
+
+// A send, flush, or answer reached a session in a terminal status.
+export class SessionEndedError extends Error {
+  readonly statusCode = 409;
+}
+
+// An immediate send (user, trigger, or automated) reached a session whose
+// launch prompt may still sit unsubmitted; typing would erase it.
+// Refused, nothing typed: the session's agent already runs outside its pane.
+export class ForeignAgentProcessError extends Error {
+  readonly statusCode = 409;
+}
+
+export class LaunchPromptPendingError extends Error {
+  readonly statusCode = 409;
+  /** The hold that refused the send; absent when no hold is set. */
+  readonly submitUnconfirmedAt: string | undefined;
+
+  constructor(message: string, submitUnconfirmedAt?: string) {
+    super(message);
+    this.submitUnconfirmedAt = submitUnconfirmedAt;
+  }
+}
+
+export class WakeTargetMissingError extends Error {
+  readonly statusCode = 409;
+}
+
+export class WakeDispatchConflictError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SubmitAckTimeoutError extends Error {
   readonly agent: AgentName;
   readonly lastScannedFile: string | null;
   readonly elapsedMs: number;
   readonly processAlive: boolean;
-  // True when the liveness read could not report (list-panes killed by its
-  // own timeout), so processAlive:false is not evidence of death. Policy: a
-  // leg that cannot report is ambiguous; ambiguous = refuse recovery, never
-  // kill. Never set together with processAlive:true.
-  readonly probeUnresponsive: boolean;
 
   constructor(args: {
     sessionId: string;
@@ -896,7 +1028,6 @@ export class SubmitAckTimeoutError extends Error {
     lastScannedFile: string | null;
     elapsedMs: number;
     processAlive: boolean;
-    probeUnresponsive: boolean;
   }) {
     super(`Timed out waiting for agent submit acknowledgment for ${args.sessionId}`);
     this.name = "SubmitAckTimeoutError";
@@ -904,7 +1035,6 @@ export class SubmitAckTimeoutError extends Error {
     this.lastScannedFile = args.lastScannedFile;
     this.elapsedMs = args.elapsedMs;
     this.processAlive = args.processAlive;
-    this.probeUnresponsive = args.probeUnresponsive;
   }
 }
 
@@ -915,12 +1045,6 @@ export class SubmitAckTimeoutError extends Error {
 // definition, shared by the drain and by flush.
 function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
   return error instanceof SubmitAckTimeoutError && error.processAlive;
-}
-
-// The liveness read could not report: not delivered, and not evidence of a
-// dead agent either. Callers must not kill the pane on this.
-function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
-  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -941,6 +1065,18 @@ type BackgroundSpawnAttemptResult = "completed" | "retry";
  * the pipeline delivery loop acts on for steps 2..N.
  */
 export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
+interface AgentMessageWriteOptions {
+  interrupt?: boolean;
+  freshLaunch?: boolean;
+  /** Target is idle or just interrupted: INTERACTIVE_SUBMIT_ACK_PACING. */
+  interactive?: boolean;
+  /**
+   * Runs once the message and its submit key are in the pane, before the ack
+   * wait; gets the ack scan's baseline, null when the send waits on no ack,
+   * and the paste start time (after any interrupt), the unconfirmed-hold time.
+   */
+  onPaneWritten?: (ackBaseline: SubmitAckBaseline | null, pastedAt: number) => void;
+}
 const SPAWN_PREFLIGHT_MAX_ATTEMPTS = 3;
 
 export class SpawnPreflightError extends Error {
@@ -974,6 +1110,7 @@ interface SessionStateResult {
   historySourcePath?: string | null;
   workspacePresent: boolean;
   serverError: boolean;
+  serverErrorEvidence?: "error" | "recovered";
   // When the agent last wrote to its own structured artifact (claude transcript
   // JSONL / codex rollout + hook state / cursor transcript JSONL). Null only
   // when the agent has no such artifact yet. Every value here is a byproduct of
@@ -1011,6 +1148,52 @@ class SidecarUrlProbeSidecarExitedError extends Error {
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
+}
+
+// A launch or Send now whose submit never confirmed: the prompt may still sit
+// unsubmitted in the composer, and any typed send (its line clear) would erase
+// it. Every path that types into the pane checks this one predicate.
+// An unacked send holds the pane only when the ack scan could have seen it. A
+// slash command can run inside the agent's TUI and write no transcript
+// record (codex /status, opencode /models), so its hold would never settle
+// and a re-queue would run it twice: it counts as submitted.
+function unconfirmedSubmitHolds(message: string): boolean {
+  return !message.trimStart().startsWith("/");
+}
+
+// The agent acked the text a failed-prompt notice names: the notice is stale.
+function withoutFailedSubmit(record: SessionRecord, ackedMessage: string | null): SessionRecord {
+  if (ackedMessage === null || record.submitFailedMessage?.message !== ackedMessage) {
+    return record;
+  }
+  const { submitFailedMessage: _acked, ...rest } = record;
+  return rest;
+}
+
+function submitPending(session: Pick<SessionRecord, "submitUnconfirmedAt">): boolean {
+  return session.submitUnconfirmedAt !== undefined;
+}
+
+// Status gate for the user send paths (send, flush, answer). A restorable
+// status passes: ensureSessionReadyForSend relaunches a stopped or paused one.
+function assertSendableStatus(session: Pick<SessionRecord, "id" | "status">): void {
+  const status = session.status;
+  switch (status) {
+    case "running":
+    case "stopped":
+    case "paused":
+      return;
+    case "spawning":
+      throw new SessionStartingError(`Session is still starting: ${session.id}`);
+    case "errored":
+    case "completed":
+    case "killed":
+      throw new SessionEndedError(`Session has ended (${status}): ${session.id}`);
+    default: {
+      const unhandled: never = status;
+      throw new Error(`Unknown session status ${String(unhandled)}: ${session.id}`);
+    }
+  }
 }
 
 type WakeDeliverability = "deliverable" | "status_not_restorable" | "workspace_missing";
@@ -1305,6 +1488,18 @@ function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): 
   return session.restrictWrites === true;
 }
 
+function resolveCloseoutOwner(args: {
+  restrictWrites: boolean;
+  worktree: boolean;
+  reusesWorkspace: boolean;
+  transferredOwner?: boolean;
+}): boolean {
+  if (args.restrictWrites) return false;
+  if (args.transferredOwner !== undefined) return args.transferredOwner;
+  if (args.reusesWorkspace) return false;
+  return args.worktree;
+}
+
 async function setupSessionAgentHooks(args: {
   agent: AgentName;
   dataDir: string;
@@ -1399,7 +1594,7 @@ function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCo
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
 
-// Single point through which every liveness read of getProcessPresenceInTmux
+// Single point through which every liveness read of isProcessRunningInTmux
 // passes, so the pane-child fallback gate (issue #806) cannot drift from the
 // matcher list: it depends on the SAME (agent, launchCommand) pair used to
 // build the matchers, which varies per call site (record vs. a recovery/
@@ -1408,19 +1603,43 @@ async function agentProcessAlive(
   input: { tmuxSession: string; agent: AgentName; launchCommand: string },
   options?: { fresh?: boolean },
 ): Promise<boolean> {
-  return (await agentProcessPresence(input, options)).alive;
-}
-
-async function agentProcessPresence(
-  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
-  options?: { fresh?: boolean },
-): Promise<{ alive: boolean; unresponsive: boolean }> {
   const matchers = agentProcessMatchers(input.agent, input.launchCommand);
   const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
-  return getProcessPresenceInTmux(input.tmuxSession, matchers, {
+  return isProcessRunningInTmux(input.tmuxSession, matchers, {
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
+}
+
+// Distinguishes which pass answered ALIVE without widening agentProcessAlive's
+// own boolean return: four call sites are `!(await agentProcessAlive(...))`,
+// and an object return there would silently read as "always alive" (tsc
+// cannot catch it; only eslint no-unnecessary-condition would). Keeps
+// agentProcessAlive's signature and all nine call sites unchanged.
+type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+
+// Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
+// second isProcessRunningInTmux read: two separate top-level calls would each
+// hit runtime-tmux's shared pane/ps cache independently, and that cache's TTL
+// runs from fetch START, not completion (runtime-tmux.ts). A first probe slow
+// enough to exceed the TTL (getPsSnapshot's own timeout is 5s) leaves the
+// cache already expired by the time the second call checks it, forking again
+// and comparing two different instants — which can mislabel `via` or miss a
+// real pane_child_fallback episode entirely (issue #871 P2).
+async function probeAgentProcess(
+  input: { tmuxSession: string; agent: AgentName; launchCommand: string },
+  options?: { fresh?: boolean },
+): Promise<AgentProcessProbe> {
+  const matchers = agentProcessMatchers(input.agent, input.launchCommand);
+  const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
+  const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
+    ...(options?.fresh ? { fresh: true } : {}),
+    ...(foreign ? { paneChildFallback: true } : {}),
+  });
+  if (!result.alive) {
+    return { alive: false };
+  }
+  return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
 
 function withProjectAgentOptions(
@@ -1521,12 +1740,105 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
+const MAX_SOURCE_REPLY_BUTTONS = 8;
+const MAX_SOURCE_REPLY_BUTTON_TEXT = 64;
+const MAX_SOURCE_REPLY_BUTTON_VALUE = 200;
+const TELEGRAM_CHOICE_TTL_MS = 24 * 60 * 60_000;
+
+// Reached straight from the HTTP body, so every field is validated here.
+function parseSourceReplyButtons(raw: unknown): SourceReplyButton[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new InvalidSourceReplyInputError("buttons must be an array");
+  }
+  if (raw.length > MAX_SOURCE_REPLY_BUTTONS) {
+    throw new InvalidSourceReplyInputError(
+      `buttons must hold at most ${MAX_SOURCE_REPLY_BUTTONS} entries`,
+    );
+  }
+  const buttons: SourceReplyButton[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const text = typeof record["text"] === "string" ? record["text"].trim() : "";
+    if (!text || text.length > MAX_SOURCE_REPLY_BUTTON_TEXT) {
+      throw new InvalidSourceReplyInputError(
+        `button text must be 1-${MAX_SOURCE_REPLY_BUTTON_TEXT} characters`,
+      );
+    }
+    const value = typeof record["value"] === "string" ? record["value"].trim() : "";
+    if (!value || value.length > MAX_SOURCE_REPLY_BUTTON_VALUE) {
+      throw new InvalidSourceReplyInputError(
+        `button value must be 1-${MAX_SOURCE_REPLY_BUTTON_VALUE} characters`,
+      );
+    }
+    if (seen.has(text)) {
+      throw new InvalidSourceReplyInputError(`button text must be unique: ${text}`);
+    }
+    seen.add(text);
+    buttons.push({ text, value });
+  }
+  return buttons;
+}
+
+function buildTelegramChoices(
+  sessionId: string,
+  target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId">,
+  buttons: SourceReplyButton[],
+): TelegramChoice[] {
+  if (buttons.length === 0) return [];
+  const offerId = randomUUID();
+  // One random base per offer plus the button index: unique by construction,
+  // and short enough for Telegram's 64-byte callback_data with the prefix.
+  const tokenBase = offerId.replaceAll("-", "").slice(0, 15);
+  const expiresAt = new Date(Date.now() + TELEGRAM_CHOICE_TTL_MS).toISOString();
+  return buttons.map((button, index) => ({
+    token: `${tokenBase}${index}`,
+    offerId,
+    sessionId,
+    chatId: target.chatId,
+    ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+    text: button.text,
+    value: button.value,
+    expiresAt,
+  }));
+}
+
+/**
+ * Telegram capability block for the launch prompt. Present only when the
+ * project can both send (a `chatId` destination) and deliver back (a
+ * `telegram:message` send trigger on that same source) — otherwise an agent
+ * would offer buttons whose clicks reach nobody.
+ */
+function telegramAgentInstructions(project: ProjectConfig | undefined): string | undefined {
+  if (!project) return undefined;
+  const sourceId = Object.entries(project.sources).find(
+    ([, source]) => source.type === "telegram" && source.chatId !== undefined,
+  )?.[0];
+  if (!sourceId) return undefined;
+  const delivers = Object.values(project.triggers).some(
+    (trigger) =>
+      trigger.source === sourceId && trigger.event === TELEGRAM_MESSAGE_EVENT && "send" in trigger,
+  );
+  if (!delivers) return undefined;
+  return [
+    "Telegram: the user reads this session in Telegram. Your terminal output is invisible to them.",
+    '- Send them a message: `"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"`.',
+    '- Offer choices: `"$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me"`. Each `--button <label>` or `--button <label>=<value>` renders one inline button.',
+    "- A click and a typed reply both arrive as an ordinary user message in this session — a click carries the button value.",
+    "- Ask this way when you need a decision from the user; do not wait silently.",
+    "- Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.",
+    '- When the user asks to be notified or sent something in Telegram, send it with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`.',
+  ].join("\n");
+}
+
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
   tags: TagDefinition[],
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
+  telegramInstructions?: string,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -1541,6 +1853,9 @@ function buildInitialMessage(
   }
   const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  if (telegramInstructions) {
+    base = `${base}\n\n${telegramInstructions}`;
+  }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Read a running sidecar's reserved port with \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports\` (tab-separated: sidecar, port id, env name, port, alive|dead; add \`--json\` for JSON). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies when the main session spawns, restores, or recovers. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`docs/commands.md\` for sidecar usage. Available: ${names}.`;
@@ -1596,8 +1911,10 @@ function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipelin
 function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesView | undefined {
   const messages = queuedMessages(session);
   const pipelineMessages = queuedPipelineMessages(session);
-  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
-  if (messages.length === 0 && pipelineMessages.length === 0 && !awaitingPrompt) {
+  // The record's awaitingPrompt keeps holding the next send after a delivery;
+  // with nothing queued there is nothing waiting on the prompt to show.
+  const awaitingPrompt = messages.length > 0 && session.queuedMessages?.awaitingPrompt === true;
+  if (messages.length === 0 && pipelineMessages.length === 0) {
     return undefined;
   }
   return {
@@ -1624,6 +1941,20 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
+}
+
+// session.spawn.failed details: messages queued while spawning stay on the
+// errored record; a kill mid-spawn keeps the killed record, whose queue the
+// kill already dropped.
+function spawnFailureQueueDetails(
+  persistedFailure: SessionRecord | null,
+  killed: boolean,
+): { killedDuringSpawn?: true; queuedCount?: number } {
+  if (killed) {
+    return { killedDuringSpawn: true };
+  }
+  const queuedCount = persistedFailure ? queuedMessages(persistedFailure).length : 0;
+  return queuedCount > 0 ? { queuedCount } : {};
 }
 
 // Removes only the first occurrence of `value`, never all of them: `send`'s
@@ -1765,12 +2096,14 @@ function buildSessionEnv(args: {
   dataDir: string;
   repoPath: string;
   symlinks: string[];
+  closeoutOwner?: boolean;
   extraEnv?: Record<string, string>;
 }): Record<string, string> {
   const env: Record<string, string> = {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
+    SPUR_CLOSEOUT_OWNER: args.closeoutOwner === true ? "1" : "0",
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.artifactsSessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
@@ -1895,7 +2228,7 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
-  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
   await killTmuxSession(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
@@ -2464,6 +2797,9 @@ function projectHasService(project: ProjectConfig, serviceId: string): boolean {
 }
 
 const TELEGRAM_TOPIC_NAME_MAX = 128;
+// "Typing" is shown while the session works on an unanswered message, never
+// longer than this after the message arrived.
+const TELEGRAM_TYPING_MAX_MS = 10 * 60_000;
 
 function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
   const title = session.slots?.title?.trim();
@@ -2472,8 +2808,22 @@ function sessionTitle(session: Pick<SessionView, "slots">): string | undefined {
 
 // Session label for Telegram text: id plus the agent title when the session has one.
 function telegramSessionLabel(session: Pick<SessionView, "id" | "slots">): string {
-  const title = sessionTitle(session);
-  return title ? `${session.id} — ${title}` : session.id;
+  return formatTelegramSessionLabel(session.id, sessionTitle(session));
+}
+
+interface TelegramReplyTargetChanges {
+  /** The placeholder this send edited; cleared only while it is still the recorded one. */
+  sentStatusMessageId?: number;
+  /** Topic created by the send; applies only while the target is still in that chat with no thread. */
+  createdThread?: { chatId: number; messageThreadId: number };
+  /** Topic name now applied; with `createdThread` it applies only if the thread does. */
+  topicName?: string;
+  lastReplyAt?: string;
+}
+
+interface ResolvedTelegramNotice {
+  target: TelegramReplyTarget;
+  source: TelegramSourceConfig;
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
@@ -2518,6 +2868,10 @@ export class SessionService {
   // does not bound (classifySessionRecord/ensureSessionReadyForSend can run
   // for a while before the pane lock is ever taken).
   private readonly queueDeliveryInFlight = new Set<string>();
+  // Sessions whose drain has typed its message (already off the queue) and
+  // waits only on the submit ack. The queue head is then a later message, not
+  // the one in flight, so removeQueuedMessage must not gate it.
+  private readonly queuedDeliveryTyped = new Set<string>();
   // Log-once-per-transition for a queued-message delivery attempt that
   // fails before or during the pane write: keyed by session id, value is
   // the last logged failure message. A permanently broken session (missing
@@ -2526,6 +2880,35 @@ export class SessionService {
   // forever; only a CHANGE in the failure (a new problem, or a fresh
   // failure after a successful delivery cleared the entry) logs again.
   private readonly queuedMessageDeliveryLastFailure = new Map<string, string>();
+  // Epoch ms at which the last queued delivery's submit ack was confirmed;
+  // lets waitForQueuedMessage release the prompt hold without its grace.
+  private readonly queuedDeliveryAckedAt = new Map<string, number>();
+  // Epoch ms at which the latest pane write to the session started
+  // (recordPaneWrite); queuedDeliveryState's fence.
+  private readonly paneWriteFenceAt = new Map<string, number>();
+  // Sessions whose unconfirmed-hold ack scan is running (settleSubmitHold).
+  private readonly submitHoldScans = new Set<string>();
+  // Queued send() calls parked until the session's next queued pane write
+  // (notifyQueuedPaneWrite) or their own attempt's end, capped at
+  // QUEUED_SEND_PANE_WRITE_WAIT_MS.
+  private readonly queuedPaneWriteWaiters = new Map<string, Set<() => void>>();
+  // ensureDeliveryRunner calls that landed while a run was live. The run
+  // may already be past its last read, so its exit re-arms once for them.
+  private readonly deliveryRerunRequested = new Set<string>();
+  private readonly todoNudgesInFlight = new Set<string>();
+  // Log-once-per-episode plus a retention bound for the rate-limit
+  // reactivation guard's pane-unavailable skip: keyed by session id, value
+  // tracks which rateLimitedAt episode the skip was last logged against and
+  // how many consecutive one-second ticks in that episode have found the
+  // pane unavailable. session.rate_limit.reactivation_skipped only logs
+  // again when rateLimitedAt changes (a new episode) or the tick count
+  // crosses RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS (the
+  // give-up log). Cleared whenever the episode ends (the guard's own
+  // rateLimitedAt clear) and in pruneSessionScopedState.
+  private readonly rateLimitReactivationLastSkip = new Map<
+    string,
+    { rateLimitedAt: string; unavailableTicks: number }
+  >();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
   // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
@@ -2540,15 +2923,18 @@ export class SessionService {
   // DASHBOARD_CACHE_INTERVAL_MS — faster than the live pane scan's cadence —
   // and the working override could never outlast the hold.
   private readonly claudeCompactingOverrides = new Map<string, number>();
+  private readonly cursorPaneReadyOverrides = new Map<string, number>();
   // Evidence-gated override (not TTL-gated) for a live usage-limit menu that
   // re-confirmed an expired claude rate-limit detection: keyed by session id.
   // A sweep can take longer than any fixed TTL to reach a given session (its
   // duration is O(live sessions) of capture-pane forks), so an entry only
   // ends via: a live scanPane:true capture that is non-empty and finds no
-  // menu (deletes it — an empty capture is a failed fork, not evidence, and
-  // leaves the entry alone); or the session leaving liveIds
-  // (pruneSessionScopedState). Both tick kinds — scanPane:true on an empty
-  // capture, and scanPane:false on every read — re-check
+  // menu (deletes it — a `null` capture (fork failed) and a `""` capture
+  // (blank pane) both leave the entry alone: recomputing paneReconfirmedLimit
+  // off nothing would flip the reported state and momentarily reopen the
+  // delivery-suppression window this override exists to hold shut); or the
+  // session leaving liveIds (pruneSessionScopedState). Both tick kinds —
+  // scanPane:true on a null/empty capture, and scanPane:false on every read — re-check
   // CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS against rateLimit.resetAtMs before
   // applying the entry, so a stalled sweep can't report rate_limited off it
   // forever with neither evidence nor a clock to end it. Residual: under
@@ -2577,6 +2963,13 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  // Tracks sessions currently reading ALIVE via the pane-child fallback (not
+  // matched by pass 1), so session.runtime.pane_child_fallback fires once on
+  // the transition into that state instead of every readRuntimeSnapshot call
+  // for the session's whole life. Cleared on any probe that is not
+  // `via: "pane_child"`. In-memory only, no persisted field. Swept alongside
+  // the other session-scoped maps in pruneSessionScopedState.
+  private readonly paneChildFallbackNotified = new Set<string>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   // Ticks the re-entrancy guard dropped while the CURRENTLY running sweep was
@@ -2620,6 +3013,9 @@ export class SessionService {
   // swept before" as "due immediately" — the first tick after a restart
   // waits out a full intervalMinutes like every other tick.
   private lastSessionGcSweepAt = Date.now();
+  // Rides the sessionGc timer (same idiom as PR 840's artifactRetention
+  // sweep) rather than a second setInterval — no new wake surface.
+  private lastDiskBudgetSweepAt = Date.now();
   // Same construction-time seed and same reason as lastSessionGcSweepAt.
   private lastArtifactRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
@@ -2662,6 +3058,8 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
+  private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
   // Every spawn owns one future live-session slot from its synchronous
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
@@ -2719,10 +3117,16 @@ export class SessionService {
   private readonly claudeRotationEpisode = new Map<string, { episode: string; count: number }>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
   private readonly sidecarUrlProbeControllers = new Map<string, AbortController>();
+  // sessionId -> the ToDo projection revision whose human-held items were last
+  // nudged, so a static human-blocked ledger is nudged once, not once a sweep.
+  private readonly lastHumanHeldNudgeRevisions = new Map<string, string>();
   // Serializes sendAgentMessage per tmux pane so two trigger batches on one
   // session queue instead of racing two pastes into the same composer.
   private readonly paneWriteLocks = new Map<string, Promise<void>>();
   private readonly lastSuccessfulTodoNudgeAt = new Map<string, number>();
+  private readonly telegramTypingInFlight = new Set<string>();
+  // Keyed by chat id: no typing call before this time (Telegram 429 retry_after).
+  private readonly telegramTypingPausedUntil = new Map<number, number>();
   private readonly todoNudgeDisabled = new Map<
     string,
     { kind: "ledger_corrupt" | "target_gone"; reason: string }
@@ -2731,6 +3135,35 @@ export class SessionService {
     string,
     { failures: number; nextRetryAtMs: number }
   >();
+  // Bounded, self-clearing sidecar-start port-conflict refusal, keyed
+  // `${sessionId}\0${sidecarName}`. Read outside withSidecarPortLock,
+  // mutated only inside startSidecarInternal's gate (before the lock) or
+  // one of the clear sites.
+  private readonly sidecarStartConflictState = new Map<
+    string,
+    {
+      failures: number;
+      nextProbeAtMs: number;
+      firstConflictAtMs: number;
+      terminalEmitted: boolean;
+      candidates: SidecarPortConflictCandidate[];
+    }
+  >();
+  // Own-identity-no-op dedup, same key shape, deliberately its OWN map: a
+  // no-op is not a conflict, and an earlier version folded this into
+  // sidecarStartConflictState — sharing one entry meant seeding
+  // firstConflictAtMs with 0 (no-op has no real conflict start time), and
+  // `0 ?? now` in recordSidecarStartConflict evaluates to 0 (nullish
+  // coalescing does not catch zero), which silently backdated a session's
+  // first REAL conflict to epoch and skipped its entire retry window
+  // straight to the post-deadline terminal branch. Cleared by
+  // clearSidecarStartConflict (this session's own success/stop/relaunch/
+  // restore/prune sites) — NOT by the cross-session reservedBy clear in
+  // sessionWithReleasedSidecarPorts, which only ever touches
+  // sidecarStartConflictState: this map is about THIS session's own pane
+  // identity, unrelated to which OTHER session was holding a port it was
+  // waiting on.
+  private readonly sidecarStartNoopIdentity = new Map<string, { pid: number; starttime: number }>();
   // Test-only (spur#859 B4): a fixture asserting "no leaked sidecar
   // process trees" over the real HTTP /sidecars/sweep route would
   // otherwise scan the real host process table — on a host with even one
@@ -2794,6 +3227,12 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    // Before any classification: a restart mid-command must already know
+    // whether this cursor build closes turns with turn_ended.
+    configureCursorTurnEndedStore(
+      join(this.config.dataDir, CURSOR_TURN_ENDED_STORE_FILE),
+      resolveCursorBuild(resolveAgentExecutable("cursor").path),
+    );
     this.applyConfig(scan.config, scan.configPaths);
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
   }
@@ -2813,14 +3252,15 @@ export class SessionService {
 
   /**
    * Resolves once every in-flight fire-and-forget run has settled: background
-   * spawns, PR auto-detect checks, healed-sidecar restarts, and the dashboard
-   * cache tick. Lets teardown drain async work whose writes and `gh` calls
-   * would otherwise land after the
-   * caller is gone.
+   * spawns, queued sends' delivery attempts, PR auto-detect checks,
+   * healed-sidecar restarts, and the dashboard cache tick. Lets teardown
+   * drain async work whose writes and `gh` calls would otherwise land after
+   * the caller is gone.
    */
   async settleBackgroundSpawns(): Promise<void> {
     await Promise.allSettled([
       ...this.backgroundSpawnRuns,
+      ...this.queuedDeliveryAttempts,
       ...this.prCheckRuns,
       ...this.sidecarHealTasks.values(),
       ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
@@ -3930,7 +4370,12 @@ export class SessionService {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
         const scheduledWake = session.scheduledWake;
-        if (scheduledWake && !this.memoryHold.engaged && Date.parse(scheduledWake.dueAt) <= now) {
+        if (
+          scheduledWake &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
+          Date.parse(scheduledWake.dueAt) <= now
+        ) {
           await this.withWorkspaceLifecycleLocks(session.id, async () => {
             // Claim the due occurrence BEFORE sending: clear scheduledWake and
             // persist it first. A slow or failing send must not leave the wake
@@ -4003,7 +4448,7 @@ export class SessionService {
         // only accepts "completed"), so its schedule is
         // dead weight: clear intervalWake/dailyWake here so this loop stops
         // re-visiting it every tick and spamming interval_failed/daily_failed
-        // for a send() that can only throw "Session is not running". Every
+        // for a send() that can only throw SessionEndedError. Every
         // other status — stopped, paused, errored, and completed itself — can
         // still come back (restore() or reopen()), so its schedule stays
         // armed-but-suppressed via evaluateWakeDeliverability below rather
@@ -4053,7 +4498,8 @@ export class SessionService {
         const intervalWake = session.intervalWake;
         if (
           intervalWake &&
-          !this.memoryHold.engaged &&
+          (!this.memoryHold.engaged ||
+            (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
           Date.parse(intervalWake.nextDueAt) <= now &&
           (await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))
         ) {
@@ -4193,6 +4639,7 @@ export class SessionService {
             // yet (e.g. a fresh post-restart tick). Skip both the send and the clear so
             // rateLimitedAt stays set and a later tick can still fire this episode.
             if (liveState !== undefined) {
+              let skipClear = false;
               if (liveState === "rate_limited") {
                 // The interactive stop-and-wait menu is an arrow-key/Enter modal, not a
                 // chat prompt: typing the reactivation sentence into it could garble input
@@ -4202,52 +4649,113 @@ export class SessionService {
                 // this menu long before afterHours elapses, so this branch is defense-in-depth
                 // for the rare case that confirm keeps failing (e.g. tmux errors) rather than
                 // the primary path.
-                const isClaudeMenu =
-                  agentStateStrategy(session.agent) === "claude_jsonl" &&
-                  detectClaudeUsageLimitMenu(await captureTmuxPane(session.tmuxSession))?.limited;
-                if (isClaudeMenu) {
-                  this.logEvent("session.rate_limit.reactivation_skipped", {
-                    level: "info",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
-                    details: {
-                      rateLimitedAt: session.rateLimitedAt,
-                      afterHours,
-                    },
-                  });
+                const isClaudeStrategy = agentStateStrategy(session.agent) === "claude_jsonl";
+                const paneText = isClaudeStrategy ? await captureTmuxPane(session.tmuxSession) : "";
+                if (isClaudeStrategy && paneText === null) {
+                  // A failed fork is not an observation: typing the reactivation
+                  // prompt could land in a pane that may actually be showing the
+                  // arrow-key usage-limit menu (the same hazard the menu branch
+                  // below guards against). Skip the clear too, so a later tick can
+                  // still fire this episode — mirroring the undefined-liveState
+                  // precedent above — but bound it so a session stuck for good
+                  // (not just a transient fork loss) doesn't pin rateLimitedAt
+                  // forever.
+                  const rateLimitedAt = session.rateLimitedAt;
+                  const prior = this.rateLimitReactivationLastSkip.get(session.id);
+                  const unavailableTicks =
+                    prior !== undefined && prior.rateLimitedAt === rateLimitedAt
+                      ? prior.unavailableTicks + 1
+                      : 1;
+                  if (unavailableTicks > RATE_LIMIT_REACTIVATION_PANE_UNAVAILABLE_MAX_TICKS) {
+                    this.rateLimitReactivationLastSkip.delete(session.id);
+                    this.logEvent("session.rate_limit.reactivation_skipped", {
+                      level: "warn",
+                      sessionId: session.id,
+                      projectId: session.project,
+                      message: `Giving up on rate-limit reactivation for ${session.id}: pane capture failed for ${unavailableTicks} consecutive ticks`,
+                      details: {
+                        reason: "pane_unavailable_giving_up",
+                        rateLimitedAt,
+                        afterHours,
+                      },
+                    });
+                    // The give-up tick sends nothing: only the clear below
+                    // proceeds, ending the episode.
+                  } else {
+                    this.rateLimitReactivationLastSkip.set(session.id, {
+                      rateLimitedAt,
+                      unavailableTicks,
+                    });
+                    if (prior === undefined || prior.rateLimitedAt !== rateLimitedAt) {
+                      this.logEvent("session.rate_limit.reactivation_skipped", {
+                        level: "info",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Skipped rate-limit reactivation for ${session.id}: pane capture failed`,
+                        details: {
+                          reason: "pane_unavailable",
+                          rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    }
+                    skipClear = true;
+                  }
                 } else {
-                  try {
-                    await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
-                    this.logEvent("session.rate_limit.reactivated", {
+                  // paneText is only null when !isClaudeStrategy fell through
+                  // above (it defaults to ""), or the null-pane branch above
+                  // already handled the isClaudeStrategy case — never null
+                  // here when isClaudeStrategy is true.
+                  const isClaudeMenu =
+                    isClaudeStrategy && detectClaudeUsageLimitMenu(paneText ?? "")?.limited;
+                  if (isClaudeMenu) {
+                    this.logEvent("session.rate_limit.reactivation_skipped", {
                       level: "info",
                       sessionId: session.id,
                       projectId: session.project,
-                      message: `Sent rate-limit reactivation to ${session.id}`,
+                      message: `Skipped rate-limit reactivation for ${session.id}: pane shows the interactive usage-limit menu`,
                       details: {
+                        reason: "usage_limit_menu",
                         rateLimitedAt: session.rateLimitedAt,
                         afterHours,
                       },
                     });
-                  } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    this.logEvent("session.rate_limit.reactivation_failed", {
-                      level: "error",
-                      sessionId: session.id,
-                      projectId: session.project,
-                      message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
-                      details: {
-                        rateLimitedAt: session.rateLimitedAt,
-                        afterHours,
-                      },
-                    });
+                  } else {
+                    try {
+                      await this.send(session.id, { message: RATE_LIMIT_REACTIVATION_PROMPT });
+                      this.logEvent("session.rate_limit.reactivated", {
+                        level: "info",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Sent rate-limit reactivation to ${session.id}`,
+                        details: {
+                          rateLimitedAt: session.rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    } catch (error) {
+                      const message = error instanceof Error ? error.message : String(error);
+                      this.logEvent("session.rate_limit.reactivation_failed", {
+                        level: "error",
+                        sessionId: session.id,
+                        projectId: session.project,
+                        message: `Failed to send rate-limit reactivation to ${session.id}: ${message}`,
+                        details: {
+                          rateLimitedAt: session.rateLimitedAt,
+                          afterHours,
+                        },
+                      });
+                    }
                   }
                 }
               }
-              const current = readSession(this.config.dataDir, session.id) ?? session;
-              if (current.rateLimitedAt === session.rateLimitedAt) {
-                const { rateLimitedAt: _rateLimitedAt, ...base } = current;
-                writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+              if (!skipClear) {
+                this.rateLimitReactivationLastSkip.delete(session.id);
+                const current = readSession(this.config.dataDir, session.id) ?? session;
+                if (current.rateLimitedAt === session.rateLimitedAt) {
+                  const { rateLimitedAt: _rateLimitedAt, ...base } = current;
+                  writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+                }
               }
             }
           }
@@ -4263,50 +4771,66 @@ export class SessionService {
         if (!this.memoryHold.engaged && session.serverErrorAt) {
           const serverErrorAgeMs = now - Date.parse(session.serverErrorAt);
           if (serverErrorAgeMs >= CLAUDE_SERVER_ERROR_REACTIVATION_MS && liveState === "error") {
-            try {
-              await this.send(session.id, {
-                message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
-                queue: false,
-              });
-              this.logEvent("session.server_error.reactivated", {
-                level: "info",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Sent server-error reactivation to ${session.id}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              this.logEvent("session.server_error.reactivation_failed", {
-                level: "error",
-                sessionId: session.id,
-                projectId: session.project,
-                message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
-                details: {
-                  serverErrorAt: session.serverErrorAt,
-                },
-              });
-            }
-            // Re-arm under CAS: only if the marker is still what this tick read
-            // (a concurrent clear/re-arm wins otherwise), so the next attempt is
-            // a fresh 30 minutes out.
-            const current = readSession(this.config.dataDir, session.id) ?? session;
-            if (current.serverErrorAt === session.serverErrorAt) {
+            await this.withWorkspaceLifecycleLocks(session.id, async () => {
+              const current = readSession(this.config.dataDir, session.id);
+              if (
+                !current?.serverErrorAt ||
+                current.status !== "running" ||
+                this.memoryHold.engaged ||
+                now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
+                (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+              )
+                return;
+              const attempts = (current.serverErrorReactivationAttempts ?? 0) + 1;
               writeSession(this.config.dataDir, {
                 ...current,
                 serverErrorAt: new Date(now).toISOString(),
+                serverErrorReactivationAttempts: attempts,
                 updatedAt: nowIso(),
               });
-            }
+              if (attempts === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+                this.logEvent("session.server_error.reactivation_exhausted", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Server-error reminder budget exhausted for ${session.id}`,
+                });
+              }
+              try {
+                await this.sendLocked(session.id, {
+                  message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                  queue: false,
+                });
+                this.logEvent("session.server_error.reactivated", {
+                  level: "info",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Sent server-error reactivation to ${session.id}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logEvent("session.server_error.reactivation_failed", {
+                  level: "error",
+                  sessionId: session.id,
+                  projectId: session.project,
+                  message: `Failed to send server-error reactivation to ${session.id}: ${message}`,
+                  details: {
+                    serverErrorAt: session.serverErrorAt,
+                  },
+                });
+              }
+            });
           }
         }
 
         const dailyWake = session.dailyWake;
         if (
           !dailyWake ||
-          this.memoryHold.engaged ||
+          (this.memoryHold.engaged &&
+            !(this.isLiveSessionRecord(session) && !isStaleParked(session))) ||
           Date.parse(dailyWake.nextDueAt) > now ||
           !(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))
         ) {
@@ -5198,9 +5722,9 @@ export class SessionService {
         // Kick the delivery runner now, synchronously, so it (not reconcile)
         // is the one racing for this session: ensureDeliveryRunner is a no-op
         // if a loop is already running (deliveryRuns dedupe), and the loop's
-        // own tryDeliverQueuedMessage claims queueDeliveryInFlight before its
-        // first await, so this can never start a second concurrent recovery
-        // attempt against the same pane. Queue the runner after this locked
+        // own tryDeliverQueuedMessage runs under the same lifecycle lock, so
+        // this can never start a second concurrent recovery attempt against
+        // the same pane. Queue the runner after this locked
         // method returns; its promise starts on a later microtask and chains
         // behind the lifecycle lock held here.
         if (cleaned && cleaned.status === "running" && deliveryPending) {
@@ -5295,8 +5819,13 @@ export class SessionService {
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
             await this.maybeNudgeForgottenReply(view);
           }
-          if (view.status === "running" && view.state === "waiting") {
-            await this.maybeNudgeTodo(session);
+          if (view.state === "working") this.maybeSendTelegramTyping(view.id);
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
+            this.scheduleTodoNudge(session);
           }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
           // view.lastActivityAt: that value is the UI-facing max of agent
@@ -5388,6 +5917,9 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const [chatId, pausedUntil] of this.telegramTypingPausedUntil) {
+      if (pausedUntil <= Date.now()) this.telegramTypingPausedUntil.delete(chatId);
+    }
     for (const sessionId of this.lastSuccessfulTodoNudgeAt.keys()) {
       if (!liveIds.has(sessionId)) this.lastSuccessfulTodoNudgeAt.delete(sessionId);
     }
@@ -5396,6 +5928,16 @@ export class SessionService {
     }
     for (const sessionId of this.todoNudgeBackoff.keys()) {
       if (!liveIds.has(sessionId)) this.todoNudgeBackoff.delete(sessionId);
+    }
+    // Keyed `${sessionId}\0${sidecarName}`, unlike every other map here —
+    // test only the first \0-split segment against liveIds.
+    for (const key of this.sidecarStartConflictState.keys()) {
+      const sessionId = key.split("\0")[0] ?? key;
+      if (!liveIds.has(sessionId)) this.sidecarStartConflictState.delete(key);
+    }
+    for (const key of this.sidecarStartNoopIdentity.keys()) {
+      const sessionId = key.split("\0")[0] ?? key;
+      if (!liveIds.has(sessionId)) this.sidecarStartNoopIdentity.delete(key);
     }
     for (const sessionId of this.codexMcpDialogOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
@@ -5407,9 +5949,19 @@ export class SessionService {
         this.claudeCompactingOverrides.delete(sessionId);
       }
     }
+    for (const sessionId of this.cursorPaneReadyOverrides.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.cursorPaneReadyOverrides.delete(sessionId);
+      }
+    }
     for (const sessionId of this.claudeRateLimitReconfirmOverrides.keys()) {
       if (!liveIds.has(sessionId)) {
         this.claudeRateLimitReconfirmOverrides.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.rateLimitReactivationLastSkip.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.rateLimitReactivationLastSkip.delete(sessionId);
       }
     }
     for (const sessionId of this.lastClassifiedLogStates.keys()) {
@@ -5425,6 +5977,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.paneChildFallbackNotified) {
+      if (!liveIds.has(sessionId)) {
+        this.paneChildFallbackNotified.delete(sessionId);
       }
     }
     for (const sessionId of this.claudeJsonlReaders.keys()) {
@@ -5460,6 +6017,11 @@ export class SessionService {
     for (const sessionId of this.queuedMessageDeliveryLastFailure.keys()) {
       if (!liveIds.has(sessionId)) {
         this.queuedMessageDeliveryLastFailure.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.lastHumanHeldNudgeRevisions.keys()) {
+      if (!liveIds.has(sessionId)) {
+        this.lastHumanHeldNudgeRevisions.delete(sessionId);
       }
     }
   }
@@ -5848,6 +6410,7 @@ export class SessionService {
     }
     this.sessionGcTimer = setInterval(() => {
       void this.runSessionGcSweep();
+      void this.runDiskBudgetSweep();
       this.runArtifactRetentionSweep();
     }, SESSION_GC_TICK_MS);
     this.sessionGcTimer.unref();
@@ -5922,6 +6485,51 @@ export class SessionService {
     } finally {
       this.sessionGcRunning = false;
     }
+  }
+
+  // The daemon NEVER runs `du` (see cache-retention.ts's call-site comment):
+  // it reads the CLI-written `<dataDir>/disk-budget.json` instead of
+  // measuring anything itself. A missing or stale (older than
+  // 2 * intervalMinutes) measurement is not evidence of a breach and emits
+  // nothing — silence here means "no recent `spur disk` run", not "under
+  // budget". Modelled on warnIfHostDiskLow (report-only, never throws) and
+  // runSessionGcSweep's config-gated cadence.
+  private async runDiskBudgetSweep(): Promise<void> {
+    const budgetConfig = this.config.diskBudget;
+    if (!budgetConfig.enabled) {
+      return;
+    }
+    if (Date.now() - this.lastDiskBudgetSweepAt < budgetConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    this.lastDiskBudgetSweepAt = Date.now();
+    // No try/catch here: readDiskBudgetReport already swallows every read/parse
+    // failure internally and returns undefined (repo rule — fail closed, never
+    // throw), and nothing else below can throw. A catch around a call that
+    // cannot fail is dead code with an event name (`disk.budget.sweep.failed`)
+    // no test could ever exercise honestly — S9.
+    const report = await readDiskBudgetReport(this.config.dataDir);
+    if (!report) {
+      return;
+    }
+    const ageMs = Date.now() - new Date(report.generatedAt).getTime();
+    if (!Number.isFinite(ageMs) || ageMs > 2 * budgetConfig.intervalMinutes * 60_000) {
+      return;
+    }
+    const warnBytes = budgetConfig.warnAttributableGb * 1024 * 1024 * 1024;
+    if (report.totals.attributableBytes <= warnBytes) {
+      return;
+    }
+    const attributableGb = report.totals.attributableBytes / (1024 * 1024 * 1024);
+    this.logEvent("host.disk.budget_exceeded", {
+      level: "warn",
+      message: `Spur-attributable disk usage is ${attributableGb.toFixed(1)}GB (above the ${budgetConfig.warnAttributableGb}GB budget)`,
+      details: {
+        attributableGb,
+        warnAttributableGb: budgetConfig.warnAttributableGb,
+        roots: report.roots.map((root) => ({ id: root.id, sizeBytes: root.sizeBytes })),
+      },
+    });
   }
 
   // Rides the session-gc tick rather than adding a second timer, but keeps its
@@ -6271,14 +6879,17 @@ export class SessionService {
     const label = telegramSessionLabel(session);
     const text =
       attention === "needs_input"
-        ? `${telegramStatusEmoji("needs_input")} ${label} needs input${paneTail}`
+        ? `${telegramStatusEmoji("needs_input")} ${label} needs input`
         : attention === "error"
-          ? `${telegramStatusEmoji("error")} ${label} error${paneTail}`
+          ? `${telegramStatusEmoji("error")} ${label} error`
           : `${telegramStatusEmoji("rate_limited")} ${label} rate limited`;
-    await this.pushTelegramNotice(session.id, session, text, { updateTopicName: true });
+    await this.pushTelegramNotice(session.id, session, text, {
+      updateTopicName: true,
+      ...(paneTail ? { preformatted: paneTail } : {}),
+    });
   }
 
-  private resolveTelegramNotice(sessionId: string) {
+  private resolveTelegramNotice(sessionId: string): ResolvedTelegramNotice | null {
     const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
     if (!target) return null;
     const source = this.config.projects[target.projectId]?.sources[target.sourceId];
@@ -6299,33 +6910,218 @@ export class SessionService {
     sessionId: string,
     topicSession: Pick<SessionView, "id" | "agent" | "state" | "slots">,
     text: string,
-    options: { updateTopicName?: boolean; closeTopic?: boolean } = {},
+    options: {
+      updateTopicName?: boolean;
+      closeTopic?: boolean;
+      /** Raw pane tail, shown verbatim in a code block after the text. */
+      preformatted?: string;
+      /** Target resolved before its state was deleted; omit to resolve now. */
+      resolved?: ResolvedTelegramNotice | null;
+    } = {},
   ): Promise<void> {
     try {
-      const resolved = this.resolveTelegramNotice(sessionId);
+      const resolved =
+        options.resolved !== undefined ? options.resolved : this.resolveTelegramNotice(sessionId);
       if (!resolved) return;
       const { target, source } = resolved;
-      await sendTelegramReply(source, target, text, { topicName: telegramTopicName(topicSession) });
-      if (target.messageThreadId !== undefined && target.chatId < 0) {
-        if (options.closeTopic) {
+      this.claimTelegramPlaceholder(sessionId, target);
+      const result = await sendTelegramReply(source, target, text, {
+        topicName: telegramTopicName(topicSession),
+        ...(options.preformatted ? { preformatted: options.preformatted } : {}),
+      });
+      this.recordTelegramSend(sessionId, target, result, {
+        createIfMissing: false,
+        topicName: telegramTopicName(topicSession),
+      });
+      if (options.closeTopic) {
+        if (target.messageThreadId !== undefined && target.chatId < 0) {
           await closeTelegramTopic(source, target.chatId, target.messageThreadId);
-        } else if (options.updateTopicName) {
-          await editTelegramTopic(
-            source,
-            target.chatId,
-            target.messageThreadId,
-            telegramTopicName(topicSession),
-          );
         }
+      } else if (options.updateTopicName) {
+        await this.syncTelegramTopicName(sessionId, topicSession);
       }
     } catch (error) {
       this.logTelegramNoticeFailure(sessionId, "notice", error);
     }
   }
 
+  /**
+   * Renames the agent's forum topic when its computed name (status emoji, id,
+   * agent, title) differs from the last name applied. The one place that calls
+   * editTelegramTopic; group topics only.
+   */
+  private async syncTelegramTopicName(
+    sessionId: string,
+    view: Pick<SessionView, "id" | "agent" | "state" | "slots">,
+  ): Promise<void> {
+    try {
+      const resolved = this.resolveTelegramNotice(sessionId);
+      if (!resolved) return;
+      const { target, source } = resolved;
+      if (target.chatId >= 0 || target.messageThreadId === undefined) return;
+      const name = telegramTopicName(view);
+      if (target.topicName === name) return;
+      // Recorded only when Telegram accepted it, so a failed rename retries.
+      if (await editTelegramTopic(source, target.chatId, target.messageThreadId, name)) {
+        this.patchTelegramReplyTarget(sessionId, null, { topicName: name });
+      }
+    } catch (error) {
+      this.logTelegramNoticeFailure(sessionId, "topic rename", error);
+    }
+  }
+
+  /**
+   * Re-reads the reply target and merges into it: an inbound that landed a
+   * new placeholder while the send was in flight must survive. Only the
+   * placeholder that was sent is cleared. A target deleted meanwhile is
+   * recreated from `fallback` alone; without one nothing is written.
+   */
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: TelegramReplyTarget,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget;
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: null,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget | null;
+  private patchTelegramReplyTarget(
+    sessionId: string,
+    fallback: TelegramReplyTarget | null,
+    changes: TelegramReplyTargetChanges,
+  ): TelegramReplyTarget | null {
+    const stored = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const current = stored ?? fallback;
+    if (!current) return null;
+    const { updatedAt: _updatedAt, statusMessageId, ...rest } = current;
+    const keptStatus =
+      statusMessageId !== changes.sentStatusMessageId ? statusMessageId : undefined;
+    const appliesThread =
+      changes.createdThread !== undefined &&
+      current.chatId === changes.createdThread.chatId &&
+      current.messageThreadId === undefined;
+    const merged = {
+      ...rest,
+      ...(keptStatus !== undefined ? { statusMessageId: keptStatus } : {}),
+      ...(appliesThread && changes.createdThread
+        ? { messageThreadId: changes.createdThread.messageThreadId }
+        : {}),
+      ...(changes.topicName !== undefined && (changes.createdThread === undefined || appliesThread)
+        ? { topicName: changes.topicName }
+        : {}),
+      ...(changes.lastReplyAt !== undefined ? { lastReplyAt: changes.lastReplyAt } : {}),
+    };
+    // A target rebuilt from the fallback never lands on a chat and thread that
+    // another session's binding already owns.
+    if (stored === null && this.telegramThreadBoundToOther(merged, sessionId)) {
+      return { ...merged, updatedAt: nowIso() };
+    }
+    writeTelegramReplyTarget(this.config.dataDir, merged);
+    return { ...merged, updatedAt: nowIso() };
+  }
+
+  private telegramThreadBoundToOther(
+    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
+    sessionId: string,
+  ): boolean {
+    const bound = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId).get(
+      telegramBindingKey(target.chatId, target.messageThreadId),
+    );
+    return bound !== undefined && bound.sessionId !== sessionId;
+  }
+
+  /**
+   * Marks the placeholder as in use before the send starts, in the same
+   * synchronous step that read the target. An inbound arriving mid-send then
+   * finds no unconsumed placeholder and cannot overwrite the answer with its
+   * "Received." edit. Never recreates a deleted target.
+   */
+  private claimTelegramPlaceholder(sessionId: string, target: TelegramReplyTarget): void {
+    if (target.statusMessageId === undefined) return;
+    this.patchTelegramReplyTarget(sessionId, null, { sentStatusMessageId: target.statusMessageId });
+  }
+
+  /**
+   * The one post-send writer: remembers the sent message ids for reply
+   * routing, then settles the reply target (placeholder consumed, created
+   * topic, reply stamp). A notice never recreates a deleted target.
+   */
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: true },
+  ): TelegramReplyTarget;
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: false },
+  ): TelegramReplyTarget | null;
+  private recordTelegramSend(
+    sessionId: string,
+    target: TelegramReplyTarget,
+    result: TelegramReplySendResult,
+    options: { lastReplyAt?: string; topicName?: string; createIfMissing: boolean },
+  ): TelegramReplyTarget | null {
+    recordTelegramMessages(
+      this.config.dataDir,
+      target.projectId,
+      target.sourceId,
+      { sessionId, chatId: target.chatId },
+      result.messageIds,
+    );
+    const changes: TelegramReplyTargetChanges = {
+      ...(result.statusMessageIdConsumed && target.statusMessageId !== undefined
+        ? { sentStatusMessageId: target.statusMessageId }
+        : {}),
+      ...(result.messageThreadId !== undefined
+        ? { createdThread: { chatId: target.chatId, messageThreadId: result.messageThreadId } }
+        : {}),
+      // A topic the send just created carries the name it was created with.
+      ...(result.messageThreadId !== undefined && options.topicName !== undefined
+        ? { topicName: options.topicName }
+        : {}),
+      ...(options.lastReplyAt !== undefined ? { lastReplyAt: options.lastReplyAt } : {}),
+    };
+    return options.createIfMissing
+      ? this.patchTelegramReplyTarget(sessionId, target, changes)
+      : this.patchTelegramReplyTarget(sessionId, null, changes);
+  }
+
   private async buildPaneTail(tmuxSession: string): Promise<string> {
-    const tail = (await captureTmuxPane(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
-    return tail ? `\n\`\`\`\n${tail}\n\`\`\`` : "";
+    return (await captureTmuxPaneOrEmpty(tmuxSession, ATTENTION_PANE_TAIL_LINES)).trim();
+  }
+
+  /**
+   * Shows "typing" in the chat while the session works on a Telegram message
+   * that is delivered but unanswered. At most one call per sweep, none after a
+   * reply, past the cap, or for a group main chat. Fire and forget.
+   */
+  private maybeSendTelegramTyping(sessionId: string): void {
+    if (this.telegramTypingInFlight.has(sessionId)) return;
+    const resolved = this.resolveTelegramNotice(sessionId);
+    if (!resolved) return;
+    const { target, source } = resolved;
+    // Telegram rate-limits per chat, so a 429 pauses every session in that chat.
+    if (Date.now() < (this.telegramTypingPausedUntil.get(target.chatId) ?? 0)) return;
+    if (target.lastInboundAt === undefined) return;
+    if (target.lastReplyAt !== undefined && target.lastReplyAt >= target.lastInboundAt) return;
+    if (Date.now() - Date.parse(target.lastInboundAt) > TELEGRAM_TYPING_MAX_MS) return;
+    if (target.chatId < 0 && target.messageThreadId === undefined) return;
+    // Still queued: the agent has not seen the message yet.
+    if (hasPendingTelegramSend(this.config.dataDir, sessionId)) return;
+    this.telegramTypingInFlight.add(sessionId);
+    void sendTelegramChatAction(source, target.chatId, target.messageThreadId)
+      .then(({ retryAfterMs }) => {
+        if (retryAfterMs !== undefined) {
+          this.telegramTypingPausedUntil.set(target.chatId, Date.now() + retryAfterMs);
+        }
+      })
+      .finally(() => {
+        this.telegramTypingInFlight.delete(sessionId);
+      });
   }
 
   private async maybeNudgeForgottenReply(
@@ -6339,19 +7135,17 @@ export class SessionService {
         target.lastReplyAt !== undefined &&
         (target.lastInboundAt === undefined || target.lastReplyAt >= target.lastInboundAt);
       if (alreadyReplied) return;
+      // The user's message has not reached the agent yet: "waiting" would be a
+      // lie. No stamp either, so the first edge after delivery still nudges.
+      if (hasPendingTelegramSend(this.config.dataDir, view.id, { unclaimedOnly: true })) return;
       await this.pushTelegramNotice(
         view.id,
         view,
         `${telegramStatusEmoji("waiting")} ${telegramSessionLabel(view)} is waiting.`,
-        {
-          updateTopicName: true,
-        },
+        { updateTopicName: true, resolved },
       );
-      const { updatedAt: _updatedAt, ...rest } = target;
-      writeTelegramReplyTarget(this.config.dataDir, {
-        ...rest,
-        lastReplyAt: new Date().toISOString(),
-      });
+      // Stamped on every attempt, sent or failed: one nudge per inbound.
+      this.patchTelegramReplyTarget(view.id, null, { lastReplyAt: nowIso() });
     } catch (error) {
       this.logTelegramNoticeFailure(view.id, "forgotten-reply nudge", error);
     }
@@ -6369,9 +7163,7 @@ export class SessionService {
   private todoNudgeBackoffBaseMs(): number {
     const collapseWindowMs =
       this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
-    // Floor at the original fixed base: a tiny configured collapseWindowMs
-    // must not shrink the nudge backoff below its pre-derivation floor.
-    return Math.max(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs * 2);
+    return backoffBaseMs(TODO_NUDGE_BACKOFF_BASE_MS, collapseWindowMs);
   }
 
   // A same-id respawn (relaunchSessionInPlace, restoreLocked) invalidates a
@@ -6384,11 +7176,46 @@ export class SessionService {
     }
   }
 
-  private async maybeNudgeTodo(session: SessionRecord): Promise<void> {
+  // Detached from the attention sweep and skipped while the session is busy:
+  // a reminder never queues behind (or ahead of) a user send, and one pane's
+  // ack wait never stalls the sweep for every other session. A skipped tick
+  // is retried by the next sweep; attempts stay bounded by todoNudge.
+  private scheduleTodoNudge(session: SessionRecord): void {
     if (
+      this.todoNudgesInFlight.has(session.id) ||
+      this.sessionLifecycleLocks.has(session.id) ||
+      this.paneWriteLocks.has(session.tmuxSession)
+    ) {
+      return;
+    }
+    this.todoNudgesInFlight.add(session.id);
+    void this.maybeNudgeTodo(session, { detached: true })
+      .catch(() => {})
+      .finally(() => {
+        this.todoNudgesInFlight.delete(session.id);
+      });
+  }
+
+  private async maybeNudgeTodo(
+    session: SessionRecord,
+    options?: { detached?: boolean },
+  ): Promise<void> {
+    return this.withWorkspaceLifecycleLocks(session.id, () =>
+      this.maybeNudgeTodoLocked(session, options),
+    );
+  }
+
+  private async maybeNudgeTodoLocked(
+    session: SessionRecord,
+    options?: { detached?: boolean },
+  ): Promise<void> {
+    if (
+      this.isInRestoreWarmup(session.id) ||
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
-      session.pipeline?.status === "running"
+      session.pipeline?.status === "running" ||
+      submitPending(session) ||
+      hasPendingTelegramSend(this.config.dataDir, session.id)
     ) {
       return;
     }
@@ -6397,39 +7224,120 @@ export class SessionService {
     const lastSuccessful = this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0;
     if (Date.now() - lastSuccessful < 60_000) return;
     try {
-      const projection = ensureTodoLedger(this.config.dataDir, session);
-      const open = projection.items.filter((item) => item.status === "open");
-      const humanHeld = projection.items.filter(
-        (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
-      );
-      let message: string | null = null;
-      if (open.length > 0) {
-        message = `Spur ToDo still has open work:\n${open
-          .map((item) => `- ${item.id}: ${item.text}`)
-          .join(
-            "\n",
-          )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
-      } else if (humanHeld.length > 0) {
-        message = `Spur ToDo needs human input:\n${humanHeld
-          .map((item) => {
-            const blocker = item.latestTransition?.blocker;
-            return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
-          })
-          .join("\n")}\nRequest the required input before continuing.`;
-      } else if (projection.counts.total === 0) {
-        message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
-      }
-      if (!message) {
-        // A clean observation with nothing to send: #836's "cleared on a
-        // clean observation". Not moved above the ensureTodoLedger read —
-        // that read succeeds on every send-failure cycle, so clearing there
-        // would zero `failures` forever and flatten the backoff to the base.
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const current = readSession(this.config.dataDir, session.id);
+        if (
+          !current ||
+          current.status !== "running" ||
+          hasQueuedMessages(current) ||
+          current.queuedMessages?.awaitingPrompt ||
+          current.pipeline?.status === "running" ||
+          submitPending(current) ||
+          hasPendingTelegramSend(this.config.dataDir, session.id)
+        )
+          return;
+        if (
+          this.todoNudgeDisabled.has(session.id) ||
+          (this.todoNudgeBackoff.get(session.id)?.nextRetryAtMs ?? 0) > Date.now() ||
+          Date.now() - (this.lastSuccessfulTodoNudgeAt.get(session.id) ?? 0) < 60_000
+        )
+          return;
+        session = current;
+        const projection = ensureTodoLedger(this.config.dataDir, session);
+        const ledgerSession = readSession(this.config.dataDir, session.id);
+        if (!ledgerSession) return;
+        session = ledgerSession;
+        const open = projection.items
+          .filter((item) => item.status === "open")
+          .sort((a, b) => a.id.localeCompare(b.id));
+        const humanHeld = projection.items
+          .filter(
+            (item) => item.status === "held" && item.latestTransition?.blocker?.kind === "human",
+          )
+          .sort((a, b) => a.id.localeCompare(b.id));
+        let message: string | null = null;
+        if (open.length > 0) {
+          message = `Spur ToDo still has open work:\n${open
+            .map((item) => `- ${item.id}: ${item.text}`)
+            .join(
+              "\n",
+            )}\nResolve it with \`"$SPUR_TODO_COMMAND" complete|cancel|hold <itemId> --reason <reason>\`.`;
+        } else if (
+          humanHeld.length > 0 &&
+          this.lastHumanHeldNudgeRevisions.get(session.id) !== projection.revision
+        ) {
+          // A human blocker cannot be advanced by the agent, so repeating this
+          // nudge every sweep manufactures work. One per ledger revision: any
+          // append (resume, add, re-hold) re-arms it, a frozen ledger does not.
+          this.lastHumanHeldNudgeRevisions.set(session.id, projection.revision);
+          message = `Spur ToDo needs human input:\n${humanHeld
+            .map((item) => {
+              const blocker = item.latestTransition?.blocker;
+              return `- ${item.id}: ${blocker?.kind === "human" ? blocker.requiredAction : item.text}`;
+            })
+            .join("\n")}\nRequest the required input before continuing.`;
+        } else if (projection.counts.total === 0) {
+          message = `Spur ToDo is empty. Record the step you are on before continuing: "$SPUR_TODO_COMMAND" add --text <step> --reason <why>.`;
+        }
+        if (!message) {
+          // A clean observation with nothing to send: #836's "cleared on a
+          // clean observation". Not moved above the ensureTodoLedger read —
+          // that read succeeds on every send-failure cycle, so clearing there
+          // would zero `failures` forever and flatten the backoff to the base.
+          this.todoNudgeBackoff.delete(session.id);
+          if (session.todoNudge) {
+            const { todoNudge: _todoNudge, ...base } = session;
+            writeSession(this.config.dataDir, base);
+          }
+          return;
+        }
+        const fingerprint = createHash("sha256")
+          .update(
+            JSON.stringify(
+              open.length
+                ? ["open", open.map((item) => [item.id, item.text])]
+                : humanHeld.length
+                  ? [
+                      "human",
+                      humanHeld.map((item) => [
+                        item.id,
+                        item.latestTransition?.blocker?.kind === "human"
+                          ? item.latestTransition.blocker.requiredAction
+                          : item.text,
+                      ]),
+                    ]
+                  : ["empty"],
+            ),
+          )
+          .digest("hex");
+        const attempts =
+          session.todoNudge?.fingerprint === fingerprint ? session.todoNudge.attempts : 0;
+        if (attempts >= AUTOMATIC_REMINDER_MAX_ATTEMPTS) return;
+        // A detached reminder outlives the sweep that scheduled it; after
+        // dispose() it must neither spend an attempt nor type into the pane.
+        if (options?.detached === true && this.deliveryStopped) return;
+        writeSession(this.config.dataDir, {
+          ...session,
+          todoNudge: { fingerprint, attempts: attempts + 1 },
+        });
+        if (attempts + 1 === AUTOMATIC_REMINDER_MAX_ATTEMPTS) {
+          this.logEvent("session.todo.nudge_exhausted", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Spur ToDo reminder budget exhausted for ${session.id}`,
+          });
+        }
+        try {
+          await this.writeAgentMessage(session, message, { interrupt: false, interactive: true });
+        } catch (error) {
+          // Live agent past the ack budget: the text landed, same policy as
+          // send/flush/drain. Counting it failed would resend the reminder.
+          if (!isRecoveredSubmitAckTimeout(error)) throw error;
+        }
+        this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
         this.todoNudgeBackoff.delete(session.id);
-        return;
-      }
-      await this.sendAgentMessage(session, message, { interrupt: false });
-      this.lastSuccessfulTodoNudgeAt.set(session.id, Date.now());
-      this.todoNudgeBackoff.delete(session.id);
+      });
     } catch (error) {
       if (
         (error instanceof TodoLedgerCorruptError && !error.transient) ||
@@ -6462,7 +7370,7 @@ export class SessionService {
       // collapseWindowMs derives a base above the fixed 30-minute cap, and
       // clamping to that fixed cap would put every retry back under the
       // collapse window it exists to clear.
-      const cap = Math.max(TODO_NUDGE_BACKOFF_MAX_MS, base);
+      const cap = backoffCapMs(TODO_NUDGE_BACKOFF_MAX_MS, base);
       this.todoNudgeBackoff.set(session.id, {
         failures,
         nextRetryAtMs: Date.now() + Math.min(base * 2 ** (failures - 1), cap),
@@ -6476,7 +7384,7 @@ export class SessionService {
     }
     const project = this.config.projects[projectId];
     if (!project) {
-      throw new Error(`Unknown project: ${projectId}`);
+      throw new SessionResourceNotFoundError(`Unknown project: ${projectId}`);
     }
     return project;
   }
@@ -6537,6 +7445,197 @@ export class SessionService {
     }
 
     return localProject ?? daemonProject;
+  }
+
+  private sidecarConflictKey(sessionId: string, sidecarName: string): string {
+    return `${sessionId}\0${sidecarName}`;
+  }
+
+  private sidecarStartConflictBaseMs(): number {
+    const collapseWindowMs =
+      this.config.eventLog?.collapseWindowMs ?? DEFAULT_EVENT_LOG_COLLAPSE_WINDOW_MS;
+    return backoffBaseMs(SIDECAR_START_CONFLICT_BACKOFF_BASE_MS, collapseWindowMs);
+  }
+
+  private sidecarStartConflictDeadlineMs(): number {
+    const base = this.sidecarStartConflictBaseMs();
+    const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+    return Math.max(SIDECAR_START_CONFLICT_DEADLINE_MS, cap);
+  }
+
+  // A blocked candidate carrying `reservedBy` (`sessionId/sidecarName`) is
+  // blocked by a live Spur reservation, not raw host occupancy — the port
+  // itself can be perfectly free (isHostPortFree true) while the recording
+  // session still owns it with an alive pane, exactly the reservedBy shape
+  // buildRangeCandidates emits. Re-probing with isHostPortFree alone would
+  // read that as "freed" every time and clear the refusal state before it
+  // ever reaches the terminal event, defeating the whole point of the
+  // bounded-refusal cache (REQ1). Mirrors the same two facts
+  // ensureSidecarReservation's own `unavailable` scan checks: is the port
+  // still recorded there, and is that owner's pane still alive.
+  private async isConflictCandidateStillBlocked(
+    candidate: SidecarPortConflictCandidate,
+  ): Promise<boolean> {
+    const slashIdx = candidate.reservedBy?.indexOf("/") ?? -1;
+    if (candidate.reservedBy && slashIdx > 0) {
+      const ownerId = candidate.reservedBy.slice(0, slashIdx);
+      const scName = candidate.reservedBy.slice(slashIdx + 1);
+      const owner = readSession(this.config.dataDir, ownerId);
+      const stillRecorded = Object.values(owner?.sidecarPorts?.[scName] ?? {}).includes(
+        candidate.port,
+      );
+      if (!stillRecorded) return false;
+      // Unreachable at runtime (stillRecorded already required owner to
+      // exist), kept only to narrow `owner` to non-null for
+      // resolveProjectForSession below.
+      if (!owner) return !(await isHostPortFree(candidate.port));
+      let project: ProjectConfig | undefined;
+      try {
+        project = this.resolveProjectForSession(owner);
+      } catch {
+        project = undefined;
+      }
+      const tmuxOwnerId = this.sidecarOwnerIdForName(owner, project, scName);
+      return sidecarTmuxAlive(tmuxOwnerId, scName);
+    }
+    // No parseable session/sidecar owner (host-occupied, unattributed, or a
+    // service-held port with no session record to consult): the only
+    // available signal is raw host occupancy.
+    return !(await isHostPortFree(candidate.port));
+  }
+
+  // Checked BEFORE withSidecarPortLock so a cached refusal never queues on
+  // the process-global lock. Never a permanent latch: an explicit
+  // clearPort bypasses this gate entirely, as do stop/complete/relaunch/
+  // restore/prune (this session's own lifecycle) AND sessionWithReleased
+  // SidecarPorts' cross-session clear (any OTHER session whose sidecar
+  // port this one's cached refusal named in reservedBy, the moment that
+  // OTHER session's release ACTUALLY drops the port — kill, stale-timeout
+  // park, worktree rebuild, restore rollback, or reconcileUnexpectedStop's
+  // crashed-holder path, every release site funnels through it). Beyond
+  // all of those, a post-deadline re-probe — at most once per backoff
+  // window, never on every attempt, since nextProbeAtMs is re-armed after
+  // each terminal refusal and failures is frozen once the gate starts
+  // short-circuiting the body's catch — runs the full start the moment it
+  // finds a blocked port has freed.
+  private async sidecarStartConflictGate(
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<SidecarPortConflictError | null> {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    const state = this.sidecarStartConflictState.get(key);
+    // A defensive guard, not an active code path: sidecarStartConflictState
+    // now holds only real conflicts (recordSidecarStartConflict is the sole
+    // writer, always called with >=1 candidate per invariant 9 — the
+    // own-identity no-op dedup lives in its own sidecarStartNoopIdentity
+    // map, never here), so an empty candidates list on an existing entry
+    // should never occur.
+    if (!state || state.candidates.length === 0) {
+      return null;
+    }
+    const now = Date.now();
+    const deadlineAtMs = state.firstConflictAtMs + this.sidecarStartConflictDeadlineMs();
+    if (now >= deadlineAtMs) {
+      // Bounds the post-deadline re-probe to at most once per backoff
+      // window, not once per attempt: an unfreed port past the deadline
+      // still throws the cached payload here without a re-probe until
+      // nextProbeAtMs, which this branch re-arms below every time it stays
+      // blocked (failures is frozen once the gate starts short-circuiting
+      // the body's catch, so that cadence is a fixed
+      // min(base * 2^(failures-1), cap) from here on).
+      if (now < state.nextProbeAtMs) {
+        return new SidecarPortConflictError(sidecarName, state.candidates);
+      }
+      // One fleet refresh for the whole batch — same pattern as the reclaim
+      // scan, never N independent fresh reads.
+      await refreshTmuxFleetSnapshot();
+      // Cheap re-probe over only the previously blocked candidates — reuses
+      // the same reservation-or-occupancy predicate the initial scan used,
+      // never raw isHostPortFree alone.
+      const stillBlocked = await Promise.all(
+        state.candidates.map((candidate) => this.isConflictCandidateStillBlocked(candidate)),
+      );
+      if (stillBlocked.some((blocked) => !blocked)) {
+        this.sidecarStartConflictState.delete(key);
+        return null;
+      }
+      const base = this.sidecarStartConflictBaseMs();
+      const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+      state.nextProbeAtMs = now + Math.min(base * 2 ** (state.failures - 1), cap);
+      if (!state.terminalEmitted) {
+        state.terminalEmitted = true;
+        this.logEvent("session.sidecar.start_rejected", {
+          level: "warn",
+          sessionId,
+          message: `Sidecar ${sidecarName} start refused: port conflict persisted past the retry deadline`,
+          details: {
+            reason: "port_conflict",
+            sidecarName,
+            candidates: state.candidates,
+            terminal: true,
+          },
+        });
+      }
+      return new SidecarPortConflictError(sidecarName, state.candidates);
+    }
+    if (now < state.nextProbeAtMs) {
+      return new SidecarPortConflictError(sidecarName, state.candidates);
+    }
+    return null;
+  }
+
+  private recordSidecarStartConflict(
+    sessionId: string,
+    sidecarName: string,
+    candidates: SidecarPortConflictCandidate[],
+  ): void {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    const existing = this.sidecarStartConflictState.get(key);
+    const base = this.sidecarStartConflictBaseMs();
+    const cap = backoffCapMs(SIDECAR_START_CONFLICT_BACKOFF_MAX_MS, base);
+    const failures = (existing?.failures ?? 0) + 1;
+    const now = Date.now();
+    this.sidecarStartConflictState.set(key, {
+      failures,
+      nextProbeAtMs: now + Math.min(base * 2 ** (failures - 1), cap),
+      // Safe to read via a bare `?? now`: sidecarStartConflictState now
+      // holds ONLY real conflicts (the no-op path writes its own separate
+      // sidecarStartNoopIdentity map), so an `existing` entry here always
+      // carries a genuine prior firstConflictAtMs, never a seeded 0.
+      firstConflictAtMs: existing?.firstConflictAtMs ?? now,
+      terminalEmitted: existing?.terminalEmitted ?? false,
+      candidates,
+    });
+  }
+
+  private clearSidecarStartConflict(sessionId: string, sidecarName: string): void {
+    const key = this.sidecarConflictKey(sessionId, sidecarName);
+    this.sidecarStartConflictState.delete(key);
+    this.sidecarStartNoopIdentity.delete(key);
+  }
+
+  // A cached refusal on session B can name session A's sidecar in a
+  // candidate's reservedBy (built as exactly `${sessionId}/${sidecarName}`,
+  // :6874-6879 — the record id, never a workspace/anchor id, so this is
+  // unrelated to the sidecarOwnerIdForName desk-shared class of bug).
+  // Called only from sessionWithReleasedSidecarPorts, once per sidecar name
+  // that call ACTUALLY drops — never for one it keeps (a kept desk-shared
+  // entry still blocks a waiting sibling; clearing there would let B's
+  // deadline restart on every kill of an unrelated desk member without the
+  // block it was waiting on ever actually lifting, re-arming exactly the
+  // bound this cache exists to enforce). Synchronous, no I/O: preserves
+  // sessionWithReleasedSidecarPorts' own no-await contract, so there is no
+  // withSidecarPortLock interleave hazard.
+  private clearSidecarStartConflictsReferencingReservedBy(reservedBy: string): void {
+    for (const key of [...this.sidecarStartConflictState.keys()]) {
+      const state = this.sidecarStartConflictState.get(key);
+      if (!state) {
+        continue;
+      }
+      if (state.candidates.some((candidate) => candidate.reservedBy === reservedBy)) {
+        this.sidecarStartConflictState.delete(key);
+      }
+    }
   }
 
   private releaseSidecarPortFromSession(
@@ -6838,6 +7937,18 @@ export class SessionService {
         liveDeskAnchors.add(workspaceIdOf(candidate));
       }
     }
+    // At most ONE fresh tmux fleet read per call (never per candidate): the
+    // fleet cache is a single shared entry, so N independent `{fresh: true}`
+    // reads inside the loop below would each discard the previous
+    // candidate's still-fresh snapshot and fork again — measured on this
+    // host as ~29 stale cross-desk duplicates, i.e. ~29 forks on every start
+    // attempt, on the exact retry path this bounded-refusal cache exists to
+    // relieve. One read taken here, before any candidate's liveness is
+    // decided, still closes GAP 1 (a booting sibling's reservation write
+    // races this scan's cached read): every candidate in this pass reads
+    // off the SAME post-refresh snapshot, none older than the instant this
+    // call started deciding.
+    let freshFleetReadDone = false;
     for (const liveSession of allSessions) {
       const holdsSidecarPorts =
         !isTerminalSessionStatus(liveSession.status) ||
@@ -6859,6 +7970,59 @@ export class SessionService {
             });
             continue;
           }
+          // A foreign recorded port that falls inside this sidecar's own
+          // configured ranges, whose recording owner's pane is no longer
+          // alive, and whose host port is genuinely free right now is a
+          // stale reservation (a session record that outlived its tmux
+          // pane) rather than a live collision — release it before it
+          // blocks every future start of this sidecar forever. Liveness is
+          // resolved through sidecarOwnerIdForName/sidecarTmuxAlive (never
+          // liveSession.id directly): a desk member's own record can be the
+          // one holding the port while the anchor's pane is what is
+          // actually alive, and this loop iterates raw session records.
+          // Liveness reads off the ONE fleet snapshot refreshed at most
+          // once per call (see freshFleetReadDone above), bypassing the
+          // ~2s tmux fleet cache exactly once, not once per candidate:
+          // ensureSidecarReservation writes sidecarPorts before
+          // createTmuxSidecarSession runs, so a cached read taken inside
+          // that window can see a brand-new sibling reservation's pane as
+          // "gone" before it has bound its port, reclaiming a port that is
+          // about to be live.
+          // Never a reclaim candidate when this record's OWN status is
+          // terminal and it only remains in this scan because a live desk
+          // sibling still needs the shared port (liveDeskAnchors above): a
+          // live member is exactly the case an anchor-owned reservation
+          // must survive, regardless of the anchor's own pane state.
+          const withinOwnRange =
+            !isTerminalSessionStatus(liveSession.status) &&
+            Object.values(sidecar.ports).some(
+              (portConfig) => port >= portConfig.start && port <= portConfig.end,
+            );
+          if (withinOwnRange) {
+            let otherProject: ProjectConfig | undefined;
+            try {
+              otherProject = this.resolveProjectForSession(liveSession);
+            } catch {
+              otherProject = undefined;
+            }
+            const otherOwnerId = this.sidecarOwnerIdForName(liveSession, otherProject, scName);
+            if (!freshFleetReadDone) {
+              await refreshTmuxFleetSnapshot();
+              freshFleetReadDone = true;
+            }
+            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName);
+            if (!otherAlive && (await isHostPortFree(port))) {
+              // The one write in this scan pass that escapes the plan/apply
+              // split below (:6890): it writes liveSession's record
+              // immediately, before this attempt's own reservation is known
+              // to succeed. Benign — the port is proven both pane-dead and
+              // host-free right here, so releasing it can never be
+              // rolled back into a wrong state even if this attempt later
+              // fails for an unrelated portId.
+              this.releaseSidecarPortFromSession(liveSession.id, scName, port);
+              continue;
+            }
+          }
           unavailable.add(port);
           portOwnership.set(port, {
             owner: liveSession.id,
@@ -6869,17 +8033,84 @@ export class SessionService {
       }
     }
 
-    const buildRangeCandidates = (
+    // Bounds the total holder-attribution work (findListenerPids +
+    // readProcessCwd) for one reservation attempt, not per port: 2x
+    // LISTENER_LOOKUP_TIMEOUT_MS (port-probe.ts) so a wedged lsof/ss on one
+    // port can never make attributing the rest of a wide range hang the
+    // whole start. Ports past the budget degrade to holder-unknown, never
+    // to "free".
+    const SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS = 4_000;
+    const attributionDeadlineMs = Date.now() + SIDECAR_CONFLICT_ATTRIBUTION_BUDGET_MS;
+
+    // Emits a candidate ONLY for a port carrying a concrete block reason —
+    // already reserved (portOwnership), claimed by a sibling portId in this
+    // same attempt, or host-occupied. A free, unreserved, unclaimed port in
+    // the range is never offered: the caller's dropdown must only ever list
+    // what is actually blocking this start (measured bug: a free port named
+    // in the refusal message alongside the genuinely occupied ones).
+    const buildRangeCandidates = async (
       portId: string,
       portConfig: SidecarPortConfig,
-    ): SidecarPortConflictCandidate[] => {
+      claimedPorts: ReadonlySet<number>,
+      blockedAtSelection: ReadonlySet<number>,
+    ): Promise<SidecarPortConflictCandidate[]> => {
       const candidates: SidecarPortConflictCandidate[] = [];
       for (let port = portConfig.start; port <= portConfig.end; port += 1) {
+        const ownership = portOwnership.get(port);
+        if (ownership) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: ownership.owner,
+            reservedBy:
+              ownership.sessionId !== undefined
+                ? `${ownership.sessionId}${ownership.sidecarName ? `/${ownership.sidecarName}` : ""}`
+                : ownership.owner,
+          });
+          continue;
+        }
+        if (claimedPorts.has(port)) {
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+            clearable: false,
+          });
+          continue;
+        }
+        if (await isHostPortFree(port)) {
+          if (!blockedAtSelection.has(port)) {
+            continue;
+          }
+          candidates.push({
+            portId,
+            env: portConfig.env,
+            port,
+            owner: "external",
+          });
+          continue;
+        }
+        let holder: SidecarPortConflictCandidate["holder"];
+        if (Date.now() < attributionDeadlineMs) {
+          try {
+            const pids = await findListenerPids(port);
+            const pid = pids[0];
+            if (pid !== undefined) {
+              holder = { pid, cwd: await readProcessCwd(pid) };
+            }
+          } catch {
+            // Neither lsof nor ss ran: stays occupied-holder-unknown, never
+            // "free" and never a 500 replacing the 409.
+          }
+        }
         candidates.push({
           portId,
           env: portConfig.env,
           port,
-          owner: portOwnership.get(port)?.owner ?? "external",
+          owner: "external",
+          ...(holder ? { holder } : {}),
         });
       }
       return candidates;
@@ -6899,6 +8130,7 @@ export class SessionService {
     const plans: ReservationPlan[] = [];
     const claimed = new Set<number>();
     const conflictCandidates: SidecarPortConflictCandidate[] = [];
+    const failedPortIds: string[] = [];
     for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
       const env = portConfig.env;
       const existingPort = currentSidecarPorts[env];
@@ -6916,6 +8148,13 @@ export class SessionService {
 
       // The user chose a specific port to clear within this range: assume the
       // clear resolves it (host clear, plus tearing down any owning session).
+      // `!claimed.has(clearPort)` is also the GAP-2 safety guard: a port
+      // already claimed by a sibling portId in THIS attempt (surfaced to the
+      // caller as a conflict candidate with clearable:false) can never enter
+      // this branch, so the crossSession teardown below can never reap
+      // another session's sidecar for a port that attempt is about to use
+      // itself. Do not remove this condition, and do not add a second guard
+      // for the same case elsewhere — one path, already sufficient.
       if (
         clearPort !== undefined &&
         clearPort >= portConfig.start &&
@@ -6941,9 +8180,16 @@ export class SessionService {
 
       // Scan the range for a free, unclaimed port.
       let selectedPort: number | undefined;
+      const blockedAtSelection = new Set<number>();
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (claimed.has(candidate) || unavailable.has(candidate)) continue;
-        if (!(await isHostPortFree(candidate))) continue;
+        if (claimed.has(candidate) || unavailable.has(candidate)) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
+        if (!(await isHostPortFree(candidate))) {
+          blockedAtSelection.add(candidate);
+          continue;
+        }
         selectedPort = candidate;
         break;
       }
@@ -6953,11 +8199,28 @@ export class SessionService {
         continue;
       }
 
-      // Whole range occupied: offer every occupied port for the user to clear.
-      conflictCandidates.push(...buildRangeCandidates(portId, portConfig));
+      // Whole range occupied: offer every blocked port for the user to clear.
+      // The reservation for this portId is unsatisfiable — throw is driven
+      // by this explicit flag, never by conflictCandidates.length, so a
+      // portId that fails after another portId already narrowed candidates
+      // can never fall through into the apply pass.
+      conflictCandidates.push(
+        ...(await buildRangeCandidates(portId, portConfig, claimed, blockedAtSelection)),
+      );
+      failedPortIds.push(portId);
     }
 
-    if (conflictCandidates.length > 0) {
+    if (failedPortIds.length > 0) {
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId: session.id,
+        message: `Sidecar ${sidecarName} start refused: port conflict on ${failedPortIds.join(", ")}`,
+        details: {
+          reason: "port_conflict",
+          sidecarName,
+          candidates: conflictCandidates,
+        },
+      });
       throw new SidecarPortConflictError(sidecarName, conflictCandidates);
     }
 
@@ -7014,184 +8277,309 @@ export class SessionService {
     sidecarDepth: number;
     clearPort?: number;
   }): Promise<SessionRecord> {
+    if (args.clearPort === undefined) {
+      const cached = await this.sidecarStartConflictGate(args.session.id, args.sidecarName);
+      if (cached) {
+        throw cached;
+      }
+    }
+    return this.startSidecarInternalLocked(args);
+  }
+
+  private async startSidecarInternalLocked(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+    clearPort?: number;
+  }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
-      const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
-      const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
-      // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
-      // "session exists" — that pane's escapee tree can hold a reserved port
-      // forever unless treated as not-alive here and reaped before restart.
-      const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
-      if (alive && !paneDead) {
-        if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
-          this.scheduleSidecarUrlReadyAndPublish(
+      // Mutated only while the lock is held: the only racer is
+      // startMcpSidecars during spawn, and a lost increment there only
+      // delays the terminal event, never a false refusal.
+      if (args.clearPort !== undefined) {
+        this.clearSidecarStartConflict(args.session.id, args.sidecarName);
+      }
+      try {
+        return await this.startSidecarInternalBody(args);
+      } catch (error) {
+        if (error instanceof SidecarPortConflictError) {
+          this.recordSidecarStartConflict(
             args.session.id,
             args.sidecarName,
-            args.sidecar,
-            args.session,
-          );
-        }
-        return args.session;
-      }
-      if (paneDead) {
-        await this.reapSidecarByName(args.session.id, args.sidecarName);
-        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
-      } else if (!alive) {
-        // tmux session/window is gone entirely (killed externally, crashed)
-        // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
-        // fall through to the recorded sidecarProcs identity — the exact
-        // leak shape reapRecordedIdentity targets — before reserving the
-        // port for a new instance, or a still-live escapee tree from the
-        // old instance keeps running under the reused port.
-        const owner = readSession(this.config.dataDir, args.session.id);
-        const identity = owner?.sidecarProcs?.[args.sidecarName];
-        if (owner && identity) {
-          const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
-          this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
-        }
-        this.clearSidecarProcEntry(args.session.id, args.sidecarName);
-      }
-
-      // REQ5: refuse rather than reuse or auto-reap a genuine cross-workspace
-      // port collision. Checked after the stale-pane cleanup above (which
-      // only ever touches this session's own pane/identity) but before
-      // ensureSidecarReservation, so a real collision is caught before any
-      // reservation side effect runs.
-      await this.refuseOverlappingCrossWorkspaceSidecar(
-        args.session,
-        args.sidecarName,
-        args.sidecar,
-        args.clearPort,
-      );
-
-      // Built-ins may defer command resolution (e.g. a bundle-resolved bin
-      // path) to this point instead of config load — see BuiltinSidecarDef.
-      const resolvedCommand =
-        BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
-
-      const agentConfig = this.sessionAgentConfig(args.session);
-      const reservedSession = await this.ensureSidecarReservation(
-        args.session,
-        args.sidecarName,
-        args.sidecar,
-        args.clearPort,
-      );
-
-      const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
-      const sessionToolDir = existsSync(existingToolDir)
-        ? existingToolDir
-        : this.prepareSessionTools(
-            reservedSession.id,
-            reservedSession.agent,
-            reservedSession.project,
-          );
-      const sessionEnv = buildSessionEnv({
-        agent: reservedSession.agent,
-        projectId: reservedSession.project,
-        sessionId: reservedSession.id,
-        artifactsSessionId: workspaceIdOf(reservedSession),
-        sessionToolDir,
-        dataDir: this.config.dataDir,
-        repoPath: args.project.path,
-        symlinks: args.project.symlinks,
-        ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
-      });
-
-      try {
-        await createTmuxSidecarSession({
-          sessionId: reservedSession.id,
-          sidecarName: args.sidecarName,
-          cwd: reservedSession.worktreePath,
-          command: resolvedCommand,
-          env: buildSidecarRuntimeEnv(
-            sessionEnv,
-            reservedSession,
-            args.sidecarName,
-            args.sidecar.env,
-            args.sidecarDepth,
-          ),
-        });
-        await verifySidecarStartup(reservedSession.id, args.sidecarName);
-
-        // Record this instance's identity so a tree that outlives its
-        // tmux supervisor is still identifiable and reapable later — see
-        // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
-        // (race, no procfs) leaves sidecarProcs unset for this name rather
-        // than blocking the start.
-        const freshPanePid = await getTmuxPanePid(
-          sidecarTmuxSession(reservedSession.id, args.sidecarName),
-          { fresh: true },
-        );
-        const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
-        const identity: SidecarProcessIdentity | undefined =
-          freshPanePid !== null && starttime !== null
-            ? { pid: freshPanePid, pgid: freshPanePid, starttime }
-            : undefined;
-
-        const sidecarNames = sessionSidecarNames(reservedSession, args.project);
-        // clearSidecarProcEntry above already dropped this name from disk
-        // when the pane was dead or the tmux session was gone —
-        // reservedSession can still be a stale
-        // in-memory copy from before that write (ensureSidecarReservation
-        // returns the untouched `session` param when the sidecar has no
-        // ports to reserve). Build sidecarProcs explicitly rather than
-        // trusting the `...reservedSession` spread, so an unreadable
-        // identity persists as cleared instead of resurrecting the stale
-        // pgid clearSidecarProcEntry just removed.
-        const sidecarProcsWithoutStale = Object.fromEntries(
-          Object.entries(reservedSession.sidecarProcs ?? {}).filter(
-            ([name]) => name !== args.sidecarName,
-          ),
-        );
-        const nextSidecarProcs = identity
-          ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
-          : sidecarProcsWithoutStale;
-        const updated: SessionRecord = {
-          ...reservedSession,
-          updatedAt: nowIso(),
-          ...(sidecarNames.includes(args.sidecarName)
-            ? {}
-            : { sidecarNames: [...sidecarNames, args.sidecarName] }),
-        };
-        if (Object.keys(nextSidecarProcs).length > 0) {
-          updated.sidecarProcs = nextSidecarProcs;
-        } else {
-          delete updated.sidecarProcs;
-        }
-        writeSession(this.config.dataDir, updated);
-        this.scheduleSidecarUrlReadyAndPublish(
-          reservedSession.id,
-          args.sidecarName,
-          args.sidecar,
-          updated,
-        );
-        return readSession(this.config.dataDir, updated.id) ?? updated;
-      } catch (error) {
-        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
-        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
-        const baseRecord =
-          reservedSession !== args.session
-            ? args.session
-            : (readSession(this.config.dataDir, args.session.id) ?? args.session);
-        const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
-        const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
-        const slotsChanged = nextSlots !== resolved.slots;
-        if (reservedSession !== args.session || slotsChanged) {
-          // Rolls the reserved-port state back off this session's own record.
-          writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
-        }
-        if (slotsChanged) {
-          this.writeWorkspaceStateWithLegacyMirror(
-            baseRecord,
-            {
-              ...(nextSlots ? { slots: nextSlots } : {}),
-              ...(resolved.pr ? { pr: resolved.pr } : {}),
-            },
-            { touchUpdatedAt: true },
+            error.payload.candidates,
           );
         }
         throw error;
       }
     });
+  }
+
+  private async startSidecarInternalBody(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+    clearPort?: number;
+  }): Promise<SessionRecord> {
+    const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
+    const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+    // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
+    // "session exists" — that pane's escapee tree can hold a reserved port
+    // forever unless treated as not-alive here and reaped before restart.
+    const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+    if (alive && !paneDead) {
+      if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
+        this.scheduleSidecarUrlReadyAndPublish(
+          args.session.id,
+          args.sidecarName,
+          args.sidecar,
+          args.session,
+        );
+      }
+      return args.session;
+    }
+    if (paneDead) {
+      await this.reapSidecarByName(args.session.id, args.sidecarName);
+      this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+    } else if (!alive) {
+      // tmux session/window is gone entirely (killed externally, crashed)
+      // rather than merely pane-dead. Mirrors killSidecarAndUnlinkSlot:
+      // fall through to the recorded sidecarProcs identity — the exact
+      // leak shape reapRecordedIdentity targets — before reserving the
+      // port for a new instance, or a still-live escapee tree from the
+      // old instance keeps running under the reused port.
+      const owner = readSession(this.config.dataDir, args.session.id);
+      const identity = owner?.sidecarProcs?.[args.sidecarName];
+      // Own-identity no-op: the tmux supervisor is gone, but the recorded
+      // process is still the exact one genuinely serving the recorded
+      // ports — a retry against a repeat-failing caller (e.g. a wake
+      // retry loop) must not reap and relaunch a healthy instance out
+      // from under itself. Order is load-bearing: staleness -> occupancy
+      // -> one snapshot for listener attribution, never a snapshot
+      // before staleness/occupancy have narrowed the candidate, and never
+      // before this point (a match here skips reapRecordedIdentity
+      // entirely, so it must run first).
+      const recordedPorts = Object.values(owner?.sidecarPorts?.[args.sidecarName] ?? {});
+      if (owner && identity && recordedPorts.length > 0) {
+        const starttime = await readProcessStarttime(identity.pid);
+        const stillSameProcess = starttime !== null && starttime === identity.starttime;
+        const stillOccupied =
+          stillSameProcess &&
+          (await Promise.all(recordedPorts.map((port) => isHostPortFree(port)))).every(
+            (free) => !free,
+          );
+        if (stillOccupied) {
+          const snapshot = await snapshotProcesses();
+          const attributed =
+            snapshot.ok &&
+            (
+              await Promise.all(
+                recordedPorts.map(async (port) => {
+                  let listenerPids: number[];
+                  try {
+                    listenerPids = await findListenerPids(port);
+                  } catch {
+                    return false;
+                  }
+                  return listenerPids.some(
+                    (pid) =>
+                      pid === identity.pid || snapshot.byPid.get(pid)?.pgid === identity.pgid,
+                  );
+                }),
+              )
+            ).every(Boolean);
+          if (attributed) {
+            const noopKey = this.sidecarConflictKey(args.session.id, args.sidecarName);
+            const seen = this.sidecarStartNoopIdentity.get(noopKey);
+            if (seen?.pid !== identity.pid || seen.starttime !== identity.starttime) {
+              this.sidecarStartNoopIdentity.set(noopKey, {
+                pid: identity.pid,
+                starttime: identity.starttime,
+              });
+              this.logEvent("session.sidecar.start_noop", {
+                level: "info",
+                sessionId: args.session.id,
+                message: `Sidecar ${args.sidecarName} start is a no-op: the recorded process is still serving its reserved ports`,
+                details: { sidecarName: args.sidecarName },
+              });
+            }
+            // Mirrors the pane-alive early return's call exactly, but the
+            // eventual publishSidecarLink write is gated on
+            // sidecarTmuxAlive(sessionId, sidecarName) (see :7599's real
+            // gate) — and by this path's own definition tmux is gone, so
+            // that gate always blocks the write here. Harmless in the
+            // common case: a recorded sidecarProcs identity implies a
+            // prior successful start that already published the link, and
+            // tmux death alone does not unlink the slot. Narrow real gap:
+            // if an earlier probe failure ran
+            // writeSessionWithUnlinkedSidecarSlot, the link can never come
+            // back through this path — only an explicit stop+start
+            // recovers it. Not fixed here; tracked as
+            // https://github.com/ashugaev/spur/issues/912.
+            if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
+              this.scheduleSidecarUrlReadyAndPublish(
+                args.session.id,
+                args.sidecarName,
+                args.sidecar,
+                args.session,
+              );
+            }
+            return args.session;
+          }
+        }
+      }
+      if (owner && identity) {
+        const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
+      }
+      this.clearSidecarProcEntry(args.session.id, args.sidecarName);
+    }
+
+    // REQ5: refuse rather than reuse or auto-reap a genuine cross-workspace
+    // port collision. Checked after the stale-pane cleanup above (which
+    // only ever touches this session's own pane/identity) but before
+    // ensureSidecarReservation, so a real collision is caught before any
+    // reservation side effect runs.
+    await this.refuseOverlappingCrossWorkspaceSidecar(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+      args.clearPort,
+    );
+
+    // Built-ins may defer command resolution (e.g. a bundle-resolved bin
+    // path) to this point instead of config load — see BuiltinSidecarDef.
+    const resolvedCommand =
+      BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
+
+    const agentConfig = this.sessionAgentConfig(args.session);
+    const reservedSession = await this.ensureSidecarReservation(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+      args.clearPort,
+    );
+
+    const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
+    const sessionToolDir = existsSync(existingToolDir)
+      ? existingToolDir
+      : this.prepareSessionTools(
+          reservedSession.id,
+          reservedSession.agent,
+          reservedSession.project,
+        );
+    const sessionEnv = buildSessionEnv({
+      agent: reservedSession.agent,
+      projectId: reservedSession.project,
+      sessionId: reservedSession.id,
+      artifactsSessionId: workspaceIdOf(reservedSession),
+      sessionToolDir,
+      dataDir: this.config.dataDir,
+      repoPath: args.project.path,
+      symlinks: args.project.symlinks,
+      closeoutOwner: reservedSession.closeoutOwner === true,
+      ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
+    });
+
+    try {
+      await createTmuxSidecarSession({
+        sessionId: reservedSession.id,
+        sidecarName: args.sidecarName,
+        cwd: reservedSession.worktreePath,
+        command: resolvedCommand,
+        env: buildSidecarRuntimeEnv(
+          sessionEnv,
+          reservedSession,
+          args.sidecarName,
+          args.sidecar.env,
+          args.sidecarDepth,
+        ),
+      });
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
+      // Record this instance's identity so a tree that outlives its
+      // tmux supervisor is still identifiable and reapable later — see
+      // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
+      // (race, no procfs) leaves sidecarProcs unset for this name rather
+      // than blocking the start.
+      const freshPanePid = await getTmuxPanePid(
+        sidecarTmuxSession(reservedSession.id, args.sidecarName),
+        { fresh: true },
+      );
+      const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+      const identity: SidecarProcessIdentity | undefined =
+        freshPanePid !== null && starttime !== null
+          ? { pid: freshPanePid, pgid: freshPanePid, starttime }
+          : undefined;
+
+      const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+      // clearSidecarProcEntry above already dropped this name from disk
+      // when the pane was dead or the tmux session was gone —
+      // reservedSession can still be a stale
+      // in-memory copy from before that write (ensureSidecarReservation
+      // returns the untouched `session` param when the sidecar has no
+      // ports to reserve). Build sidecarProcs explicitly rather than
+      // trusting the `...reservedSession` spread, so an unreadable
+      // identity persists as cleared instead of resurrecting the stale
+      // pgid clearSidecarProcEntry just removed.
+      const sidecarProcsWithoutStale = Object.fromEntries(
+        Object.entries(reservedSession.sidecarProcs ?? {}).filter(
+          ([name]) => name !== args.sidecarName,
+        ),
+      );
+      const nextSidecarProcs = identity
+        ? { ...sidecarProcsWithoutStale, [args.sidecarName]: identity }
+        : sidecarProcsWithoutStale;
+      const updated: SessionRecord = {
+        ...reservedSession,
+        updatedAt: nowIso(),
+        ...(sidecarNames.includes(args.sidecarName)
+          ? {}
+          : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+      };
+      if (Object.keys(nextSidecarProcs).length > 0) {
+        updated.sidecarProcs = nextSidecarProcs;
+      } else {
+        delete updated.sidecarProcs;
+      }
+      writeSession(this.config.dataDir, updated);
+      this.clearSidecarStartConflict(args.session.id, args.sidecarName);
+      this.scheduleSidecarUrlReadyAndPublish(
+        reservedSession.id,
+        args.sidecarName,
+        args.sidecar,
+        updated,
+      );
+      return readSession(this.config.dataDir, updated.id) ?? updated;
+    } catch (error) {
+      await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+      this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      const baseRecord =
+        reservedSession !== args.session
+          ? args.session
+          : (readSession(this.config.dataDir, args.session.id) ?? args.session);
+      const resolved = resolveWorkspaceState(this.config.dataDir, baseRecord);
+      const nextSlots = this.withUnlinkedSidecarSlot(resolved.slots, args.sidecarName);
+      const slotsChanged = nextSlots !== resolved.slots;
+      if (reservedSession !== args.session || slotsChanged) {
+        // Rolls the reserved-port state back off this session's own record.
+        writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
+      }
+      if (slotsChanged) {
+        this.writeWorkspaceStateWithLegacyMirror(
+          baseRecord,
+          {
+            ...(nextSlots ? { slots: nextSlots } : {}),
+            ...(resolved.pr ? { pr: resolved.pr } : {}),
+          },
+          { touchUpdatedAt: true },
+        );
+      }
+      throw error;
+    }
   }
 
   // Pre-launch pass for sidecars that must exist before the agent's launch
@@ -8748,6 +10136,208 @@ export class SessionService {
     return this.finalizeSpawnTarget(project, normalized, modeResolution, request.project);
   }
 
+  // A spawn builds its records in memory and writes them over the placeholder;
+  // this carries the messages send() queued onto the persisted record since.
+  // Callers write the result in the same synchronous run, so no send can land
+  // between this read and that write.
+  private carrySpawnQueue(record: SessionRecord): SessionRecord {
+    const persisted = readSession(this.config.dataDir, record.id);
+    if (!persisted || !hasQueuedMessages(persisted)) {
+      return record;
+    }
+    return withQueuedMessages(record, queuedMessages(persisted), true);
+  }
+
+  // A kill that lands mid-spawn wins: the spawn never writes over it.
+  private spawnWasKilled(sessionId: string): boolean {
+    return readSession(this.config.dataDir, sessionId)?.status === "killed";
+  }
+
+  private assertSpawnNotKilled(sessionId: string): void {
+    if (this.spawnWasKilled(sessionId)) {
+      throw new Error(`Session ${sessionId} was killed while spawning`);
+    }
+  }
+
+  // A launch send whose submit never confirmed may still sit unsubmitted in
+  // the composer. The spawn persists the marker on its running record so
+  // queued delivery holds across a restart until the transcript shows
+  // activity after it (waitForQueuedMessage).
+  private withLaunchSubmitOutcome(
+    record: SessionRecord,
+    outcome: AgentSendOutcome,
+    sentAt: number,
+  ): SessionRecord {
+    const next = { ...record };
+    delete next.submitUnconfirmedAt;
+    if (outcome !== "submit_unconfirmed") {
+      return next;
+    }
+    this.logEvent("session.spawn.launch_unconfirmed", {
+      level: "warn",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Launch prompt submit for ${record.id} not confirmed; queued messages hold until the agent shows activity`,
+      details: { agent: record.agent },
+    });
+    return { ...next, submitUnconfirmedAt: new Date(sentAt).toISOString() };
+  }
+
+  // The submit-ack scan context for a session's pane: shared by the live
+  // send, the restart rebind, and the unconfirmed-hold settle.
+  private submitAckContext(
+    session: Pick<SessionRecord, "id" | "agent" | "worktreePath" | "agentSessionId">,
+  ): AgentSubmitAckContext {
+    return {
+      worktreePath: session.worktreePath,
+      codexSessionsDir: this.codexSessionsDir(session.id),
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      ...(session.agent === "cursor"
+        ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+        : {}),
+    };
+  }
+
+  // Settles submitUnconfirmedAt once the agent shows activity at or after it.
+  // Called from the classification path, so any enrich, tick, or queue wait
+  // settles it.
+  //   Launch hold (no typed marker): that activity confirms it.
+  //   Send hold (typed marker with its ack baseline): only the agent's ack of
+  //   that text confirms it; a busy turn's own records never do. The agent
+  //   back at its prompt, quiet past the queued-send grace, with no ack: the
+  //   text goes back to the queue head once (submitRequeuedMessage); a second
+  //   miss for the same text releases the hold (session.submit.released).
+  private async settleSubmitHold(
+    session: SessionRecord,
+    state: SessionState,
+    agentActivityAt: Date | null,
+  ): Promise<SessionRecord> {
+    const holdAt = session.submitUnconfirmedAt;
+    if (!holdAt || !agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)) {
+      return session;
+    }
+    const typed = session.queuedMessageTyped;
+    if (!typed?.ackBaseline) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (!latest || latest.submitUnconfirmedAt !== holdAt) {
+        return latest ?? session;
+      }
+      return this.confirmSubmitHold(latest, "activity");
+    }
+    if (this.submitHoldScans.has(session.id)) {
+      return session;
+    }
+    this.submitHoldScans.add(session.id);
+    let acked: boolean;
+    try {
+      const binding = await resumeAgentSubmitAckBinding(
+        session.agent,
+        this.submitAckContext(session),
+        typed.ackBaseline,
+      );
+      acked = binding ? (await binding.scan(typed.message)).found : false;
+    } finally {
+      this.submitHoldScans.delete(session.id);
+    }
+    // One synchronous span from here: a concurrent settle sees this write.
+    const latest = readSession(this.config.dataDir, session.id);
+    if (
+      !latest ||
+      latest.submitUnconfirmedAt !== holdAt ||
+      latest.queuedMessageTyped?.typedAt !== typed.typedAt
+    ) {
+      return latest ?? session;
+    }
+    if (acked) {
+      return this.confirmSubmitHold(latest, "ack");
+    }
+    const turnEnded =
+      state === "waiting" &&
+      Date.now() - agentActivityAt.getTime() >= agentQueuedSendPromptGraceMs(session.agent);
+    return turnEnded ? this.requeueUnconfirmedSubmit(latest, typed.message) : latest;
+  }
+
+  private confirmSubmitHold(latest: SessionRecord, evidence: "activity" | "ack"): SessionRecord {
+    const {
+      submitUnconfirmedAt: _confirmed,
+      queuedMessageTyped: typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    const confirmed = withoutFailedSubmit(
+      {
+        ...base,
+        ...(evidence === "activity" && typed ? { queuedMessageTyped: typed } : {}),
+        ...(requeued !== undefined && requeued !== typed?.message
+          ? { submitRequeuedMessage: requeued }
+          : {}),
+      },
+      evidence === "ack" && typed ? typed.message : null,
+    );
+    writeSession(this.config.dataDir, confirmed);
+    this.logEvent("session.submit.confirmed", {
+      level: "info",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message:
+        evidence === "ack"
+          ? `Unconfirmed prompt for ${latest.id} confirmed by the agent's ack`
+          : `Unconfirmed prompt for ${latest.id} confirmed by agent activity`,
+      details: { evidence },
+    });
+    return confirmed;
+  }
+
+  private requeueUnconfirmedSubmit(latest: SessionRecord, message: string): SessionRecord {
+    const {
+      submitUnconfirmedAt: _held,
+      queuedMessageTyped: _typed,
+      submitRequeuedMessage: requeued,
+      ...base
+    } = latest;
+    if (requeued === message) {
+      // Never silent: the view shows the text with Retry and Dismiss.
+      const failed: SessionRecord = {
+        ...base,
+        submitFailedMessage: { message, at: nowIso() },
+      };
+      writeSession(this.config.dataDir, failed);
+      this.logEvent("session.submit.released", {
+        level: "warn",
+        sessionId: latest.id,
+        projectId: latest.project,
+        message: `Released the unconfirmed prompt hold for ${latest.id}: the agent took no ack of it after one re-queue`,
+        details: { messageLength: message.length },
+      });
+      return failed;
+    }
+    const record = withQueuedMessages(
+      { ...base, submitRequeuedMessage: message, updatedAt: nowIso() },
+      [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+      false,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.requeued", {
+      level: "warn",
+      sessionId: latest.id,
+      projectId: latest.project,
+      message: `Re-queued an unconfirmed message for ${latest.id}: the agent's turn ended with no ack of it`,
+      details: { reason: "submit_unconfirmed", messageLength: message.length },
+    });
+    this.scheduleDeliveryRunner(latest.id);
+    return record;
+  }
+
+  // The one path for every spawn write after the placeholder: a kill that
+  // landed since stops the spawn instead of being overwritten, and queued
+  // messages carry over. Check, read, and write run in one synchronous span.
+  private writeSpawnRecord(record: SessionRecord): SessionRecord {
+    this.assertSpawnNotKilled(record.id);
+    const carried = this.carrySpawnQueue(record);
+    writeSession(this.config.dataDir, carried);
+    return carried;
+  }
+
   async spawn(
     request: SpawnSessionRequest,
     options?: {
@@ -8756,6 +10346,9 @@ export class SessionService {
       replacingSessionId?: string;
       admissionReservation?: symbol;
       validatedExplicitModel?: string;
+      closeoutOwnerTransfer?: boolean;
+      /** Internal: set by a source adapter, never from the HTTP body. */
+      telegramOrigin?: TelegramSpawnOrigin;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -8910,6 +10503,14 @@ export class SessionService {
       const tmuxSession = sessionId;
       createdAt = nowIso();
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+        ...(options?.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
+      });
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -8935,6 +10536,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: resolvedBranch.branch,
@@ -8959,6 +10561,15 @@ export class SessionService {
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
+      // Before the launch prompt exists: an agent that replies ahead of the
+      // source's own bind step must answer the chat that asked for it.
+      if (options?.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...options.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
       this.admissionReservations.delete(admissionReservation);
       admissionReserved = false;
       workspacePath = placeholder.worktreePath;
@@ -9049,6 +10660,7 @@ export class SessionService {
             this.config.tags,
             project.branchNaming?.regex,
             selfDestruct,
+            telegramAgentInstructions(project),
           );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
@@ -9089,7 +10701,7 @@ export class SessionService {
           );
         }
       }
-      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+      const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
           id: sessionId,
@@ -9099,7 +10711,8 @@ export class SessionService {
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
-      });
+      };
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, launchOptions);
       const promptDeliveredOnLaunch =
         launchPlan.initialMessageDeliveredOnLaunch === true ||
         (startupImagePaths.length > 0 &&
@@ -9143,6 +10756,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
       const launchAgent = agent;
@@ -9154,11 +10768,12 @@ export class SessionService {
             : undefined;
 
         stage = "tmux.create";
+        this.assertSpawnNotKilled(launchSessionId);
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          agent: launchAgent,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
         });
         this.logEvent("session.spawn.tmux_created", {
@@ -9185,7 +10800,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, runningRecord);
+          this.writeSpawnRecord(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -9194,12 +10809,15 @@ export class SessionService {
         await launchAndBind();
       }
 
+      this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
+        const launchSentAt = Date.now();
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
+        runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -9242,12 +10860,7 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      const latestPlaceholder = readSession(this.config.dataDir, updatedRecord.id);
-      if (latestPlaceholder && hasQueuedMessages(latestPlaceholder)) {
-        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestPlaceholder), true);
-      }
-
-      writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
@@ -9268,6 +10881,9 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (sessionId && options?.telegramOrigin) {
+        deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+      }
       if (sessionId && project && placeholderWritten && agent) {
         // This catch wraps every stage from tmux.create through record.write,
         // so the pane can already hold a real launched agent by the time we
@@ -9339,7 +10955,11 @@ export class SessionService {
           updatedAt: nowIso(),
           error: message,
         };
-        writeSession(this.config.dataDir, erroredRecord);
+        const killed = this.spawnWasKilled(sessionId);
+        const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
+        if (persistedFailure) {
+          writeSession(this.config.dataDir, persistedFailure);
+        }
 
         this.logEvent("session.spawn.failed", {
           level: "error",
@@ -9352,6 +10972,7 @@ export class SessionService {
             worktreePath: workspacePath || null,
             agent: erroredRecord.agent,
             branch: erroredRecord.branch,
+            ...spawnFailureQueueDetails(persistedFailure, killed),
           },
         });
 
@@ -9616,14 +11237,7 @@ export class SessionService {
     options?: { touchUpdatedAt?: boolean },
   ): SessionRecord | null {
     const workspaceId = workspaceIdOf(member);
-    const stored = readWorkspaceState(this.config.dataDir, workspaceId);
-    const nextState: WorkspaceState = {
-      ...state,
-      ...(state.manualTitleOverride || stored?.manualTitleOverride
-        ? { manualTitleOverride: true }
-        : {}),
-    };
-    writeWorkspaceState(this.config.dataDir, workspaceId, nextState);
+    writeWorkspaceState(this.config.dataDir, workspaceId, state);
     const owner =
       member.id === workspaceId ? member : readSession(this.config.dataDir, workspaceId);
     if (!owner) {
@@ -9633,13 +11247,13 @@ export class SessionService {
       ...owner,
       ...(options?.touchUpdatedAt ? { updatedAt: nowIso() } : {}),
     };
-    if (nextState.slots) {
-      mirrored.slots = nextState.slots;
+    if (state.slots) {
+      mirrored.slots = state.slots;
     } else {
       delete mirrored.slots;
     }
-    if (nextState.pr) {
-      mirrored.pr = nextState.pr;
+    if (state.pr) {
+      mirrored.pr = state.pr;
     } else {
       delete mirrored.pr;
     }
@@ -9741,6 +11355,11 @@ export class SessionService {
           ? join(this.config.worktreeDir, request.project, sessionId)
           : project.path;
       const originalTaskPrompt = resolveOriginalTaskPrompt(request, prompt);
+      const closeoutOwner = resolveCloseoutOwner({
+        restrictWrites,
+        worktree,
+        reusesWorkspace: reuseCtx !== null,
+      });
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -9750,6 +11369,7 @@ export class SessionService {
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
+        closeoutOwner,
         ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
         prompt,
         branch: placeholderBranch,
@@ -9996,7 +11616,7 @@ export class SessionService {
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         updatedAt: nowIso(),
       };
-      writeSession(this.config.dataDir, spawnPlaceholder);
+      this.writeSpawnRecord(spawnPlaceholder);
       ensureTodoLedger(this.config.dataDir, spawnPlaceholder);
       prepared.placeholder = spawnPlaceholder;
 
@@ -10068,6 +11688,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         selfDestruct,
+        telegramAgentInstructions(project),
       );
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
@@ -10136,6 +11757,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
+        closeoutOwner: runningRecord.closeoutOwner === true,
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
@@ -10146,11 +11768,12 @@ export class SessionService {
             : undefined;
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+        this.assertSpawnNotKilled(sessionId);
         await createTmuxSession({
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          agent: launchAgent,
+          launchScriptDir: prepared.sessionToolDir,
           env: sessionEnv,
         });
         this.logEvent("session.spawn.tmux_created", {
@@ -10182,7 +11805,7 @@ export class SessionService {
         if (openCodeSessionBaseline) {
           const agentSessionId = await waitForNewOpenCodeSessionId(openCodeSessionBaseline);
           runningRecord = { ...runningRecord, agentSessionId, updatedAt: nowIso() };
-          writeSession(this.config.dataDir, runningRecord);
+          this.writeSpawnRecord(runningRecord);
         }
       };
       if (launchAgent === "opencode") {
@@ -10191,12 +11814,15 @@ export class SessionService {
         await launchAndBind();
       }
 
+      this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
+        const launchSentAt = Date.now();
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
         });
+        runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         initialPromptSent = true;
         firstStepSubmitted = sendOutcome === "submitted";
         this.logEvent("session.spawn.initial_prompt_sent", {
@@ -10243,7 +11869,7 @@ export class SessionService {
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
-      writeSession(this.config.dataDir, updatedRecord);
+      updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
@@ -10266,9 +11892,15 @@ export class SessionService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
-      const finalFailure =
-        terminalPreflightFailure || attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
-      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      const finalAttempt =
+        terminalPreflightFailure ||
+        this.spawnWasKilled(sessionId) ||
+        attempt >= SPAWN_RETRY_ATTEMPTS ||
+        initialPromptSent;
+      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalAttempt);
+      // Re-read after the cleanup await: a kill can land during it.
+      const killed = this.spawnWasKilled(sessionId);
+      const finalFailure = finalAttempt || killed;
       if (terminalPreflightFailure) {
         this.logEvent("session.preflight.failed", {
           level: "error",
@@ -10282,7 +11914,7 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        writeSession(this.config.dataDir, {
+        this.writeSpawnRecord({
           ...prepared.placeholder,
           launchCommand: "",
           status: "spawning",
@@ -10302,14 +11934,19 @@ export class SessionService {
         });
         return "retry";
       }
-      writeSession(this.config.dataDir, {
-        ...prepared.placeholder,
-        worktreePath: workspacePath || prepared.placeholder.worktreePath,
-        launchCommand: "",
-        status: "errored",
-        updatedAt: nowIso(),
-        error: message,
-      });
+      const persistedFailure = killed
+        ? null
+        : this.carrySpawnQueue({
+            ...prepared.placeholder,
+            worktreePath: workspacePath || prepared.placeholder.worktreePath,
+            launchCommand: "",
+            status: "errored",
+            updatedAt: nowIso(),
+            error: message,
+          });
+      if (persistedFailure) {
+        writeSession(this.config.dataDir, persistedFailure);
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         sessionId,
@@ -10322,6 +11959,7 @@ export class SessionService {
           worktreePath: workspacePath || prepared.placeholder.worktreePath || null,
           agent,
           branch: prepared.placeholder.branch,
+          ...spawnFailureQueueDetails(persistedFailure, killed),
         },
       });
       return "completed";
@@ -10397,13 +12035,270 @@ export class SessionService {
     );
   }
 
+  async updateWakeMessage(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    return this.withSessionLifecycleLock(sessionId, () =>
+      this.updateWakeMessageLocked(sessionId, request),
+    );
+  }
+
+  async dispatchWake(sessionId: string, request: DispatchSessionWakeRequest): Promise<SessionView> {
+    return this.dispatchWakeLocked(sessionId, request);
+  }
+
+  private wakeTargetProperty(target: WakeTarget): "scheduledWake" | "intervalWake" | "dailyWake" {
+    if (target === "scheduled") return "scheduledWake";
+    if (target === "interval") return "intervalWake";
+    return "dailyWake";
+  }
+
+  private async updateWakeMessageLocked(
+    sessionId: string,
+    request: UpdateSessionWakeMessageRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const property = this.wakeTargetProperty(request.target);
+    const current = session[property];
+    if (!current) {
+      throw new WakeTargetMissingError(
+        `Wake target "${request.target}" not found for ${sessionId}`,
+      );
+    }
+    const updated: SessionRecord = {
+      ...session,
+      [property]: {
+        ...current,
+        message: request.message,
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return this.enrich(updated);
+  }
+
+  private async dispatchWakeLocked(
+    sessionId: string,
+    request: DispatchSessionWakeRequest,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    if (request.target === "scheduled") {
+      await this.dispatchScheduledWakeNow(session);
+    } else if (request.target === "interval") {
+      await this.dispatchIntervalWakeNow(session);
+    } else {
+      await this.dispatchDailyWakeNow(session);
+    }
+    const updated = readSession(this.config.dataDir, sessionId);
+    if (!updated) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    return this.enrich(updated);
+  }
+
+  private async dispatchScheduledWakeNow(session: SessionRecord): Promise<void> {
+    const scheduledWake = session.scheduledWake;
+    if (!scheduledWake) {
+      throw new WakeTargetMissingError(`Wake target "scheduled" not found for ${session.id}`);
+    }
+    if ((await wakeDeliverability(session)) !== "deliverable") {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch scheduled wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const current = readSession(this.config.dataDir, session.id) ?? session;
+      const claimed =
+        current.scheduledWake?.dueAt === scheduledWake.dueAt &&
+        current.scheduledWake.message === scheduledWake.message;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+      }
+      const { scheduledWake: _scheduledWake, ...base } = current;
+      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      try {
+        await this.sendLocked(session.id, { message: scheduledWake.message, queue: false });
+        this.logEvent("session.wake.sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched scheduled wake to ${session.id}`,
+          details: {
+            dueAt: scheduledWake.dueAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        const afterFailure = readSession(this.config.dataDir, session.id);
+        if (afterFailure && !afterFailure.scheduledWake) {
+          writeSession(this.config.dataDir, {
+            ...afterFailure,
+            scheduledWake,
+            updatedAt: nowIso(),
+          });
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchIntervalWakeNow(session: SessionRecord): Promise<void> {
+    const intervalWake = session.intervalWake;
+    if (!intervalWake) {
+      throw new WakeTargetMissingError(`Wake target "interval" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "interval", intervalWake.nextDueAt))) {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch interval wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const nextDueAt = new Date(now + intervalWake.intervalMs).toISOString();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.intervalWake?.nextDueAt === intervalWake.nextDueAt &&
+        current.intervalWake.intervalMs === intervalWake.intervalMs &&
+        current.intervalWake.message === intervalWake.message &&
+        current.intervalWake.stopCondition === intervalWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "interval" changed for ${session.id}`);
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        intervalWake: { ...intervalWake, nextDueAt },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatIntervalWakeMessage(
+            session.id,
+            intervalWake.message,
+            intervalWake.stopCondition,
+          ),
+          queue: false,
+        });
+        this.logEvent("session.wake.interval_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched interval wake to ${session.id}`,
+          details: {
+            nextDueAt,
+            intervalMs: intervalWake.intervalMs,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              intervalWake: {
+                ...afterDenial.intervalWake,
+                nextDueAt: intervalWake.nextDueAt,
+              },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchDailyWakeNow(session: SessionRecord): Promise<void> {
+    const dailyWake = session.dailyWake;
+    if (!dailyWake) {
+      throw new WakeTargetMissingError(`Wake target "daily" not found for ${session.id}`);
+    }
+    if (!(await this.evaluateWakeDeliverability(session, "daily", dailyWake.nextDueAt))) {
+      throw new WakeDispatchConflictError(
+        `Cannot dispatch daily wake for ${session.id}: session not deliverable`,
+      );
+    }
+    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const now = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      if (current === null || !isRestorableStatus(current.status)) {
+        throw new WakeDispatchConflictError(`Wake target "daily" unavailable for ${session.id}`);
+      }
+      const claimed =
+        current.dailyWake?.nextDueAt === dailyWake.nextDueAt &&
+        current.dailyWake.dailyAt.join(",") === dailyWake.dailyAt.join(",") &&
+        current.dailyWake.message === dailyWake.message &&
+        current.dailyWake.stopCondition === dailyWake.stopCondition;
+      if (!claimed) {
+        throw new WakeDispatchConflictError(`Wake target "daily" changed for ${session.id}`);
+      }
+      let nextDueAt: Date;
+      try {
+        nextDueAt = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(now));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to resolve next daily wake time for ${session.id}: ${message}`, {
+          cause: error,
+        });
+      }
+      writeSession(this.config.dataDir, {
+        ...current,
+        dailyWake: { ...dailyWake, nextDueAt: nextDueAt.toISOString() },
+        updatedAt: nowIso(),
+      });
+      try {
+        await this.sendLocked(session.id, {
+          message: this.formatDailyWakeMessage(
+            session.id,
+            dailyWake.message,
+            dailyWake.stopCondition,
+          ),
+          queue: false,
+        });
+        this.logEvent("session.wake.daily_sent", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Dispatched daily wake to ${session.id}`,
+          details: {
+            nextDueAt: dailyWake.nextDueAt,
+            dailyAt: dailyWake.dailyAt,
+            manual: true,
+          },
+        });
+      } catch (error) {
+        if (error instanceof SessionAdmissionDeniedError) {
+          const afterDenial = readSession(this.config.dataDir, session.id);
+          if (afterDenial?.dailyWake?.nextDueAt === nextDueAt.toISOString()) {
+            writeSession(this.config.dataDir, {
+              ...afterDenial,
+              dailyWake: { ...dailyWake },
+              updatedAt: nowIso(),
+            });
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
   private async scheduleWakeLocked(
     sessionId: string,
     request: ScheduleSessionWakeRequest,
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const {
       intervalWake: _intervalWake,
@@ -10511,7 +12406,7 @@ export class SessionService {
   private async cancelWakeLocked(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const { intervalWake: _intervalWake, dailyWake: _dailyWake, ...base } = session;
     const updated: SessionRecord = { ...base, updatedAt: nowIso() };
@@ -10541,8 +12436,10 @@ export class SessionService {
     if (!message) {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
+    const buttons = parseSourceReplyButtons(request.buttons);
 
-    const target = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
+    const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }
@@ -10554,30 +12451,54 @@ export class SessionService {
     }
 
     const view = await this.enrich(session);
-    const result = await sendTelegramReply(source, target, message, {
-      topicName: telegramTopicName(view),
-    });
-    const { statusMessageId: _statusMessageId, ...targetWithoutStatus } = target;
-    const replyTarget = {
-      ...(result.statusMessageIdConsumed ? targetWithoutStatus : target),
-      ...(result.messageThreadId !== undefined ? { messageThreadId: result.messageThreadId } : {}),
-      lastReplyAt: new Date().toISOString(),
-    };
-    writeTelegramReplyTarget(this.config.dataDir, replyTarget);
-    if (result.messageThreadId !== undefined && target.messageThreadId !== result.messageThreadId) {
-      const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
-      bindings.set(`${target.chatId}:${result.messageThreadId}`, {
-        chatId: target.chatId,
-        messageThreadId: result.messageThreadId,
+    const choices = buildTelegramChoices(sessionId, target, buttons);
+    // Persisted before the send: a click can only arrive once Telegram has the
+    // keyboard, and the row must already be there when it does.
+    if (choices.length > 0) {
+      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
         sessionId,
+        chatId: target.chatId,
+        choices,
       });
-      writeTelegramBindings(
-        this.config.dataDir,
-        target.projectId,
-        target.sourceId,
-        bindings.values(),
-      );
     }
+    this.claimTelegramPlaceholder(sessionId, target);
+    const result = await sendTelegramReply(
+      source,
+      target,
+      `${telegramSessionLabel(view)}\n${message}`,
+      {
+        topicName: telegramTopicName(view),
+        ...(choices.length > 0
+          ? {
+              buttons: choices.map((choice) => ({
+                text: choice.text,
+                callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
+              })),
+            }
+          : {}),
+      },
+    );
+    // A buttonless reply supersedes the question it answers, so it retires the
+    // pending offer — after the send, since a throw leaves the keyboard up.
+    if (choices.length === 0) {
+      writeTelegramOffer(this.config.dataDir, target.projectId, target.sourceId, {
+        sessionId,
+        chatId: target.chatId,
+        choices: [],
+      });
+    }
+    // A target that existed when the send began is never re-created: it was
+    // removed mid-send (a spawn took the thread over), and writing it back
+    // would keep this session posting into a thread it no longer owns.
+    const sent = { lastReplyAt: nowIso(), topicName: telegramTopicName(view) };
+    const settledTarget =
+      storedTarget === null
+        ? this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: true })
+        : this.recordTelegramSend(sessionId, target, result, { ...sent, createIfMissing: false });
+    const replyTarget = settledTarget ?? target;
+    // Covers a freshly created forum topic too: its key cannot already be taken.
+    if (settledTarget) this.bindTelegramChatIfFree(settledTarget, sessionId);
+    await this.syncTelegramTopicName(sessionId, view);
     this.logEvent("source.reply.sent", {
       level: "info",
       sessionId,
@@ -10602,14 +12523,117 @@ export class SessionService {
       ...(replyTarget.messageThreadId !== undefined
         ? { messageThreadId: replyTarget.messageThreadId }
         : {}),
+      ...(choices.length > 0 ? { buttons: choices.length } : {}),
     };
   }
 
+  /**
+   * Destination for a session that never received a Telegram message: the
+   * project's own Telegram source with a configured `chatId`.
+   */
+  private configuredTelegramReplyTarget(session: SessionRecord): TelegramReplyTarget | null {
+    const project = this.config.projects[session.project];
+    if (!project) return null;
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "telegram" || source.chatId === undefined) continue;
+      return {
+        sessionId: session.id,
+        projectId: session.project,
+        sourceId,
+        chatId: source.chatId,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Routes the user's typed reply back into this session by claiming the chat
+   * thread, but never steals one another session already owns.
+   */
+  private bindTelegramChatIfFree(
+    target: Pick<TelegramReplyTarget, "projectId" | "sourceId" | "chatId" | "messageThreadId">,
+    sessionId: string,
+  ): void {
+    const bindings = readTelegramBindings(this.config.dataDir, target.projectId, target.sourceId);
+    const key = telegramBindingKey(target.chatId, target.messageThreadId);
+    if (bindings.has(key)) return;
+    bindings.set(key, {
+      chatId: target.chatId,
+      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+      sessionId,
+    });
+    writeTelegramBindings(
+      this.config.dataDir,
+      target.projectId,
+      target.sourceId,
+      bindings.values(),
+    );
+  }
+
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () => this.sendLocked(sessionId, request));
+    const appended =
+      request.queue !== false ? this.appendBehindTypingDelivery(sessionId, request) : null;
+    if (appended) {
+      return this.enrich(appended);
+    }
+    const { view, paneWrite } = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const sent = await this.sendLockedWithAttempt(sessionId, request);
+      // Registered under the lock, so the attempt cannot type before the
+      // waiter exists. Waits for the pane write or a stand-down, never the
+      // submit ack.
+      return {
+        view: sent.view,
+        paneWrite: sent.attempt
+          ? this.waitForQueuedPaneWrite(sessionId, sent.attempt, QUEUED_SEND_PANE_WRITE_WAIT_MS)
+          : null,
+      };
+    });
+    if (!paneWrite) {
+      return view;
+    }
+    await paneWrite;
+    const latest = readSession(this.config.dataDir, sessionId);
+    return latest ? this.enrich(latest) : view;
+  }
+
+  // A queued send while this session's delivery is typing or waiting on its
+  // submit ack: that delivery holds the session lock for up to the ack
+  // budget, so the lock path would stall this request as long. The session
+  // is live and running (the pane write is under way), so no readiness check
+  // is needed. One synchronous span, read to write: no lifecycle op can
+  // interleave. Held for the prompt; whoever owns the in-flight delivery
+  // (the send's attempt, the runner, a flush) arms the runner after it.
+  // Returns null to take the lock path.
+  private appendBehindTypingDelivery(
+    sessionId: string,
+    request: SendMessageRequest,
+  ): SessionRecord | null {
+    if (!this.queueDeliveryInFlight.has(sessionId) && !this.queuedDeliveryTyped.has(sessionId)) {
+      return null;
+    }
+    const session = readSession(this.config.dataDir, sessionId);
+    if (
+      !session ||
+      session.status !== "running" ||
+      submitPending(session) ||
+      !hasMessageContent(request)
+    ) {
+      return null;
+    }
+    return this.appendQueuedMessage(session, this.prepareSendMessage(session, request), true);
   }
 
   private async sendLocked(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
+    return (await this.sendLockedWithAttempt(sessionId, request)).view;
+  }
+
+  // `attempt` is the queued message's own detached delivery attempt, null
+  // when none was started (immediate send, spawning, held for the prompt).
+  private async sendLockedWithAttempt(
+    sessionId: string,
+    request: SendMessageRequest,
+  ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -10617,74 +12641,188 @@ export class SessionService {
     if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
+    if (session.status === "spawning" && request.queue !== false) {
+      // Held on the placeholder; the spawn carries it into the running record
+      // behind the initial prompt (carrySpawnQueue) and arms delivery.
+      const queued = this.appendQueuedMessage(
+        session,
+        this.prepareSendMessage(session, request),
+        true,
+      );
+      return { view: await this.enrich(queued), attempt: null };
     }
+    assertSendableStatus(session);
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
-      return this.deliverPreparedLocked(sessionId, finalMessage, {
+      const view = await this.deliverPreparedLocked(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
       });
+      return { view, attempt: null };
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
     const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
-      ? await this.classifySessionState(readySession)
+      ? this.queuedDeliveryState(await this.classifySessionRecord(readySession))
       : "waiting";
-    // Single fresh read, taken once immediately before both the dedupe check
-    // and the append below, and used for both: `readySession` above can be
-    // stale by the time this runs (ensureSessionReadyForSend may have waited
-    // on a busy agent), and checking the dedupe against a stale queue while
-    // appending onto a fresher one lets two concurrent sends of the same
-    // text both pass the dedupe check and both append, leaving a duplicate
-    // entry that breaks unit 2's content key (exact text unique per queue).
-    // Only the queue field is taken from the fresh read; every other field
-    // still comes from `readySession`.
-    const latestQueued = queuedMessages(
-      readSession(this.config.dataDir, sessionId) ?? readySession,
+    const activeRecord = this.appendQueuedMessage(
+      { ...readySession, status: "running" },
+      finalMessage,
+      readySession.queuedMessages?.awaitingPrompt === true ||
+        sendState !== "waiting" ||
+        submitPending(readySession),
     );
-    let activeRecord: SessionRecord;
-    if (latestQueued.includes(finalMessage)) {
+    // Detached: this call never holds the session lock through the pane
+    // write or its submit ack. The attempt arms the runner when it ends.
+    const attempt =
+      activeRecord.queuedMessages?.awaitingPrompt !== true
+        ? this.startQueuedDeliveryAttempt(sessionId)
+        : null;
+    if (!attempt) {
+      this.scheduleDeliveryRunner(sessionId);
+    }
+    return {
+      view: await this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord),
+      attempt,
+    };
+  }
+
+  // Appends one message to the persisted queue on top of `base`, or returns
+  // the persisted record unchanged when the exact text is already queued.
+  // Single fresh read, taken once immediately before both the dedupe check
+  // and the append, and used for both: `base` can be stale by the time this
+  // runs (ensureSessionReadyForSend may have waited on a busy agent), and
+  // checking the dedupe against a stale queue while appending onto a fresher
+  // one lets two concurrent sends of the same text both pass the dedupe check
+  // and both append, leaving a duplicate entry that breaks the queue ops'
+  // content key (exact text unique per queue). Only the queue field is taken
+  // from the fresh read; every other field comes from `base`.
+  private appendQueuedMessage(
+    base: SessionRecord,
+    message: string,
+    awaitingPrompt: boolean,
+  ): SessionRecord {
+    const latest = readSession(this.config.dataDir, base.id) ?? base;
+    const latestQueued = queuedMessages(latest);
+    if (latestQueued.includes(message)) {
       this.logEvent("session.message.duplicate_ignored", {
         level: "info",
-        sessionId,
-        projectId: readySession.project,
-        message: `Ignored duplicate queued message for ${sessionId}`,
+        sessionId: base.id,
+        projectId: base.project,
+        message: `Ignored duplicate queued message for ${base.id}`,
         details: {
           queuedCount: latestQueued.length,
-          messageLength: finalMessage.length,
+          messageLength: message.length,
         },
       });
-      activeRecord = readySession;
-    } else {
-      activeRecord = withQueuedMessages(
-        {
-          ...readySession,
-          status: "running",
-          updatedAt: nowIso(),
-        },
-        [...latestQueued, finalMessage],
-        readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
+      return latest;
+    }
+    const record = withQueuedMessages(
+      { ...base, updatedAt: nowIso() },
+      [...latestQueued, message],
+      awaitingPrompt,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.queued", {
+      level: "info",
+      sessionId: base.id,
+      projectId: record.project,
+      message: `Queued message for ${base.id}`,
+      details: {
+        queuedCount: queuedMessages(record).length,
+        messageLength: message.length,
+        ...(base.status === "spawning" ? { spawning: true } : {}),
+      },
+    });
+    return record;
+  }
+
+  // A submit that failed twice (settleSubmitHold): Retry puts the text back at
+  // the queue head with a fresh re-queue budget; Dismiss drops the notice.
+  async resolveSubmitFailure(sessionId: string, action: "retry" | "dismiss"): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      const failed = session.submitFailedMessage;
+      if (!failed) {
+        throw new LaunchPromptPendingError(`No failed prompt for ${sessionId}`);
+      }
+      const { submitFailedMessage: _resolved, submitRequeuedMessage: requeued, ...base } = session;
+      const kept: SessionRecord =
+        requeued !== undefined && requeued !== failed.message
+          ? { ...base, submitRequeuedMessage: requeued }
+          : base;
+      if (action === "dismiss") {
+        writeSession(this.config.dataDir, kept);
+        this.logEvent("session.submit.failure_dismissed", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Dismissed the failed prompt notice for ${sessionId}`,
+        });
+        return this.enrich(kept);
+      }
+      assertSendableStatus(session);
+      const record = withQueuedMessages(
+        { ...kept, updatedAt: nowIso() },
+        [failed.message, ...removeFirstOccurrence(queuedMessages(session), failed.message)],
+        false,
       );
-      writeSession(this.config.dataDir, activeRecord);
-      this.logEvent("session.message.queued", {
+      writeSession(this.config.dataDir, record);
+      this.logEvent("session.message.requeued", {
         level: "info",
         sessionId,
-        projectId: activeRecord.project,
-        message: `Queued message for ${sessionId}`,
-        details: {
-          queuedCount: queuedMessages(activeRecord).length,
-          messageLength: finalMessage.length,
-        },
+        projectId: session.project,
+        message: `Re-queued a failed prompt for ${sessionId} at the user's retry`,
+        details: { reason: "submit_failed_retry", messageLength: failed.message.length },
       });
-    }
-    if (activeRecord.queuedMessages?.awaitingPrompt !== true) {
-      await this.tryDeliverQueuedMessageLocked(sessionId);
-    }
-    this.scheduleDeliveryRunner(sessionId);
-    return this.enrich(readSession(this.config.dataDir, sessionId) ?? activeRecord);
+      this.scheduleDeliveryRunner(sessionId);
+      return this.enrich(record);
+    });
+  }
+
+  // The one escape from a pending launch: press the submit key over the
+  // prompt already in the composer, never type over it. The marker clears
+  // when the agent's transcript shows it took the prompt.
+  async submitPendingLaunch(sessionId: string): Promise<SessionView> {
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session) {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      assertSendableStatus(session);
+      if (!submitPending(session)) {
+        throw new LaunchPromptPendingError(`No unconfirmed prompt for ${sessionId}`);
+      }
+      await this.withPaneWriteLock(session.tmuxSession, async () => {
+        const alive = await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        );
+        if (!alive) {
+          throw new AgentExitedBeforeSendError(
+            `Agent process for ${sessionId} is not running; launch prompt not submitted`,
+          );
+        }
+        const writeStartedAt = Date.now();
+        await sendSubmitKeyToTmux(session.tmuxSession);
+        this.recordPaneWrite(session, writeStartedAt);
+      });
+      this.logEvent("session.spawn.launch_submitted", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Pressed submit over the pending launch prompt for ${sessionId}`,
+      });
+      return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+    });
   }
 
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
@@ -10695,19 +12833,52 @@ export class SessionService {
     if (session.agent !== "claude") {
       throw new Error("Interactive answering is only supported for claude sessions");
     }
-    if (!isRestorableStatus(session.status)) {
-      throw new Error(`Session is not running: ${sessionId}`);
-    }
+    assertSendableStatus(session);
     if (!Number.isInteger(optionIndex) || optionIndex < 0) {
       throw new Error("optionIndex must be a non-negative integer");
     }
+    const writeStartedAt = Date.now();
     await sendMenuSelectionKeys(session.tmuxSession, optionIndex);
+    this.recordPaneWrite(session, writeStartedAt);
+  }
+
+  // Every pane write that submits input to the agent: any state read before
+  // it (this service's classification cache, the agent's own state cache)
+  // predates the turn the write starts, so a queued message must never act on
+  // its "waiting".
+  private recordPaneWrite(
+    session: Pick<SessionRecord, "id" | "agent" | "agentSessionId">,
+    startedAt: number,
+  ): void {
+    this.stateCache.delete(session.id);
+    invalidateAgentState(session.agent, session.agentSessionId);
+    this.paneWriteFenceAt.set(session.id, startedAt);
+  }
+
+  // Queued delivery's read of a classification. A "waiting" whose last agent
+  // activity predates the latest pane write was read before the agent took
+  // that write (an agent state cache filled in the gap, a slow export): it
+  // describes the turn the write replaced, so it reads as working until the
+  // agent records activity past the write, for at most PANE_WRITE_FENCE_MS.
+  private queuedDeliveryState(classified: SessionStateResult): SessionState {
+    if (classified.state !== "waiting") return classified.state;
+    const fence = this.paneWriteFenceAt.get(classified.session.id);
+    const activityAt = classified.agentActivityAt;
+    if (
+      fence === undefined ||
+      activityAt === null ||
+      activityAt.getTime() >= fence ||
+      Date.now() - fence >= PANE_WRITE_FENCE_MS
+    ) {
+      return "waiting";
+    }
+    return "working";
   }
 
   async deliver(
     sessionId: string,
     message: string,
-    options?: { interrupt?: boolean },
+    options?: { interrupt?: boolean; sensitivePromptSuffix?: string },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -10720,7 +12891,16 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
-    return this.deliverPrepared(sessionId, message, { ...options, entryPoint: "deliver" });
+    const result = await this.deliverPrepared(sessionId, message, {
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+      entryPoint: "deliver",
+    });
+    if (options?.sensitivePromptSuffix) {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current) throw new Error(`Session not found: ${sessionId}`);
+      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+    }
+    return result;
   }
 
   // Content-keyed: both queue ops locate the exact string in the queue rather
@@ -10752,18 +12932,21 @@ export class SessionService {
 
   async removeQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
-    // A drain (or a flush) already in flight for this session may have
-    // already typed the CURRENT head into the pane and be parked waiting on
-    // its ack — removing that exact text now would report "removed unsent"
-    // even though the pane write already landed (the same pane-write-
-    // precedes-ack-wait asymmetry the original bug was). Gate ONLY head
-    // removal: deliverQueuedMessage always targets index 0, so a non-head
-    // message can never be mid-delivery, and rejecting a safe, unrelated
-    // removal with a 409 would force the caller to wait out a live
-    // delivery's full ack window (up to ~900s) for no reason.
+    // A drain between its claim and its pane write, or a flush already in
+    // flight, may be typing the CURRENT head into the pane — removing that
+    // exact text now would report "removed unsent" even though the pane
+    // write lands (the same pane-write-precedes-ack-wait asymmetry the
+    // original bug was). Gate ONLY head removal: deliverQueuedMessage always
+    // targets index 0, so a non-head message can never be mid-delivery, and
+    // rejecting a safe, unrelated removal with a 409 would force the caller
+    // to wait out a live delivery's full ack window (up to ~900s) for no
+    // reason. A drain drops its text from the queue at the pane write
+    // (queuedDeliveryTyped), so during its ack wait the head is a later,
+    // untyped message.
     const isHead = queuedMessages(session)[0] === message;
     if (
       isHead &&
+      !this.queuedDeliveryTyped.has(sessionId) &&
       (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId))
     ) {
       throw new QueueDeliveryInFlightError(`Delivery already in flight for ${sessionId}`);
@@ -10785,9 +12968,9 @@ export class SessionService {
   // Immediate delivery of an already-queued entry. Order: probe -> deliver
   // -> re-read -> subtract. Never remove-then-deliver — a failed delivery
   // would lose the message outright. Delivery reuses deliverPrepared (the
-  // existing immediate-send path, given recoverOnLiveAckTimeout so a live
-  // ack timeout returns success instead of a false session.message.failed),
-  // so there is exactly one immediate-delivery path, not a second one forked
+  // existing immediate-send path, whose interactive entry points turn a live
+  // ack timeout into success instead of a false session.message.failed), so
+  // there is exactly one immediate-delivery path, not a second one forked
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
@@ -10801,6 +12984,7 @@ export class SessionService {
 
   private async flushQueuedMessageLocked(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    assertSendableStatus(session);
     // Both probes are synchronous, before any await. The pane-lock probe
     // catches a drain already past its own queueDeliveryInFlight registration
     // and into the pane write; the marker probe catches a drain (or another
@@ -10811,10 +12995,15 @@ export class SessionService {
     }
     this.queueDeliveryInFlight.add(sessionId);
     try {
-      await this.deliverPreparedLocked(sessionId, message, {
+      // Same as web Send now: a working agent gets its interrupt key first.
+      const delivered = await this.deliverPreparedLocked(sessionId, message, {
         entryPoint: "flush",
-        recoverOnLiveAckTimeout: true,
+        interrupt: true,
       });
+      // Moved to the head, still queued.
+      if (delivered.queuedAheadReason) {
+        return delivered;
+      }
       // Re-read: the delivery just wrote the record, so `session` is stale.
       const latest = readSession(this.config.dataDir, sessionId) ?? session;
       const persisted = this.writeQueueWithout(latest, message);
@@ -10841,21 +13030,75 @@ export class SessionService {
   // `readySession` (taken before it): that read can be arbitrarily stale by
   // the time the send resolves, and blind-writing it would erase a
   // concurrent append or resurrect an already-drained message.
+  // An unacked write on a live agent may still sit in the composer: hold every
+  // pane writer until the agent acks the typed text (settleSubmitHold); the
+  // banner's submit (Enter only) is the escape. The typed marker carries the
+  // text and its ack baseline for that scan.
+  private withSubmitUnconfirmed(
+    record: SessionRecord,
+    typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
+  ): SessionRecord {
+    this.logEvent("session.message.submit_unconfirmed", {
+      level: "warn",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Sent a message to ${record.id} the agent has not confirmed; queued messages hold until the agent acks it`,
+      details: { agent: record.agent },
+    });
+    return { ...record, submitUnconfirmedAt: typed.typedAt, queuedMessageTyped: typed };
+  }
+
+  // Queue head, held for the prompt, on a fresh queue read: the next runner
+  // pass types it once the agent is waiting. The response names the reason.
+  private async queueAheadOfBusyTurn(
+    readySession: SessionRecord,
+    message: string,
+    state: SessionState,
+  ): Promise<SessionView> {
+    const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
+    const record = withQueuedMessages(
+      { ...readySession, status: "running", updatedAt: nowIso() },
+      [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+      true,
+    );
+    writeSession(this.config.dataDir, record);
+    this.logEvent("session.message.queued_ahead", {
+      level: "info",
+      sessionId: record.id,
+      projectId: record.project,
+      message: `Queued a Send now to ${record.id} at the head: ${record.agent} has no interrupt key and is ${state}`,
+      details: {
+        agent: record.agent,
+        state,
+        queuedCount: queuedMessages(record).length,
+        messageLength: message.length,
+      },
+    });
+    this.scheduleDeliveryRunner(record.id);
+    return { ...(await this.enrich(record)), queuedAheadReason: "no_interrupt" };
+  }
+
   private async commitDeliveredSend(
     sessionId: string,
     readySession: SessionRecord,
+    unconfirmed: NonNullable<SessionRecord["queuedMessageTyped"]> | null,
+    ackedMessage: string | null,
   ): Promise<SessionRecord> {
     this.stateCache.delete(sessionId);
     const latest = readSession(this.config.dataDir, sessionId) ?? readySession;
-    const updated = withQueuedMessages(
-      {
-        ...readySession,
-        status: "running",
-        updatedAt: nowIso(),
-      },
+    const delivered = withQueuedMessages(
+      withoutFailedSubmit(
+        {
+          ...readySession,
+          status: "running",
+          updatedAt: nowIso(),
+        },
+        ackedMessage,
+      ),
       queuedMessages(latest),
       latest.queuedMessages?.awaitingPrompt ?? false,
     );
+    const updated = unconfirmed ? this.withSubmitUnconfirmed(delivered, unconfirmed) : delivered;
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
     return persisted;
@@ -10868,11 +13111,6 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
-      // Flush's ack-timeout policy: a submit ack timeout with the process
-      // still alive means the pane write landed, so the delivery is treated
-      // as recovered instead of failed. Absent (deliver(), queue:false
-      // send) keeps today's throw-and-log-failed semantics unchanged.
-      recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
@@ -10887,9 +13125,13 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
-      recoverOnLiveAckTimeout?: boolean;
     },
   ): Promise<SessionView> {
+    // send and flush are user-driven: short ack pacing, and a live-process ack
+    // timeout means the pane write landed, so it is recovered, not failed.
+    // deliver() (triggers) keeps the agent's long pacing and throws, which
+    // drives its own retry.
+    const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
       if (!initialSession) {
@@ -10910,28 +13152,71 @@ export class SessionService {
         });
         throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
       }
+      // Classification clears the marker when the agent already took the prompt.
+      if (submitPending(initialSession)) {
+        const held = (await this.classifySessionRecord(initialSession)).session;
+        if (submitPending(held)) {
+          throw new LaunchPromptPendingError(
+            `Agent has not confirmed the last prompt: ${sessionId}. Submit it first.`,
+            held.submitUnconfirmedAt,
+          );
+        }
+      }
       const readySession = await this.ensureSessionReadyForSend(initialSession);
+      // No interrupt key (cursor): text typed into a busy turn lands in the
+      // agent's own follow-up box, which can drop it. Send now and flush queue
+      // it at the head instead; the runner types it when the turn ends. A
+      // session this send relaunched has no turn to wait out.
+      if (
+        interactive &&
+        initialSession.status === "running" &&
+        agentInterruptKeys(readySession.agent).length === 0
+      ) {
+        const state = this.queuedDeliveryState(await this.classifySessionRecord(readySession));
+        if (state !== "waiting") {
+          return await this.queueAheadOfBusyTurn(readySession, message, state);
+        }
+      }
       let interrupt = options.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
       let recovered: SubmitAckTimeoutError | null = null;
+      // Object, not a `let`: set inside the pane-write callback.
+      const pane: { typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null } = {
+        typed: null,
+      };
       try {
-        await this.sendAgentMessage(readySession, message, { interrupt });
+        await this.sendAgentMessage(readySession, message, {
+          interrupt,
+          interactive,
+          onPaneWritten: (ackBaseline, pastedAt) => {
+            pane.typed = {
+              message,
+              typedAt: new Date(pastedAt).toISOString(),
+              ...(ackBaseline ? { ackBaseline } : {}),
+            };
+          },
+        });
       } catch (error) {
-        if (options.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
+        if (!interactive || !isRecoveredSubmitAckTimeout(error)) {
           throw error;
         }
         recovered = error;
       }
-      const persisted = await this.commitDeliveredSend(sessionId, readySession);
+      const persisted = await this.commitDeliveredSend(
+        sessionId,
+        readySession,
+        recovered && unconfirmedSubmitHolds(message) ? pane.typed : null,
+        recovered ? null : message,
+      );
       if (recovered) {
         this.logEvent("session.message.delivery_recovered", {
           level: "warn",
           sessionId,
           projectId: initialSession.project,
-          message: `Recovered a delivered message to ${sessionId} after a submit ack timeout`,
+          message: `Sent a message to ${sessionId}; submit ack timed out on a live agent, not confirmed`,
           details: {
             agent: recovered.agent,
             lastScannedFile: recovered.lastScannedFile,
@@ -10959,6 +13244,7 @@ export class SessionService {
       if (
         error instanceof SessionRateLimitedError ||
         error instanceof QueueDeliveryInFlightError ||
+        error instanceof LaunchPromptPendingError ||
         (error instanceof SessionAdmissionDeniedError && error.reason === "memory_guard")
       ) {
         throw error;
@@ -11110,7 +13396,11 @@ export class SessionService {
         this.historyCaptureStamps.get(stampKey),
         (payload) => {
           const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, anchorId);
-          writeFileSync(join(artifactDir, artifactId), payload);
+          writeFileSync(
+            join(artifactDir, artifactId),
+            redactAutoPingHandles(payload.toString("utf8")),
+            "utf8",
+          );
         },
       );
       // Nothing new in the source: no file, no metadata entry, no artifact id.
@@ -11196,11 +13486,118 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: AgentMessageWriteOptions,
   ): Promise<AgentSendOutcome> {
     return this.withPaneWriteLock(session.tmuxSession, () =>
       this.writeAgentMessage(session, message, options),
     );
+  }
+
+  private async sendDeferredSensitiveInitialMessage(
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
+    >,
+    message: string,
+  ): Promise<AgentSendOutcome> {
+    return this.withPaneWriteLock(session.tmuxSession, async () => {
+      const startedAt = Date.now();
+      const binding = agentWaitsForSubmitAck(session.agent)
+        ? await createAgentSubmitAckBinding(session.agent, {
+            ...this.submitAckContext(session),
+            freshLaunch: false,
+          })
+        : null;
+      const writeStartedAt = Date.now();
+      await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+      this.recordPaneWrite(session, writeStartedAt);
+      if (!binding) return "submitted" as const;
+      // Bounded resend loop, short window on every agent: this callback holds
+      // withPaneWriteLock, so a long window (claude/codex/opencode pacing is
+      // 300s) starves every other send to this pane. Worst case is
+      // maxResends+1 scans x DEFERRED_CONTROLS_ACK_WINDOW_MS plus maxResends
+      // bare Enters — 3 x 5s = 15s today. Restores the recovery for a
+      // genuinely dropped Enter (agents/index.ts) without reinstating
+      // cursor's old 65s hold.
+      let result: SubmitAckScanResult = { found: false, lastScannedFile: null };
+      // Set only when a mid-loop probe observes a dead pane; a confirmed-dead
+      // agent does not come back inside one send, so the loop stops resending
+      // into it instead of burning the rest of the budget. Never set on a
+      // live result — see the probe's own fresh:true comment below.
+      let knownDead = false;
+      for (let attempt = 0; attempt <= DEFERRED_CONTROLS_MAX_RESENDS; attempt += 1) {
+        result = await this.waitForSubmitAck(binding, message, DEFERRED_CONTROLS_ACK_WINDOW_MS);
+        if (result.found) return "submitted" as const;
+        if (attempt < DEFERRED_CONTROLS_MAX_RESENDS) {
+          // fresh:true — a stale cached hit would report an agent that just
+          // died as alive.
+          const alive = await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh: true },
+          );
+          if (!alive) {
+            knownDead = true;
+            break;
+          }
+          await sendSubmitKeyToTmux(session.tmuxSession);
+        }
+      }
+      // fresh:true — a cached hit could report an agent that just died as
+      // alive; this value decides throw vs. treat-as-delivered. Skipped when
+      // already confirmed dead mid-loop.
+      const processAlive = knownDead
+        ? false
+        : await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: session.launchCommand,
+            },
+            { fresh: true },
+          );
+      const elapsedMs = Date.now() - startedAt;
+      if (processAlive) {
+        this.logEvent("session.controls.delivery_recovered", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Deferred controls ack timed out for ${session.id} but agent process is live; continuing`,
+          details: {
+            agent: session.agent,
+            lastScannedFile: result.lastScannedFile,
+            elapsedMs,
+            processAlive,
+            controlCount: (message.match(/ap1_/g) ?? []).length,
+          },
+        });
+        // Deliberately not "submitted": writeAgentMessage's cursor-live branch
+        // returns "submitted" for an ordinary recovered send, but spawn/trigger
+        // telemetry needs to tell that apart from an unconfirmed deferred-controls
+        // ack. Don't "fix" this to match writeAgentMessage.
+        return "submit_unconfirmed" as const;
+      }
+      throw new SubmitAckTimeoutError({
+        sessionId: session.id,
+        agent: session.agent,
+        lastScannedFile: result.lastScannedFile,
+        elapsedMs,
+        processAlive: false,
+      });
+    });
+  }
+
+  private async earlySubmitResendAllowed(
+    session: Pick<SessionRecord, "agent" | "tmuxSession" | "worktreePath" | "agentSessionId">,
+  ): Promise<boolean> {
+    const panePid = await getTmuxPanePid(session.tmuxSession);
+    return agentEarlySubmitResendAllowed(session.agent, {
+      worktreePath: session.worktreePath,
+      ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+      ...(panePid !== null ? { panePid } : {}),
+    });
   }
 
   private async writeAgentMessage(
@@ -11209,54 +13606,102 @@ export class SessionService {
       "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
     >,
     message: string,
-    options?: { interrupt?: boolean; freshLaunch?: boolean },
+    options?: AgentMessageWriteOptions,
   ): Promise<AgentSendOutcome> {
     const freshLaunch = options?.freshLaunch === true;
+    const interactive = options?.interactive === true;
     const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) &&
       !(session.agent === "codex" && process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"]);
-    const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
     const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
       ? await createAgentSubmitAckBinding(session.agent, {
-          worktreePath: session.worktreePath,
-          codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
-          ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+          ...this.submitAckContext(session),
           freshLaunch,
         })
       : null;
     const startedAt = Date.now();
-    await sendMessageToTmux(session.tmuxSession, message, {
-      agent: session.agent,
-      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
-    });
+    const interrupted =
+      options?.interrupt === true &&
+      (await sendInterruptKeysToTmux(session.tmuxSession, session.agent));
+    // Checked right before every paste, fresh:true: the interrupt key can end
+    // the agent, and an agent whose wrapper just died leaves the pane at the
+    // shell prompt while the session still reads running. A cached "alive"
+    // would paste the message into the shell.
+    const alive = await agentProcessAlive(
+      {
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        launchCommand: session.launchCommand,
+      },
+      { fresh: true },
+    );
+    if (!alive) {
+      throw new AgentExitedBeforeSendError(
+        interrupted
+          ? `Agent process for ${session.id} exited after the interrupt; message not sent`
+          : `Agent process for ${session.id} is not running; message not sent`,
+      );
+    }
+    // After the interrupt and its settle: the interrupted turn's own record
+    // lands before this, so it never confirms the pasted text.
+    const pastedAt = Date.now();
+    await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+    this.recordPaneWrite(session, pastedAt);
+    options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     if (!binding) {
       return "submitted";
     }
-    const { windowMs: ackWindowMs, maxResends } = agentSubmitAckPacing(session.agent, {
+    const {
+      windowMs: ackWindowMs,
+      maxResends,
+      firstWindowMs,
+    } = agentSubmitAckPacing(session.agent, {
       freshLaunch,
+      interactive,
+      slashCommand: message.trimStart().startsWith("/"),
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    // Set only when the mid-loop probe below observes a non-alive pane (dead,
-    // or unresponsive = ambiguous); reused for the post-loop check so it is
-    // not re-probed and the unresponsive flag survives to the throw. Never set
-    // on a live result — a live pane can still die before the next check, so
-    // "alive" is never cached (see the probe's own fresh:true comment).
-    let latchedNotAlive: { alive: boolean; unresponsive: boolean } | null = null;
+    // Set only when the mid-loop probe below observes a dead pane; reused for
+    // the post-loop processAlive check so a confirmed-dead agent is not
+    // re-probed. Never set on a live result — a live pane can still die before
+    // the next check, so "alive" is never cached, only "dead" (see the probe's
+    // own fresh:true comment).
+    let knownDead = false;
+    // The last scan that missed the text read the transcript before the agent
+    // recorded it. An interrupted turn can close after the paste (the agent
+    // takes the input once its abort lands), so on an ack the queue fence
+    // moves up to that read: the closing turn's own records predate it.
+    let lastMissAt = pastedAt;
+    const trackedBinding: SubmitAckBinding = {
+      baseline: binding.baseline,
+      scan: async (text) => {
+        const scannedAt = Date.now();
+        const result = await binding.scan(text);
+        if (!result.found) lastMissAt = scannedAt;
+        return result;
+      },
+    };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
-      lastResult = await this.waitForSubmitAck(binding, message, ackWindowMs);
+      const earlyWindow = attempt === 0 && firstWindowMs !== undefined;
+      lastResult = await this.waitForSubmitAck(
+        trackedBinding,
+        message,
+        earlyWindow ? firstWindowMs : ackWindowMs,
+      );
       if (lastResult.found) {
+        this.paneWriteFenceAt.set(session.id, lastMissAt);
         return "submitted";
       }
       if (attempt < maxResends) {
-        // Cursor-only fast dead-agent exit (I2 scopes this to cursor's short
-        // window/high-resend pacing; claude/codex/opencode keep their long
-        // window and freshLaunch "submit_unconfirmed" pacing untouched). A
-        // dead pane process does not come back inside one send, so a false
-        // result here can be trusted for the rest of this loop; { fresh: true }
-        // is mandatory — a stale cached hit would report an agent that just
-        // died as alive.
-        if (session.agent === "cursor") {
-          const presence = await agentProcessPresence(
+        // Fast dead-agent exit before each resent Enter: cursor, interactive
+        // sends, and the launch send (a kill mid-spawn removes its pane).
+        // Deliver() into a busy claude/codex/opencode keeps its long window
+        // untouched. A dead pane process does not come back inside one send,
+        // so a false result here can be trusted for the rest of this loop;
+        // { fresh: true } is mandatory — a stale cached hit would report an
+        // agent that just died as alive.
+        if (session.agent === "cursor" || interactive || freshLaunch) {
+          const alive = await agentProcessAlive(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -11264,10 +13709,15 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!presence.alive) {
-            latchedNotAlive = presence;
+          if (!alive) {
+            knownDead = true;
             break;
           }
+        }
+        // The short first window ends in an Enter only when the agent proves
+        // it is not showing a menu; otherwise the long window applies.
+        if (earlyWindow && !(await this.earlySubmitResendAllowed(session))) {
+          continue;
         }
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
@@ -11275,20 +13725,23 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const presence =
-      latchedNotAlive ??
-      (await agentProcessPresence(
-        {
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-          launchCommand: session.launchCommand,
-        },
-        { fresh: true },
-      ));
-    const processAlive = presence.alive;
-    const probeUnresponsive = presence.unresponsive;
+    const processAlive = knownDead
+      ? false
+      : await agentProcessAlive(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        );
     const elapsedMs = Date.now() - startedAt;
-    if (session.agent === "cursor" && processAlive) {
+    // Interactive callers own the live-timeout policy (delivered + warn), so
+    // they get the typed timeout, never this silent cursor pass. Neither does
+    // a launch send: an unacked launch prompt may still sit unsubmitted (or
+    // be gone), so it takes the launch-unconfirmed hold below, like claude
+    // and codex.
+    if (session.agent === "cursor" && processAlive && !interactive && !freshLaunch) {
       this.logEvent("session.submit.recovered", {
         level: "warn",
         sessionId: session.id,
@@ -11314,17 +13767,21 @@ export class SessionService {
         elapsedMs,
         ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
-        probeUnresponsive,
       },
     });
-    if (freshLaunch && processAlive && agentHasLaunchSubmitAck(session.agent)) {
-      // Scoped to agents with launch-send pacing (claude): their short window
-      // plus Enter resends are the launch send's whole recovery, so throwing
-      // afterwards would only tear a healthy session down — the foreground
-      // spawn kills the pane in its catch and the background spawn retries from
-      // scratch. Agents without that pacing keep throwing, which is what drives
-      // their launch retry. The caller learns submission was never confirmed
-      // from the outcome below.
+    if (
+      freshLaunch &&
+      processAlive &&
+      (agentHasLaunchSubmitAck(session.agent) || session.agent === "cursor")
+    ) {
+      // Scoped to agents with launch-send pacing (claude, codex) and cursor:
+      // their window plus Enter resends are the launch send's whole recovery,
+      // so throwing afterwards would only tear a healthy session down — the
+      // foreground spawn kills the pane in its catch and the background spawn
+      // retries from scratch. Cursor used to pass here as silently submitted,
+      // which hid a lost launch prompt behind a normal-looking session. opencode
+      // keeps throwing, which is what drives its launch retry. The caller learns
+      // submission was never confirmed from the outcome below.
       return "submit_unconfirmed";
     }
     throw new SubmitAckTimeoutError({
@@ -11333,7 +13790,6 @@ export class SessionService {
       lastScannedFile: lastResult.lastScannedFile,
       elapsedMs,
       processAlive,
-      probeUnresponsive,
     });
   }
 
@@ -11538,10 +13994,13 @@ export class SessionService {
     );
   }
 
-  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+  async updateSlots(
+    sessionId: string,
+    request: UpdateSessionSlotsRequest,
+  ): Promise<UpdateSessionSlotsResponse> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // Slots (title/links/tags/pr) are workspace-owned: mutations always land
     // on the workspace's own state, so every member sees the same slots.
@@ -11564,39 +14023,44 @@ export class SessionService {
       (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
     );
     const genericUnlinks = normalized.unlinkLabels;
-    const conditionalTitleBlocked =
-      normalized.setTitleIfAbsent === true && current.manualTitleOverride === true;
+    // Whether a title write is a no-op once-only initializer (agent
+    // `--title-if-absent` against an already-set title) or a blocked manual
+    // lock (`titleSource === "manual"`) is decided in ONE place:
+    // `applyNormalizedSlotsUpdate`'s `blockedTitleEdit`/`hasExistingTitle`
+    // logic. Always pass the title through so that function sees it and can
+    // return "blocked" with `MANUAL_TITLE_LOCK_MESSAGE`; do not re-derive the
+    // block decision here.
     const hasGenericChanges =
-      (normalized.title !== undefined && !conditionalTitleBlocked) ||
+      normalized.title !== undefined ||
       normalized.clearTitle ||
       genericLinks.length > 0 ||
       genericUnlinks.length > 0 ||
       normalized.tags.length > 0 ||
       normalized.untags.length > 0;
-    const slots = hasGenericChanges
-      ? applySlotsUpdate(current.slots, {
-          ...(normalized.title !== undefined && !conditionalTitleBlocked
+    const applied: AppliedSlotsUpdate = hasGenericChanges
+      ? applyNormalizedSlotsUpdate(current.slots, {
+          ...(normalized.title !== undefined
             ? {
                 title: normalized.title,
                 ...(normalized.setTitleIfAbsent ? { setTitleIfAbsent: true } : {}),
               }
             : {}),
-          ...(normalized.clearTitle ? { clearTitle: true } : {}),
-          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
-          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
-          ...(normalized.tags.length > 0 ? { tags: normalized.tags } : {}),
-          ...(normalized.untags.length > 0 ? { untags: normalized.untags } : {}),
+          clearTitle: normalized.clearTitle,
+          source: normalized.source,
+          links: genericLinks,
+          unlinkLabels: genericUnlinks,
+          tags: normalized.tags,
+          untags: normalized.untags,
         })
-      : current.slots;
+      : {
+          ...(current.slots ? { slots: current.slots } : {}),
+          result: { titleResult: "unchanged" },
+        };
+    const slots = applied.slots;
     const nextPr = nativePr ? nativePr : unlinksPr && !hasGenericPrSlot ? undefined : current.pr;
     const nextState: WorkspaceState = {
       ...(slots ? { slots } : {}),
       ...(nextPr ? { pr: nextPr } : {}),
-      ...(current.manualTitleOverride ||
-      normalized.clearTitle ||
-      (normalized.title !== undefined && !normalized.setTitleIfAbsent)
-        ? { manualTitleOverride: true }
-        : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
     const displaySlots = deriveSessionSlots(nextState);
@@ -11608,6 +14072,8 @@ export class SessionService {
       details: {
         title: displaySlots?.title ?? null,
         linkCount: displaySlots?.links.length ?? 0,
+        titleResult: applied.result.titleResult,
+        ...(applied.result.message ? { message: applied.result.message } : {}),
       },
     });
     // The API response is always the CALLER's view, never the workspace
@@ -11617,7 +14083,19 @@ export class SessionService {
       owner?.id === sessionId
         ? owner
         : (readSession(this.config.dataDir, sessionId) ?? currentSession);
-    return this.enrich(callerRecord);
+    const callerView = await this.enrich(callerRecord);
+    // The title is workspace-shared: every member's topic carries it.
+    for (const member of this.listDeskSessions(session)) {
+      if (member.id === sessionId) {
+        await this.syncTelegramTopicName(sessionId, callerView);
+        continue;
+      }
+      const topic = this.resolveTelegramNotice(member.id)?.target;
+      if (topic && topic.chatId < 0 && topic.messageThreadId !== undefined) {
+        await this.syncTelegramTopicName(member.id, await this.enrich(member));
+      }
+    }
+    return { ...callerView, slotUpdate: applied.result };
   }
 
   async startSidecar(
@@ -11877,6 +14355,10 @@ export class SessionService {
     if (!sidecarNames.includes(sidecarName)) {
       throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
     }
+    // A stopped sidecar can free the exact port a cached refusal is waiting
+    // on; never make the next start wait out the backoff for a condition
+    // this stop just resolved.
+    this.clearSidecarStartConflict(sessionId, sidecarName);
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
     const sidecar = project?.sidecars[sidecarName];
     const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
@@ -12054,7 +14536,20 @@ export class SessionService {
   // Strips sidecarPorts from a going-terminal record, keeping only the
   // anchor-owned (non-mcp, desk-shared) entries while another desk member's
   // agent is still running and using them. Route every terminal-write site
-  // through this instead of a wholesale delete.
+  // through this instead of a wholesale delete — the single choke point
+  // for "this session no longer holds this sidecar's port(s)", covering
+  // every release path (kill, stop, complete, stale-timeout park, restore
+  // rollback, relaunch, reconcileUnexpectedStop's crashed-holder path, ...).
+  //
+  // A cached start-conflict refusal on another (waiting) session can name
+  // this session's sidecar in a candidate's reservedBy. As a side effect,
+  // for every sidecar name this call ACTUALLY drops (never one it keeps —
+  // releasableSidecarPorts keeps a whole name or drops it whole, never
+  // partially), clear any such cached refusal: the deadline/backoff bound
+  // (invariant 6, "no permanent latch") is a session's OWN gate, but its
+  // only invalidation hooks are its own lifecycle and its own elapsed
+  // time — nothing else fires just because the OTHER session actually
+  // holding the port went away, whichever of the 9 call sites that was.
   private sessionWithReleasedSidecarPorts(session: SessionRecord): SessionRecord {
     if (!session.sidecarPorts) {
       return session;
@@ -12064,6 +14559,12 @@ export class SessionService {
       this.resolveProjectForSession(session),
       this.hasRunningWorkspaceMembers(session),
     );
+    for (const sidecarName of Object.keys(session.sidecarPorts)) {
+      if (kept?.[sidecarName] !== undefined) {
+        continue;
+      }
+      this.clearSidecarStartConflictsReferencingReservedBy(`${session.id}/${sidecarName}`);
+    }
     const { sidecarPorts: _dropped, ...rest } = session;
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
@@ -12107,6 +14608,7 @@ export class SessionService {
     this.conversationReadChain.delete(sessionId);
     this.claudeJsonlReaders.delete(sessionId);
     this.cursorJsonlReaders.delete(sessionId);
+    this.cursorPaneReadyOverrides.delete(sessionId);
     const anchorId = workspaceIdOf(session);
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
@@ -12152,7 +14654,7 @@ export class SessionService {
   // restore(), the resume-fallback inside it, and switchAuth all reuse the
   // SAME tmux session name and session id for the pane they create next, so
   // a survivor of the kill below is indistinguishable from its own
-  // replacement to every existing probe (getProcessPresenceInTmux keys on tty,
+  // replacement to every existing probe (isProcessRunningInTmux keys on tty,
   // confirmAgentExited keys on tmux session name — neither can tell them
   // apart). Capturing the pane's own process tree BEFORE the kill, then
   // polling those exact pids after it, is the only way to know the kill
@@ -12201,6 +14703,42 @@ export class SessionService {
         throw new Error(
           `Session ${session.id}: could not read the process table to confirm the prior agent process exited; refusing to launch a replacement`,
         );
+      }
+    }
+    // Ownership (capturePaneAgentProcesses, matcher-based) and liveness
+    // (agentProcessAlive, matcher + pane-child fallback) can disagree for a
+    // foreign-binary launch: an ok+empty capture plus a still-ALIVE probe
+    // means the pane's real occupant is invisible to the matchers that would
+    // have named it a survivor. Gated on paneLookup.status === "ok" so a
+    // pane-pid-unreadable episode (already reported above) is not
+    // re-reported here as a capture failure; `fresh: true` because the
+    // capture above is a just-taken read and a TTL-cached liveness verdict
+    // could predate the agent's exit by up to 2s and refuse a legitimate
+    // relaunch.
+    if (
+      options.failOnSurvivors &&
+      paneLookup.status === "ok" &&
+      capture.status === "ok" &&
+      capture.processes.length === 0 &&
+      agentLaunchUsesForeignBinary(session.agent, session.launchCommand)
+    ) {
+      const stillAlive = await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      );
+      if (stillAlive) {
+        const message = `Session ${session.id}: the agent process still reads alive but no owned process was captured; refusing to launch a replacement`;
+        this.logEvent("session.agent_process.capture_blind", {
+          level: "error",
+          sessionId: session.id,
+          message,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+        throw new Error(message);
       }
     }
     await killTmuxSession(session.tmuxSession);
@@ -12266,34 +14804,26 @@ export class SessionService {
       message: `Session ${session.id} already has a live agent process outside its pane`,
       details: { pids: scan.pids },
     });
-    throw new Error(buildForeignAgentProcessMessage(session.id, firstForeign));
+    throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(session.id, firstForeign));
   }
 
   // Classifies a manual-status-gate refusal for the failure event. A ToDo
   // cause (empty ledger or unfinished work) demotes to `warn` with
   // `details.kind`, because the gate rejected before any teardown and the
-  // session is untouched. Exception: the `handoff` caller at the
-  // POST-SPAWN site (a successor session already exists at throw time, see
-  // the Handoff double-gate) stays `error` even on a ToDo cause; the
-  // `handoff` PRE-SPAWN gate throws before a successor exists and still
-  // demotes to `warn` like every other caller. Every other cause stays
-  // `error` with no `details`.
+  // session is untouched. Every other cause stays `error` with no `details`.
   private logManualStatusFailure(
     action: ManualStatusAction,
     targetStatus: ManualSessionStatus,
     sessionId: string,
     projectId: string,
     error: unknown,
-    site: "pre_spawn" | "post_spawn" = "pre_spawn",
   ): void {
     const message = error instanceof Error ? error.message : String(error);
     const isTodoCause = error instanceof TodoEmptyLedgerError || error instanceof TodoOpenWorkError;
-    const isPostSpawnHandoff = action === "handoff" && site === "post_spawn";
-    const level = isTodoCause && !isPostSpawnHandoff ? "warn" : "error";
-    const details =
-      isTodoCause && !isPostSpawnHandoff
-        ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
-        : undefined;
+    const level = isTodoCause ? "warn" : "error";
+    const details = isTodoCause
+      ? { kind: error instanceof TodoEmptyLedgerError ? "todo_ledger_empty" : "todo_open_work" }
+      : undefined;
     this.logEvent(`session.${action}.failed`, {
       level,
       sessionId,
@@ -12383,7 +14913,7 @@ export class SessionService {
     let startupAttachmentsCleaned = false;
 
     try {
-      if (targetStatus === "completed") {
+      if (targetStatus === "completed" && eventAction !== "handoff") {
         const projection = ensureTodoLedger(this.config.dataDir, session);
         const block = todoLedgerBlock(projection);
         // The ledger gates the agent, never the human: a person closing through
@@ -12410,8 +14940,12 @@ export class SessionService {
         // missing forever. A skipped cleanup (a still-live desk sibling)
         // means the files are untouched, so the ids stay.
         startupAttachmentsCleaned = ranCleanup;
-        const replyTargetProjectId =
-          readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
+        const resolvedNotice = this.resolveTelegramNotice(sessionId);
+        const { heldBinding } = deleteTelegramSourceStateForSession(
+          this.config.dataDir,
+          resolvedNotice?.target.projectId ?? session.project,
+          sessionId,
+        );
         await this.pushTelegramNotice(
           sessionId,
           {
@@ -12420,20 +14954,12 @@ export class SessionService {
             state: "stopped",
             ...(session.slots ? { slots: session.slots } : {}),
           },
-          `Session ${telegramSessionLabel(session)} finished (${targetStatus}). This chat is unbound.`,
-          { closeTopic: session.selfDestruct?.enabled !== true },
+          `Session ${telegramSessionLabel(session)} finished (${targetStatus}).${heldBinding ? " This chat is unbound." : ""}`,
+          { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
         );
-        deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
       }
     } catch (error) {
-      this.logManualStatusFailure(
-        eventAction,
-        targetStatus,
-        sessionId,
-        session.project,
-        error,
-        "post_spawn",
-      );
+      this.logManualStatusFailure(eventAction, targetStatus, sessionId, session.project, error);
       throw error;
     }
 
@@ -12531,8 +15057,12 @@ export class SessionService {
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
-      const replyTargetProjectId =
-        readTelegramReplyTarget(this.config.dataDir, sessionId)?.projectId ?? session.project;
+      const resolvedNotice = this.resolveTelegramNotice(sessionId);
+      const { heldBinding } = deleteTelegramSourceStateForSession(
+        this.config.dataDir,
+        resolvedNotice?.target.projectId ?? session.project,
+        sessionId,
+      );
       await this.pushTelegramNotice(
         sessionId,
         {
@@ -12541,10 +15071,9 @@ export class SessionService {
           state: "killed",
           ...(session.slots ? { slots: session.slots } : {}),
         },
-        `Session ${telegramSessionLabel(session)} finished (killed). This chat is unbound.`,
-        { closeTopic: session.selfDestruct?.enabled !== true },
+        `Session ${telegramSessionLabel(session)} finished (killed).${heldBinding ? " This chat is unbound." : ""}`,
+        { closeTopic: session.selfDestruct?.enabled !== true, resolved: resolvedNotice },
       );
-      deleteTelegramSourceStateForSession(this.config.dataDir, replyTargetProjectId, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -12569,12 +15098,22 @@ export class SessionService {
     }
 
     const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
-    const record: SessionRecord = {
-      ...this.sessionWithReleasedSidecarPorts(cleanedSession),
-      status: "killed",
-      updatedAt: nowIso(),
-    };
+    // A killed session never runs again, so its undelivered queue and any
+    // pending-launch and typed-awaiting-ack markers go with it.
+    const record: SessionRecord = withQueuedMessages(
+      {
+        ...this.sessionWithReleasedSidecarPorts(cleanedSession),
+        status: "killed",
+        updatedAt: nowIso(),
+      },
+      [],
+      false,
+    );
     delete record.retainInList;
+    delete record.submitUnconfirmedAt;
+    delete record.queuedMessageTyped;
+    delete record.submitRequeuedMessage;
+    delete record.submitFailedMessage;
     writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
@@ -12605,6 +15144,9 @@ export class SessionService {
       message: `Killed ${sessionId}`,
       details: {
         worktree: session.worktree,
+        ...(hasQueuedMessages(cleanedSession)
+          ? { discardedQueuedCount: queuedMessages(cleanedSession).length }
+          : {}),
       },
     });
     return this.enrich(record);
@@ -12618,10 +15160,13 @@ export class SessionService {
       return session;
     }
 
-    // Claude and OpenCode sessions pin their native session id. Never overwrite
+    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
     // one with newest-session discovery, which could bind a sibling session
     // sharing the worktree. Legacy records without an id keep discovery below.
-    if ((session.agent === "claude" || session.agent === "opencode") && session.agentSessionId) {
+    if (
+      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
+      session.agentSessionId
+    ) {
       return session;
     }
 
@@ -12857,6 +15402,11 @@ export class SessionService {
     project: ProjectConfig,
   ): Promise<SessionRecord> {
     this.clearTargetGoneNudgeGate(session.id);
+    // A relaunch replays every sidecar from scratch; a cached refusal from
+    // before this relaunch must never carry over.
+    for (const name of Object.keys(project.sidecars)) {
+      this.clearSidecarStartConflict(session.id, name);
+    }
     await this.assertNoForeignAgentForSession(
       session,
       await this.lookupPanePidQuietly(session.tmuxSession),
@@ -12944,6 +15494,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
+      closeoutOwner: session.closeoutOwner === true,
       ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
     });
 
@@ -12964,7 +15515,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-        agent: session.agent,
+        launchScriptDir: sessionToolDir,
         env,
       });
       await waitForTmuxReady(
@@ -13027,7 +15578,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: freshLaunchCommand,
-        agent: session.agent,
+        launchScriptDir: sessionToolDir,
         env,
       });
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
@@ -13073,6 +15624,7 @@ export class SessionService {
         this.config.tags,
         project.branchNaming?.regex,
         session.selfDestruct,
+        telegramAgentInstructions(project),
       );
       const recoveryPaneTarget = {
         id: session.id,
@@ -13083,16 +15635,17 @@ export class SessionService {
         ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       };
       if (session.agent === "codex") {
-        // codex has no launch-send pacing (agentHasLaunchSubmitAck is false for
-        // it) and its rollout-based ack lags a fresh launch/resume enough that
-        // waiting on it here would reproduce the exact bug f79fb970f fixed for
-        // restore(): a healthy pane torn down because the ack scan, not the
-        // send, timed out. Bypass sendAgentMessage the same way restore() does
-        // for codex. A dead pane still surfaces: send-keys against a gone tmux
-        // session throws.
+        // codex's rollout-based ack lags a resume enough that waiting on it
+        // here would reproduce the exact bug f79fb970f fixed for restore(): a
+        // healthy pane torn down because the ack scan, not the send, timed
+        // out. Bypass sendAgentMessage the same way restore() does for codex.
+        // A dead pane still surfaces: send-keys against a gone tmux session
+        // throws.
+        const writeStartedAt = Date.now();
         await sendMessageToTmux(session.tmuxSession, recoveryContextMessage, {
           agent: session.agent,
         });
+        this.recordPaneWrite(session, writeStartedAt);
       } else {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
@@ -13134,7 +15687,16 @@ export class SessionService {
       // id in readClaudeJsonlState's fallback lookup.
       this.claudeJsonlReaders.delete(session.id);
     }
-    const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
+    // The hold and its typed marker dropped: the relaunch replaced the pane
+    // the old prompt was pending in.
+    const {
+      error: _ignoredError,
+      submitUnconfirmedAt: _replacedLaunch,
+      queuedMessageTyped: _replacedTyped,
+      submitRequeuedMessage: _replacedRequeue,
+      submitFailedMessage: _replacedFailure,
+      ...recoveredBase
+    } = sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
     // new pane is live, and before any caller (send/deliverPrepared/
     // tryDeliverQueuedMessage/switchAuth, all downstream of
@@ -13171,6 +15733,17 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     this.clearTargetGoneNudgeGate(sessionId);
+    // A restore can replay every sidecar afresh (directly, or via
+    // relaunchSessionInPlace on the fresh-launch fallback); a cached
+    // refusal from before this restore must never carry over.
+    try {
+      const restoreProject = this.resolveProjectForSession(session);
+      for (const name of Object.keys(restoreProject?.sidecars ?? {})) {
+        this.clearSidecarStartConflict(sessionId, name);
+      }
+    } catch {
+      // Unknown project: nothing recorded to clear.
+    }
     // Same shepherd-only re-materialization as ensureSessionReadyForSend: this
     // path reads the session directly rather than through that method, so
     // isRestorableSession's workspaceExists (computed by enrich() below) would
@@ -13384,6 +15957,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         repoPath: this.getProject(current.project).path,
         symlinks: this.getProject(current.project).symlinks,
+        closeoutOwner: current.closeoutOwner === true,
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
@@ -13391,7 +15965,7 @@ export class SessionService {
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
-        agent: current.agent,
+        launchScriptDir: sessionToolDir,
         env,
       });
       try {
@@ -13449,11 +16023,14 @@ export class SessionService {
           this.config.tags,
           restoreProject?.branchNaming?.regex,
           current.selfDestruct,
+          telegramAgentInstructions(restoreProject),
         );
         if (current.agent === "codex") {
+          const writeStartedAt = Date.now();
           await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
             agent: current.agent,
           });
+          this.recordPaneWrite(current, writeStartedAt);
         } else {
           // The fallback relaunched the agent instead of resuming it, so this is a
           // launch send with no transcript behind it, same as a spawn's. A resume
@@ -13494,7 +16071,7 @@ export class SessionService {
       // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
       // path after this block intentionally keeps its own warmup.
       this.restoreWarmupUntil.delete(sessionId);
-      if (isRecoveredSubmitAckTimeout(error)) {
+      if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
         // No finishStaleWake here: this branch is only reachable through the
         // submit-ack wait of restore()'s own message, which a stale-parked
@@ -13511,6 +16088,10 @@ export class SessionService {
           mcpSidecarUpdate,
         );
         delete recovered.stopReason;
+        delete recovered.submitUnconfirmedAt;
+        delete recovered.queuedMessageTyped;
+        delete recovered.submitRequeuedMessage;
+        delete recovered.submitFailedMessage;
         const persistedRecovered = await this.captureAgentSessionId(
           recovered,
           AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -13541,26 +16122,13 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      if (!isAmbiguousSubmitAckTimeout(error)) {
-        await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
-      }
+      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
-        ...(isAmbiguousSubmitAckTimeout(error)
-          ? {
-              details: {
-                reason: "submit_ack_timeout",
-                agent: error.agent,
-                elapsedMs: error.elapsedMs,
-                processAlive: false,
-                probeUnresponsive: true,
-              },
-            }
-          : {}),
       });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
@@ -13579,6 +16147,12 @@ export class SessionService {
     );
     restored = await this.finishStaleWake(restored, this.getProject(current.project));
     delete restored.stopReason;
+    // The restore relaunched the agent with its own prompt; an old launch's
+    // pending marker no longer describes the composer.
+    delete restored.submitUnconfirmedAt;
+    delete restored.queuedMessageTyped;
+    delete restored.submitRequeuedMessage;
+    delete restored.submitFailedMessage;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -14048,6 +16622,13 @@ export class SessionService {
     return { authenticated: isAccountAuthenticated(account), loginActive };
   }
 
+  private clearCloseoutOwner(sessionId: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (session?.closeoutOwner !== true) return;
+    writeSession(this.config.dataDir, { ...session, closeoutOwner: false, updatedAt: nowIso() });
+    this.stateCache.delete(sessionId);
+  }
+
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -14114,9 +16695,11 @@ export class SessionService {
       }),
       {
         modeResolution: "carried",
+        closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
     );
+    this.clearCloseoutOwner(session.id);
     if (session.status !== "completed") {
       await this.kill(session.id, { force: forceKillSource, prAction: "leave_open" });
     }
@@ -14263,9 +16846,11 @@ export class SessionService {
           replacingSessionId: session.id,
           admissionReservation,
           modeResolution: "carried",
+          closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
           ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
         },
       );
+      this.clearCloseoutOwner(session.id);
 
       const spawnedRecord = readSession(this.config.dataDir, spawned.id);
       if (spawnedRecord) {
@@ -14282,9 +16867,10 @@ export class SessionService {
         const carryTags = session.slots.tags.filter((tag) => knownTags.has(tag));
         if (carryTags.length > 0) {
           try {
-            spawned = await this.updateSlots(spawned.id, {
+            const { slotUpdate: _slotUpdate, ...spawnedView } = await this.updateSlots(spawned.id, {
               tags: carryTags,
             });
+            spawned = spawnedView;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logEvent("session.handoff.carry_slots_failed", {
@@ -14312,6 +16898,19 @@ export class SessionService {
 
   private resumeSessionDelivery(): void {
     for (const session of listSessions(this.config.dataDir)) {
+      if (session.queuedMessageTyped) {
+        // Arms the runner itself once the typed message is settled.
+        void this.recoverTypedQueuedMessage(session.id).catch((error: unknown) => {
+          this.logEvent("session.message.delivery_failed", {
+            level: "error",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `Failed to recover a typed queued message for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          this.ensureDeliveryRunner(session.id);
+        });
+        continue;
+      }
       this.ensureDeliveryRunner(session.id);
     }
   }
@@ -14329,6 +16928,7 @@ export class SessionService {
 
   private ensureDeliveryRunner(sessionId: string): void {
     if (this.deliveryRuns.has(sessionId)) {
+      this.deliveryRerunRequested.add(sessionId);
       return;
     }
 
@@ -14339,14 +16939,73 @@ export class SessionService {
 
     const run = this.runDeliveryLoop(sessionId).finally(() => {
       this.deliveryRuns.delete(sessionId);
+      if (this.deliveryRerunRequested.delete(sessionId) && !this.deliveryStopped) {
+        this.ensureDeliveryRunner(sessionId);
+      }
     });
     this.deliveryRuns.set(sessionId, run);
+  }
+
+  private notifyQueuedPaneWrite(sessionId: string): void {
+    for (const resolve of this.queuedPaneWriteWaiters.get(sessionId) ?? []) {
+      resolve();
+    }
+  }
+
+  // Resolves at the session's next queued pane write, when `attempt` settles
+  // (it stood down without typing, or finished), or after timeoutMs.
+  private waitForQueuedPaneWrite(
+    sessionId: string,
+    attempt: Promise<boolean>,
+    timeoutMs: number,
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      const waiters = this.queuedPaneWriteWaiters.get(sessionId) ?? new Set<() => void>();
+      this.queuedPaneWriteWaiters.set(sessionId, waiters);
+      const done = (): void => {
+        clearTimeout(timer);
+        waiters.delete(done);
+        if (waiters.size === 0 && this.queuedPaneWriteWaiters.get(sessionId) === waiters) {
+          this.queuedPaneWriteWaiters.delete(sessionId);
+        }
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      timer.unref();
+      waiters.add(done);
+      void attempt.then(done);
+    });
   }
 
   private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
     return this.withWorkspaceLifecycleLocks(sessionId, () =>
       this.tryDeliverQueuedMessageLocked(sessionId),
     );
+  }
+
+  // A queued send's own delivery attempt, detached from the caller: queued
+  // behind the caller's lock, it runs once that lock is released, so the
+  // caller never holds its lock through the pane write or the submit ack.
+  // Arms the runner only after it ends: a runner armed earlier would read
+  // the pre-attempt record and type the next queued message straight after
+  // this one, past the prompt hold. Never rejects: nothing awaits it to the end.
+  private startQueuedDeliveryAttempt(sessionId: string): Promise<boolean> {
+    const run = this.tryDeliverQueuedMessage(sessionId)
+      .catch((error: unknown) => {
+        this.logEvent("session.message.delivery_failed", {
+          level: "error",
+          sessionId,
+          message: `Failed to deliver queued message to ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return false;
+      })
+      .then((delivered) => {
+        this.queuedDeliveryAttempts.delete(run);
+        this.scheduleDeliveryRunner(sessionId);
+        return delivered;
+      });
+    this.queuedDeliveryAttempts.add(run);
+    return run;
   }
 
   private async tryDeliverQueuedMessageLocked(sessionId: string): Promise<boolean> {
@@ -14357,44 +17016,65 @@ export class SessionService {
     if (this.queueDeliveryInFlight.has(sessionId)) {
       return false;
     }
-    // While the memory hold is engaged, defer this attempt entirely: it
-    // would otherwise call ensureSessionReadyForSend, which can relaunch the
-    // session in place and write to its pane — real work this loop should
-    // not do under host memory pressure. Returning false is safe:
-    // runDeliveryLoop treats true/false identically, and false is what every
-    // other stays-queued path below returns.
-    if (this.memoryHold.engaged) {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
       return false;
     }
-    this.queueDeliveryInFlight.add(sessionId);
+    // While the memory hold is engaged, defer this attempt for cold or
+    // stale-parked sessions: it would otherwise call ensureSessionReadyForSend,
+    // which can relaunch the session in place and write to its pane — real
+    // work this loop should not do under host memory pressure. Live running
+    // sessions proceed with delivery. Returning false is safe:
+    // runDeliveryLoop treats true/false identically, and false is what every
+    // other stays-queued path below returns.
+    if (
+      this.memoryHold.engaged &&
+      !(this.isLiveSessionRecord(session) && !isStaleParked(session))
+    ) {
+      return false;
+    }
+    // Claimed only around the pane write below, never across the readiness
+    // and settle checks: those can take seconds (opencode classifies through
+    // `opencode export`), and remove/flush must not 409 while nothing is
+    // being typed.
+    let claimed = false;
     try {
-      const session = readSession(this.config.dataDir, sessionId);
-      if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
-        return false;
-      }
-
       let nextMessage: string | undefined;
       try {
         const readySession = await this.ensureSessionReadyForSend(session);
-        const classified = await this.classifySessionRecord(readySession);
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
         // so an ordinary queued send must not sit for up to 30 minutes waiting
         // for that nudge to fire on its own.
-        if (classified.state !== "waiting" && !classified.serverError) {
+        //
+        // Settle is measured on the agent's own structured artifact, not raw tmux
+        // activity. Raw tmux activity is the session-wide max across every window,
+        // so a user's split running a dev server would stall delivery indefinitely,
+        // and merely attaching the web terminal (which makes the TUI repaint) would
+        // delay it by another full window. The agent's transcript is inherently
+        // scoped to the agent and is untouched by both.
+        const settleRemainingMs = async (): Promise<number | null> => {
+          const classified = await this.classifySessionRecord(readySession);
+          if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
+            return null;
+          }
+          const activityAt = resolveAgentActivityAt(classified);
+          return activityAt === null
+            ? 0
+            : Math.max(0, activityAt.getTime() + QUEUED_MESSAGE_SETTLE_MS - Date.now());
+        };
+        const remainingMs = await settleRemainingMs();
+        if (remainingMs === null) {
           return false;
         }
-        // Gate on the agent's own structured artifact, not raw tmux activity. Raw
-        // tmux activity is the session-wide max across every window, so a user's
-        // split running a dev server would stall delivery indefinitely, and merely
-        // attaching the web terminal (which makes the TUI repaint) would delay it
-        // by another full window. The agent's transcript is inherently scoped to
-        // the agent and is untouched by both.
-        if (
-          !isIdleEnoughToReceive(resolveAgentActivityAt(classified), getIdleWaitBeforeFlushMs())
-        ) {
-          return false;
+        if (remainingMs > 0) {
+          // Wait out the settle here: a miss hands the message to the delivery
+          // loop, which parks it behind a running pipeline step's ready grace.
+          await sleep(remainingMs);
+          if (this.deliveryStopped || (await settleRemainingMs()) !== 0) {
+            return false;
+          }
         }
 
         const latest = readSession(this.config.dataDir, sessionId);
@@ -14407,6 +17087,10 @@ export class SessionService {
           return false;
         }
 
+        // Same synchronous span as the re-read above: a removal that landed
+        // before it is already gone from `latest`; one after it sees the claim.
+        this.queueDeliveryInFlight.add(sessionId);
+        claimed = true;
         await this.deliverQueuedMessage(latest, nextMessage);
         // A delivery that actually landed clears any dedup so a LATER
         // failure (a new problem, not a repeat) logs fresh.
@@ -14443,7 +17127,9 @@ export class SessionService {
         return true;
       }
     } finally {
-      this.queueDeliveryInFlight.delete(sessionId);
+      if (claimed) {
+        this.queueDeliveryInFlight.delete(sessionId);
+      }
     }
   }
 
@@ -14451,42 +17137,87 @@ export class SessionService {
     session: SessionRecord,
     message: string,
   ): Promise<SessionRecord> {
+    const sessionId = session.id;
     let recovered: SubmitAckTimeoutError | null = null;
+    // Object, not a `let`: set inside the pane-write callback.
+    const pane = { drained: false };
+    // Drains at the pane write, not the ack: a queued send waits on this
+    // write (send() -> waitForQueuedPaneWrite), never on the ack.
+    // Re-reads and subtracts the first occurrence of the text rather than
+    // trusting a slice taken before the send: a concurrent `send` append or
+    // flush would otherwise be erased by a blind whole-record write.
+    // The persisted queuedMessageTyped marker covers a restart before the ack
+    // (recoverTypedQueuedMessage).
+    const drain = (ackBaseline: SubmitAckBaseline | null, pastedAt = Date.now()): void => {
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      const typedAt = new Date(pastedAt).toISOString();
+      writeSession(
+        this.config.dataDir,
+        withQueuedMessages(
+          {
+            ...latest,
+            status: "running",
+            updatedAt: typedAt,
+            queuedMessageTyped: { message, typedAt, ...(ackBaseline ? { ackBaseline } : {}) },
+          },
+          removeFirstOccurrence(queuedMessages(latest), message),
+          true,
+        ),
+      );
+      pane.drained = true;
+      this.queuedDeliveryTyped.add(sessionId);
+      this.notifyQueuedPaneWrite(sessionId);
+    };
     try {
-      await this.sendAgentMessage(session, message, { interrupt: false });
+      await this.sendAgentMessage(session, message, {
+        interrupt: false,
+        interactive: true,
+        onPaneWritten: drain,
+      });
+      this.queuedDeliveryAckedAt.set(sessionId, Date.now());
     } catch (error) {
+      this.queuedDeliveryAckedAt.delete(sessionId);
       // A live process past a submit-ack timeout means the pane write
       // landed; treat it as delivered rather than rethrow into the caller's
       // failure branch (isRecoveredSubmitAckTimeout, module scope, shared
       // with flush).
       if (!isRecoveredSubmitAckTimeout(error)) {
+        this.queuedDeliveryTyped.delete(sessionId);
+        if (pane.drained) {
+          this.requeueTypedMessageAtHead(sessionId, message);
+        }
         throw error;
       }
       recovered = error;
     }
-    const sessionId = session.id;
+    // A resolved (or recovered) write means the pane write landed, hook or not.
+    if (!pane.drained) {
+      drain(null);
+    }
+    this.queuedDeliveryTyped.delete(sessionId);
     this.stateCache.delete(sessionId);
-    // Re-read and subtract the first occurrence of the delivered text,
-    // rather than trusting a pre-computed remaining-messages slice taken
-    // before the send: that slice can be stale by the time the send
-    // resolves (a concurrent `send` append, or a concurrent flush), and a
-    // blind write over it would erase the concurrent write.
-    const latest = readSession(this.config.dataDir, sessionId) ?? session;
-    const remaining = removeFirstOccurrence(queuedMessages(latest), message);
-    const updated = withQueuedMessages(
-      {
-        ...latest,
-        status: "running",
-        updatedAt: nowIso(),
-      },
-      remaining,
-      true,
+    // The drain above is already on disk, and the typed marker clears here:
+    // captureAgentSessionId anchors its own internal write on a fresh
+    // readSession and must never observe the pre-drain queue or the marker.
+    const {
+      queuedMessageTyped: typed,
+      submitRequeuedMessage: requeued,
+      ...acked
+    } = readSession(this.config.dataDir, sessionId) ?? session;
+    // Counted as typed, never re-queued here (no duplicate): the hold keeps
+    // the next queued message's line clear off a prompt the agent never
+    // took, and settles on the agent's ack of it. An acked re-queued text
+    // spends its re-queue marker.
+    const kept = withoutFailedSubmit(
+      requeued !== undefined && (recovered || requeued !== message)
+        ? { ...acked, submitRequeuedMessage: requeued }
+        : acked,
+      recovered ? null : message,
     );
-    // Persist the drain before the discovery wait below: captureAgentSessionId
-    // anchors its own internal write on a fresh readSession, and must never
-    // observe the pre-drain queue here. A crash between an internal write and
-    // this function's own write would otherwise leave agentSessionId on disk
-    // while the just-delivered message still shows as queued.
+    const updated =
+      recovered && typed && unconfirmedSubmitHolds(message)
+        ? this.withSubmitUnconfirmed(kept, typed)
+        : kept;
     writeSession(this.config.dataDir, updated);
     const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
     writeSession(this.config.dataDir, persisted);
@@ -14520,7 +17251,85 @@ export class SessionService {
     return persisted;
   }
 
+  // Puts a typed-but-unacked message back at the queue head, on a fresh read:
+  // appends since the drain (send's lock-free path) stay behind it in order,
+  // and an identical text re-sent meanwhile moves up rather than duplicating.
+  // Clears the typed marker; awaitingPrompt false so the runner retypes it
+  // (the line clear before a retype erases any text left in the composer).
+  private requeueTypedMessageAtHead(sessionId: string, message: string): void {
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!latest) {
+      return;
+    }
+    const { queuedMessageTyped: _typed, ...base } = latest;
+    writeSession(
+      this.config.dataDir,
+      withQueuedMessages(
+        { ...base, updatedAt: nowIso() },
+        [message, ...removeFirstOccurrence(queuedMessages(latest), message)],
+        false,
+      ),
+    );
+  }
+
+  // Daemon restart with a queued message typed but never acked: the in-memory
+  // ack wait is gone, and a swallowed Enter would leave the text in the
+  // composer for the next message's line clear to erase. The live send's own
+  // ack scan, rebound to its persisted pre-send baseline, decides: only turns
+  // recorded after that send count, with the agent's own matching (opencode:
+  // any new user message id, since it stores a /cmd prompt expanded). No ack,
+  // or no baseline to scan from -> back at the head. Skipped while this
+  // daemon's own delivery owns the session.
+  private async recoverTypedQueuedMessage(sessionId: string): Promise<void> {
+    await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      const typed = session?.queuedMessageTyped;
+      // A marker under a hold is settleSubmitHold's: it waits for the turn to
+      // end, and its re-queue budget survives the restart.
+      if (
+        !session ||
+        !typed ||
+        submitPending(session) ||
+        this.queuedDeliveryTyped.has(sessionId) ||
+        this.queueDeliveryInFlight.has(sessionId)
+      ) {
+        return;
+      }
+      if (isTerminalSessionStatus(session.status)) {
+        const { queuedMessageTyped: _typed, ...cleared } = session;
+        writeSession(this.config.dataDir, cleared);
+        return;
+      }
+      const binding = typed.ackBaseline
+        ? await resumeAgentSubmitAckBinding(
+            session.agent,
+            this.submitAckContext(session),
+            typed.ackBaseline,
+          )
+        : null;
+      const acked = binding ? (await binding.scan(typed.message)).found : false;
+      if (acked) {
+        const latest = readSession(this.config.dataDir, sessionId) ?? session;
+        const { queuedMessageTyped: _typed, ...cleared } = latest;
+        writeSession(this.config.dataDir, cleared);
+        return;
+      }
+      this.requeueTypedMessageAtHead(sessionId, typed.message);
+      this.logEvent("session.message.requeued", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: `Re-queued a message typed before a restart with no submit ack for ${sessionId}`,
+        details: { messageLength: typed.message.length, typedAt: typed.typedAt },
+      });
+    });
+    this.ensureDeliveryRunner(sessionId);
+  }
+
   private async runDeliveryLoop(sessionId: string): Promise<void> {
+    // Per-run state, not an instance field: the bound must not leak budget
+    // across separate delivery runs for the same session.
+    let healContinues = 0;
     try {
       for (;;) {
         if (this.deliveryStopped) {
@@ -14553,6 +17362,43 @@ export class SessionService {
           }
 
           if (waitOutcome === "stopped") {
+            // deliveryStopped means daemon shutdown, not drift: stay silent so
+            // dispose() never produces a diagnostic event, matching the
+            // pipeline branch below. isDeliveryStopped() is a call, not the
+            // field directly, because dispose() can flip the field during the
+            // wait above and this re-check must not inherit the loop-top
+            // guard's stale `false` narrowing.
+            if (!this.isDeliveryStopped()) {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
+              if (
+                latest?.queuedMessages?.awaitingPrompt === true &&
+                latest.status !== "running" &&
+                latest.stopReason === undefined &&
+                !isTerminalSessionStatus(latest.status)
+              ) {
+                this.logEvent("session.message.stalled", {
+                  level: "warn",
+                  sessionId,
+                  projectId: latest.project,
+                  message: `Message delivery stalled for ${sessionId}: session status is ${latest.status} while ${queuedMessages(latest).length} message(s) are still queued`,
+                  details: {
+                    queuedCount: queuedMessages(latest).length,
+                    sessionStatus: latest.status,
+                  },
+                });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
+              }
+            }
             return;
           }
 
@@ -14587,6 +17433,10 @@ export class SessionService {
             // guard's stale `false` narrowing.
             if (!this.isDeliveryStopped()) {
               const latest = readSession(this.config.dataDir, sessionId);
+              if (this.shouldRunDelivery(latest) && healContinues < DELIVERY_HEAL_CONTINUE_LIMIT) {
+                healContinues += 1;
+                continue;
+              }
               if (
                 latest?.pipeline?.status === "running" &&
                 latest.status !== "running" &&
@@ -14605,9 +17455,18 @@ export class SessionService {
                   details: {
                     awaitingStepIndex: latest.pipeline.awaitingStepIndex ?? null,
                     nextStepIndex: latest.pipeline.nextStepIndex,
+                    totalSteps: latest.pipeline.steps.length,
+                    stepsPending: latest.pipeline.nextStepIndex < latest.pipeline.steps.length,
                     sessionStatus: latest.status,
                   },
                 });
+              }
+              if (this.shouldRunDelivery(latest)) {
+                // Budget spent, record deliverable again: pace at the poll interval
+                // instead of dropping the only runner. The guard above cannot have
+                // fired -- it needs status !== "running".
+                await sleep(PIPELINE_POLL_INTERVAL_MS);
+                continue;
               }
             }
             return;
@@ -14822,6 +17681,11 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
+      // Classification above clears the marker on agent activity.
+      if (submitPending(readSession(this.config.dataDir, sessionId) ?? session)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
       if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
@@ -14852,7 +17716,8 @@ export class SessionService {
       const messageUpdatedAt = new Date(session.updatedAt);
       const promptGraceMs = agentQueuedSendPromptGraceMs(session.agent);
 
-      const agentState = await this.classifySessionState(session);
+      const classified = await this.classifySessionRecord(session);
+      const agentState = this.queuedDeliveryState(classified);
       if (agentState === "working") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
@@ -14861,7 +17726,26 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, promptGraceMs)) {
+      // An unconfirmed launch prompt can still sit in the composer, where the
+      // queued send's line clear would erase it. Hold until the transcript
+      // shows the agent took something after the launch send.
+      if (submitPending(classified.session)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+      // A confirmed ack plus a transcript write after it means the agent took
+      // the delivered message and closed that turn: no grace needed. Without
+      // that evidence (unconfirmed ack, restart) the grace bridges the lag
+      // before the agent's transcript shows it working.
+      const ackedAt = this.queuedDeliveryAckedAt.get(sessionId);
+      const activityAt = resolveAgentActivityAt(classified);
+      const turnClosedAfterAck =
+        ackedAt !== undefined && activityAt !== null && activityAt.getTime() > ackedAt;
+      if (
+        agentState === "waiting" &&
+        (turnClosedAfterAck || !isFresh(messageUpdatedAt, promptGraceMs))
+      ) {
+        this.queuedDeliveryAckedAt.delete(sessionId);
         return "ready";
       }
 
@@ -14886,7 +17770,7 @@ export class SessionService {
   // processAlive on both samples closes the pane-leg hole the same way
   // ensureSessionReadyForSend's probe gate does.
   private async confirmAgentExited(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
   ): Promise<boolean> {
     const first = await this.readRuntimeSnapshot(session);
     if (first.processAlive || first.probeUnresponsive) {
@@ -15037,7 +17921,7 @@ export class SessionService {
   // be read again 1s later, agreeing with itself and marking a live session
   // stopped.
   private async readRuntimeSnapshot(
-    session: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options?: { fresh?: boolean },
   ): Promise<SessionRuntimeSnapshot> {
     const fresh = options?.fresh ?? false;
@@ -15053,9 +17937,9 @@ export class SessionService {
     // condition just above) — narrow on the value itself rather than assert.
     const paneUsable = panePresence ? !panePresence.dead : false;
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const processAlive =
+    const processProbe: AgentProcessProbe =
       runtimeAlive && paneUsable
-        ? await agentProcessAlive(
+        ? await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -15063,7 +17947,23 @@ export class SessionService {
             },
             { fresh },
           )
-        : false;
+        : { alive: false };
+    // Fires once on the transition into the pane-child fallback answering
+    // ALIVE instead of every readRuntimeSnapshot call — see
+    // paneChildFallbackNotified's own comment for the event-volume math.
+    if (processProbe.alive && processProbe.via === "pane_child") {
+      if (!this.paneChildFallbackNotified.has(session.id)) {
+        this.paneChildFallbackNotified.add(session.id);
+        this.logEvent("session.runtime.pane_child_fallback", {
+          level: "warn",
+          sessionId: session.id,
+          message: `Session ${session.id}: the pane-child fallback supplied the ALIVE verdict for tmux session ${session.tmuxSession}`,
+          details: { tmuxSession: session.tmuxSession, agent: session.agent },
+        });
+      }
+    } else {
+      this.paneChildFallbackNotified.delete(session.id);
+    }
     // Guarded so neither call can force a snapshot that was never fetched:
     // sessionsUnresponsive only matters when the session read itself came up
     // absent, panesUnresponsive only when the pane read came up dead.
@@ -15072,7 +17972,7 @@ export class SessionService {
     return {
       runtimeAlive,
       paneUsable,
-      processAlive,
+      processAlive: processProbe.alive,
       tmuxActivityAt,
       probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
     };
@@ -15520,16 +18420,13 @@ export class SessionService {
     stateSource: StateSource,
     historySourcePath: string | null,
     serverError: boolean,
+    serverErrorEvidence?: "error" | "recovered",
   ): Promise<SessionStateTransition[]> {
-    // The state can stay "error" across many ticks while the marker must
-    // still be armed/cleared, so this runs outside the transition branch
-    // below. Gated on the in-hand session record (no extra readSession) so
-    // the steady state (serverError already agrees with session.serverErrorAt)
-    // costs nothing.
+    // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
-    } else if (!serverError && session.serverErrorAt) {
-      this.writeServerErrorMarker(session.id, null);
+    } else if (serverErrorEvidence === "recovered" && session.serverErrorAt) {
+      this.writeServerErrorMarker(session.id, null, session.serverErrorAt);
     }
 
     const history = this.stateHistory.get(session.id) ?? [];
@@ -15580,7 +18477,11 @@ export class SessionService {
 
   // Sole writer/clearer of serverErrorAt outside the wake-loop CAS re-arm.
   // Re-reads before writing since this runs off the in-hand session record.
-  private writeServerErrorMarker(sessionId: string, serverErrorAt: string | null): void {
+  private writeServerErrorMarker(
+    sessionId: string,
+    serverErrorAt: string | null,
+    observedMarker?: string,
+  ): void {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) return;
     if (serverErrorAt) {
@@ -15591,8 +18492,12 @@ export class SessionService {
       if (current.serverErrorAt) return;
       writeSession(this.config.dataDir, { ...current, serverErrorAt, updatedAt: nowIso() });
     } else {
-      if (!current.serverErrorAt) return;
-      const { serverErrorAt: _serverErrorAt, ...base } = current;
+      if (!current.serverErrorAt || current.serverErrorAt !== observedMarker) return;
+      const {
+        serverErrorAt: _serverErrorAt,
+        serverErrorReactivationAttempts: _attempts,
+        ...base
+      } = current;
       writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
     }
   }
@@ -15619,6 +18524,26 @@ export class SessionService {
     return false;
   }
 
+  // A spawning record no spawn in this process owns (the spawn was lost to a
+  // daemon restart) whose agent is alive. Nothing proves the launch prompt
+  // reached it, so its pane is stopped; the caller then reconciles the record
+  // to "stopped" like a dead orphan, queue kept, and restore or the next send
+  // relaunches it with the task prompt.
+  private async stopOrphanedSpawnPane(session: SessionRecord): Promise<SessionRuntimeSnapshot> {
+    this.logEvent("session.spawn.orphan_stopped", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Stopped ${session.id}: its spawn was lost before the launch prompt was confirmed`,
+      details: {
+        agent: session.agent,
+        queuedCount: queuedMessages(session).length,
+      },
+    });
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    return this.readRuntimeSnapshot(session, { fresh: true });
+  }
+
   private async reconcileUnexpectedStop(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
@@ -15636,6 +18561,7 @@ export class SessionService {
       // spawning session with no active pipeline (finished, failed, or lost to a
       // daemon restart) and a dead runtime is reconciled like a dropped running
       // one — otherwise it hangs on "working" forever with no terminal state.
+      // One with a live agent has its pane stopped first (stopOrphanedSpawnPane).
       if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
         return { session, runtime };
       }
@@ -15643,20 +18569,25 @@ export class SessionService {
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
     if (!workspaceGone) {
-      if (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive) {
-        return { session, runtime };
+      const live = (snapshot: SessionRuntimeSnapshot) =>
+        snapshot.runtimeAlive && snapshot.paneUsable && snapshot.processAlive;
+      if (!live(runtime)) {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        // fresh:true — an independent re-sample, not a replay of the same
+        // ~2s-TTL cached snapshot the first check above just read. Otherwise a
+        // single transient tmux/list-windows blip would agree with itself on
+        // both reads and mark a genuinely live session stopped.
+        confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       }
-      await sleep(PIPELINE_POLL_INTERVAL_MS);
-      // fresh:true — an independent re-sample, not a replay of the same
-      // ~2s-TTL cached snapshot the first check above just read. Otherwise a
-      // single transient tmux/list-windows blip would agree with itself on
-      // both reads and mark a genuinely live session stopped.
-      confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
       if (
-        confirmedRuntime.runtimeAlive &&
-        confirmedRuntime.paneUsable &&
-        confirmedRuntime.processAlive
+        live(confirmedRuntime) &&
+        session.status === "spawning" &&
+        readSession(this.config.dataDir, session.id)?.status === "spawning" &&
+        !this.spawnsInFlight.has(session.id)
       ) {
+        confirmedRuntime = await this.stopOrphanedSpawnPane(session);
+      }
+      if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
       }
       // A timeout-killed tmux probe is ambiguous, not confirmed absence — a
@@ -15940,6 +18871,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
@@ -15962,6 +18894,14 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          if (jsonlResult.serverError) serverErrorEvidence = "error";
+          else if (
+            session.agentSessionId &&
+            session.serverErrorAt &&
+            hasClaudeRecoveryAfter(jsonlResult.reader.tailRecords, session.serverErrorAt)
+          ) {
+            serverErrorEvidence = "recovered";
+          }
           serverErrorJsonlPath = jsonlResult.reader.filePath;
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
@@ -16012,6 +18952,11 @@ export class SessionService {
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
           session.agentSessionId,
+          {
+            minMtimeMs: session.agentSessionId
+              ? undefined
+              : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+          },
         );
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
@@ -16032,6 +18977,10 @@ export class SessionService {
         );
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
+        agentActivityAt =
+          structuredState?.activityMs !== undefined
+            ? activityAtFromMs(structuredState.activityMs)
+            : null;
         classifiedDetail = structuredState
           ? `State: ${state} (opencode export, ${structuredState.reason})`
           : "State: working (opencode export unavailable)";
@@ -16048,87 +18997,108 @@ export class SessionService {
       // captureTmuxPane, so it's still O(1) forks per session per TTL window).
       if (scanPane && strategy === "claude_jsonl") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const menuHit = detectClaudeUsageLimitMenu(paneText);
-        if (!rateLimit?.limited) {
-          const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
-          if (tmuxHit?.limited) {
-            rateLimit = tmuxHit;
-          }
-        }
-        if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
-          await this.confirmClaudeUsageLimitMenu(session);
-        }
-        // Re-confirmation: the detection is flagged but its parsed reset has
-        // passed, and a live menu is on the pane. Carried via an evidence-
-        // gated override rather than by overwriting `rateLimit` itself, so
-        // resetAtMs stays observable and the scanPane:false dashboard tick
-        // agrees with this sweep until a live scan actually clears it,
-        // instead of flapping rate_limited -> waiting every time a sweep
-        // takes longer than a fixed TTL to reach this session again. Gated
-        // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
-        // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
-        // caveat) can't pin the session rate_limited forever — reaching this
-        // branch guarantees resetAtMs is set (rateLimitExpired requires it).
-        if (
-          rateLimit?.limited &&
-          !rateLimitActive(rateLimit, nowMs) &&
-          menuHit?.limited &&
-          rateLimit.resetAtMs !== undefined &&
-          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
-        ) {
-          paneReconfirmedLimit = true;
-          this.claudeRateLimitReconfirmOverrides.add(session.id);
-        } else if (paneText !== "") {
-          // A menu-not-found result only clears the override when it comes
-          // from an actual capture. captureTmuxPane collapses a failed
-          // capture-pane fork into "" (see its own comment), so an empty
-          // paneText here is indistinguishable from a real empty pane at
-          // this call site — clearing on it would treat a failed observation
-          // as evidence the menu is gone. Leave the override in place on an
-          // empty capture; CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS above still
-          // bounds how long it can survive with no fresh confirming scan.
-          // The real fix is upstream, in captureTmuxPane's return contract.
-          this.claudeRateLimitReconfirmOverrides.delete(session.id);
-        } else if (
-          this.claudeRateLimitReconfirmOverrides.has(session.id) &&
-          rateLimit?.resetAtMs !== undefined &&
-          nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
-        ) {
-          // Not clearing the override on an empty capture (above) only
-          // protects the NEXT scanPane:false read — this tick's own
-          // paneReconfirmedLimit is otherwise recomputed fresh from menuHit
-          // (null here), so it would still flip the reported state to
+        if (paneText === null || paneText === "") {
+          // One shared "no observation" path for a failed fork (null) and a
+          // genuinely blank pane (""). A blank pane IS a real observation for
+          // claudeCompactingOverrides below (TTL-bounded, no delivery-
+          // suppression side effect), but not for
+          // claudeRateLimitReconfirmOverrides: recomputing paneReconfirmedLimit
+          // fresh off a null menuHit would flip the reported state to
           // "no menu found" off nothing and momentarily reopen the
-          // delivery-suppression window this override exists to hold shut.
-          // An empty capture is not an observation in either direction:
-          // reuse the stored override the same way the scanPane:false path
-          // below does, under the same ceiling gate, so the reported state
-          // doesn't move until a real capture or the ceiling decides it.
-          paneReconfirmedLimit = true;
-        }
-        // Compaction never reaches Claude's persisted status file (it stays
-        // "idle" throughout, which jsonl/hook maps to waiting) and the
-        // transcript only gets a compact record after completion — so the
-        // live pane spinner is the only signal while it's in progress. The
-        // rate-limit override below still wins if a banner or a re-confirmed
-        // menu is also present — skip recording the override in that case so
-        // the scanPane:false dashboard tick doesn't strand a stale "working"
-        // once the rate limit expires (mirrors codexMcpDialogOverrides'
-        // hard-limit delete above). Recorded into claudeCompactingOverrides
-        // (TTL) so the scanPane:false dashboard tick's own idle re-read
-        // doesn't keep refreshing stabilizeState's hold window against this
-        // working transition.
-        if (
-          detectClaudeCompacting(paneText) &&
-          !rateLimitActive(rateLimit, nowMs) &&
-          !paneReconfirmedLimit
-        ) {
-          state = "working";
-          compactingApplied = true;
-          this.claudeCompactingOverrides.set(session.id, nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS);
-          classifiedDetail = "State: working (claude compacting)";
+          // delivery-suppression window this override exists to hold shut
+          // (see :14876-14885-era comment preserved below). So the override
+          // add/delete stays gated on a NON-EMPTY capture; both null and ""
+          // reuse the stored entry the same way the scanPane:false path does,
+          // under the same ceiling gate.
+          if (
+            this.claudeRateLimitReconfirmOverrides.has(session.id) &&
+            rateLimit?.resetAtMs !== undefined &&
+            nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+          ) {
+            paneReconfirmedLimit = true;
+          }
+          if (paneText === null) {
+            // A failed fork never mutates claudeCompactingOverrides (no set,
+            // no delete) — only reapply the stored entry if unexpired, the
+            // same read the scanPane:false branch below does. Reapplying
+            // does NOT refresh the expiry: only the live "detected compacting"
+            // branch below writes it, so the entry still dies
+            // CLAUDE_COMPACTING_OVERRIDE_TTL_MS after the last real
+            // observation no matter how many null ticks reapply it.
+            const expiresAt = this.claudeCompactingOverrides.get(session.id);
+            if (expiresAt !== undefined && expiresAt > nowMs) {
+              state = "working";
+              compactingApplied = true;
+              classifiedDetail = "State: working (claude compacting)";
+            }
+          } else {
+            // A blank pane IS a real observation for this TTL-bounded
+            // override: no spinner on the pane means compaction ended.
+            this.claudeCompactingOverrides.delete(session.id);
+          }
         } else {
-          this.claudeCompactingOverrides.delete(session.id);
+          const menuHit = detectClaudeUsageLimitMenu(paneText);
+          if (!rateLimit?.limited) {
+            const tmuxHit = scanTmuxRateLimit(paneText) ?? menuHit;
+            if (tmuxHit?.limited) {
+              rateLimit = tmuxHit;
+            }
+          }
+          if (menuHit?.limited && claudeUsageMenuOptionOneSelected(paneText)) {
+            await this.confirmClaudeUsageLimitMenu(session);
+          }
+          // Re-confirmation: the detection is flagged but its parsed reset has
+          // passed, and a live menu is on the pane. Carried via an evidence-
+          // gated override rather than by overwriting `rateLimit` itself, so
+          // resetAtMs stays observable and the scanPane:false dashboard tick
+          // agrees with this sweep until a live scan actually clears it,
+          // instead of flapping rate_limited -> waiting every time a sweep
+          // takes longer than a fixed TTL to reach this session again. Gated
+          // here on CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS so a menu that never
+          // clears (no fresh output, per confirmClaudeUsageLimitMenu's own
+          // caveat) can't pin the session rate_limited forever — reaching this
+          // branch guarantees resetAtMs is set (rateLimitExpired requires it).
+          if (
+            rateLimit?.limited &&
+            !rateLimitActive(rateLimit, nowMs) &&
+            menuHit?.limited &&
+            rateLimit.resetAtMs !== undefined &&
+            nowMs - rateLimit.resetAtMs <= CLAUDE_RATE_LIMIT_RECONFIRM_CEILING_MS
+          ) {
+            paneReconfirmedLimit = true;
+            this.claudeRateLimitReconfirmOverrides.add(session.id);
+          } else {
+            // A menu-not-found result off a non-empty capture is real
+            // evidence the menu is gone: clear the override.
+            this.claudeRateLimitReconfirmOverrides.delete(session.id);
+          }
+          // Compaction never reaches Claude's persisted status file (it stays
+          // "idle" throughout, which jsonl/hook maps to waiting) and the
+          // transcript only gets a compact record after completion — so the
+          // live pane spinner is the only signal while it's in progress. The
+          // rate-limit override below still wins if a banner or a re-confirmed
+          // menu is also present — skip recording the override in that case so
+          // the scanPane:false dashboard tick doesn't strand a stale "working"
+          // once the rate limit expires (mirrors codexMcpDialogOverrides'
+          // hard-limit delete above). Recorded into claudeCompactingOverrides
+          // (TTL) so the scanPane:false dashboard tick's own idle re-read
+          // doesn't keep refreshing stabilizeState's hold window against this
+          // working transition.
+          if (
+            detectClaudeCompacting(paneText) &&
+            !rateLimitActive(rateLimit, nowMs) &&
+            !paneReconfirmedLimit
+          ) {
+            state = "working";
+            compactingApplied = true;
+            this.claudeCompactingOverrides.set(
+              session.id,
+              nowMs + CLAUDE_COMPACTING_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: working (claude compacting)";
+          } else {
+            this.claudeCompactingOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "claude_jsonl") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
@@ -16165,20 +19135,34 @@ export class SessionService {
         // not a soft rate-limit signal is also present) the session is
         // promoted to needs_input.
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const hardHit = scanTmuxRateLimit(paneText);
-        if (hardHit?.limited) {
-          rateLimit = hardHit;
-          this.codexMcpDialogOverrides.delete(session.id);
-        } else if (detectCodexMcpPermissionDialog(paneText)) {
-          state = "needs_input";
-          rateLimit = null;
-          this.codexMcpDialogOverrides.set(
-            session.id,
-            Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
-          );
-          classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+        if (paneText === null) {
+          // A failed fork never mutates codexMcpDialogOverrides (no hard-hit
+          // promotion, no delete) — only reapply the stored entry if
+          // unexpired, the same read the scanPane:false branch below does.
+          // Reapplying does NOT refresh the expiry: only the live "detected
+          // dialog" branch below writes it.
+          const expiresAt = this.codexMcpDialogOverrides.get(session.id);
+          if (expiresAt !== undefined && expiresAt > Date.now()) {
+            state = "needs_input";
+            rateLimit = null;
+            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+          }
         } else {
-          this.codexMcpDialogOverrides.delete(session.id);
+          const hardHit = scanTmuxRateLimit(paneText);
+          if (hardHit?.limited) {
+            rateLimit = hardHit;
+            this.codexMcpDialogOverrides.delete(session.id);
+          } else if (detectCodexMcpPermissionDialog(paneText)) {
+            state = "needs_input";
+            rateLimit = null;
+            this.codexMcpDialogOverrides.set(
+              session.id,
+              Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
+          } else {
+            this.codexMcpDialogOverrides.delete(session.id);
+          }
         }
       } else if (!scanPane && strategy === "hook") {
         // The scanPane:false dashboard tick can't afford its own capture-pane
@@ -16198,9 +19182,62 @@ export class SessionService {
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
         }
+      } else if (scanPane && strategy === "cursor_jsonl") {
+        const paneText = await captureTmuxPane(session.tmuxSession);
+        if (paneText === null) {
+          // A failed fork never mutates cursorPaneReadyOverrides (no write,
+          // no delete) — only reapply the stored entry if unexpired, the same
+          // read the scanPane:false branch below does. Reapplying does NOT
+          // refresh the expiry: only the live ready-prompt branch below
+          // writes it.
+          const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+          if (
+            expiresAt !== undefined &&
+            expiresAt > nowMs &&
+            state === "error" &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            classifiedDetail = "State: waiting (cursor pane ready override)";
+          }
+        } else {
+          if (!rateLimit?.limited) {
+            const tmuxHit = scanTmuxRateLimit(paneText);
+            if (tmuxHit?.limited) {
+              rateLimit = tmuxHit;
+            }
+          }
+          if (
+            state === "error" &&
+            cursorShowsReadyPrompt(paneText) &&
+            !rateLimitActive(rateLimit, nowMs)
+          ) {
+            state = "waiting";
+            this.cursorPaneReadyOverrides.set(
+              session.id,
+              nowMs + CURSOR_PANE_READY_OVERRIDE_TTL_MS,
+            );
+            classifiedDetail = "State: waiting (cursor pane ready override)";
+          } else {
+            this.cursorPaneReadyOverrides.delete(session.id);
+          }
+        }
+      } else if (!scanPane && strategy === "cursor_jsonl") {
+        const expiresAt = this.cursorPaneReadyOverrides.get(session.id);
+        if (
+          expiresAt !== undefined &&
+          expiresAt > nowMs &&
+          state === "error" &&
+          !rateLimitActive(rateLimit, nowMs)
+        ) {
+          state = "waiting";
+          classifiedDetail = "State: waiting (cursor pane ready override)";
+        }
       } else if (scanPane && !rateLimit?.limited && strategy !== "opencode") {
         const paneText = await captureTmuxPane(session.tmuxSession);
-        const tmuxHit = scanTmuxRateLimit(paneText);
+        // A failed fork takes no observation: it only ever promotes on a hit,
+        // so this is a pure guard.
+        const tmuxHit = paneText === null ? null : scanTmuxRateLimit(paneText);
         if (tmuxHit?.limited) {
           rateLimit = tmuxHit;
         }
@@ -16251,6 +19288,7 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
+    effectiveSession = await this.settleSubmitHold(effectiveSession, state, agentActivityAt);
 
     return {
       session: effectiveSession,
@@ -16258,11 +19296,9 @@ export class SessionService {
       state,
       source: stateSource,
       historySourcePath,
-      // Only true when the hasServerErrorRecord arm above actually applied. A
-      // live rate_limit record wins state outright, so this reports false and
-      // updateStateHistory's clear branch drops any stale serverErrorAt
-      // instead of arming it.
+      // Keep queue/state classification separate from positive recovery evidence.
       serverError: state === "error" && hasServerErrorRecord,
+      ...(serverErrorEvidence ? { serverErrorEvidence } : {}),
       workspacePresent: workspace.exists,
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
@@ -16298,6 +19334,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
@@ -16443,6 +19480,7 @@ export class SessionService {
       classified.source,
       classified.historySourcePath ?? null,
       classified.serverError,
+      classified.serverErrorEvidence,
     );
 
     const services: ServiceInstanceView[] = [];
@@ -16510,6 +19548,8 @@ export class SessionService {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
+      // The record's queue state is internal; the view carries queuedMessagesView.
+      queuedMessages: _queuedMessages,
       ...sessionWithoutDetailFields
     } = session;
 

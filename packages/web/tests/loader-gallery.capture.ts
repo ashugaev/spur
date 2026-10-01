@@ -1,7 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type Browser, type Page } from "playwright/test";
-import { makeWorkingSession, mockSessions } from "./fixtures.js";
+import {
+  expect,
+  test,
+  type Browser,
+  type Page,
+  makeWorkingSession,
+  mockSessions,
+  installApiRouteGuardsOnContext,
+} from "./fixtures.js";
 
 const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
 if (process.env.SPUR_LOADER_CAPTURE !== "1" || !artifactsDir) {
@@ -58,6 +65,7 @@ async function captureScenario({
     reducedMotion,
     viewport,
   });
+  await installApiRouteGuardsOnContext(context);
   const page = await context.newPage();
   await prepare(page);
   await page.waitForTimeout(1_000);

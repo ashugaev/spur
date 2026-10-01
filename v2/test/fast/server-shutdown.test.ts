@@ -6,6 +6,7 @@ import type * as EventSourcesModule from "../../src/event-sources/index.js";
 import type * as RuntimeLogCollectorModule from "../../src/runtime-log-collector.js";
 import type * as TriggersModule from "../../src/triggers.js";
 import { readEventLog } from "../../src/event-log.js";
+import { AutoPingService } from "../../src/auto-ping.js";
 import {
   _resetGhUsageForTests,
   noteGhInvocation,
@@ -118,6 +119,21 @@ describe("summarizeActiveResources", () => {
 describe("armShutdownBackstop", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("disposes the server-owned auto-ping timer once", async () => {
+    const { configPath } = await writeDaemonConfig();
+    const dispose = vi.spyOn(AutoPingService.prototype, "dispose");
+    const { startServer } = await import("../../src/server.js");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    await server.stop();
+
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("fires with the active-resource summary once the timeout elapses", async () => {

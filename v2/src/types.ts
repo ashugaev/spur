@@ -2,6 +2,7 @@ import type { HostMemory } from "./host-memory.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
+export const AUTOMATIC_REMINDER_MAX_ATTEMPTS = 3;
 
 export type SessionStatus =
   | "spawning"
@@ -47,6 +48,7 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
   number: number;
   repo: string;
@@ -126,6 +128,7 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
+  titleSource?: SessionSlotTitleSource;
   links: SessionLink[];
   tags?: string[];
 }
@@ -155,6 +158,14 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+// GitHub-only signal kinds that report an occurrence, not a lifecycle state.
+// They are exempt from the lifecycle filter a session's first poll applies, so
+// an occurrence already pending when the session is first baselined still
+// emits. A poll with no prior snapshot at all emits nothing unless the source
+// asks for it (`runOnStart`), same as every other kind.
+export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
+export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -166,6 +177,8 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+/** Callback-data prefix for an agent-offered inline button. */
+export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
@@ -320,6 +333,8 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
+  /** Destination for agent-initiated sends from a session with no inbound Telegram message. */
+  chatId?: number;
   autoSpawn?: TelegramAutoSpawnConfig;
 }
 
@@ -337,10 +352,32 @@ export interface TelegramBinding {
   sessionId: string;
 }
 
+/** One pending inline-button choice offered by an agent, awaiting a click. */
+export interface TelegramChoice {
+  token: string;
+  /** All choices from one agent send share this; a click consumes the whole offer. */
+  offerId: string;
+  sessionId: string;
+  chatId: number;
+  messageThreadId?: number;
+  text: string;
+  value: string;
+  expiresAt: string;
+}
+
+/** A bot message and the session that sent it, so a user reply routes back there. */
+export interface TelegramMessageOwner {
+  chatId: number;
+  messageId: number;
+  sessionId: string;
+}
+
 export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;
   statusMessageId?: number;
+  /** Last forum-topic name applied for this session; a rename happens only when the computed name differs. */
+  topicName?: string;
   lastInboundAt?: string;
   lastReplyAt?: string;
   updatedAt: string;
@@ -475,8 +512,58 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
+  providerThreadTarget?: AutoPingThreadTarget;
+}
+
+export type AutoPingScope = "event" | "thread" | "subscription";
+
+export type AutoPingDestination = { kind: "session"; sessionId: string };
+
+export type AutoPingThreadTarget =
+  | { kind: "github-review-thread"; threadId: string }
+  | { kind: "gitlab-discussion"; mergeRequestIid: number; discussionId: string }
+  | { kind: "telegram-topic"; chatId: number; messageThreadId: number };
+
+export type AutoPingTarget =
+  | { kind: "occurrence"; occurrenceId: string }
+  | AutoPingThreadTarget
+  | { kind: "subscription" };
+
+export interface AutoPingRouteDescriptor {
+  version: 1;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  sourceType: SourceType;
+  eventName: string;
+  actionKind: "send";
+  destination: AutoPingDestination;
+  spawnDeskGroup: boolean;
+}
+
+export interface AutoPingSuppressionView {
+  suppressionId: string;
+  scope: AutoPingScope;
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  target: AutoPingTarget;
+  createdAt: string;
+}
+
+export interface AutoPingSuppressionListResponse {
+  records: AutoPingSuppressionView[];
+}
+
+export interface AutoPingUnsubscribeResponse {
+  record: AutoPingSuppressionView;
+  created: boolean;
+}
+
+export interface AutoPingResumeResponse {
+  records: AutoPingSuppressionView[];
+  removed: boolean;
 }
 
 // The PR/MR the snapshot's signals were collected from. `null` covers legacy
@@ -485,6 +572,7 @@ export interface ReviewSignal {
 export interface ReviewSnapshot {
   prNumber: number | null;
   signals: Map<string, ReviewSignal>;
+  mergeConflictClearId?: string;
 }
 
 // The baseline to diff the next poll's signals against: the stored snapshot's
@@ -506,6 +594,7 @@ export interface ReviewEventData {
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
+  mergeConflictClearId?: string;
 }
 
 export interface ReviewRequestSummary {
@@ -537,7 +626,21 @@ export interface ServiceProblemEventData {
   ruleId: string;
 }
 
-export type PersistedSendBatch =
+export interface PersistedAutoPingBatchItem {
+  occurrenceId: string;
+  eventHandle: string;
+  threadTarget?: AutoPingThreadTarget;
+  threadHandle?: string;
+}
+
+export interface PersistedAutoPingBatchState {
+  routeFingerprint: string;
+  destination: AutoPingDestination;
+  subscriptionHandle: string;
+  items: Record<string, PersistedAutoPingBatchItem>;
+}
+
+export type PersistedSendBatch = (
   | {
       kind: "review";
       providerId: ReviewProviderId;
@@ -548,6 +651,7 @@ export type PersistedSendBatch =
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
+      mergeConflictClearId?: string;
     }
   | {
       kind: "service";
@@ -561,15 +665,38 @@ export type PersistedSendBatch =
       prompt?: string;
       sessionId: string;
       messages: TelegramMessageEventData[];
-    };
+    }
+) & { autoPing?: PersistedAutoPingBatchState };
 
 export interface PersistedPendingBatch {
   queueKey: string;
+  workId?: string;
+  revision?: number;
+  claim?: {
+    controllerId: string;
+    routeLeaseId: string;
+    claimId: string;
+    claimedAt: string;
+  };
   projectId: string;
   triggerId: string;
   sourceId: string;
   batch: PersistedSendBatch;
+  retryAccounting?: SendBatchRetryEntry[];
+  /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
+  suppressedHoldAt?: string;
 }
+
+export interface SendBatchRetryEntry {
+  itemKey: string;
+  fingerprint: string;
+  deliveryAttempts: number;
+  ciAttempts: number;
+  nextAttemptAt: number;
+}
+
+export const DELIVERY_MAX_ATTEMPTS = 8;
+export const CI_FAILED_MAX_ATTEMPTS = 3;
 
 export interface SessionModeConfig {
   skill: string;
@@ -767,6 +894,14 @@ export interface AppConfig {
     idleTtlMinutes: number;
     maxAgeWarnMinutes: number;
   };
+  diskBudget: {
+    enabled: boolean;
+    intervalMinutes: number;
+    warnAttributableGb: number;
+    npmCacheMaxGb: number;
+    buildCacheOlderThanDays: number;
+    maxWorktreesPerSweep: number;
+  };
   admission: AdmissionConfig;
   staleAfterMinutes: number;
   // Never decide off this snapshot: `readAutoUpdateFlag` in
@@ -887,6 +1022,7 @@ export interface SessionRecord {
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
+  closeoutOwner?: boolean;
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
@@ -921,11 +1057,40 @@ export interface SessionRecord {
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  /**
+   * ISO time of a launch or send whose submit never confirmed. Every typed
+   * send holds while set. A launch hold clears on the first transcript
+   * activity after it; a send's hold (with `queuedMessageTyped`) clears only
+   * on the agent's ack of that text. Read from the legacy
+   * `launchUnconfirmedAt` on older records.
+   */
+  submitUnconfirmedAt?: string;
+  /**
+   * A message already typed into the pane (and so off the queue) whose
+   * submit ack is still pending, or never came (with `submitUnconfirmedAt`).
+   * `ackBaseline` is the ack scan's pre-send transcript position, absent when
+   * the send had no ack scan. A daemon restart with this set, no hold, and no
+   * ack past that position (or no position at all) puts the message back at
+   * the head.
+   */
+  queuedMessageTyped?: { message: string; typedAt: string; ackBaseline?: SubmitAckBaseline };
+  /**
+   * Text an unconfirmed send already put back at the queue head once. Its
+   * next unconfirmed submit releases the hold instead of re-queuing it again.
+   */
+  submitRequeuedMessage?: string;
+  /**
+   * A send the agent never acked, after its one re-queue: the hold is
+   * released, the text shown with Retry and Dismiss until the user acts.
+   */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
   rateLimitedAt?: string;
   serverErrorAt?: string;
+  serverErrorReactivationAttempts?: number;
+  todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
@@ -1016,6 +1181,12 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  /**
+   * Send now / flush response only: the message was queued at the head
+   * instead of typed. `no_interrupt`: the agent has no interrupt key and was
+   * not waiting.
+   */
+  queuedAheadReason?: "no_interrupt";
 }
 
 /**
@@ -1134,6 +1305,15 @@ export interface SpawnSessionRequest {
   subscriptions?: SubscribeSessionStatesRequest[];
 }
 
+/**
+ * Telegram chat a source-initiated spawn came from. Internal to the daemon:
+ * only the source adapter passes it (spawn options), never the HTTP body.
+ */
+export type TelegramSpawnOrigin = Pick<
+  TelegramReplyTarget,
+  "projectId" | "sourceId" | "chatId" | "messageThreadId"
+>;
+
 export interface SendMessageAttachment {
   name: string;
   data: string; // base64
@@ -1146,8 +1326,14 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface SourceReplyButton {
+  text: string;
+  value: string;
+}
+
 export interface SourceReplyRequest {
   message: string;
+  buttons?: SourceReplyButton[];
 }
 
 export interface SourceReplyResponse {
@@ -1158,7 +1344,10 @@ export interface SourceReplyResponse {
   sourceId: string;
   chatId: number;
   messageThreadId?: number;
+  buttons?: number;
 }
+
+export type WakeTarget = "scheduled" | "interval" | "daily";
 
 export interface ScheduleSessionWakeRequest {
   at?: string;
@@ -1167,6 +1356,16 @@ export interface ScheduleSessionWakeRequest {
   dailyAt?: string[];
   stopCondition?: string;
   message?: string;
+}
+
+export interface UpdateSessionWakeMessageRequest {
+  target: WakeTarget;
+  message: string;
+}
+
+export interface DispatchSessionWakeRequest {
+  target: WakeTarget;
+  dispatch: true;
 }
 
 export interface RunServiceRequest {
@@ -1186,6 +1385,12 @@ export interface SidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  /** Session/sidecar name that recorded a reservation for this port, when known. */
+  reservedBy?: string;
+  /** Attributed foreign listener, when the port is host-occupied by an untracked process. */
+  holder?: { pid: number; cwd: string | null };
+  /** False for a port already claimed by a sibling portId in this same attempt: clearing it would break that other reservation. */
+  clearable?: boolean;
 }
 
 export interface SidecarPortConflictPayload {
@@ -1345,10 +1550,22 @@ export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
   setTitleIfAbsent?: boolean;
+  source?: SessionSlotTitleSource;
   links?: SessionLink[];
   unlinkLabels?: string[];
   tags?: string[];
   untags?: string[];
+}
+
+export type SessionSlotTitleResult = "updated" | "cleared" | "unchanged" | "blocked";
+
+export interface SessionSlotsUpdateResult {
+  titleResult: SessionSlotTitleResult;
+  message?: string;
+}
+
+export interface UpdateSessionSlotsResponse extends SessionView {
+  slotUpdate: SessionSlotsUpdateResult;
 }
 
 export interface ProjectListEntry {
@@ -1469,6 +1686,28 @@ export interface ConversationMessage {
   text: string;
   timestampMs: number;
 }
+
+/**
+ * JSON form of a submit-ack binding's pre-send transcript position. Persisted
+ * with a typed queued message so a restarted daemon can rebind the same scan
+ * (resumeAgentSubmitAckBinding) and see only turns recorded after the send.
+ */
+export type SubmitAckBaseline =
+  | { agent: "claude"; file: string; size: number }
+  | { agent: "codex"; offsets: Record<string, number> }
+  | {
+      agent: "cursor";
+      file: string;
+      size: number;
+      /** Rotated chat transcript and its offset at send time. */
+      rotated?: { file: string; size: number };
+    }
+  | {
+      agent: "opencode";
+      sessionId: string;
+      /** Newest user message at send time; null when the session had none. */
+      after: { createdMs: number; id: string } | null;
+    };
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }

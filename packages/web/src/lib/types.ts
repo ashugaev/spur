@@ -65,6 +65,8 @@ export interface SpurTagDefinition {
   color: string;
 }
 
+export type SpurSessionTitleSource = "manual" | "agent";
+
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
@@ -126,6 +128,9 @@ export interface SpurSidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  reservedBy?: string;
+  holder?: { pid: number; cwd: string | null };
+  clearable?: boolean;
 }
 
 export interface SpurSidecarPortConflict {
@@ -333,6 +338,10 @@ export interface SpurSessionView {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  /** Set while the agent has not confirmed the last prompt; sends are held. */
+  submitUnconfirmedAt?: string;
+  /** A send the agent never confirmed after its retry; shown until retried or dismissed. */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -343,6 +352,7 @@ export interface SpurSessionView {
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
+    titleSource?: SpurSessionTitleSource;
     links: SpurSessionLink[];
     tags?: string[];
   };
@@ -367,6 +377,15 @@ export interface SpurSessionView {
  * plus the real stop outcome (`sidecarStop`), never claiming a clean reap
  * when survivors were left behind. */
 export type SpurSidecarStopResponse = SpurSessionView & { sidecarStop: SpurSidecarStopReport };
+
+// Mirrors v2/src/types.ts UpdateSessionSlotsResponse — the daemon's reply to
+// POST /sessions/:id/slots.
+export interface SpurUpdateSessionSlotsResponse extends SpurSessionView {
+  slotUpdate: {
+    titleResult: "updated" | "cleared" | "unchanged" | "blocked";
+    message?: string;
+  };
+}
 
 export type SpurTodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
@@ -696,6 +715,8 @@ export interface DashboardSession {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  submitUnconfirmedAt?: string;
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -777,6 +798,8 @@ export function toDashboardSession(
     artifacts: session.artifacts ?? [],
     ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
+    ...(session.submitUnconfirmedAt ? { submitUnconfirmedAt: session.submitUnconfirmedAt } : {}),
+    ...(session.submitFailedMessage ? { submitFailedMessage: session.submitFailedMessage } : {}),
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
@@ -872,8 +895,10 @@ export function canHandoff(session: DashboardSession): boolean {
   );
 }
 
+// A spawning session takes queued messages before its pane exists; the daemon
+// holds them until the launch prompt is in.
 export function canSendMessage(session: DashboardSession): boolean {
-  return session.runtimeAlive && !isTerminalSession(session);
+  return (session.runtimeAlive || session.status === "spawning") && !isTerminalSession(session);
 }
 
 export interface ConversationMessage {

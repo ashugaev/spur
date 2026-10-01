@@ -1,6 +1,8 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { getProcessPresenceInTmux as GetProcessPresenceInTmux } from "../../src/runtime-tmux.js";
 
 type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
@@ -18,15 +20,6 @@ vi.mock("node:child_process", () => ({
 const SESSION_COUNT = 50;
 const sessionNames = Array.from({ length: SESSION_COUNT }, (_, i) => `api-${i}`);
 
-// Asserts the `alive` half of getProcessPresenceInTmux against the freshly
-// imported module (the suite resets modules per test).
-async function isProcessRunningInTmux(
-  ...args: Parameters<typeof GetProcessPresenceInTmux>
-): Promise<boolean> {
-  const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
-  return (await getProcessPresenceInTmux(...args)).alive;
-}
-
 // Mirrors readRuntimeSnapshot's per-session probe order in session-service.ts,
 // isolated from SessionService so it exercises the real runtime-tmux.ts
 // caches (session-service.test.ts mocks the whole module, so it never
@@ -36,7 +29,8 @@ async function simulateReadRuntimeSnapshot(sessionName: string): Promise<{
   paneUsable: boolean;
   processAlive: boolean;
 }> {
-  const { tmuxSessionExists, tmuxPaneDead } = await import("../../src/runtime-tmux.js");
+  const { tmuxSessionExists, tmuxPaneDead, isProcessRunningInTmux } =
+    await import("../../src/runtime-tmux.js");
   const runtimeAlive = await tmuxSessionExists(sessionName);
   const paneUsable = runtimeAlive ? !(await tmuxPaneDead(sessionName)) : false;
   const processAlive =
@@ -116,7 +110,7 @@ describe("runtime-tmux shared probe cache", () => {
 
   it("keeps a cached probe result identical to what a live probe returned in the same TTL window", async () => {
     installFleetTmuxMock();
-    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionActivity } =
+    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionActivity, isProcessRunningInTmux } =
       await import("../../src/runtime-tmux.js");
 
     const sessionName = "api-3";
@@ -251,6 +245,61 @@ describe("runtime-tmux shared probe cache", () => {
     expect(captureCalls).toBe(SESSION_COUNT + 1);
   });
 
+  it("resolves a rejected capture-pane fork to null, distinct from a genuinely blank pane", async () => {
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        throw new Error("capture-pane failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane, captureTmuxPaneOrEmpty } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    // The rejected fork is evicted (memoizedProbe's evict-on-reject), so a
+    // second call within the same TTL window re-forks rather than serving a
+    // stale rejection.
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(2);
+
+    // captureTmuxPaneOrEmpty collapses the same rejection into "", never
+    // null, for display-only callers.
+    await expect(captureTmuxPaneOrEmpty("api-0")).resolves.toBe("");
+    expect(captureCalls).toBe(3);
+  });
+
+  it("still shares a resolved capture-pane result within the TTL after a prior rejection", async () => {
+    let shouldFail = true;
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        if (shouldFail) throw new Error("capture-pane failed");
+        return { stdout: "pane text", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-1")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    shouldFail = false;
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
+
+    // A second read within the TTL shares the resolved capture — no
+    // additional fork, even though the very first read for this session had
+    // rejected.
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
+  });
+
   it("prunes expired capture-pane cache entries instead of accumulating them forever", async () => {
     vi.useFakeTimers();
     try {
@@ -306,7 +355,8 @@ describe("runtime-tmux shared probe cache", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { tmuxPaneDead, getTmuxPanePid } = await import("../../src/runtime-tmux.js");
+    const { tmuxPaneDead, getTmuxPanePid, isProcessRunningInTmux } =
+      await import("../../src/runtime-tmux.js");
 
     // Active pane (row 3) is alive with pid 333 — not the inactive window's
     // dead pane (row 1) nor the active window's non-active split pane (row 2).
@@ -393,6 +443,7 @@ describe("runtime-tmux shared probe cache", () => {
       sessionName: "fresh-api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: mkdtempSync(join(tmpdir(), "spur-launch-script-test-")),
     });
 
     // Without invalidation this would still serve the stale cached `false`
@@ -440,7 +491,8 @@ describe("runtime-tmux shared probe cache", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { tmuxSessionExists, listTmuxSessionNames } = await import("../../src/runtime-tmux.js");
+    const { tmuxSessionExists, isProcessRunningInTmux, listTmuxSessionNames } =
+      await import("../../src/runtime-tmux.js");
 
     await expect(listTmuxSessionNames()).resolves.toEqual(new Set());
     await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
@@ -547,26 +599,5 @@ describe("runtime-tmux shared probe cache", () => {
 
     expect(listWindowsCalls).toBe(1);
     expect(listPanesCalls).toBe(1);
-  });
-
-  it("getProcessPresenceInTmux fresh read issues ONE list-panes fork and reports unresponsive when it is timeout-killed", async () => {
-    execFileAsyncMock.mockImplementation(async (file, args) => {
-      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
-        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
-      }
-      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
-    });
-
-    const { getProcessPresenceInTmux } = await import("../../src/runtime-tmux.js");
-
-    await expect(getProcessPresenceInTmux("api-1", ["node"], { fresh: true })).resolves.toEqual({
-      alive: false,
-      unresponsive: true,
-    });
-    expect(
-      callsFor(
-        (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
-      ),
-    ).toBe(1);
   });
 });

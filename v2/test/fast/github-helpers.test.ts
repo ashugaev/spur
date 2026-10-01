@@ -916,7 +916,9 @@ describe("GitHub review batching", () => {
     const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
 
     expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(48);
+    // 47 = floor(500,000 / the bound-PR node budget), the derived cap under
+    // GITHUB_REVIEW_BATCH_MAX_TARGETS.
+    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(47);
     expect(first.get("api-50")).toEqual({ status: "skipped", reason: "capacity" });
     expect(second.get("api-50")?.status).toBe("ok");
   });
@@ -1213,6 +1215,7 @@ describe("GitHub review batching", () => {
               reviewThreads: {
                 nodes: [
                   {
+                    id: "PRRT_1",
                     isResolved: false,
                     comments: {
                       nodes: [101, 102, 103].map((databaseId) => ({
@@ -1248,6 +1251,13 @@ describe("GitHub review batching", () => {
     expect([...collected.collected.snapshot.keys()]).toEqual(
       expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
     );
+    for (const key of ["review-comment:101", "review-comment:102", "review-comment:103"]) {
+      expect(collected.collected.snapshot.get(key)).toEqual(
+        expect.objectContaining({
+          providerThreadTarget: { kind: "github-review-thread", threadId: "PRRT_1" },
+        }),
+      );
+    }
   });
 
   it("paginates past 100 same-thread comments to the prior high-water mark", async () => {
@@ -2134,7 +2144,7 @@ describe("GitHub review batching", () => {
 
     expect(ghMock).toHaveBeenCalledTimes(1);
     const largeArgv = ghMock.mock.calls[0]?.slice(1) as string[];
-    expect(largeArgv.filter((a) => /^n\d+=/.test(a))).toHaveLength(48);
+    expect(largeArgv.filter((a) => /^n\d+=/.test(a))).toHaveLength(47);
   });
 
   it("errors only the paginating member when its thread page fails", async () => {

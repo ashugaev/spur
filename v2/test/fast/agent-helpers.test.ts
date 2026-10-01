@@ -108,6 +108,7 @@ describe("agent helpers", () => {
   });
 
   it("gates the pane-child fallback on a foreign launch binary", () => {
+    vi.stubEnv("SPUR_CLAUDE_BIN", "claude");
     expect(agentLaunchUsesForeignBinary("codex", "codex --model x")).toBe(false);
     expect(
       agentLaunchUsesForeignBinary("codex", "/home/u/.local/bin/codex-wrap.sh --model x"),
