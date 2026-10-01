@@ -10970,14 +10970,16 @@ export class SessionService {
       if (sessionId && options?.telegramOrigin) {
         deleteTelegramReplyTarget(this.config.dataDir, sessionId);
       }
+      const killedBeforeRetention = sessionId ? this.spawnWasKilled(sessionId) : false;
       if (
+        !killedBeforeRetention &&
         !launchedRecord &&
         launchCandidate &&
         (await this.launchResourcesMayRemain(launchCandidate))
       ) {
         launchedRecord = launchCandidate;
       }
-      if (launchedRecord) {
+      if (launchedRecord && !(sessionId && this.spawnWasKilled(sessionId))) {
         await this.retainLaunchedError(launchedRecord, error);
         throw error;
       }
@@ -12032,14 +12034,16 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const killedBeforeRetention = this.spawnWasKilled(sessionId);
       if (
+        !killedBeforeRetention &&
         !launchedRecord &&
         launchCandidate &&
         (await this.launchResourcesMayRemain(launchCandidate))
       ) {
         launchedRecord = launchCandidate;
       }
-      if (launchedRecord) {
+      if (launchedRecord && !this.spawnWasKilled(sessionId)) {
         await this.retainLaunchedError(launchedRecord, error);
         return "completed";
       }
