@@ -83,6 +83,7 @@ interface PendingBatch {
   revision: number;
   routeLeaseId: string;
   retryAccounting: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
 }
 
 // Rate-limit suppression is deliberately excluded from the failure/backoff
@@ -618,6 +619,7 @@ function mergeIntoBatch(
   if (existing) {
     const replaced = existing.batch.merge(incoming);
     if (replaced) {
+      existing.admissionCapRetryAt = undefined;
       existing.retryAccounting = existing.retryAccounting.filter(
         (entry) => !entry.itemKey.startsWith(replaced.retiredItemPrefix),
       );
@@ -795,6 +797,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return { status: "suppressed" };
       }
       batch.batch = authoritativeBatch;
+      batch.admissionCapRetryAt = persisted.admissionCapRetryAt;
+      const now = Date.now();
+      if (batch.admissionCapRetryAt !== undefined && now < batch.admissionCapRetryAt) {
+        return { status: "suppressed" };
+      }
+      batch.admissionCapRetryAt = undefined;
       batch.batch.prune(deps.config.dataDir);
       const snapshotPruned = batch.batch.isEmpty();
       let livePruned = false;
@@ -816,7 +824,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
       const submission = restoreSendBatch(structuredClone(batch.batch.serialize()));
       if (!submission) return { status: "suppressed" };
-      const now = Date.now();
       submission.filterItems((item) => {
         const entry = accounting.get(item.itemKey);
         if (!entry || exhausted(entry)) return false;
@@ -901,6 +908,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       let claimedRevision = (persisted.revision ?? 0) + 1;
       let claimed = {
         ...persisted,
+        admissionCapRetryAt: batch.admissionCapRetryAt,
         batch: batch.batch.serialize(),
         retryAccounting: batch.retryAccounting,
         revision: claimedRevision,
@@ -926,6 +934,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         void _claim;
         const record = {
           ...unclaimed,
+          admissionCapRetryAt: batch.admissionCapRetryAt,
           revision: claimedRevision + 1,
           batch: batch.batch.serialize(),
           retryAccounting: batch.retryAccounting,
@@ -1106,6 +1115,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             },
           );
           refundSubmitted();
+          if (error.reason === "cap") {
+            batch.admissionCapRetryAt = Date.now() + DELIVERY_RETRY_BASE_MS;
+          }
           persistResult();
           return { status: "suppressed" };
         }
@@ -1318,6 +1330,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         const authoritativeBatch = restoreSendBatch(persisted.batch);
         if (authoritativeBatch && authoritativeBatch.sessionId === cached.batch.sessionId) {
           cached.batch = authoritativeBatch;
+          cached.admissionCapRetryAt = persisted.admissionCapRetryAt;
           cached.revision = persisted.revision ?? 0;
           cached.retryAccounting = reconcileRetryAccounting(
             cached.batch,
@@ -1367,6 +1380,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         sourceId: trigger.source,
         batch: batch.batch.serialize(),
         retryAccounting: batch.retryAccounting,
+        admissionCapRetryAt:
+          batch.admissionCapRetryAt !== undefined && batch.admissionCapRetryAt > Date.now()
+            ? batch.admissionCapRetryAt
+            : undefined,
       });
     });
     if (!batch) return;
@@ -1576,6 +1593,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         revision,
         routeLeaseId,
         retryAccounting: reconcileRetryAccounting(batch, record.retryAccounting ?? []),
+        admissionCapRetryAt: record.admissionCapRetryAt,
       });
       const restored = pendingBatches.get(record.queueKey);
       if (restored) syncBatchOccurrenceReferences(record.queueKey, restored);

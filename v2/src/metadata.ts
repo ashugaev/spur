@@ -197,6 +197,14 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const admissionCapRetryAt = value["admissionCapRetryAt"];
+  if (
+    admissionCapRetryAt !== undefined &&
+    (typeof admissionCapRetryAt !== "number" ||
+      !Number.isFinite(admissionCapRetryAt) ||
+      admissionCapRetryAt <= 0)
+  )
+    return false;
   const accounting = value["retryAccounting"];
   if (
     accounting !== undefined &&

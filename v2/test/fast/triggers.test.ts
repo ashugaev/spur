@@ -847,6 +847,230 @@ describe("startConfiguredTriggers", () => {
       });
     };
 
+    describe("admission cap", () => {
+      it.each(["queued", "stale", "interrupt"])(
+        "holds the whole backlog and new edits on %s delivery beyond eight denials",
+        async (path) => {
+          const { startConfiguredTriggers } = await loadTriggersModule();
+          const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+          const get = vi.fn().mockResolvedValue(running(path));
+          const deliver = vi.fn().mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+          const bus = new EventBus();
+          const controller = startConfiguredTriggers({
+            config: config({ interrupt: path === "interrupt" }) as never,
+            bus,
+            sessionService: { get, deliver } as never,
+            logger: { warn: vi.fn() },
+          });
+          const signals: ReviewSignal[] = Array.from({ length: 8 }, (_, index) => ({
+            key: `comment:${index + 1}`,
+            kind: "comment",
+            text: `original ${index + 1}`,
+          }));
+          try {
+            emit(bus, signals);
+            await vi.advanceTimersByTimeAsync(path === "queued" ? 35_000 : 1);
+            expect(deliver).toHaveBeenCalledTimes(1);
+            const deadline = pending()?.admissionCapRetryAt;
+            if (!deadline) throw new Error("Missing cap deadline");
+            const claims = updatePendingSendBatchConditionalMock.mock.calls.length;
+            const edited: ReviewSignal = {
+              key: "comment:1",
+              kind: "comment",
+              text: "new event edit",
+            };
+            await vi.advanceTimersByTimeAsync(Math.min(5_000, deadline - Date.now() - 2));
+            emit(bus, [edited, { key: "comment:9", kind: "comment", text: "new arrival" }]);
+            readGitHubSourceSnapshotMock.mockReturnValue(
+              storedSnapshot([
+                edited,
+                ...signals.slice(1),
+                { key: "comment:9", kind: "comment", text: "new arrival" },
+              ]),
+            );
+            await vi.advanceTimersByTimeAsync(1);
+            expect(pending()?.admissionCapRetryAt).toBe(deadline);
+            expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+            expect(deliver).toHaveBeenCalledTimes(1);
+            expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims);
+            expect(pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
+              true,
+            );
+            await vi.advanceTimersByTimeAsync(deadline - Date.now() - 1);
+            expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+            for (let attempt = 2; attempt <= 10; attempt += 1) {
+              await vi.advanceTimersByTimeAsync(10_000);
+              expect(deliver).toHaveBeenCalledTimes(attempt);
+              expect(refreshSignalsMock.mock.calls.at(-1)?.[0].signals).toHaveLength(4);
+              expect(
+                refreshSignalsMock.mock.calls.at(-1)?.[0].signals.map((signal) => signal.key),
+              ).toEqual(["comment:1", "comment:2", "comment:3", "comment:4"]);
+              expect(pending()?.retryAccounting).toHaveLength(9);
+              expect(
+                pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0),
+              ).toBe(true);
+            }
+            expect(deliver.mock.calls[1]?.[1]).toContain("new event edit");
+          } finally {
+            await controller.stop();
+          }
+        },
+      );
+
+      it.each(["historical", "post-denial"])(
+        "preserves the deadline across reload with %s stop history and prior refunded attempts",
+        async (history) => {
+          const { startConfiguredTriggers } = await loadTriggersModule();
+          const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+          const get = vi.fn().mockResolvedValue(running("stale"));
+          const deliver = vi.fn().mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+          const bus = new EventBus();
+          const deps = {
+            config: config() as never,
+            bus,
+            sessionService: { get, deliver } as never,
+            logger: { warn: vi.fn() },
+          };
+          let controller = startConfiguredTriggers(deps);
+          try {
+            emit(bus, [{ key: "comment:1", kind: "comment", text: "body" }]);
+            await vi.advanceTimersByTimeAsync(1);
+            const record = pending();
+            if (!record?.admissionCapRetryAt || !record.retryAccounting?.[0])
+              throw new Error("Missing held work");
+            const deadline = record.admissionCapRetryAt;
+            record.retryAccounting[0].deliveryAttempts = 3;
+            get.mockResolvedValue({
+              ...running("stale"),
+              stateHistory: [
+                {
+                  state: "stale",
+                  at: new Date(
+                    deadline - (history === "historical" ? 15_000 : 9_000),
+                  ).toISOString(),
+                },
+              ],
+            });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await controller.stop();
+            controller = startConfiguredTriggers(deps);
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(pending()?.admissionCapRetryAt).toBe(deadline);
+            expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+            expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(3);
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(deliver).toHaveBeenCalledTimes(2);
+            expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(3);
+          } finally {
+            await controller.stop();
+          }
+        },
+      );
+
+      it("starts the hold at denial completion after a slow lookup and clears it from remaining work on success", async () => {
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+        const get = vi.fn().mockResolvedValue(running("stale"));
+        const deliver = vi
+          .fn()
+          .mockRejectedValueOnce(new SessionAdmissionDeniedError("full", "cap"))
+          .mockResolvedValue(undefined);
+        let release!: () => void;
+        const lookup = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        refreshSignalsMock.mockImplementationOnce(async (input) => {
+          await lookup;
+          return input.signals.map((signal) => ({ status: "live", key: signal.key, signal }));
+        });
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: config() as never,
+          bus,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          emit(bus, [
+            { key: "comment:1", kind: "comment", text: "current body" },
+            { key: "ci_failed", kind: "ci_failed", text: "failed CI" },
+          ]);
+          await vi.advanceTimersByTimeAsync(15_000);
+          expect(deliver).not.toHaveBeenCalled();
+          const deniedAt = Date.now();
+          release();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(pending()?.admissionCapRetryAt).toBe(deniedAt + 10_000);
+          await vi.advanceTimersByTimeAsync(9_998);
+          expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(5_001);
+          expect(deliver).toHaveBeenCalledTimes(2);
+          expect(pending()?.admissionCapRetryAt).toBeUndefined();
+          expect(pending()?.retryAccounting).toEqual([
+            expect.objectContaining({ ciAttempts: 1, deliveryAttempts: 1 }),
+          ]);
+          expect(
+            updatePendingSendBatchConditionalMock.mock.calls.at(-1)?.[2].admissionCapRetryAt,
+          ).toBeUndefined();
+        } finally {
+          await controller.stop();
+        }
+      });
+
+      it.each(["work", "revision"])(
+        "cannot stamp a late denial onto replacement %s and rereads an absent authoritative hold",
+        async (replacement) => {
+          const { startConfiguredTriggers } = await loadTriggersModule();
+          const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+          let reject!: (error: Error) => void;
+          const response = new Promise<void>((_resolve, fail) => {
+            reject = fail;
+          });
+          const deliver = vi.fn().mockReturnValueOnce(response).mockResolvedValue(undefined);
+          const get = vi.fn().mockResolvedValue(running("stale"));
+          const bus = new EventBus();
+          const deps = {
+            config: config() as never,
+            bus,
+            sessionService: { get, deliver } as never,
+            logger: { warn: vi.fn() },
+          };
+          let controller = startConfiguredTriggers(deps);
+          try {
+            emit(bus, [{ key: "comment:1", kind: "comment", text: "body" }]);
+            await vi.advanceTimersByTimeAsync(1);
+            const claimed = pending();
+            if (!claimed) throw new Error("Missing claimed work");
+            const next = {
+              ...claimed,
+              workId: replacement === "work" ? "replacement-work" : claimed.workId,
+              revision: (claimed.revision ?? 0) + 1,
+              claim: undefined,
+              retryAccounting: claimed.retryAccounting?.map((entry) => ({
+                ...entry,
+                deliveryAttempts: 0,
+                nextAttemptAt: 0,
+              })),
+            };
+            readPendingSendBatchesMock().set(next.queueKey, next);
+            reject(new SessionAdmissionDeniedError("full", "cap"));
+            await vi.advanceTimersByTimeAsync(1);
+            expect(pending()).toEqual(next);
+            expect(pending()?.admissionCapRetryAt).toBeUndefined();
+            if (replacement === "work") {
+              await controller.stop();
+              controller = startConfiguredTriggers(deps);
+            }
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(deliver).toHaveBeenCalledTimes(2);
+            expect(pending()).toBeUndefined();
+          } finally {
+            await controller.stop();
+          }
+        },
+      );
+    });
+
     it.each(["queued", "stale", "interrupt"])(
       "resolves edited and deleted feedback on %s delivery",
       async (path) => {
@@ -948,6 +1172,8 @@ describe("startConfiguredTriggers", () => {
           { key: "comment:1", kind: "comment", text: "failed" },
           { key: "comment:2", kind: "comment", text: "gone" },
           { key: "comment:3", kind: "comment", text: "ready" },
+          { key: "comment:4", kind: "comment", text: "also ready" },
+          { key: "comment:5", kind: "comment", text: "deferred" },
           { key: "ci_failed", kind: "ci_failed", text: "CI failed" },
         ];
         refreshSignalsMock.mockImplementation(async (input) =>
@@ -986,7 +1212,13 @@ describe("startConfiguredTriggers", () => {
           expect(deliver.mock.calls[0]?.[1]).toContain("current");
           expect(deliver.mock.calls[0]?.[1]).not.toContain("- failed\n");
           const record = pending();
-          expect(record?.batch).toMatchObject({ signals: [signals[0], signals[2], signals[3]] });
+          expect(record?.batch).toMatchObject({
+            signals: signals.filter((signal) => signal.key !== "comment:2"),
+          });
+          if (reason === "cap") {
+            expect(record?.admissionCapRetryAt).toBeGreaterThan(Date.now());
+            expect(record?.admissionCapRetryAt).toBeLessThanOrEqual(Date.now() + 10_000);
+          } else expect(record?.admissionCapRetryAt).toBeUndefined();
           expect(
             record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
           ).toMatchObject({ deliveryAttempts: 1 });
@@ -997,6 +1229,9 @@ describe("startConfiguredTriggers", () => {
             record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:3")),
           ).toMatchObject({ deliveryAttempts: reason === "general" ? 1 : 0 });
           expect(
+            record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:5")),
+          ).toMatchObject({ deliveryAttempts: 0, nextAttemptAt: 0 });
+          expect(
             record?.retryAccounting?.find((entry) => entry.itemKey.includes("ci_failed")),
           ).toMatchObject({
             deliveryAttempts: reason === "general" ? 1 : 0,
@@ -1005,6 +1240,22 @@ describe("startConfiguredTriggers", () => {
           expect(record?.batch.autoPing?.items["comment:2"]).toBeUndefined();
           expect(record?.batch.autoPing?.items["comment:1"]).toBeTruthy();
           expect(inputLogEntries("api-1")).toHaveLength(0);
+          if (reason === "cap") {
+            const failed = record?.retryAccounting?.find((entry) =>
+              entry.itemKey.includes("comment:1"),
+            );
+            await vi.advanceTimersByTimeAsync(10_000);
+            expect(deliver).toHaveBeenCalledTimes(2);
+            expect(
+              pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
+            ).toMatchObject({ deliveryAttempts: 2, fingerprint: failed?.fingerprint });
+            expect(
+              pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("ci_failed")),
+            ).toMatchObject({ deliveryAttempts: 0, ciAttempts: 0 });
+            expect(pending()?.admissionCapRetryAt).toBeGreaterThan(
+              record?.admissionCapRetryAt ?? 0,
+            );
+          }
         } finally {
           await controller.stop();
         }
@@ -1065,7 +1316,7 @@ describe("startConfiguredTriggers", () => {
       "matching repo to URL",
     ];
     it.each(contextChanges)(
-      "retires absent exhausted accounting only when the %s context changes",
+      "admission cap retires absent exhausted accounting and the hold only when the %s context changes",
       async (change) => {
         const dataDir = mkdtempSync(join(tmpdir(), "spur-feedback-context-"));
         const autoPing = new AutoPingService(dataDir);
@@ -1106,6 +1357,8 @@ describe("startConfiguredTriggers", () => {
           await vi.advanceTimersByTimeAsync(1);
           const record = pending();
           if (!record) throw new Error("Missing pending fixture");
+          const deadline = Date.now() + 10_000;
+          record.admissionCapRetryAt = deadline;
           record.retryAccounting?.push(
             {
               itemKey: item.itemKey,
@@ -1178,6 +1431,7 @@ describe("startConfiguredTriggers", () => {
             );
           await vi.advanceTimersByTimeAsync(1);
           const updated = pending();
+          expect(updated?.admissionCapRetryAt).toBe(replaced ? undefined : deadline);
           expect(
             updated?.retryAccounting?.filter(
               (entry) =>

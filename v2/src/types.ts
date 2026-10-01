@@ -661,6 +661,7 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
 }
 
 export interface SendBatchRetryEntry {
