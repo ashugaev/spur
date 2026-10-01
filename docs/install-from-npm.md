@@ -117,7 +117,9 @@ spur connect spur.yaml
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
-`<project-id>`: key under `projects:` in the scaffolded `spur.yaml` (repo dir name, sanitized). `<new-branch>`: unused name; a branch already checked out fails.
+`<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
+
+`<new-branch>`: a branch not checked out in any worktree. The default branch fails.
 
 ## Upgrade
 
