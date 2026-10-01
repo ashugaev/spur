@@ -44,8 +44,11 @@
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
-- `POST /sessions/:id/send`
+- `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
 - `POST /sessions/:id/answer`
+- `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
+- `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head
+- `POST /sessions/:id/submit-failed/dismiss` — drops `submitFailedMessage`
 - `POST /sessions/:id/source-reply`
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`

@@ -1188,6 +1188,185 @@ projects:
     });
   });
 
+  it("resolves telegram allowedUsers and allowedChats from the environment", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+        allowedChats: "\${TG_CHATS}"
+        chatId: "\${TG_CHAT}"
+`);
+    await writeProjectEnv(configPath, "TG_USERS=123, 456\nTG_CHATS=-1001,123\nTG_CHAT=-1001\n");
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      allowedUsers: [123, 456],
+      allowedChats: [-1001, 123],
+      chatId: -1001,
+    });
+
+    const empty = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(empty, 'TG_USERS=","\n');
+    expect(() => loadConfig(empty)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must include at least one integer",
+    );
+
+    const bogus = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(bogus, "TG_USERS=123,abc\n");
+    expect(() => loadConfig(bogus)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must be an integer",
+    );
+
+    const missing = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS_ABSENT}"
+`);
+    expect(() => loadConfig(missing)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers could not be resolved from the environment",
+    );
+  });
+
+  it("parses a telegram outbound chatId and requires it to be allowed", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: -1001
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1001,
+    });
+
+    const mismatched = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        allowedChats: [-1002]
+        chatId: -1001
+`);
+    expect(() => loadConfig(mismatched)).toThrow(
+      "projects.backend.sources.telegram.chatId must be listed in " +
+        "projects.backend.sources.telegram.allowedChats",
+    );
+
+    const fromEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(fromEnv, "TELEGRAM_CHAT_ID=-1002\n");
+    expect(loadConfig(fromEnv).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1002,
+    });
+
+    const missingEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID_ABSENT}"
+`);
+    expect(() => loadConfig(missingEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const emptyEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(emptyEnv, 'TELEGRAM_CHAT_ID=""\n');
+    // An empty value never resolves to chat 0.
+    expect(() => loadConfig(emptyEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const hex = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "0x10"
+`);
+    expect(() => loadConfig(hex)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+
+    const fractional = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: 1.5
+`);
+    expect(() => loadConfig(fractional)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+  });
+
   it("materializes telegram autoSpawn defaults with no model", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -3107,6 +3286,9 @@ projects:
 
   it("keeps the root sp project free of a review fleet", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
@@ -3116,6 +3298,9 @@ projects:
 
   it("parses the root PR-merged send trigger", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
     const trigger = config.projects["sp"]?.triggers["gh-merged"];
     if (!trigger || !("send" in trigger)) {
@@ -3131,6 +3316,9 @@ projects:
 
   it("sets medium provider reasoning for the sp project", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -3140,6 +3328,9 @@ projects:
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);

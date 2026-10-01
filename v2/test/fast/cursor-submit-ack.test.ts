@@ -2,6 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 
 const {
   findCursorAckTranscriptFileMock,
@@ -16,10 +17,14 @@ const {
     vi.fn<(worktreePath: string, options?: { configDir?: string }) => Promise<string | null>>(),
 }));
 
-vi.mock("../../src/cursor-jsonl-state.js", () => ({
-  findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
-  resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
-}));
+vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof CursorJsonlStateModule>();
+  return {
+    findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
+    resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
+    readCursorStableOffset: actual.readCursorStableOffset,
+  };
+});
 
 vi.mock("../../src/agents/cursor.js", () => ({
   findCursorSessionId: findCursorSessionIdMock,
@@ -27,6 +32,8 @@ vi.mock("../../src/agents/cursor.js", () => ({
 
 import {
   captureCursorSubmitBaseline,
+  persistCursorSubmitBaseline,
+  restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
 } from "../../src/agents/cursor-submit-ack.js";
 
@@ -161,6 +168,34 @@ describe("scanCursorJsonlForMessage", () => {
     const result = await scanCursorJsonlForMessage(baseline, "new turn", "/tmp/worktree");
     expect(result.found).toBe(true);
     expect(result.scannedFile).toBe(filePath);
+  });
+
+  // Cursor rewrites the transcript on submit: the trailing turn_ended line is
+  // dropped and the new user turn appended, so the new turn starts before the
+  // pre-send file size.
+  it("acks a turn cursor wrote by rewriting away the trailing turn_ended line", async () => {
+    const turnEnded = { type: "turn_ended", status: "success" };
+    const assistantOk = { role: "assistant", message: { content: [{ type: "text", text: "ok" }] } };
+    const filePath = await makeJsonl("rewrite.jsonl", [
+      userTurn("old turn"),
+      assistantOk,
+      turnEnded,
+    ]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
+    if (!baseline) throw new Error("expected a baseline");
+    await writeFile(
+      filePath,
+      [userTurn("old turn"), assistantOk, userTurn("new turn")]
+        .map((line) => JSON.stringify(line))
+        .join("\n") + "\n",
+      "utf8",
+    );
+
+    const result = await scanCursorJsonlForMessage(baseline, "new turn", "/tmp/worktree");
+    expect(result.found).toBe(true);
+    const stale = await scanCursorJsonlForMessage(baseline, "old turn", "/tmp/worktree");
+    expect(stale.found).toBe(false);
   });
 
   it("scans a freshly rotated transcript from offset 0 when latest differs", async () => {
@@ -374,5 +409,73 @@ describe("scanCursorJsonlForMessage", () => {
     );
 
     expect(result).toEqual({ found: true, scannedFile: actualPinnedFile });
+  });
+});
+
+describe("cursor submit baseline across a restart", () => {
+  it("offsets an already-rotated chat at send time and keeps that offset through persist and restore", async () => {
+    const pinnedFile = await makeJsonl("pinned-restart.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-restart.jsonl", [userTurn("continue")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    const options = { cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
+
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    expect(live).not.toBeNull();
+    if (!live) return;
+    const rotatedSize = (await stat(rotatedFile)).size;
+    const persisted = JSON.parse(JSON.stringify(persistCursorSubmitBaseline(live))) as ReturnType<
+      typeof persistCursorSubmitBaseline
+    >;
+    expect(persisted).toEqual({
+      file: pinnedFile,
+      size: (await stat(pinnedFile)).size,
+      rotated: { file: rotatedFile, size: rotatedSize },
+    });
+
+    // Cursor writes the sent turn to the rotated chat, then the daemon restarts.
+    await appendJsonl(rotatedFile, [userTurn("continue")]);
+    const restored = restoreCursorSubmitBaseline(persisted);
+    const result = await scanCursorJsonlForMessage(
+      restored,
+      "continue",
+      "/tmp/worktree",
+      "pinned-id",
+      options,
+    );
+    expect(result).toEqual({ found: true, scannedFile: rotatedFile });
+
+    // The pre-send "continue" alone never acks from the send-time offset.
+    const beforeSend = restoreCursorSubmitBaseline({
+      ...persisted,
+      rotated: { file: rotatedFile, size: rotatedSize + 1_000 },
+    });
+    expect(
+      (
+        await scanCursorJsonlForMessage(
+          beforeSend,
+          "continue",
+          "/tmp/worktree",
+          "pinned-id",
+          options,
+        )
+      ).found,
+    ).toBe(false);
+  });
+
+  it("persists no rotation when the chat id matches the pin", async () => {
+    const pinnedFile = await makeJsonl("pinned-norotate.jsonl", [userTurn("earlier turn")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", {
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    });
+    expect(live && persistCursorSubmitBaseline(live)).toEqual({
+      file: pinnedFile,
+      size: (await stat(pinnedFile)).size,
+    });
   });
 });

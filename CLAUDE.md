@@ -11,6 +11,7 @@ MIRROR
   `.codex/agents/*.toml` are the Codex-side agent prompts, parallel to `.claude/agents/*.md`. Update them when behavior or rules change.
   `.cursor/BUGBOT.md` configures Cursor BugBot review focus. Keep aligned with ALWAYS-ON RULES below.
   Hook scripts mirror per runtime: `.claude/hooks/`, `.codex/hooks/`, `.cursor/hooks/`. Sync runtime-specific scripts across all three. Cross-runtime scripts, for example `auto-push.sh`, live only in `.claude/hooks/`, referenced from each runtime's `hooks.json`.
+  The Telegram spawn-prompt suffix has four copies: `wrapTelegramSpawnPrompt` (v2/src/event-sources/telegram.ts), `TelegramSendBatch.format` (v2/src/send-batches.ts), `TELEGRAM_REPLY_SUFFIX` (packages/web/src/lib/session-prompt.ts), and the pinning literal in `packages/web/src/__tests__/session-prompt.test.ts`. Change all four together, or the web UI indexes and shows the raw suffix. Any other consumer imports `TELEGRAM_REPLY_SUFFIX` — never pastes it. Its first and last line are the strip anchors: edit the middle freely, but rewording either end orphans the wrapper in every prompt already stored on disk.
 
 
 AGENTS
@@ -45,6 +46,7 @@ Capabilities loaded by description match. Source: .claude/skills/
   shallow-scoring     .claude/skills/shallow-scoring/SKILL.md     Route a task to a deliberation tier by ambiguity × blast radius
   self-verify         .claude/skills/self-verify/SKILL.md         Final close-out gate validation
   telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
+  telegram-e2e        .claude/skills/telegram-e2e/SKILL.md        Live test the Telegram source on a test bot before close-out of any Telegram change
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
   clean-install-test  .claude/skills/clean-install-test/SKILL.md  Clean-room test the npm server install before release, or verify a source-install deploy change end to end on the itest VM
@@ -103,6 +105,7 @@ ALWAYS-ON RULES
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
   Default close-out: push to the existing PR branch, or create a new PR and leave it open for a human to merge. Never run `gh pr merge --auto`; auto-merge is disabled repo-wide and only an admin can enable it. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
+  Query CI status or review comments only on explicit user request; Spur notifications alone do not authorize queries.
   Use `Spur` in code, config, docs, and CLI surfaces.
   Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.

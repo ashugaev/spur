@@ -211,7 +211,10 @@ describe("Telegram batch", () => {
     expect(formatted).toContain(
       "Source: telegram. The requester only sees messages you send with:",
     );
-    expect(formatted).toContain('spur source reply "<message>"');
+    expect(formatted).toContain('"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"');
+    expect(formatted).toContain(
+      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options. Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.',
+    );
     expect(formatted).toContain(
       "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
     );
@@ -718,5 +721,21 @@ describe("restoreSendBatch", () => {
         messages: [{ sessionId: "api-1" }],
       }),
     ).toBeNull();
+  });
+});
+
+describe("interactive batches", () => {
+  it("only telegram batches are interactive, including restored ones", () => {
+    const github = createSendBatchParser("github", "proj", "src-1")(githubEventData());
+    const service = createSendBatchParser("service", "proj", "src-1")(serviceEventData());
+    const telegram = createSendBatchParser("telegram", "proj", "src-1")(telegramEventData());
+
+    expect(github?.interactive).toBe(false);
+    expect(service?.interactive).toBe(false);
+    expect(telegram?.interactive).toBe(true);
+    const restored = telegram ? restoreSendBatch(telegram.serialize()) : null;
+    expect(restored?.interactive).toBe(true);
+    const restoredGithub = github ? restoreSendBatch(github.serialize()) : null;
+    expect(restoredGithub?.interactive).toBe(false);
   });
 });

@@ -112,9 +112,14 @@ After a start/restart the units can take up to ~2 min to answer on a ~1 GB host 
 
 ```bash
 cd <repo>
-spur connect --config spur.yaml
-spur spawn <project-id> --branch <branch> "smoke test" --json
+spur doctor --scaffold
+spur connect spur.yaml
+spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
+
+`<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
+
+`<new-branch>`: a branch not checked out in any worktree. The default branch fails.
 
 ## Upgrade
 

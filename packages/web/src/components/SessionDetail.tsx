@@ -15,6 +15,8 @@ import {
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
+import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
+import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
 import { TokenCount } from "@/components/TokenCount";
@@ -93,6 +95,7 @@ import {
 } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
+import { usePoll } from "@/hooks/usePoll";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -1716,11 +1719,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // means "follow the live tail" (the default, no `from` query param).
   const [fromIndex, setFromIndex] = useState<number | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  // Monotonic id of the newest conversation request. A tail poll issued before
-  // a load-older can resolve after it; without this its stale payload lands in
-  // `conversation` and the [conversation] effect below clears the older-page
-  // spinner while the older page is still in flight.
-  const conversationRequestRef = useRef(0);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1775,53 +1773,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setSession(next);
   }, []);
 
-  const loadSession = useCallback(async () => {
-    const requestedSessionId = sessionId;
-    const requestId = loadRequestIdRef.current + 1;
-    loadRequestIdRef.current = requestId;
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
-        cache: "no-store",
-      });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
+  const fetchSession = useCallback(
+    async (signal: AbortSignal) => {
+      const requestedSessionId = sessionId;
+      const requestId = loadRequestIdRef.current + 1;
+      loadRequestIdRef.current = requestId;
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
+          cache: "no-store",
+          signal,
+        });
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+        }
+        const payload = (await response.json()) as SpurSessionView;
+        if (
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const nextSession = toDashboardSession(payload);
+        setSession(nextSession);
+        setError(null);
+        dismissLoadErrorToast();
+      } catch (loadError) {
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const message = errorMessage(loadError, "Failed to load session");
+        if (sessionRef.current?.id !== requestedSessionId) {
+          setSession(null);
+          setError(message);
+          return;
+        }
+        if (lastLoadErrorToastRef.current?.message === message) return;
+        dismissLoadErrorToast();
+        const id = showErrorToast(message);
+        lastLoadErrorToastRef.current = { id, message };
       }
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
-      }
-      const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const nextSession = toDashboardSession(payload);
-      setSession(nextSession);
-      setError(null);
-      dismissLoadErrorToast();
-    } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const message = errorMessage(loadError, "Failed to load session");
-      if (sessionRef.current?.id !== requestedSessionId) {
-        setSession(null);
-        setError(message);
-        return;
-      }
-      if (lastLoadErrorToastRef.current?.message === message) return;
-      dismissLoadErrorToast();
-      const id = showErrorToast(message);
-      lastLoadErrorToastRef.current = { id, message };
-    }
-  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+    },
+    [dismissLoadErrorToast, sessionId, showErrorToast],
+  );
+  const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1846,14 +1850,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => ({ catalog: tagCatalog, applyTags }),
     [tagCatalog, applyTags],
   );
-
-  useEffect(() => {
-    void loadSession();
-    const timer = setInterval(() => {
-      void loadSession();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -1881,36 +1877,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionId,
   ]);
 
-  const loadConversation = useCallback(async () => {
-    if (!session) {
-      setConversation(null);
-      return;
-    }
-    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
-    const requestId = conversationRequestRef.current + 1;
-    conversationRequestRef.current = requestId;
-    const isNewest = () => conversationRequestRef.current === requestId;
-    try {
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) {
-        if (isNewest()) setConversation(null);
+  const fetchConversation = useCallback(
+    async (signal: AbortSignal) => {
+      if (!session) {
+        setConversation(null);
         return;
       }
-      const payload = (await res.json()) as ConversationResponse;
-      if (isNewest()) setConversation(payload);
-    } catch {
-      if (isNewest()) setConversation(null);
-    }
-  }, [session?.agent, sessionId, fromIndex]);
-
-  useEffect(() => {
-    void loadConversation();
-    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadConversation]);
+      const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+          { cache: "no-store", signal },
+        );
+        if (!res.ok) {
+          if (!signal.aborted) setConversation(null);
+          return;
+        }
+        const payload = (await res.json()) as ConversationResponse;
+        if (!signal.aborted) setConversation(payload);
+      } catch {
+        if (!signal.aborted) setConversation(null);
+      }
+    },
+    [session?.agent, sessionId, fromIndex],
+  );
+  const loadConversation = usePoll(fetchConversation, POLL_INTERVAL_MS);
 
   const handleLoadOlder = useCallback(() => {
     const startIndex = conversation?.startIndex ?? 0;
@@ -1974,6 +1965,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
+  // Send now / flush to an agent with no interrupt key while it works: the
+  // daemon queued the message at the head instead of typing it.
+  const showQueuedAheadToast = (payload: unknown) => {
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      (payload as { queuedAheadReason?: unknown }).queuedAheadReason === "no_interrupt"
+    ) {
+      const agent = session?.agent ?? "agent";
+      showSuccessToast(
+        `${agent.charAt(0).toUpperCase()}${agent.slice(1)} can't be interrupted — sends when the turn ends`,
+      );
+    }
+  };
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -2025,6 +2031,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         setMessage("");
         setAttachments([]);
+        // A 200 Send now the agent never acked: typed, not confirmed; the
+        // banner holds further sends until the agent shows activity.
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          typeof (payload as { submitUnconfirmedAt?: unknown }).submitUnconfirmedAt === "string"
+        ) {
+          showErrorToast("Sent, agent hasn't confirmed yet");
+        }
+        showQueuedAheadToast(payload);
       }
       await loadSession();
       return true;
@@ -2057,6 +2073,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) {
         throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
       }
+      showQueuedAheadToast(payload);
       await loadSession();
     } catch (queueError) {
       showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));
@@ -2503,6 +2520,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
+  // The daemon queues a send to a spawning session and refuses Send now (409).
+  const sessionStarting = session?.status === "spawning";
+  // The daemon refuses every immediate send (409) while the last prompt is
+  // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
+  const launchPending = Boolean(session?.submitUnconfirmedAt);
+  const sendNowBlocked = sessionStarting || launchPending;
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
 
@@ -2934,7 +2957,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
             <TagsContext.Provider value={tagsContextValue}>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {displayState ? (
+                  <ActivityDot activity={sessionStarting ? "starting" : displayState} />
+                ) : null}
                 {session.branch ? (
                   <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                     {session.branch}
@@ -3184,7 +3209,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
-              session.queuedMessages.awaitingPrompt ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -3210,7 +3234,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                   label={`Send queued message #${index + 1} now`}
                                   busyLabel={`Sending queued message #${index + 1}…`}
                                   busy={flushBusy}
-                                  disabled={busyAction !== null}
+                                  disabled={sendNowBlocked || busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
                                   }
@@ -3285,6 +3309,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) && !tokenBudgetBlocked ? (
                   <div className="space-y-2">
+                    {launchPending ? (
+                      <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
+                    ) : null}
+                    {session.submitFailedMessage ? (
+                      <SubmitFailedBanner
+                        sessionId={sessionId}
+                        message={session.submitFailedMessage.message}
+                        onResolved={loadSession}
+                      />
+                    ) : null}
                     <FileAttachmentTextarea
                       attachments={attachments}
                       clearLabel="Clear message"
@@ -3299,7 +3333,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }
                         if (isPrimarySubmitHotkey(event)) {
                           event.preventDefault();
-                          void doSend({ queue: false, interrupt: true });
+                          void doSend(
+                            sendNowBlocked ? { queue: true } : { queue: false, interrupt: true },
+                          );
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -3321,6 +3357,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
                           <VoiceStatusHint voice={voice} />
+                        ) : sessionStarting ? (
+                          "Session is starting. Queued messages send after launch."
                         ) : null}
                       </span>
                       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3355,7 +3393,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
-                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                            sendNowBlocked ||
+                            busyAction !== null ||
+                            (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"

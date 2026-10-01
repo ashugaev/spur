@@ -23,6 +23,7 @@ import {
   type SpurSessionView,
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
+import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
@@ -667,15 +668,10 @@ test.describe("D1: Header renders correctly", () => {
   test("dashboard search matches canonical tasks and work items while preserving desks", async ({
     page,
   }) => {
-    const telegramSuffix = `
-
-Source: telegram. The requester only sees messages you send with:
-spur source reply "<message>"
-Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
     const root = makeWorkingSession({
       id: "search-desk-root",
-      prompt: `Repair settlement export${telegramSuffix}`,
-      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      prompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
+      originalTaskPrompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
       slots: {
         title: "Settlement repair",
         links: [{ label: "github-pr", url: "https://github.com/acme/payments/pull/742" }],

@@ -41,26 +41,35 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { getReleases } from "./releases-cache.js";
 import {
+  AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidConfigPathError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
   PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
+  SessionStartingError,
   SidecarPortConflictError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
-import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import {
+  dropsQueuedSend,
+  startConfiguredTriggers,
+  type TriggerGroupController,
+} from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
 import { getVersion } from "./version.js";
 import {
@@ -750,9 +759,14 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
+            ...(dropsQueuedSend(session, service.memoryHoldEngaged()) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn(request);
+          const { telegramOrigin, ...spawnRequest } = request;
+          const session = await service.spawn(
+            spawnRequest,
+            telegramOrigin ? { telegramOrigin } : undefined,
+          );
           return {
             id: session.id,
             project: session.project,
@@ -1729,6 +1743,25 @@ export async function startServer(
         return;
       }
 
+      const launchSubmitSessionId = path.match(/^\/sessions\/([^/]+)\/launch\/submit$/)?.[1];
+      if (method === "POST" && launchSubmitSessionId) {
+        sendJson(response, 200, await service.submitPendingLaunch(launchSubmitSessionId));
+        return;
+      }
+
+      const submitFailedMatch = path.match(/^\/sessions\/([^/]+)\/submit-failed\/(retry|dismiss)$/);
+      if (method === "POST" && submitFailedMatch?.[1] && submitFailedMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.resolveSubmitFailure(
+            submitFailedMatch[1],
+            submitFailedMatch[2] === "retry" ? "retry" : "dismiss",
+          ),
+        );
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);
@@ -2006,7 +2039,12 @@ export async function startServer(
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
-        error instanceof QueueDeliveryInFlightError
+        error instanceof QueueDeliveryInFlightError ||
+        error instanceof AgentExitedBeforeSendError ||
+        error instanceof SessionStartingError ||
+        error instanceof SessionEndedError ||
+        error instanceof ForeignAgentProcessError ||
+        error instanceof LaunchPromptPendingError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;

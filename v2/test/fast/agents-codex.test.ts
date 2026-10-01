@@ -1233,6 +1233,55 @@ describe("scanCodexRolloutForMessage", () => {
     expect(result.found).toBe(true);
   });
 
+  it("matches a launch prompt in the rollout shape codex 0.157 writes for a first turn", async () => {
+    // Line order and item shapes of a real first-turn rollout: the turn opens
+    // with instructions and an environment_context user item before the
+    // pasted prompt, which carries Spur's appended session metadata.
+    const prompt = "Reply with the single word ready.\n\nSession metadata:\n- Suggest a title.";
+    const userItem = (text: string) =>
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+      });
+    const lines = [
+      JSON.stringify({ type: "session_meta", payload: { id: "thread-1", cwd: "/repo" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "t1" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "<skills_instructions>" }],
+        },
+      }),
+      userItem("<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"),
+      JSON.stringify({ type: "world_state", payload: {} }),
+      JSON.stringify({ type: "turn_context", payload: { cwd: "/repo" } }),
+      userItem(prompt),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "ready" }],
+        },
+      }),
+    ];
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", lines);
+    await expect(
+      scanCodexRolloutForMessage("/sessions", `${prompt}\n`, new Map()),
+    ).resolves.toEqual({ found: true, lastScannedFile: "/sessions/rollout.jsonl" });
+
+    // A prompt still sitting unsubmitted in the composer leaves only the
+    // turn preamble behind: the scan must not report it delivered.
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", lines.slice(0, 6));
+    await expect(scanCodexRolloutForMessage("/sessions", prompt, new Map())).resolves.toMatchObject(
+      { found: false },
+    );
+  });
+
   it("scans multiple rollout files", async () => {
     const line1 = JSON.stringify({
       type: "event_msg",

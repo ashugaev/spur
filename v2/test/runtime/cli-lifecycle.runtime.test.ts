@@ -2557,7 +2557,7 @@ projects:
     await expect(
       context.execCli(["--config", configPath, "send", spawned.id, "after complete"]),
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining(`Session is not running: ${spawned.id}`),
+      stderr: expect.stringContaining(`Session has ended (completed): ${spawned.id}`),
     });
   });
 

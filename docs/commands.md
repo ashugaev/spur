@@ -105,6 +105,10 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
 
+## source reply
+
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`); in a private chat a user reply to it routes back to this session. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Binding rules and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+
 ## Sidecars
 
 Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
