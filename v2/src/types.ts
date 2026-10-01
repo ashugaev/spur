@@ -1037,7 +1037,8 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout";
+  /** "memory_shed" is written only by the critical memory shed's session stop. */
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed";
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;

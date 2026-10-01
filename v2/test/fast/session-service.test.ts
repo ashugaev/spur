@@ -17102,6 +17102,59 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.status).toBe("stopped");
     });
 
+    it("cgroup memory.max shed stops a session with stopReason memory_shed while host RAM is healthy", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      // Host arm cannot authorize: availableBytes is above admissionFloorBytes.
+      readHostMemoryMock.mockReturnValue({ ...criticalMemory(), availableBytes: 20_000_000_000 });
+      readCgroupMemorySnapshotMock.mockReturnValue({
+        path: "/system.slice/spur-daemon.service",
+        currentBytes: 9_000_000_000,
+        highBytes: 10_000_000_000,
+        maxBytes: 10_000_000_000,
+      });
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as MemoryShedService & {
+        memoryShedEpisode: { cgroupMaxLatched: boolean };
+      };
+
+      const pressure = service.readMemoryPressure(Date.now());
+      expect(service.memoryShedEpisode.cgroupMaxLatched).toBe(true);
+      expect(pressure.activeTriggers).toEqual(["cgroup_max_headroom"]);
+
+      await service.runMemoryShed();
+
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.stopReason).toBe("memory_shed");
+      service.dispose();
+    });
+
+    it("a user pause through the normal status path still writes manual_pause", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", sessionRecord({ id: "api-1" }));
+      mockClaudeJsonlState("waiting");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      }) as unknown as MemoryShedService & {
+        applyManualStatusLocked(
+          id: string,
+          status: "stopped",
+          request: Record<string, never>,
+          options: { skipEnrichment: true },
+        ): Promise<void>;
+      };
+
+      await service.applyManualStatusLocked("api-1", "stopped", {}, { skipEnrichment: true });
+
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.stopReason).toBe("manual_pause");
+      service.dispose();
+    });
+
     it("uses cgroup high for sidecars only and clears it across the recovery band", async () => {
       const config = baseConfig();
       loadConfigMock.mockReturnValue({
@@ -48081,6 +48134,63 @@ describe("SessionService", () => {
           .map(([, entry]) => entry)
           .filter((entry) => entry.event === "session.wake.deferred");
         expect(deferredEvents.map((entry) => entry.sessionId).sort()).toEqual(deferredIds.sort());
+        service.dispose();
+      });
+    });
+
+    describe("wake is admissible only for zero-slot record shapes", () => {
+      async function sendToDeadPane(stopReason: "memory_shed" | undefined) {
+        // Cap of 1 with a live occupier: any gated wake is over the cap.
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, maxLiveSessions: 1 },
+        });
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "occupier",
+          sessionRecord({ id: "occupier", status: "running", tmuxSession: "occupier" }),
+        );
+        sessions.set(
+          "api-1",
+          sessionRecord({
+            id: "api-1",
+            status: "stopped",
+            ...(stopReason ? { stopReason } : {}),
+            tmuxSession: "api-1",
+          }),
+        );
+        const relaunchedTmux = new Set<string>(["occupier"]);
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => relaunchedTmux.has(name));
+        createTmuxSessionMock.mockImplementation(
+          async ({ sessionName }: { sessionName: string }) => {
+            relaunchedTmux.add(sessionName);
+          },
+        );
+        isProcessRunningInTmuxMock.mockResolvedValue(true);
+        const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        return { service, SessionAdmissionDeniedError };
+      }
+
+      it("denies a delivery-driven wake of a memory_shed record over the cap and never relaunches", async () => {
+        const { service, SessionAdmissionDeniedError } = await sendToDeadPane("memory_shed");
+
+        await expect(service.send("api-1", { message: "resume work" })).rejects.toBeInstanceOf(
+          SessionAdmissionDeniedError,
+        );
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        service.dispose();
+      });
+
+      it("still relaunches a plain stopped record (dead-pane recovery) over the cap", async () => {
+        const { service } = await sendToDeadPane(undefined);
+
+        await service.send("api-1", { message: "resume work" });
+
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
         service.dispose();
       });
     });

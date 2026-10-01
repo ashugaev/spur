@@ -92,6 +92,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 Cap limits concurrent live sessions at spawn, restore, and stale-parked wake. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
 
+The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
+
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
