@@ -890,17 +890,29 @@ describe("startConfiguredTriggers", () => {
             );
             await vi.advanceTimersByTimeAsync(1);
             expect(pending()?.admissionCapRetryAt).toBe(deadline);
+            expect(pending()?.admissionCapDenials).toBe(1);
             expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
             expect(deliver).toHaveBeenCalledTimes(1);
             expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(claims);
             expect(pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
               true,
             );
-            await vi.advanceTimersByTimeAsync(deadline - Date.now() - 1);
-            expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
             for (let attempt = 2; attempt <= 10; attempt += 1) {
-              await vi.advanceTimersByTimeAsync(10_000);
+              const nextDeadline = pending()?.admissionCapRetryAt;
+              if (!nextDeadline) throw new Error("Missing growing deadline");
+              const ownedWrites = updatePendingSendBatchConditionalMock.mock.calls.length;
+              await vi.advanceTimersByTimeAsync(nextDeadline - Date.now() - 1);
+              expect(refreshSignalsMock).toHaveBeenCalledTimes(attempt - 1);
+              expect(deliver).toHaveBeenCalledTimes(attempt - 1);
+              expect(updatePendingSendBatchConditionalMock).toHaveBeenCalledTimes(ownedWrites);
+              await vi.advanceTimersByTimeAsync(1);
               expect(deliver).toHaveBeenCalledTimes(attempt);
+              expect(pending()?.admissionCapDenials).toBe(Math.min(attempt, 7));
+              expect((pending()?.admissionCapRetryAt ?? 0) - Date.now()).toBe(
+                [10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 640_000][
+                  Math.min(attempt, 7) - 1
+                ],
+              );
               expect(refreshSignalsMock.mock.calls.at(-1)?.[0].signals).toHaveLength(4);
               expect(
                 refreshSignalsMock.mock.calls.at(-1)?.[0].signals.map((signal) => signal.key),
@@ -916,6 +928,91 @@ describe("startConfiguredTriggers", () => {
           }
         },
       );
+
+      it.each(["queued", "stale"])(
+        "bounds one-hour lookup pressure on %s delivery",
+        async (path) => {
+          const { startConfiguredTriggers } = await loadTriggersModule();
+          const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+          const get = vi.fn().mockResolvedValue(running(path));
+          const deliver = vi.fn().mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+          const bus = new EventBus();
+          const controller = startConfiguredTriggers({
+            config: config() as never,
+            bus,
+            sessionService: { get, deliver } as never,
+            logger: { warn: vi.fn() },
+          });
+          try {
+            emit(
+              bus,
+              Array.from({ length: 9 }, (_, index) => ({
+                key: `comment:${index + 1}`,
+                kind: "comment",
+                text: `body ${index + 1}`,
+              })),
+            );
+            await vi.advanceTimersByTimeAsync(path === "queued" ? 35_000 : 1);
+            const firstDenialAt = (pending()?.admissionCapRetryAt ?? 0) - 10_000;
+            expect(deliver).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(firstDenialAt + 3_600_000 - Date.now());
+            expect(deliver.mock.calls.length).toBeLessThanOrEqual(11);
+            expect(refreshSignalsMock.mock.calls.length).toBe(deliver.mock.calls.length);
+            expect(
+              refreshSignalsMock.mock.calls.reduce(
+                (count, [input]) => count + input.signals.length,
+                0,
+              ),
+            ).toBeLessThanOrEqual(44);
+            expect(pending()?.admissionCapDenials).toBe(7);
+            expect(pending()?.retryAccounting).toHaveLength(9);
+            expect(pending()?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
+              true,
+            );
+          } finally {
+            await controller.stop();
+          }
+        },
+      );
+
+      it("retains count-only growth through expired event serialization and reload", async () => {
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+        const get = vi.fn().mockResolvedValue(running("interrupt"));
+        const deliver = vi.fn().mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+        const bus = new EventBus();
+        const deps = {
+          config: config() as never,
+          bus,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        };
+        let controller = startConfiguredTriggers(deps);
+        try {
+          emit(bus, [{ key: "comment:1", kind: "comment", text: "queued" }]);
+          await vi.advanceTimersByTimeAsync(1);
+          const record = pending();
+          if (!record) throw new Error("Missing queued work");
+          record.admissionCapDenials = 2;
+          record.admissionCapRetryAt = Date.now() - 1;
+          await controller.stop();
+          controller = startConfiguredTriggers(deps);
+          emit(bus, [{ key: "comment:1", kind: "comment", text: "new edit after expiry" }]);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(pending()?.admissionCapRetryAt).toBeUndefined();
+          expect(pending()?.admissionCapDenials).toBe(2);
+          await controller.stop();
+          get.mockResolvedValue(running("stale"));
+          controller = startConfiguredTriggers(deps);
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(deliver).toHaveBeenCalledTimes(1);
+          expect(pending()?.admissionCapDenials).toBe(3);
+          expect(pending()?.admissionCapRetryAt).toBe(Date.now() + 40_000);
+          expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(0);
+        } finally {
+          await controller.stop();
+        }
+      });
 
       it.each(["historical", "post-denial"])(
         "preserves the deadline across reload with %s stop history and prior refunded attempts",
@@ -934,11 +1031,12 @@ describe("startConfiguredTriggers", () => {
           let controller = startConfiguredTriggers(deps);
           try {
             emit(bus, [{ key: "comment:1", kind: "comment", text: "body" }]);
-            await vi.advanceTimersByTimeAsync(1);
+            await vi.advanceTimersByTimeAsync(10_001);
             const record = pending();
             if (!record?.admissionCapRetryAt || !record.retryAccounting?.[0])
               throw new Error("Missing held work");
             const deadline = record.admissionCapRetryAt;
+            expect(record.admissionCapDenials).toBe(2);
             record.retryAccounting[0].deliveryAttempts = 3;
             get.mockResolvedValue({
               ...running("stale"),
@@ -946,7 +1044,7 @@ describe("startConfiguredTriggers", () => {
                 {
                   state: "stale",
                   at: new Date(
-                    deadline - (history === "historical" ? 15_000 : 9_000),
+                    deadline - (history === "historical" ? 25_000 : 19_000),
                   ).toISOString(),
                 },
               ],
@@ -956,10 +1054,13 @@ describe("startConfiguredTriggers", () => {
             controller = startConfiguredTriggers(deps);
             await vi.advanceTimersByTimeAsync(5_000);
             expect(pending()?.admissionCapRetryAt).toBe(deadline);
-            expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+            expect(refreshSignalsMock).toHaveBeenCalledTimes(2);
+            expect(pending()?.admissionCapDenials).toBe(2);
             expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(3);
-            await vi.advanceTimersByTimeAsync(5_000);
-            expect(deliver).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(deadline - Date.now() + 5_000);
+            expect(deliver).toHaveBeenCalledTimes(3);
+            expect(pending()?.admissionCapDenials).toBe(3);
+            expect(pending()?.admissionCapRetryAt).toBeGreaterThanOrEqual(Date.now() + 35_000);
             expect(pending()?.retryAccounting?.[0]?.deliveryAttempts).toBe(3);
           } finally {
             await controller.stop();
@@ -974,14 +1075,19 @@ describe("startConfiguredTriggers", () => {
         const deliver = vi
           .fn()
           .mockRejectedValueOnce(new SessionAdmissionDeniedError("full", "cap"))
+          .mockRejectedValueOnce(new SessionAdmissionDeniedError("full", "cap"))
           .mockResolvedValue(undefined);
         let release!: () => void;
         const lookup = new Promise<void>((resolve) => {
           release = resolve;
         });
-        refreshSignalsMock.mockImplementationOnce(async (input) => {
-          await lookup;
-          return input.signals.map((signal) => ({ status: "live", key: signal.key, signal }));
+        refreshSignalsMock.mockImplementation(async (input) => {
+          if (refreshSignalsMock.mock.calls.length === 2) await lookup;
+          return input.signals.map((signal) =>
+            signal.key === "comment:2"
+              ? { status: "failed", key: signal.key, error: "HTTP 403" }
+              : { status: "live", key: signal.key, signal },
+          );
         });
         const bus = new EventBus();
         const controller = startConfiguredTriggers({
@@ -993,25 +1099,41 @@ describe("startConfiguredTriggers", () => {
         try {
           emit(bus, [
             { key: "comment:1", kind: "comment", text: "current body" },
+            { key: "comment:2", kind: "comment", text: "unavailable cached body" },
             { key: "ci_failed", kind: "ci_failed", text: "failed CI" },
           ]);
-          await vi.advanceTimersByTimeAsync(15_000);
-          expect(deliver).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(30_000);
+          expect(deliver).toHaveBeenCalledTimes(1);
           const deniedAt = Date.now();
           release();
           await vi.advanceTimersByTimeAsync(1);
-          expect(pending()?.admissionCapRetryAt).toBe(deniedAt + 10_000);
-          await vi.advanceTimersByTimeAsync(9_998);
-          expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+          expect(pending()?.admissionCapRetryAt).toBe(deniedAt + 20_000);
+          expect(pending()?.admissionCapDenials).toBe(2);
+          await vi.advanceTimersByTimeAsync(19_998);
+          expect(refreshSignalsMock).toHaveBeenCalledTimes(2);
           await vi.advanceTimersByTimeAsync(5_001);
-          expect(deliver).toHaveBeenCalledTimes(2);
+          expect(deliver).toHaveBeenCalledTimes(3);
           expect(pending()?.admissionCapRetryAt).toBeUndefined();
-          expect(pending()?.retryAccounting).toEqual([
-            expect.objectContaining({ ciAttempts: 1, deliveryAttempts: 1 }),
-          ]);
+          expect(pending()?.admissionCapDenials).toBeUndefined();
+          expect(
+            pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("ci_failed")),
+          ).toMatchObject({ ciAttempts: 1, deliveryAttempts: 1 });
+          expect(
+            pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:2")),
+          ).toMatchObject({ deliveryAttempts: 3 });
+          expect(deliver.mock.calls[2]?.[1]).toContain("current body");
+          expect(deliver.mock.calls[2]?.[1]).not.toContain("unavailable cached body");
           expect(
             updatePendingSendBatchConditionalMock.mock.calls.at(-1)?.[2].admissionCapRetryAt,
           ).toBeUndefined();
+          expect(
+            updatePendingSendBatchConditionalMock.mock.calls.at(-1)?.[2].admissionCapDenials,
+          ).toBeUndefined();
+          deliver.mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+          emit(bus, [{ key: "comment:3", kind: "comment", text: "later current body" }]);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(pending()?.admissionCapDenials).toBe(1);
+          expect(pending()?.admissionCapRetryAt).toBe(Date.now() + 9_999);
         } finally {
           await controller.stop();
         }
@@ -1057,6 +1179,7 @@ describe("startConfiguredTriggers", () => {
             await vi.advanceTimersByTimeAsync(1);
             expect(pending()).toEqual(next);
             expect(pending()?.admissionCapRetryAt).toBeUndefined();
+            expect(pending()?.admissionCapDenials).toBeUndefined();
             if (replacement === "work") {
               await controller.stop();
               controller = startConfiguredTriggers(deps);
@@ -1197,7 +1320,7 @@ describe("startConfiguredTriggers", () => {
                   "held",
                   reason === "memory_guard" ? "memory_guard" : "cap",
                 );
-        const get = vi.fn().mockResolvedValue(running("stale"));
+        const get = vi.fn().mockResolvedValue(running("interrupt"));
         const deliver = vi.fn().mockRejectedValue(error);
         const bus = new EventBus();
         const controller = startConfiguredTriggers({
@@ -1209,6 +1332,11 @@ describe("startConfiguredTriggers", () => {
         try {
           emit(bus, signals);
           await vi.advanceTimersByTimeAsync(1);
+          const queued = pending();
+          if (!queued) throw new Error("Missing queued work");
+          queued.admissionCapDenials = 2;
+          get.mockResolvedValue(running("stale"));
+          await vi.advanceTimersByTimeAsync(5_000);
           expect(deliver.mock.calls[0]?.[1]).toContain("current");
           expect(deliver.mock.calls[0]?.[1]).not.toContain("- failed\n");
           const record = pending();
@@ -1217,8 +1345,9 @@ describe("startConfiguredTriggers", () => {
           });
           if (reason === "cap") {
             expect(record?.admissionCapRetryAt).toBeGreaterThan(Date.now());
-            expect(record?.admissionCapRetryAt).toBeLessThanOrEqual(Date.now() + 10_000);
+            expect(record?.admissionCapRetryAt).toBeLessThanOrEqual(Date.now() + 40_000);
           } else expect(record?.admissionCapRetryAt).toBeUndefined();
+          expect(record?.admissionCapDenials).toBe(reason === "cap" ? 3 : 2);
           expect(
             record?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
           ).toMatchObject({ deliveryAttempts: 1 });
@@ -1244,7 +1373,7 @@ describe("startConfiguredTriggers", () => {
             const failed = record?.retryAccounting?.find((entry) =>
               entry.itemKey.includes("comment:1"),
             );
-            await vi.advanceTimersByTimeAsync(10_000);
+            await vi.advanceTimersByTimeAsync(40_000);
             expect(deliver).toHaveBeenCalledTimes(2);
             expect(
               pending()?.retryAccounting?.find((entry) => entry.itemKey.includes("comment:1")),
@@ -1255,6 +1384,7 @@ describe("startConfiguredTriggers", () => {
             expect(pending()?.admissionCapRetryAt).toBeGreaterThan(
               record?.admissionCapRetryAt ?? 0,
             );
+            expect(pending()?.admissionCapDenials).toBe(4);
           }
         } finally {
           await controller.stop();
@@ -1359,6 +1489,7 @@ describe("startConfiguredTriggers", () => {
           if (!record) throw new Error("Missing pending fixture");
           const deadline = Date.now() + 10_000;
           record.admissionCapRetryAt = deadline;
+          record.admissionCapDenials = 3;
           record.retryAccounting?.push(
             {
               itemKey: item.itemKey,
@@ -1383,6 +1514,10 @@ describe("startConfiguredTriggers", () => {
             },
           );
           session = running("stale");
+          if (replaced) {
+            const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+            deliver.mockRejectedValue(new SessionAdmissionDeniedError("full", "cap"));
+          }
           if (change === "URL to repo")
             session.pr = {
               number: 42,
@@ -1431,7 +1566,8 @@ describe("startConfiguredTriggers", () => {
             );
           await vi.advanceTimersByTimeAsync(1);
           const updated = pending();
-          expect(updated?.admissionCapRetryAt).toBe(replaced ? undefined : deadline);
+          expect(updated?.admissionCapDenials).toBe(replaced ? 1 : 3);
+          expect(updated?.admissionCapRetryAt).toBe(replaced ? Date.now() + 9_999 : deadline);
           expect(
             updated?.retryAccounting?.filter(
               (entry) =>
