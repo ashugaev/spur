@@ -22,6 +22,7 @@ import {
   type ReviewSnapshot,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
+  type SubmitAckBaseline,
   type ServiceInstanceRecord,
   type ServiceSourceState,
   type SessionPipelineState,
@@ -759,6 +760,60 @@ function normalizeQueuedMessagesState(
   };
 }
 
+// A malformed ackBaseline drops alone: the marker then re-queues on restart,
+// the same as an unconfirmed ack.
+function normalizeQueuedMessageTyped(
+  typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
+): NonNullable<SessionRecord["queuedMessageTyped"]> {
+  const ackBaseline = normalizeSubmitAckBaseline(typed.ackBaseline);
+  return {
+    message: typed.message,
+    typedAt: typed.typedAt,
+    ...(ackBaseline ? { ackBaseline } : {}),
+  };
+}
+
+function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const { agent } = record;
+  if (
+    (agent === "claude" || agent === "cursor") &&
+    typeof record["file"] === "string" &&
+    typeof record["size"] === "number"
+  ) {
+    const base = { file: record["file"], size: record["size"] };
+    const rotated = record["rotated"];
+    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
+      return { agent, ...base };
+    }
+    const { file, size } = rotated as Record<string, unknown>;
+    return typeof file === "string" && typeof size === "number"
+      ? { agent, ...base, rotated: { file, size } }
+      : { agent, ...base };
+  }
+  const offsets = record["offsets"];
+  if (agent === "codex" && offsets !== null && typeof offsets === "object") {
+    const entries = Object.entries(offsets).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    );
+    return { agent, offsets: Object.fromEntries(entries) };
+  }
+  const after = record["after"];
+  if (agent === "opencode" && typeof record["sessionId"] === "string") {
+    if (after === null) {
+      return { agent, sessionId: record["sessionId"], after: null };
+    }
+    if (typeof after === "object") {
+      const { createdMs, id } = after as Record<string, unknown>;
+      if (typeof createdMs === "number" && typeof id === "string") {
+        return { agent, sessionId: record["sessionId"], after: { createdMs, id } };
+      }
+    }
+  }
+  return undefined;
+}
+
 // Keeps only entries whose pid/pgid/starttime are finite positive integers —
 // a malformed entry (bad restore, hand-edited JSON) must never survive a
 // write, since it would be trusted as a real signal target later.
@@ -823,6 +878,13 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  // Records written before the rename carry the hold as launchUnconfirmedAt;
+  // read it once here so an existing hold survives, and write only the new name.
+  const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
+    .launchUnconfirmedAt;
+  const submitUnconfirmedAt =
+    normalizedSession.submitUnconfirmedAt ??
+    (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
   const workspaceId = workspaceIdOf(normalizedSession);
   const closeoutOwner =
     typeof normalizedSession.closeoutOwner === "boolean"
@@ -887,6 +949,27 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
+      : {}),
+    ...(submitUnconfirmedAt ? { submitUnconfirmedAt } : {}),
+    ...(typeof normalizedSession.submitRequeuedMessage === "string"
+      ? { submitRequeuedMessage: normalizedSession.submitRequeuedMessage }
+      : {}),
+    ...(normalizedSession.submitFailedMessage &&
+    typeof normalizedSession.submitFailedMessage.message === "string" &&
+    typeof normalizedSession.submitFailedMessage.at === "string"
+      ? {
+          submitFailedMessage: {
+            message: normalizedSession.submitFailedMessage.message,
+            at: normalizedSession.submitFailedMessage.at,
+          },
+        }
+      : {}),
+    ...(normalizedSession.queuedMessageTyped &&
+    typeof normalizedSession.queuedMessageTyped.message === "string" &&
+    typeof normalizedSession.queuedMessageTyped.typedAt === "string"
+      ? {
+          queuedMessageTyped: normalizeQueuedMessageTyped(normalizedSession.queuedMessageTyped),
+        }
       : {}),
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),

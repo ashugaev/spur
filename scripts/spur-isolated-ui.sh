@@ -62,7 +62,6 @@ cp "$TSCONFIG_FILE" "$TSCONFIG_BACKUP"
 
 setsid env -u npm_config_virtual_store_dir \
   PORT="$UI_PORT" \
-  WEB_HOST="127.0.0.1" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
   WATCHPACK_POLLING=true \
   SPUR_CONFIG="$SPUR_ISOLATED_CONFIG" \

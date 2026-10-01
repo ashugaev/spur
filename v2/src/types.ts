@@ -683,6 +683,8 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
+  suppressedHoldAt?: string;
 }
 
 export interface SendBatchRetryEntry {
@@ -1055,6 +1057,33 @@ export interface SessionRecord {
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  /**
+   * ISO time of a launch or send whose submit never confirmed. Every typed
+   * send holds while set. A launch hold clears on the first transcript
+   * activity after it; a send's hold (with `queuedMessageTyped`) clears only
+   * on the agent's ack of that text. Read from the legacy
+   * `launchUnconfirmedAt` on older records.
+   */
+  submitUnconfirmedAt?: string;
+  /**
+   * A message already typed into the pane (and so off the queue) whose
+   * submit ack is still pending, or never came (with `submitUnconfirmedAt`).
+   * `ackBaseline` is the ack scan's pre-send transcript position, absent when
+   * the send had no ack scan. A daemon restart with this set, no hold, and no
+   * ack past that position (or no position at all) puts the message back at
+   * the head.
+   */
+  queuedMessageTyped?: { message: string; typedAt: string; ackBaseline?: SubmitAckBaseline };
+  /**
+   * Text an unconfirmed send already put back at the queue head once. Its
+   * next unconfirmed submit releases the hold instead of re-queuing it again.
+   */
+  submitRequeuedMessage?: string;
+  /**
+   * A send the agent never acked, after its one re-queue: the hold is
+   * released, the text shown with Retry and Dismiss until the user acts.
+   */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -1152,6 +1181,12 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages"> {
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  /**
+   * Send now / flush response only: the message was queued at the head
+   * instead of typed. `no_interrupt`: the agent has no interrupt key and was
+   * not waiting.
+   */
+  queuedAheadReason?: "no_interrupt";
 }
 
 /**
@@ -1651,6 +1686,28 @@ export interface ConversationMessage {
   text: string;
   timestampMs: number;
 }
+
+/**
+ * JSON form of a submit-ack binding's pre-send transcript position. Persisted
+ * with a typed queued message so a restarted daemon can rebind the same scan
+ * (resumeAgentSubmitAckBinding) and see only turns recorded after the send.
+ */
+export type SubmitAckBaseline =
+  | { agent: "claude"; file: string; size: number }
+  | { agent: "codex"; offsets: Record<string, number> }
+  | {
+      agent: "cursor";
+      file: string;
+      size: number;
+      /** Rotated chat transcript and its offset at send time. */
+      rotated?: { file: string; size: number };
+    }
+  | {
+      agent: "opencode";
+      sessionId: string;
+      /** Newest user message at send time; null when the session had none. */
+      after: { createdMs: number; id: string } | null;
+    };
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }
