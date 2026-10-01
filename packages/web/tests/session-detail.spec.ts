@@ -2676,7 +2676,7 @@ test.describe("S3b: Queued messages section", () => {
     const session = makeWorkingSession({
       id: "detail-s3b-2",
       queuedMessages: {
-        messages: [],
+        messages: ["Queued follow-up"],
         awaitingPrompt: true,
       },
     });
@@ -2685,7 +2685,9 @@ test.describe("S3b: Queued messages section", () => {
 
     await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
     await expect(page.getByText(/queued messages will send automatically/i)).toBeVisible();
-    await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
+    await expect(
+      page.getByRole("list", { name: /queued messages list/i }).getByRole("listitem"),
+    ).toHaveCount(1);
   });
 
   test("removes a real queued row, leaves the auto-step row uncontrolled, and never targets it by index", async ({

@@ -30,7 +30,7 @@ import {
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
-import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
+import type { PersistedPendingBatch, SessionRecord, SubmitAckBaseline } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -1153,6 +1153,165 @@ describe("session metadata PR migration", () => {
     expect(listSessions(dataDir)).toEqual([
       expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
     ]);
+  });
+
+  it("keeps submitUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      submitUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+      submitRequeuedMessage: "typed once",
+      submitFailedMessage: { message: "typed twice", at: "2026-03-18T10:01:30.000Z" },
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    // The re-queue budget survives a write, and so a restart.
+    expect(readSession(dataDir, "api-1")?.submitRequeuedMessage).toBe("typed once");
+    expect(readSession(dataDir, "api-1")?.submitFailedMessage).toEqual({
+      message: "typed twice",
+      at: "2026-03-18T10:01:30.000Z",
+    });
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+
+    const { submitUnconfirmedAt: _cleared, ...confirmed } = first;
+    writeSession(dataDir, confirmed);
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBeUndefined();
+  });
+
+  it("migrates a hold persisted under the old launchUnconfirmedAt name, writing only the new one", async () => {
+    const dataDir = await newDataDir();
+    const legacy = {
+      id: "api-1",
+      project: "api",
+      agent: "codex" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      launchUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+    };
+    writeSession(dataDir, legacy as unknown as SessionRecord);
+
+    const migrated = readSession(dataDir, "api-1");
+    expect(migrated?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(migrated).not.toHaveProperty("launchUnconfirmedAt");
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+  });
+
+  it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    const typed = {
+      message: "typed text",
+      typedAt: "2026-03-18T10:00:30.000Z",
+      ackBaseline: { agent: "codex" as const, offsets: { "/s/rollout.jsonl": 120 } },
+    };
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessageTyped: typed,
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual(typed);
+    expect(listSessions(dataDir)[0]?.queuedMessageTyped).toEqual(typed);
+
+    const { queuedMessageTyped: _cleared, ...acked } = first;
+    writeSession(dataDir, acked);
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toBeUndefined();
+  });
+
+  it("keeps every agent's ack baseline shape on the typed marker and drops a malformed one alone", async () => {
+    const dataDir = await newDataDir();
+    const base = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const typedAt = "2026-03-18T10:00:30.000Z";
+    const baselines: SubmitAckBaseline[] = [
+      { agent: "claude", file: "/c.jsonl", size: 7 },
+      { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
+      { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
+      { agent: "opencode", sessionId: "ses_1", after: null },
+    ];
+    for (const ackBaseline of baselines) {
+      writeSession(dataDir, {
+        ...base,
+        queuedMessageTyped: { message: "m", typedAt, ackBaseline },
+      });
+      expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({
+        message: "m",
+        typedAt,
+        ackBaseline,
+      });
+    }
+    const malformed = { agent: "claude", size: "x" } as unknown as {
+      agent: "claude";
+      file: string;
+      size: number;
+    };
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // A malformed rotation entry drops alone; the pinned offset survives.
+    const badRotation = {
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+      rotated: { file: 3 },
+    } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: badRotation },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+    });
   });
 });
 

@@ -338,6 +338,10 @@ export interface SpurSessionView {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  /** Set while the agent has not confirmed the last prompt; sends are held. */
+  submitUnconfirmedAt?: string;
+  /** A send the agent never confirmed after its retry; shown until retried or dismissed. */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -711,6 +715,8 @@ export interface DashboardSession {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  submitUnconfirmedAt?: string;
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -792,6 +798,8 @@ export function toDashboardSession(
     artifacts: session.artifacts ?? [],
     ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
+    ...(session.submitUnconfirmedAt ? { submitUnconfirmedAt: session.submitUnconfirmedAt } : {}),
+    ...(session.submitFailedMessage ? { submitFailedMessage: session.submitFailedMessage } : {}),
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
@@ -887,8 +895,10 @@ export function canHandoff(session: DashboardSession): boolean {
   );
 }
 
+// A spawning session takes queued messages before its pane exists; the daemon
+// holds them until the launch prompt is in.
 export function canSendMessage(session: DashboardSession): boolean {
-  return session.runtimeAlive && !isTerminalSession(session);
+  return (session.runtimeAlive || session.status === "spawning") && !isTerminalSession(session);
 }
 
 export interface ConversationMessage {

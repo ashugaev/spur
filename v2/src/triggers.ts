@@ -34,6 +34,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  LaunchPromptPendingError,
   SessionAdmissionDeniedError,
   SessionRateLimitedError,
   type SessionService,
@@ -905,7 +906,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return { status: "suppressed" };
       }
       batch.revision = claimedRevision;
-      const persistResult = (): void => {
+      const persistResult = (suppressedHoldAt?: string): void => {
         const { claim: _claim, ...unclaimed } = claimed;
         void _claim;
         const record = {
@@ -913,6 +914,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           revision: claimedRevision + 1,
           batch: batch.batch.serialize(),
           retryAccounting: batch.retryAccounting,
+          ...(suppressedHoldAt !== undefined ? { suppressedHoldAt } : {}),
         };
         updatePendingSendBatchConditional(
           deps.config.dataDir,
@@ -976,6 +978,31 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           });
           batch.retryAccounting = beforeAttempt;
           persistResult();
+          return { status: "suppressed" };
+        }
+        // Same shape as a rate limit: the session is alive and takes the batch
+        // once its last prompt is confirmed, so no attempt is spent. Logged
+        // once per hold: the persisted batch remembers the hold it logged.
+        if (error instanceof LaunchPromptPendingError) {
+          if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
+          const holdAt = error.submitUnconfirmedAt;
+          if (holdAt === undefined || persisted.suppressedHoldAt !== holdAt) {
+            logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_launch_pending", {
+              level: "info",
+              sessionId: batch.batch.sessionId,
+              projectId: batch.projectId,
+              sourceId: batch.sourceId,
+              triggerId: batch.triggerId,
+              message: `Suppressed queued trigger update to ${batch.batch.sessionId}: last prompt not confirmed`,
+              details: {
+                interrupt,
+                attempt: null,
+                ...(holdAt !== undefined ? { submitUnconfirmedAt: holdAt } : {}),
+              },
+            });
+          }
+          batch.retryAccounting = beforeAttempt;
+          persistResult(holdAt);
           return { status: "suppressed" };
         }
         if (error instanceof SessionAdmissionDeniedError) {
@@ -1260,6 +1287,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         sourceId: trigger.source,
         batch: batch.batch.serialize(),
         retryAccounting: batch.retryAccounting,
+        ...(persisted?.suppressedHoldAt !== undefined
+          ? { suppressedHoldAt: persisted.suppressedHoldAt }
+          : {}),
       });
     });
     if (!batch) return;

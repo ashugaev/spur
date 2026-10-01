@@ -12,12 +12,17 @@ import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
+  buildForeignAgentProcessMessage,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
+  SessionStartingError,
   SidecarPortConflictError,
   SessionService,
 } from "../../src/session-service.js";
@@ -1500,6 +1505,160 @@ describe("startServer", () => {
       expect(response.status).toBe(409);
     } finally {
       SessionService.prototype.send = originalSend;
+      await server.stop();
+    }
+  });
+
+  it("routes a failed prompt's retry and dismiss to the service, and a missing one to 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const original = SessionService.prototype.resolveSubmitFailure;
+    const calls: Array<[string, string]> = [];
+    SessionService.prototype.resolveSubmitFailure = async function mockResolve(sessionId, action) {
+      calls.push([sessionId, action]);
+      if (sessionId === "demo-2") {
+        throw new LaunchPromptPendingError(`No failed prompt for ${sessionId}`);
+      }
+      return { id: sessionId } as never;
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+    const post = (path: string) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+    try {
+      expect((await post("/sessions/demo-1/submit-failed/retry")).status).toBe(200);
+      expect((await post("/sessions/demo-1/submit-failed/dismiss")).status).toBe(200);
+      const missing = await post("/sessions/demo-2/submit-failed/retry");
+      expect(missing.status).toBe(409);
+      await expect(missing.json()).resolves.toEqual({ error: "No failed prompt for demo-2" });
+      expect(calls).toEqual([
+        ["demo-1", "retry"],
+        ["demo-1", "dismiss"],
+        ["demo-2", "retry"],
+      ]);
+    } finally {
+      SessionService.prototype.resolveSubmitFailure = original;
+      await server.stop();
+    }
+  });
+
+  it("maps a send, flush, or answer refused by session status to 409 with the message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const originalSend = SessionService.prototype.send;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const originalAnswer = SessionService.prototype.answerQuestion;
+    SessionService.prototype.send = async function mockSend(sessionId, request) {
+      if (request.message === "foreign") {
+        throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(sessionId, 4242));
+      }
+      throw new SessionStartingError(`Session is still starting: ${sessionId}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(sessionId) {
+      throw new SessionEndedError(`Session has ended (killed): ${sessionId}`);
+    };
+    SessionService.prototype.answerQuestion = async function mockAnswer(sessionId) {
+      throw new SessionEndedError(`Session has ended (completed): ${sessionId}`);
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+
+    const post = (path: string, body: unknown) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const starting = await post("/sessions/demo-1/send", {
+        message: "hi",
+        queue: false,
+        interrupt: true,
+      });
+      expect(starting.status).toBe(409);
+      await expect(starting.json()).resolves.toEqual({
+        error: "Session is still starting: demo-1",
+      });
+
+      // The agent already runs outside its pane (a killed wrapper, status
+      // still running): refused, nothing typed.
+      const foreign = await post("/sessions/demo-1/send", {
+        message: "foreign",
+        queue: false,
+        interrupt: true,
+      });
+      expect(foreign.status).toBe(409);
+      await expect(foreign.json()).resolves.toEqual({
+        error: buildForeignAgentProcessMessage("demo-1", 4242),
+      });
+
+      const ended = await post("/sessions/demo-1/queue/flush", { message: "hi" });
+      expect(ended.status).toBe(409);
+      await expect(ended.json()).resolves.toEqual({ error: "Session has ended (killed): demo-1" });
+
+      const answered = await post("/sessions/demo-1/answer", { optionIndex: 0 });
+      expect(answered.status).toBe(409);
+      await expect(answered.json()).resolves.toEqual({
+        error: "Session has ended (completed): demo-1",
+      });
+    } finally {
+      SessionService.prototype.send = originalSend;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      SessionService.prototype.answerQuestion = originalAnswer;
       await server.stop();
     }
   });

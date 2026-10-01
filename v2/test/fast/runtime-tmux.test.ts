@@ -1,4 +1,15 @@
+import type * as childProcessModule from "node:child_process";
 import { EventEmitter } from "node:events";
+import {
+  chmodSync,
+  linkSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
@@ -14,6 +25,9 @@ type ExecFileAsync = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
+// createTmuxSession writes its launch script for real; keep it out of any
+// session dir.
+const LAUNCH_SCRIPT_DIR = mkdtempSync(join(tmpdir(), "spur-launch-script-test-"));
 const execFileMock: ((...args: unknown[]) => void) & {
   [promisify.custom]: typeof execFileAsyncMock;
 } = Object.assign(vi.fn(), {
@@ -194,7 +208,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-      agent: "codex",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -213,7 +227,103 @@ describe("runtime-tmux", () => {
       "-c",
       "/tmp/worktree",
     ]);
-    expect(sleepMock).toHaveBeenCalledWith(300);
+    // The pane's login+interactive shell sources the owner-only launch
+    // script, then stays as that shell; nothing is typed, and the launch
+    // never rides the tmux command line.
+    const scriptPath = join(LAUNCH_SCRIPT_DIR, "agent-launch.sh");
+    expect(args.at(-1)).toBe(`exec "$SHELL" -lic '. '\\''${scriptPath}'\\''; exec "$SHELL" -l'`);
+    expect(readFileSync(scriptPath, "utf8")).toBe(
+      "codex --dangerously-bypass-approvals-and-sandbox\n",
+    );
+    expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+    expect(execFileAsyncMock.mock.calls.some(([, callArgs]) => callArgs[0] === "send-keys")).toBe(
+      false,
+    );
+    expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a launch past tmux's command-length limit off the tmux command line", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-long-"));
+    const prompt = "x".repeat(18_000);
+    const launchCommand = `opencode --auto --prompt '${prompt}'`;
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand,
+      launchScriptDir,
+    });
+
+    const newSession = execFileAsyncMock.mock.calls.find(([, args]) =>
+      args.includes("new-session"),
+    );
+    expect(newSession?.[1]?.at(-1)?.length ?? Infinity).toBeLessThan(1_024);
+    expect(newSession?.[1]?.at(-1)).not.toContain(prompt);
+    expect(readFileSync(join(launchScriptDir, "agent-launch.sh"), "utf8")).toBe(
+      `${launchCommand}\n`,
+    );
+  });
+
+  it("replaces an existing launch script with a fresh owner-only inode, never rewriting it in place", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-replace-"));
+    const scriptPath = join(launchScriptDir, "agent-launch.sh");
+    writeFileSync(scriptPath, "old launch\n", { mode: 0o644 });
+    chmodSync(scriptPath, 0o644);
+    // A second name on the old inode: an in-place rewrite would change it.
+    const oldInodeLink = join(launchScriptDir, "old-inode");
+    linkSync(scriptPath, oldInodeLink);
+    const oldInode = statSync(scriptPath).ino;
+
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand: "claude --resume abc",
+      launchScriptDir,
+    });
+
+    expect(readFileSync(scriptPath, "utf8")).toBe("claude --resume abc\n");
+    expect(statSync(scriptPath).ino).not.toBe(oldInode);
+    expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(oldInodeLink, "utf8")).toBe("old launch\n");
+    expect(statSync(oldInodeLink).mode & 0o777).toBe(0o644);
+    expect(readdirSync(launchScriptDir).sort()).toEqual(["agent-launch.sh", "old-inode"]);
+  });
+
+  it("runs the launch script's quotes, $, backticks, and newlines exactly as written", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("new-session") ? "" : "ok",
+      stderr: "",
+    }));
+    const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+    const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
+    const out = join(home, "out.txt");
+    const launchCommand = `printf '%s\\n' "it's" '$HOME' '\`echo nope\`' 'line one\nline two' > ${out}`;
+    await createTmuxSession({
+      sessionName: "api-1",
+      cwd: "/tmp/worktree",
+      launchCommand,
+      launchScriptDir: home,
+    });
+    const paneCommand = String(
+      execFileAsyncMock.mock.calls.find(([, args]) => args.includes("new-session"))?.[1]?.at(-1),
+    );
+    const { execFileSync } = await vi.importActual<typeof childProcessModule>("node:child_process");
+    // As tmux runs it: default-shell -c <pane command>, with an rc-free HOME.
+    execFileSync("sh", ["-c", paneCommand], {
+      env: { SHELL: "/bin/bash", HOME: home, PATH: process.env["PATH"] ?? "" },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    expect(readFileSync(out, "utf8")).toBe("it's\n$HOME\n`echo nope`\nline one\nline two\n");
   });
 
   // Regression (status-verifier shp-a4bc, spur-9813): the spur daemon is
@@ -244,7 +354,7 @@ describe("runtime-tmux", () => {
         sessionName: "api-1",
         cwd: "/tmp/worktree",
         launchCommand: "claude --dangerously-skip-permissions",
-        agent: "claude",
+        launchScriptDir: LAUNCH_SCRIPT_DIR,
       });
 
       const firstCall = execFileAsyncMock.mock.calls[0];
@@ -279,7 +389,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -296,7 +406,9 @@ describe("runtime-tmux", () => {
       "-f",
     ]);
     expect(firstCall[1]).toContain("new-session");
-    expect(execFileAsyncMock.mock.calls.some(([file]) => file === "tmux")).toBe(true);
+    // The launch rides the new-session command itself: nothing is typed.
+    expect(firstCall[1].at(-1)).toContain(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"));
+    expect(execFileAsyncMock.mock.calls).toHaveLength(1);
   });
 
   it("falls back to direct tmux when auto systemd scope is unavailable", async () => {
@@ -317,7 +429,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
     expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe("systemd-run");
@@ -346,6 +458,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
       agent: "claude" as const,
     };
     await createTmuxSession(session);
@@ -379,7 +492,7 @@ describe("runtime-tmux", () => {
         sessionName: "api-1",
         cwd: "/tmp/worktree",
         launchCommand: "claude --dangerously-skip-permissions",
-        agent: "claude",
+        launchScriptDir: LAUNCH_SCRIPT_DIR,
       }),
     ).rejects.toThrow("Failed to connect to bus");
     expect(execFileAsyncMock.mock.calls).toHaveLength(1);
@@ -851,18 +964,17 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
-      agent: "claude",
+      launchScriptDir: LAUNCH_SCRIPT_DIR,
     });
 
-    // Only the launch payload itself (the literal text sent via
-    // `send-keys -l`) must be unwrapped — unlike the earlier
-    // `-e KEY=VALUE` new-session args, which legitimately carry the
-    // session's own env (including the pin) and are exempt from this
-    // assertion.
-    const literalSendKeys = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "send-keys" && args.includes("-l"),
+    // Only the launch payload itself (the launch script the pane command
+    // sources) must be unwrapped — unlike the earlier `-e KEY=VALUE`
+    // new-session args, which legitimately carry the session's own env
+    // (including the pin) and are exempt from this assertion.
+    const newSession = execFileAsyncMock.mock.calls.find(([, args]) =>
+      args.includes("new-session"),
     );
-    expect(literalSendKeys?.[1]?.at(-1)).toBe("claude --dangerously-skip-permissions");
+    expect(newSession?.[1]?.at(-1)).toContain(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"));
 
     const sanitizedNames = [
       "NPM_CONFIG_PREFIX",
@@ -871,54 +983,74 @@ describe("runtime-tmux", () => {
       "npm_config_globalconfig",
       "PREFIX",
     ];
-    const payload = String(literalSendKeys?.[1]?.at(-1));
+    const payload = readFileSync(join(LAUNCH_SCRIPT_DIR, "agent-launch.sh"), "utf8");
+    expect(payload).toBe("claude --dangerously-skip-permissions\n");
     for (const name of sanitizedNames) {
       expect(payload).not.toContain(name);
     }
   });
 
-  it("keeps interrupt behavior before codex atomic send", async () => {
+  it("sends C-c then settles for a codex interrupt", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
 
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "codex" });
+    await expect(sendInterruptKeysToTmux("api-1", "codex")).resolves.toBe(true);
 
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
-    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
-    expect(pasteCall?.[1]).toContain("-p");
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
-  it("skips the interrupt keystroke for cursor sends", async () => {
+  it("sends C-c for a claude interrupt", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "claude")).resolves.toBe(true);
+
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual(["C-c"]);
+  });
+
+  // opencode binds ctrl+c to app_exit: C-c here kills the agent and the
+  // message that follows lands in the pane's shell.
+  it("interrupts opencode with a double Escape, never C-c", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "opencode")).resolves.toBe(true);
+
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "Escape",
+      "Escape",
+    ]);
+    expect(sleepMock.mock.calls.map(([ms]) => ms)).toEqual([200, 500]);
+  });
+
+  it("sends no interrupt key for cursor", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendInterruptKeysToTmux } = await import("../../src/runtime-tmux.js");
+
+    await expect(sendInterruptKeysToTmux("api-1", "cursor")).resolves.toBe(false);
+
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+    expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("types a cursor message without any interrupt key", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
 
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "cursor" });
+    await sendMessageToTmux("api-1", "follow up", { agent: "cursor" });
 
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(false);
-    expect(sleepMock).not.toHaveBeenCalledWith(500);
-    expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
       "cancel",
       "C-u",
       "follow up",
       "Enter",
     ]);
-  });
-
-  it("keeps the interrupt keystroke for claude sends", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
-
-    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "claude" });
-
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
-    expect(sleepMock).toHaveBeenCalledWith(500);
   });
 
   it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
@@ -947,6 +1079,22 @@ describe("runtime-tmux", () => {
       ),
     ).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(1_000);
+  });
+
+  it("settles after cursor's input box first appears, with no trust prompt", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        return { stdout: "Cursor Agent\n→ Plan, search, build anything", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" });
+
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "send-keys")).toBe(false);
   });
 
   it("resolves on a banner-less cursor resumed pane via the readyMarkers path", async () => {
@@ -1185,6 +1333,105 @@ describe("runtime-tmux", () => {
         agentProcessMatchers("codex", wrapperLaunchCommand),
       ),
     ).toBe(true);
+  });
+
+  it("reads a pane dead when its codex wrapper died and the orphaned native binary sits in the background", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // `kill -9` on the `node .../codex` wrapper: zsh took the tty's
+            // foreground back (tpgid == zsh's pgid) ...
+            "2300788 1 2300788 2300788 pts/8 4200 -zsh",
+            // ... while the native binary, reparented, kept the dead job's
+            // pgid and still names "codex" on the same tty.
+            "2301310 1 2301303 2300788 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
+  it("reads a pane dead in the window before the shell takes the tty back from a dead codex wrapper", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            // The wrapper (pgid 2301303) is gone, but zsh has not reclaimed
+            // the terminal yet: the tty's foreground group is still the job's.
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            // The orphaned native binary keeps that pgid, so it passes the
+            // foreground check, but it was reparented to init.
+            "2301310 1 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
+  it("reads an agent reparented to a subreaper outside the pane as dead", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            // A user-level subreaper (systemd --user) adopted the orphan.
+            "1500 1 1500 -1 ? 9000 /usr/lib/systemd/systemd --user",
+            "2301310 1500 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(false);
+  });
+
+  it("keeps reading a foreground codex alive", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "lqcx-a1 1 1 0 2300788 /dev/pts/8", stderr: "" };
+      }
+      if (file === "ps") {
+        return {
+          stdout: [
+            "2300788 1 2300788 2301303 pts/8 4200 -zsh",
+            "2301303 2300788 2301303 2301303 pts/8 90000 node /home/alek/.local/bin/codex --enable hooks",
+            "2301310 2301303 2301303 2301303 pts/8 512000 /home/alek/.local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex --enable hooks",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    expect(await isProcessRunningInTmux("lqcx-a1", ["codex"], { fresh: true })).toBe(true);
   });
 
   it("does not let codex-code-mode-host alone satisfy the canonical codex matcher", async () => {
