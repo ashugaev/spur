@@ -20,13 +20,16 @@ export const DEFAULT_UI_PORT = 5555;
 interface SidecarPortRow {
   sidecar?: unknown;
   port?: unknown;
+  alive?: unknown;
 }
 
-function isSidecarPortRow(value: unknown): value is { port: number } {
+/** A reservation whose sidecar is running: a stopped one names a dead port. */
+function isSidecarPortRow(value: unknown): value is { port: number; alive: true } {
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as SidecarPortRow).port === "number"
+    typeof (value as SidecarPortRow).port === "number" &&
+    (value as SidecarPortRow).alive === true
   );
 }
 

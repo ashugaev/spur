@@ -52,6 +52,22 @@ describe("resolveWebBaseUrl", () => {
     expect(url).toBe("http://127.0.0.1:5642");
   });
 
+  it("resolves to null when the isolated-ui reservation is not alive (sidecar stopped)", async () => {
+    const toolDir = await makeFakeSpurSidecar(
+      JSON.stringify([
+        {
+          sidecar: "isolated-ui",
+          id: "ui",
+          env: "SPUR_RESERVED_PORT_UI",
+          port: 5607,
+          alive: false,
+        },
+      ]),
+    );
+    const url = await resolveWebBaseUrl(5555, { SPUR_SESSION_TOOL_DIR: toolDir });
+    expect(url).toBeNull();
+  });
+
   it("resolves to null (fail closed), never config.ui.port's 5555, when isolated-ui has no reservation yet", async () => {
     const toolDir = await makeFakeSpurSidecar("[]");
     const url = await resolveWebBaseUrl(5555, { SPUR_SESSION_TOOL_DIR: toolDir });
