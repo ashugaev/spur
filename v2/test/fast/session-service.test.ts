@@ -23980,6 +23980,209 @@ describe("SessionService", () => {
       );
     });
 
+    // An unreadable tmux probe reports "absent"/"dead" exactly like a genuine
+    // absence. Acting on it reaps a healthy sidecar, so both probe legs refuse
+    // instead — before any side effect, hence retryable.
+    describe("unresponsive tmux probe", () => {
+      function devSidecarProjectConfig(options?: { ports?: boolean }) {
+        return {
+          ...baseConfig(),
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: {
+                dev: {
+                  command: "pnpm dev",
+                  autoStart: false,
+                  ...(options?.ports === false
+                    ? {}
+                    : {
+                        ports: {
+                          http: { env: "SPUR_RESERVED_PORT_DEV", start: 4100, end: 4100 },
+                        },
+                      }),
+                },
+              },
+            },
+          },
+        };
+      }
+
+      function seedApiOne(options: { identity?: boolean; ports?: boolean }) {
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          project: "api",
+          agent: "claude" as const,
+          prompt: "hello",
+          branch: "api-1",
+          worktree: true,
+          launchCommand: "claude --dangerously-skip-permissions",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+          id: "api-1",
+          tmuxSession: "api-1",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          status: "running" as const,
+          sidecarNames: ["dev"],
+          ...(options.ports === false
+            ? {}
+            : { sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 4100 } } }),
+          ...(options.identity
+            ? { sidecarProcs: { dev: { pid: 999_999_999, pgid: 999_999_999, starttime: 1 } } }
+            : {}),
+        });
+        workspaceExistsMock.mockReturnValue(true);
+        return sessions;
+      }
+
+      function reapSkippedEvents() {
+        return logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter((entry) => entry.event === "session.sidecar.launch_reap_skipped");
+      }
+
+      // AC1 + AC3: the recorded identity survives the refusal, and an
+      // immediate retry (no timer advance, so a poisoned conflict gate would
+      // still be armed) starts the sidecar for real.
+      it("refuses the session leg when the probe is unresponsive and an identity is recorded, and an immediate retry succeeds", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+        const sessions = seedApiOne({ identity: true });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+
+        const { SessionService, SidecarProbeUnresponsiveError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const refusal = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+
+        expect(refusal).toBeInstanceOf(SidecarProbeUnresponsiveError);
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.sidecarProcs?.dev).toEqual({
+          pid: 999_999_999,
+          pgid: 999_999_999,
+          starttime: 1,
+        });
+        // No write may have dropped the identity on the way through.
+        for (const [, record] of writeSessionMock.mock.calls) {
+          if (record.id === "api-1") {
+            expect(record.sidecarProcs?.dev).toBeDefined();
+          }
+        }
+
+        // AC3: retry with a readable probe, no timer advance.
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+        await service.startSidecar("api-1", "dev");
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+        );
+      });
+
+      // AC2 + AC6: the pane leg is unconditional — reapSidecarByName kills by
+      // tmux name, destructive with or without a recorded identity.
+      it.each([
+        ["with a recorded identity", true],
+        ["without a recorded identity", false],
+      ])(
+        "refuses the pane leg when the pane read is unresponsive, %s",
+        async (_label, identity) => {
+          loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+          seedApiOne({ identity });
+          getSidecarTmuxPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+          getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: true });
+
+          const { SessionService, SidecarProbeUnresponsiveError } =
+            await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+          const refusal = await service
+            .startSidecar("api-1", "dev")
+            .catch((error: unknown) => error);
+
+          expect(refusal).toBeInstanceOf(SidecarProbeUnresponsiveError);
+          expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--dev");
+          expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+
+          // AC6: one read per helper for this sidecar's own name. Filtered to
+          // "dev", since reservation scans probe OTHER sessions' sidecar names.
+          expect(
+            getSidecarTmuxPresenceMock.mock.calls.filter((call) => call[1] === "dev").length,
+          ).toBeLessThanOrEqual(1);
+          expect(
+            getTmuxPanePresenceMock.mock.calls.filter(
+              (call) => typeof call[0] === "string" && call[0].includes("--dev"),
+            ).length,
+          ).toBeLessThanOrEqual(1);
+        },
+      );
+
+      // AC4: a portless sidecar skips the own-identity guard entirely
+      // (recordedPorts.length === 0), so the gate is the only protection.
+      it("refuses the session leg for a portless sidecar with a recorded identity", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig({ ports: false }));
+        seedApiOne({ identity: true, ports: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+
+        const { SessionService, SidecarProbeUnresponsiveError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const refusal = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+
+        expect(refusal).toBeInstanceOf(SidecarProbeUnresponsiveError);
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      });
+
+      // AC9: a first start records no identity, so the reap it would skip is
+      // already a no-op — refusing it would only break a harmless launch.
+      it("still launches when the probe is unresponsive but no identity is recorded", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+        seedApiOne({ identity: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await service.startSidecar("api-1", "dev");
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: "api-1", sidecarName: "dev" }),
+        );
+      });
+
+      // AC11: the launch may have failed on a DUPLICATE tmux name — a live
+      // sidecar the probe could not see. Reaping by name would kill it.
+      it("skips the launch-failure reap when the probe was unresponsive", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+        seedApiOne({ identity: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+        createTmuxSidecarSessionMock.mockRejectedValue(new Error("duplicate session: api-1--dev"));
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const failure = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(Error);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--dev");
+        expect(reapSkippedEvents()).toHaveLength(1);
+      });
+
+      // AC12: the reap is narrowed, not removed — a readable probe still reaps.
+      it("still reaps on a launch failure when the probe was readable", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+        seedApiOne({ identity: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+        createTmuxSidecarSessionMock.mockRejectedValue(new Error("duplicate session: api-1--dev"));
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const failure = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(Error);
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+        expect(reapSkippedEvents()).toHaveLength(0);
+      });
+    });
+
     it("enrich reports the anchor's tmuxSession/ports for a desk-shared sidecar and the session's own id for its mcp sidecar", async () => {
       loadConfigMock.mockReturnValue(daemonAndPlaywrightProjectConfig());
       const sessions = createSessionStore();
