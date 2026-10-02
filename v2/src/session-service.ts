@@ -6242,7 +6242,8 @@ export class SessionService {
       // the parse cache's inode check on the next listSessions, not from
       // anything stored here.
       for (const session of due) {
-        if (!refreshedDuringTick(session.id)) this.dashboardEnrichedRecords.set(session.id, session);
+        if (!refreshedDuringTick(session.id))
+          this.dashboardEnrichedRecords.set(session.id, session);
       }
       this.dashboardIdleCursor = nextDashboardIdleCursor;
 
@@ -6273,7 +6274,8 @@ export class SessionService {
         }
       }
       for (const id of this.dashboardRefreshVersions.keys()) {
-        if (!includedIds.has(id) && !refreshedDuringTick(id)) this.dashboardRefreshVersions.delete(id);
+        if (!includedIds.has(id) && !refreshedDuringTick(id))
+          this.dashboardRefreshVersions.delete(id);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -28,17 +28,33 @@ const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" 
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
 test.describe("Lifecycle reconciliation", () => {
-  test("complete stays hidden across three polls and stale settlement data", async ({ page }, testInfo) => {
-    const session = makeSessionWithPR({ id: "lifecycle-complete", prompt: "Lifecycle complete", slots: { title: "Lifecycle complete", links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }] } });
+  test("complete stays hidden across three polls and stale settlement data", async ({
+    page,
+  }, testInfo) => {
+    const session = makeSessionWithPR({
+      id: "lifecycle-complete",
+      prompt: "Lifecycle complete",
+      slots: {
+        title: "Lifecycle complete",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
     let rows = [session];
     let polls = 0;
-    await mockSessions(page, () => { polls += 1; return rows; });
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
     await mockPrState(page, "merged");
-    await page.route(`**/api/sessions/${session.id}`, (route) => route.fulfill({
-      json: { ...session, status: "completed", state: "stopped", runtimeAlive: false },
-    }));
+    await page.route(`**/api/sessions/${session.id}`, (route) =>
+      route.fulfill({
+        json: { ...session, status: "completed", state: "stopped", runtimeAlive: false },
+      }),
+    );
     let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
       await held;
       await route.fulfill({ json: { completedIds: [session.id] } });
@@ -63,15 +79,24 @@ test.describe("Lifecycle reconciliation", () => {
     await page.screenshot({ path: testInfo.outputPath("complete-success.png") });
   });
 
-  test("restore stays Working through omitted polls then follows returned Waiting and a later stop", async ({ page }, testInfo) => {
+  test("restore stays Working through omitted polls then follows returned Waiting and a later stop", async ({
+    page,
+  }, testInfo) => {
     const stopped = makeStoppedSession({ id: "lifecycle-restore", prompt: "Lifecycle restore" });
-    const waiting = makeWaitingSession({ ...stopped, status: "running", state: "waiting", runtimeAlive: true });
+    const waiting = makeWaitingSession({
+      ...stopped,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+    });
     let rows = [stopped];
     let current = waiting;
     await mockSessions(page, () => rows);
     await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: current }));
     let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       await held;
       await route.fulfill({ json: waiting });
@@ -84,7 +109,9 @@ test.describe("Lifecycle reconciliation", () => {
       rows = index === 1 ? [] : [stopped];
       await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
       await expect(restore).toHaveCount(0);
-      await expect(page.getByRole("button", { name: `Open web terminal for ${stopped.id}` })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: `Open web terminal for ${stopped.id}` }),
+      ).toBeVisible();
     }
     await page.screenshot({ path: testInfo.outputPath("restore-pending.png") });
     release();
@@ -100,12 +127,18 @@ test.describe("Lifecycle reconciliation", () => {
 
   test("failure preserves a row added by polling and permits retry", async ({ page }, testInfo) => {
     const stopped = makeStoppedSession({ id: "lifecycle-failure", prompt: "Lifecycle failure" });
-    const added = makeWorkingSession({ id: "lifecycle-added", prompt: "Added during restore", worktreePath: "/tmp/added" });
+    const added = makeWorkingSession({
+      id: "lifecycle-added",
+      prompt: "Added during restore",
+      worktreePath: "/tmp/added",
+    });
     let rows = [stopped];
     await mockSessions(page, () => rows);
     await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: stopped }));
     let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let calls = 0;
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       calls += 1;
@@ -128,20 +161,30 @@ test.describe("Lifecycle reconciliation", () => {
     await expect.poll(() => calls).toBe(2);
   });
 
-  test("dead-runtime running restore reconciles current Waiting without reverting to Restore", async ({ page }) => {
-    const old = makeWorkingSession({ id: "lifecycle-dead-runtime", prompt: "Dead runtime restore", runtimeAlive: false });
+  test("dead-runtime running restore reconciles current Waiting without reverting to Restore", async ({
+    page,
+  }) => {
+    const old = makeWorkingSession({
+      id: "lifecycle-dead-runtime",
+      prompt: "Dead runtime restore",
+      runtimeAlive: false,
+    });
     const waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
     let rows = [old];
     await mockSessions(page, () => rows);
     let release!: () => void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let detailCalls = 0;
     await page.route(`**/api/sessions/${old.id}`, async (route) => {
       detailCalls += 1;
       await held;
       await route.fulfill({ json: waiting });
     });
-    await page.route(`**/api/sessions/${old.id}/restore`, (route) => route.fulfill({ json: waiting }));
+    await page.route(`**/api/sessions/${old.id}/restore`, (route) =>
+      route.fulfill({ json: waiting }),
+    );
     await page.clock.install();
     await page.goto("/");
     const restore = page.getByRole("button", { name: `Restore session ${old.id}` });
@@ -156,9 +199,23 @@ test.describe("Lifecycle reconciliation", () => {
     await expect(restore).toHaveCount(0);
   });
 
-  test("completed overlay follows a real reopen before terminal list confirmation", async ({ page }) => {
-    const old = makeSessionWithPR({ id: "lifecycle-reopened", prompt: "Reopened completion", slots: { title: "Reopened completion", links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }] } });
-    let current = { ...old, status: "completed" as SpurSessionView["status"], state: "stopped" as SpurSessionView["state"], runtimeAlive: false };
+  test("completed overlay follows a real reopen before terminal list confirmation", async ({
+    page,
+  }) => {
+    const old = makeSessionWithPR({
+      id: "lifecycle-reopened",
+      prompt: "Reopened completion",
+      slots: {
+        title: "Reopened completion",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    let current = {
+      ...old,
+      status: "completed" as SpurSessionView["status"],
+      state: "stopped" as SpurSessionView["state"],
+      runtimeAlive: false,
+    };
     let detailCalls = 0;
     await mockSessions(page, [old]);
     await mockPrState(page, "merged");
@@ -166,7 +223,9 @@ test.describe("Lifecycle reconciliation", () => {
       detailCalls += 1;
       return route.fulfill({ json: current });
     });
-    await page.route(`**/api/sessions/${old.id}/complete`, (route) => route.fulfill({ json: { completedIds: [old.id] } }));
+    await page.route(`**/api/sessions/${old.id}/complete`, (route) =>
+      route.fulfill({ json: { completedIds: [old.id] } }),
+    );
     await page.clock.install();
     await page.goto("/");
     const done = page.getByRole("button", { name: `Mark ${old.id} as done` });

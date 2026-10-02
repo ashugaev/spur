@@ -40352,7 +40352,9 @@ describe("SessionService", () => {
         refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
       };
       let release!: () => void;
-      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       const enrich = vi.spyOn(internals, "enrichDashboard");
       enrich.mockImplementationOnce(async (record) => {
         await blocked;
@@ -40371,10 +40373,15 @@ describe("SessionService", () => {
       await tick;
       const listed = await service.list({ view: "dashboard", includeCompleted: true });
       expect(listed.map((view) => [view.id, view.model])).toEqual([
-        ["api-1", "current"], ["api-new", "current"],
+        ["api-1", "current"],
+        ["api-new", "current"],
       ]);
       await internals.runDashboardCacheTick();
-      expect((await service.list({ view: "dashboard", includeCompleted: true })).map((view) => view.model)).toEqual(["current", "current"]);
+      expect(
+        (await service.list({ view: "dashboard", includeCompleted: true })).map(
+          (view) => view.model,
+        ),
+      ).toEqual(["current", "current"]);
       service.dispose();
     });
 
@@ -40409,7 +40416,9 @@ describe("SessionService", () => {
         refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
       };
       let release!: () => void;
-      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       const enrich = vi.spyOn(internals, "enrichDashboard");
       enrich.mockImplementationOnce(async (record) => {
         await blocked;
@@ -40428,10 +40437,14 @@ describe("SessionService", () => {
       await internals.refreshDashboardCacheEntry(restored);
       release();
       await tick;
-      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe("completed");
+      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe(
+        "completed",
+      );
       enrich.mockImplementation(async (record) => ({ id: record.id, model: "restored" }));
       await internals.runDashboardCacheTick();
-      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe("restored");
+      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe(
+        "restored",
+      );
       service.dispose();
     });
 
