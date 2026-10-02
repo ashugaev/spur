@@ -124,10 +124,11 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
     return;
   }
 
-  // Terminal records suppress only no-retry failure kinds. Succeeded and
-  // retryable records permit another attempt for the same newer candidate.
+  // A skipped restart cannot advance the running version on another install.
+  // Plain success and retryable failures still permit another attempt.
   if (state && state.version === candidate.tag) {
-    if (isNoRetryFailureKind(state.failureKind)) {
+    const restartSkipped = state.phase === "succeeded" && state.outcome === "restart_skipped";
+    if (restartSkipped || isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {
         level: "info",
         details: {
@@ -135,7 +136,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
           phase: state.phase,
           failureKind: state.failureKind,
           initiator: state.initiator,
-          reason: "no_retry_kind",
+          reason: restartSkipped ? "restart_skipped" : "no_retry_kind",
         },
       });
       return;

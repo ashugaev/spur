@@ -67,7 +67,7 @@ function terminalState(
   version: string,
   failureKind?: DeployFailureKind,
   initiator: DeployInitiator = "auto",
-): DeploySwitchState {
+): Exclude<DeploySwitchState, { phase: "running" }> {
   return {
     phase,
     version,
@@ -186,6 +186,41 @@ describe("runAutoUpdateTick", () => {
         },
       }),
     );
+  });
+
+  it("suppresses repeated installs after a skipped restart without disarming", async () => {
+    const deps = baseDeps({
+      readState: () => ({
+        ...terminalState("succeeded", "1.1.0"),
+        outcome: "restart_skipped",
+      }),
+    });
+
+    await runAutoUpdateTick(deps);
+    await runAutoUpdateTick(deps);
+
+    expect(deps.start).not.toHaveBeenCalled();
+    expect(deps.disarm).not.toHaveBeenCalled();
+    expect(deps.appendLedger).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith(
+      "daemon.auto_update.suppressed",
+      expect.objectContaining({
+        details: expect.objectContaining({ version: "1.1.0", reason: "restart_skipped" }),
+      }),
+    );
+  });
+
+  it("allows a newer candidate after a skipped restart of an older candidate", async () => {
+    const deps = baseDeps({
+      readState: () => ({
+        ...terminalState("succeeded", "1.0.1"),
+        outcome: "restart_skipped",
+      }),
+    });
+
+    await runAutoUpdateTick(deps);
+
+    expect(deps.start).toHaveBeenCalledExactlyOnceWith("1.1.0");
   });
 
   it("suppresses rolled_back and logs the reason", async () => {
