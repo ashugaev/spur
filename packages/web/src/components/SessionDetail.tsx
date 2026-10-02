@@ -1811,7 +1811,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           signal,
         });
         if (
-          signal.aborted || requestId !== loadRequestIdRef.current ||
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
           return;
@@ -1819,12 +1820,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (!response.ok) {
           if (response.status === 404) {
             const baseline = await fetch("/api/runtime/info", { cache: "no-store", signal });
-            if (signal.aborted || requestId !== loadRequestIdRef.current ||
-              currentSessionIdRef.current !== requestedSessionId) return;
+            if (
+              signal.aborted ||
+              requestId !== loadRequestIdRef.current ||
+              currentSessionIdRef.current !== requestedSessionId
+            )
+              return;
             if (baseline.ok) {
-              const info = await baseline.json() as { lifecycleInstanceId?: string };
-              if (signal.aborted || requestId !== loadRequestIdRef.current ||
-                currentSessionIdRef.current !== requestedSessionId) return;
+              const info = (await baseline.json()) as { lifecycleInstanceId?: string };
+              if (
+                signal.aborted ||
+                requestId !== loadRequestIdRef.current ||
+                currentSessionIdRef.current !== requestedSessionId
+              )
+                return;
               if (info.lifecycleInstanceId && consumer.accept(info.lifecycleInstanceId, [], read)) {
                 rawSessionRef.current = null;
                 sessionRef.current = null;
@@ -1839,14 +1848,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         const payload = (await response.json()) as SpurSessionView;
         if (
-          signal.aborted || requestId !== loadRequestIdRef.current ||
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
           return;
         }
-        const accepted = payload.lifecycle
-          ? consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0]
-          : consumer.instanceId === null ? payload : null;
+        if (!payload.lifecycle) throw new Error("Invalid session lifecycle snapshot");
+        const accepted = consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0];
         if (!accepted) return;
         const reconciling = lifecycleReconcileRef.current;
         if (reconciling && accepted === payload) {
@@ -1879,7 +1888,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [dismissLoadErrorToast, publishLifecycleSession, sessionId, showErrorToast],
   );
   const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
-  const applySessionUpdate = useCallback(() => { void loadSession(); }, [loadSession]);
+  const applySessionUpdate = useCallback(() => {
+    void loadSession();
+  }, [loadSession]);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -2049,14 +2060,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         const requestedSessionId = sessionId;
         try {
           const response = await fetch("/api/runtime/info", { cache: "no-store" });
-          if (!response.ok) throw new Error(await readApiErrorMessage(response, "Failed to load runtime info"));
-          const info = await response.json() as { lifecycleInstanceId?: string };
-          if (currentSessionIdRef.current !== requestedSessionId || consumer !== lifecycleRef.current ||
-            !info.lifecycleInstanceId || !consumer.accept(info.lifecycleInstanceId, [], read)) return false;
+          if (!response.ok)
+            throw new Error(await readApiErrorMessage(response, "Failed to load runtime info"));
+          const info = (await response.json()) as { lifecycleInstanceId?: string };
+          if (
+            currentSessionIdRef.current !== requestedSessionId ||
+            consumer !== lifecycleRef.current ||
+            !info.lifecycleInstanceId ||
+            !consumer.accept(info.lifecycleInstanceId, [], read)
+          )
+            return false;
           await loadSession();
         } catch (baselineError) {
-          if (currentSessionIdRef.current === requestedSessionId && consumer === lifecycleRef.current &&
-            read.generation === consumer.generation) {
+          if (
+            currentSessionIdRef.current === requestedSessionId &&
+            consumer === lifecycleRef.current &&
+            read.generation === consumer.generation
+          ) {
             showErrorToast(errorMessage(baselineError, "Failed to load runtime info"));
           }
           return false;
@@ -2070,9 +2090,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       loadRequestIdRef.current += 1;
       publishLifecycleSession(raw);
     }
-    const isCurrentAction = () => currentSessionIdRef.current === sessionId &&
-      (!owner || (consumer === lifecycleRef.current && consumer.isCurrent(owner) &&
-        lifecycleActionRef.current === owner));
+    const isCurrentAction = () =>
+      currentSessionIdRef.current === sessionId &&
+      (!owner ||
+        (consumer === lifecycleRef.current &&
+          consumer.isCurrent(owner) &&
+          lifecycleActionRef.current === owner));
     if (
       action === "kill" &&
       !options.skipKillConfirm &&
@@ -2114,8 +2137,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
       }
-      if (owner && payload !== null && typeof payload === "object" && "id" in payload &&
-        payload.id === sessionId) {
+      if (
+        owner &&
+        payload !== null &&
+        typeof payload === "object" &&
+        "id" in payload &&
+        payload.id === sessionId
+      ) {
         const accepted = consumer.acceptMutation(payload as SpurSessionView, owner);
         if (accepted) publishLifecycleSession(accepted);
       }
@@ -2153,7 +2181,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (owner) {
           lifecycleReconcileRef.current = owner;
           await loadSession();
-          if (isCurrentAction() && rawSessionRef.current) publishLifecycleSession(rawSessionRef.current);
+          if (isCurrentAction() && rawSessionRef.current)
+            publishLifecycleSession(rawSessionRef.current);
         }
         if (isCurrentAction()) setBusyAction(null);
       }
@@ -2304,7 +2333,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       }
       const data = (await response.json()) as SpurSessionView;
       const accepted = lifecycleRef.current.acceptUpdate(data);
-      if (accepted && accepted.id === currentSessionIdRef.current) publishLifecycleSession(accepted);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSwitchAuthOpen(false);
     } catch (switchAuthErr) {
       setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
@@ -2443,7 +2473,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       }
       const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
       const accepted = lifecycleRef.current.acceptUpdate(payload);
-      if (accepted && accepted.id === currentSessionIdRef.current) publishLifecycleSession(accepted);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
       if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
@@ -2602,7 +2633,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
         const accepted = lifecycleRef.current.acceptUpdate(payload);
-        if (accepted && accepted.id === currentSessionIdRef.current) publishLifecycleSession(accepted);
+        if (accepted && accepted.id === currentSessionIdRef.current)
+          publishLifecycleSession(accepted);
         setTitleEditing(false);
         setTitleDraft("");
       } catch (titleError) {
