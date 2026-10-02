@@ -24,7 +24,7 @@ const isProcessRunningInTmuxMock = vi.fn();
 const probeTmuxProcessMatchMock = vi.fn(
   async (name: string, matchers: string[], options?: { fresh?: boolean }) => {
     const alive: boolean = await isProcessRunningInTmuxMock(name, matchers, options);
-    return { alive, matchedByName: alive };
+    return { alive, matchedByName: alive, unresponsive: false };
   },
 );
 const getTmuxSessionActivityMock = vi.fn();

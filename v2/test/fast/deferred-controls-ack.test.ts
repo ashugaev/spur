@@ -180,7 +180,7 @@ const probeTmuxProcessMatchMock =
       sessionName: string,
       matchers: string[],
       options?: { fresh?: boolean; paneChildFallback?: boolean },
-    ) => Promise<{ alive: boolean; matchedByName: boolean }>
+    ) => Promise<{ alive: boolean; matchedByName: boolean; unresponsive: boolean }>
   >();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
@@ -1340,7 +1340,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (sessionName, matchers, options) => {
         const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
-        return { alive, matchedByName: alive };
+        return { alive, matchedByName: alive, unresponsive: false };
       });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
@@ -1715,6 +1715,34 @@ describe("SessionService", () => {
       // before spending a resend on it. Exactly 1 scan, 0 resends.
       expect(waitSpy).toHaveBeenCalledTimes(1);
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("unresponsive liveness probe: stops after one scan, latches the read, and throws probeUnresponsive", async () => {
+      primeLiveNonAckingBinding();
+      probeTmuxProcessMatchMock
+        .mockReset()
+        .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+      await expect(
+        deferredInternals(service).sendDeferredSensitiveInitialMessage(
+          runningSession(),
+          controlsMessage(),
+        ),
+      ).rejects.toMatchObject({
+        name: "SubmitAckTimeoutError",
+        processAlive: false,
+        probeUnresponsive: true,
+      });
+
+      expect(waitSpy).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      // Latched: the post-loop read reuses the mid-loop result.
+      expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(1);
       service.dispose();
     });
 
