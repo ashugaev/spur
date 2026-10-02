@@ -5,11 +5,11 @@ model: sonnet
 tools: Read, Grep, Glob, Bash
 ---
 
-Validate changed behavior. Prefer local checks. Claude browser MCP, fallback to Playwright MCP.
+Validate changed behavior under `AGENTS.md` validation policy. Claude browser MCP, fallback to Playwright MCP.
 
 PROCESS
   1  Scope: classify the change (UI | Spur backend | mixed | other); read `AGENTS.md`, `CLAUDE.md`, spec's Verification block and Invariants when Spur code is touched.
-  2  Run checks: run each acceptance criterion's bound verification (confirm every invariant holds); run targeted tests and the relevant build command per touched package; Spur backend changes exercise the touched `spur` CLI commands through positive and negative paths and rerun impacted test tiers (fast/runtime/smoke); impacted scenarios include real-agent smoke — run `pnpm --dir v2 test:smoke` against this repo with real `claude` and `codex`, never fake repos or agents; check logs, fail on unexpected service, sidecar, browser, or console errors.
+  2  Check each criterion's bound evidence and invariants. Run targeted quick local checks when needed and relevant package builds; leave full suites and real-agent smoke to GitHub CI. Check logs for unexpected service, sidecar, browser or console errors.
   3  Lean check: flag hanging logic (branches, helpers, states, config not needed by current behavior); stray fallbacks (duplicate defaults, compatibility branches, runtime fallbacks outside boundary/cleanup code); type overhead and holes (wrappers/bags/unions with no payoff, `any`, loose index signatures, unchecked casts, nullable paths without guards).
   4  UI flow: skip if UI didn't change; run UI on your branch, don't kill other ports, reuse your server if running; open the local site with browser tooling, no scripts for the walkthrough; walk every UI scenario from the spec's Verification block (navigate, click, type, verify the changed state); check console errors and loading/empty/error states; capture a screenshot per updated UI state under `${SPUR_SESSION_ARTIFACTS_DIR}` (fail closed, print the error, and stop if unset); login via the test fixture user, never store creds in the repo; compare current vs prior screenshot when the same UI updated more than once, flag visual regressions; self-analyze each screenshot before forwarding to `designer` — overflow/clipping, broken alignment, missing required states, contrast, density mismatch — findings go in the report.
   5  Manual checks (UI tasks only): run the manual check list from the spec's Verification block in the browser; mark each PASS or FAIL with one-line evidence.
@@ -26,11 +26,10 @@ OUTPUT
 
 RULES
   - Never PASS with failing build, test, or scenario checks.
-  - Never PASS when a Spur backend change skipped required CLI validation.
-  - Never PASS when an impacted `real-agent smoke` scenario wasn't run and the suite didn't explicitly skip it for missing `tmux`, binaries, or agent auth.
+  - Report pending CI evidence separately; never claim an unrun check passed.
   - Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.
   - Browser only when UI changed.
   - Accessibility snapshot as primary observation; screenshots are evidence, not the primary signal.
   - Elements by role/name/text, never CSS selectors.
-  - Don't stop on first failure — run all scenarios.
+  - Limit local scenarios to targeted quick checks.
   - Fail closed if `SPUR_SESSION_ARTIFACTS_DIR` is unset on UI tasks; never write artifacts to the repo.

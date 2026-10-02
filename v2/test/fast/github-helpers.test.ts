@@ -14,7 +14,7 @@ import {
   writeGitHubReviewPagination,
   writeSession,
 } from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
+import type { SessionRecord, ReviewSignal } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
@@ -56,6 +56,131 @@ const { _resetPrLookupsForTests, claimPollPrLookup, enqueuePrLookup, flushPrLook
 const { _resetPrLookupCacheForTests, readPrLookupEntry } =
   await import("../../src/pr-lookup-cache.js");
 const { _resetGhUsageForTests, extractGithubErrorText } = await import("../../src/gh.js");
+
+describe("live GitHub feedback", () => {
+  const signals: [ReviewSignal, ReviewSignal, ReviewSignal] = [
+    { key: "comment:1", kind: "comment", text: "cached" },
+    {
+      key: "review-comment:2",
+      kind: "comment",
+      text: "cached",
+      providerThreadTarget: { kind: "github-review-thread", threadId: "thread2" },
+    },
+    { key: "review:3", kind: "comment", text: "cached" },
+  ];
+  const refresh = (input: ReviewSignal[] = signals) => {
+    if (!githubReviewProvider.refreshSignals) throw new Error("Missing refresh");
+    return githubReviewProvider.refreshSignals({
+      hostname: "git.example.com",
+      repo: "acme/api",
+      prNumber: 42,
+      cwd: "/tmp/daemon-data",
+      signals: input,
+    });
+  };
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("requests four Enterprise comments concurrently and preserves inline thread metadata", async () => {
+    const releases: Array<(body: string) => void> = [];
+    ghMock.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    const pending = refresh([...signals, { ...signals[0], key: "comment:4" }]);
+    expect(ghMock).toHaveBeenCalledTimes(4);
+    const replies = [
+      { body: "edited issue", user: { login: "alice" } },
+      { body: "edited inline", user: { login: "bob" }, path: "main.ts", line: 7 },
+      { body: " edited review ", state: "COMMENTED", user: null },
+      { body: "fourth comment", user: null },
+    ];
+    releases.forEach((release, index) => release(JSON.stringify(replies[index])));
+    const outcomes = await pending;
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["live", "live", "live", "live"]);
+    expect(outcomes[1]).toMatchObject({
+      signal: { ...signals[1], text: 'New review comment from bob on main.ts:7: "edited inline"' },
+    });
+    expect(ghMock.mock.calls).toEqual([
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/issues/comments/1",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/pulls/comments/2",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/pulls/42/reviews/3",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/issues/comments/4",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+    ]);
+  });
+
+  it("isolates deletion, malformed response, and live siblings", async () => {
+    ghMock
+      .mockRejectedValueOnce(new Error("gh: Not Found (HTTP 404)"))
+      .mockResolvedValueOnce("bad json")
+      .mockResolvedValueOnce(JSON.stringify({ body: "new review", state: "CHANGES_REQUESTED" }));
+    expect((await refresh()).map((outcome) => outcome.status)).toEqual([
+      "deleted",
+      "failed",
+      "live",
+    ]);
+  });
+
+  it.each(["gh not found", "HTTP 401", "HTTP 403 rate limit", "network timeout"])(
+    "retains %s as failure",
+    async (message) => {
+      ghMock.mockRejectedValue(new Error(message));
+      expect(await refresh([signals[0]])).toEqual([
+        { status: "failed", key: "comment:1", error: message },
+      ]);
+    },
+  );
+
+  it.each([
+    { body: " ", state: "COMMENTED" },
+    { body: "old", state: "DISMISSED" },
+  ])("removes nonactionable review %j", async (response) => {
+    ghMock.mockResolvedValue(JSON.stringify(response));
+    expect(await refresh([signals[2]])).toEqual([{ status: "deleted", key: "review:3" }]);
+  });
+
+  it("fails an unknown comment key without issuing a request", async () => {
+    expect(await refresh([{ key: "unknown:1", kind: "comment", text: "old" }])).toMatchObject([
+      { status: "failed" },
+    ]);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+});
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -455,6 +580,10 @@ describe("collectSignals GraphQL batch", () => {
     );
 
     expect(result?.ciActive).toBe(false);
+    expect(result?.data).toMatchObject({
+      repo: "acme/api",
+      prUrl: "https://github.com/acme/api/pull/42",
+    });
     expect(result?.ciCheckFetchFailed).toBe(false);
   });
 
