@@ -60,6 +60,86 @@ function makeDeps(overrides: Partial<SessionGcExecutorDeps> = {}): SessionGcExec
 }
 
 describe("executeSessionGc", () => {
+  it.each(["guards", "pr"] as const)(
+    "retains stopped records when an error-only write appears during %s",
+    async (boundary) => {
+      const record = makeSession({ id: "api-1", status: "stopped" });
+      const plan = planOne(record);
+      let current = record;
+      const deps = makeDeps({
+        readGroupMembers: () => [current],
+        probeGuards: vi.fn(async () => {
+          if (boundary === "guards") current = { ...record, error: "probe failed" };
+          return [];
+        }),
+        openPrIndex: vi.fn(async () => {
+          if (boundary === "pr") current = { ...record, error: "probe failed" };
+          return { numbers: new Set<number>(), branches: new Set<string>() };
+        }),
+      });
+
+      const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+      expect(deps.removeWorktree).not.toHaveBeenCalled();
+      expect(deps.archiveGroup).not.toHaveBeenCalled();
+      expect(report.groups[0]?.blockReasons).toEqual(["retained_error"]);
+    },
+  );
+
+  it("retains an archive-only group when a sibling gains error during guards", async () => {
+    const records = [
+      makeSession({ id: "api-1", workspaceId: "shared", worktree: false }),
+      makeSession({ id: "api-2", workspaceId: "shared", worktree: false, status: "stopped" }),
+    ];
+    const plan = planSessionGc({
+      sessions: records,
+      worktreeDir: WORKTREE_DIR,
+      now: NOW,
+      olderThanDays: 30,
+      statuses: ["completed", "killed", "stopped"],
+      limit: 100,
+      pathExists: () => true,
+    });
+    let current = records;
+    const deps = makeDeps({
+      readGroupMembers: () => current,
+      probeGuards: vi.fn(async () => {
+        current = records.map((record) =>
+          record.status === "stopped" ? { ...record, error: "probe failed" } : record,
+        );
+        return [];
+      }),
+    });
+
+    const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]?.blockReasons).toEqual(["retained_error"]);
+  });
+
+  it("retains records when error appears during prune before archive", async () => {
+    const record = makeSession({ id: "api-1", status: "stopped" });
+    const plan = planOne(record);
+    let current = record;
+    const deps = makeDeps({
+      readGroupMembers: () => [current],
+      pruneRepo: vi.fn(async () => {
+        current = { ...record, error: "probe failed" };
+      }),
+    });
+
+    const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+    expect(deps.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      removed: true,
+      archived: false,
+      blockReasons: ["retained_error"],
+    });
+  });
+
   it("removes the worktree and archives records for a reclaim group", async () => {
     const record = makeSession({ id: "api-1" });
     const plan = planOne(record);
@@ -306,6 +386,7 @@ describe("executeSessionGc", () => {
     ["worktreePath", { worktreePath: `${WORKTREE_DIR}/api/moved` }],
     ["worktree", { worktree: false }],
     ["branch", { branch: "feature/renamed" }],
+    ["error", { error: "probe failed" }],
     [
       "pr",
       { pr: { number: 7, repo: "acme/api", url: "https://github.com/acme/api/pull/7" } as const },

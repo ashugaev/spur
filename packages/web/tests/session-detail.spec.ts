@@ -3769,6 +3769,111 @@ test.describe("S4b: Artifacts section", () => {
     await expect(page.getByRole("table")).toBeVisible();
   });
 
+  test("bounds artifact grid and list scrolling without trapping the detail page", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-scroll-boundary",
+      artifacts: Array.from({ length: 40 }, (_, index) => ({
+        id: `artifact-${index}.txt`,
+        name: `artifact-${index}.txt`,
+        size: 100 + index,
+        mimeType: "text/plain; charset=utf-8",
+        kind: "download" as const,
+        origin: "intentional" as const,
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+      })),
+    });
+    await mockSessionDetail(page, session);
+    await page.setViewportSize({ width: 390, height: 640 });
+    await page.goto(`/sessions/${session.id}`);
+
+    const collection = page.locator("[data-artifact-collection]");
+    await expect(collection).toBeVisible();
+    for (const mode of ["Grid", "List"]) {
+      await page.getByRole("button", { name: mode }).click();
+      const viewControlsTop = (await page.getByRole("button", { name: "Grid" }).boundingBox())?.y;
+      const geometry = await collection.evaluate((element) => {
+        const style = getComputedStyle(element);
+        element.scrollTop = element.scrollHeight;
+        return {
+          clientHeight: element.clientHeight,
+          overscrollBehaviorY: style.overscrollBehaviorY,
+          scrollHeight: element.scrollHeight,
+          scrollTop: element.scrollTop,
+        };
+      });
+      expect(geometry.clientHeight).toBeLessThanOrEqual(Math.min(576, 640 * 0.55) + 1);
+      expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+      expect(geometry.scrollTop).toBeGreaterThan(0);
+      expect(geometry.overscrollBehaviorY).toBe("auto");
+      const lastArtifact = collection.getByText("artifact-39.txt", { exact: true });
+      await expect(lastArtifact).toBeVisible();
+      const lastArtifactIntersects = await lastArtifact.evaluate((element) => {
+        const artifactRect = element.getBoundingClientRect();
+        const collectionRect = element
+          .closest("[data-artifact-collection]")
+          ?.getBoundingClientRect();
+        return Boolean(
+          collectionRect &&
+          artifactRect.bottom > collectionRect.top &&
+          artifactRect.top < collectionRect.bottom,
+        );
+      });
+      expect(lastArtifactIntersects).toBe(true);
+      expect((await page.getByRole("button", { name: "Grid" }).boundingBox())?.y).toBe(
+        viewControlsTop,
+      );
+    }
+
+    await collection.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await collection.hover();
+    const pageScrollBefore = await page.evaluate(() => window.scrollY);
+    await page.mouse.wheel(0, 600);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(pageScrollBefore);
+  });
+
+  test("keeps few and zero artifact collections at intrinsic height", async ({ page }) => {
+    const fewSession = makeWorkingSession({
+      id: "detail-s4b-few-artifacts",
+      artifacts: [
+        {
+          id: "only.txt",
+          name: "only.txt",
+          size: 100,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    const zeroSession = makeWorkingSession({
+      id: "detail-s4b-zero-artifacts",
+      artifacts: [],
+    });
+    await mockSessionDetail(page, fewSession);
+    await mockSessionDetail(page, zeroSession);
+    await page.setViewportSize({ width: 390, height: 640 });
+    await page.goto(`/sessions/${fewSession.id}`);
+
+    const collection = page.locator("[data-artifact-collection]");
+    await expect(collection).toBeVisible();
+    const geometry = await collection.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.clientHeight + 1);
+    expect(geometry.clientHeight).toBeLessThan(640 * 0.55);
+
+    await page.goto(`/sessions/${zeroSession.id}`);
+    await expect(page.locator("[data-artifact-collection]")).toHaveCount(0);
+  });
+
   test("sorts the artifact list by every column", async ({ page }) => {
     await page.addInitScript(() => {
       window.localStorage.setItem("spur:artifact-view-mode", "list");

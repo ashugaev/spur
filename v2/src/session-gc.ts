@@ -13,6 +13,7 @@ import {
   resolveRepoPathFromWorktree,
 } from "./workspace.js";
 import {
+  hasRetainedSessionError,
   isStaleParked,
   type AppConfig,
   type ProjectConfig,
@@ -253,6 +254,9 @@ function classifyGroup(
   if (members.some((member) => protectedSessionIds.has(member.id))) {
     blockReasons.push("live_session");
   }
+  if (members.some((member) => hasRetainedSessionError(member))) {
+    blockReasons.push("retained_error");
+  }
   if (members.some((member) => !statusSet.has(member.status))) {
     blockReasons.push("not_eligible_status");
   }
@@ -421,6 +425,7 @@ export interface ExecuteSessionGcOptions {
 function isPlanStillFresh(planned: SessionRecord, fresh: SessionRecord): boolean {
   return (
     fresh.status === planned.status &&
+    fresh.error === planned.error &&
     fresh.updatedAt === planned.updatedAt &&
     fresh.worktree === planned.worktree &&
     fresh.worktreePath === planned.worktreePath &&
@@ -439,7 +444,7 @@ function isCwdInsideOrEqual(cwd: string, worktreePath: string): boolean {
 }
 
 function currentLivenessBlockReason(
-  deps: SessionGcExecutorDeps,
+  deps: Pick<SessionGcExecutorDeps, "checkGroupLiveness">,
   sessionIds: readonly string[],
 ): string | undefined {
   try {
@@ -450,6 +455,25 @@ function currentLivenessBlockReason(
   } catch {
     return "liveness_check_failed";
   }
+}
+
+function currentRecordsBlockReason(
+  readGroupMembers: SessionGcExecutorDeps["readGroupMembers"],
+  group: GcGroupPlan,
+): string | undefined {
+  const members = readGroupMembers(group.sessionIds);
+  if (members.some((member) => member && hasRetainedSessionError(member))) {
+    return "retained_error";
+  }
+  if (
+    group.members.some((planned, index) => {
+      const fresh = members[index];
+      return !fresh || !isPlanStillFresh(planned, fresh);
+    })
+  ) {
+    return "changed_during_run";
+  }
+  return undefined;
 }
 
 export async function executeSessionGc(
@@ -534,7 +558,9 @@ export async function executeSessionGc(
           // worktree removal failed leaves a worktree no record-driven sweep
           // can ever see again.
           if (action === "reclaim" && !options.dryRun) {
-            const livenessBlock = currentLivenessBlockReason(deps, group.sessionIds);
+            const livenessBlock =
+              currentLivenessBlockReason(deps, group.sessionIds) ??
+              currentRecordsBlockReason(deps.readGroupMembers, group);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
@@ -546,7 +572,9 @@ export async function executeSessionGc(
             }
           }
           if (action !== "blocked" && !options.dryRun) {
-            const livenessBlock = currentLivenessBlockReason(deps, group.sessionIds);
+            const livenessBlock =
+              currentLivenessBlockReason(deps, group.sessionIds) ??
+              currentRecordsBlockReason(deps.readGroupMembers, group);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
@@ -647,6 +675,19 @@ export function createGcDeps(
   // per-group refresh multiplies gh calls by group count, and exhausting the
   // GraphQL quota would turn every later probe into probe_failed.
   const openPrIndexCache = new Map<string, Promise<GcOpenPrIndex>>();
+  const readGroupMembers: SessionGcExecutorDeps["readGroupMembers"] = (sessionIds) =>
+    sessionIds.map((id) => readSession(config.dataDir, id));
+  const checkGroupLiveness: SessionGcExecutorDeps["checkGroupLiveness"] = (sessionIds) => {
+    try {
+      for (const session of readGroupMembers(sessionIds)) {
+        if (!session) return "unknown";
+        if (isLiveSession(session)) return "live";
+      }
+      return "inactive";
+    } catch {
+      return "unknown";
+    }
+  };
 
   async function repoPathForGroup(freshMembers: readonly SessionRecord[]): Promise<string> {
     const representative = freshMembers[0];
@@ -659,19 +700,8 @@ export function createGcDeps(
 
   return {
     cwd: process.cwd(),
-    readGroupMembers: (sessionIds) => sessionIds.map((id) => readSession(config.dataDir, id)),
-    checkGroupLiveness: (sessionIds) => {
-      try {
-        for (const sessionId of sessionIds) {
-          const session = readSession(config.dataDir, sessionId);
-          if (!session) return "unknown";
-          if (isLiveSession(session)) return "live";
-        }
-        return "inactive";
-      } catch {
-        return "unknown";
-      }
-    },
+    readGroupMembers,
+    checkGroupLiveness,
     probeGuards: async (group, freshMembers) => {
       if (!group.worktreePath || !existsSync(group.worktreePath)) {
         return [];
@@ -718,7 +748,12 @@ export function createGcDeps(
     measureSize: measureWorktreeSize,
     removeWorktree: async (group, freshMembers) => {
       const repoPath = await repoPathForGroup(freshMembers);
-      await removeWorktree(repoPath, group.worktreePath);
+      await removeWorktree(repoPath, group.worktreePath, () => {
+        const blockReason =
+          currentLivenessBlockReason({ checkGroupLiveness }, group.sessionIds) ??
+          currentRecordsBlockReason(readGroupMembers, group);
+        if (blockReason) throw new Error(`Session GC blocked: ${blockReason}`);
+      });
     },
     archiveGroup: (members) => archiveSessions(config.dataDir, members),
     pruneRepo: async (_group, freshMembers) => {

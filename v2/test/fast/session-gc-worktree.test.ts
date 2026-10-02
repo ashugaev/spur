@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { listSessions, writeSession } from "../../src/metadata.js";
 import {
@@ -119,6 +119,34 @@ function planFor(config: AppConfig) {
 const NO_OPEN_PRS: GcOpenPrIndex = { numbers: new Set(), branches: new Set() };
 
 describe("session gc against a real git worktree", () => {
+  it("rechecks retained error before git removal after waiting for the workspace lock", async () => {
+    const fixture = await createFixture();
+    const stopped = { ...fixture.session, status: "stopped" as const };
+    writeSession(fixture.config.dataDir, stopped);
+    const group = planFor(fixture.config).groups[0];
+    if (!group) throw new Error("fixture has no GC group");
+    const lockPath = join(fixture.repoPath, ".git", "spur-workspace.lock");
+    writeFileSync(lockPath, `${process.pid}:test`);
+    const ownerProbe = vi.spyOn(process, "kill");
+    const removal = createGcDeps(fixture.config).removeWorktree(group, [stopped]);
+    const rejection = expect(removal).rejects.toThrow("Session GC blocked: retained_error");
+    try {
+      await vi.waitFor(() => expect(ownerProbe).toHaveBeenCalledWith(process.pid, 0));
+    } finally {
+      ownerProbe.mockRestore();
+    }
+    writeSession(fixture.config.dataDir, { ...stopped, error: "probe failed" });
+    await rm(lockPath);
+    await rejection;
+
+    expect(existsSync(fixture.worktreePath)).toBe(true);
+    expect(listSessions(fixture.config.dataDir)[0]?.error).toBe("probe failed");
+    const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], {
+      cwd: fixture.repoPath,
+    });
+    expect(stdout).toContain(fixture.worktreePath);
+  });
+
   it("removes the worktree through git, prunes the repo, archives the record, and reports freed bytes", async () => {
     const fixture = await createFixture();
     const plan = planFor(fixture.config);
