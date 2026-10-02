@@ -60,6 +60,7 @@ import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
+import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
 import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
@@ -238,62 +239,6 @@ function sameDeskActiveSessions(
       candidate.status !== "killed" &&
       candidate.status !== "completed",
   );
-}
-
-function completedIdsFromResponse(value: unknown): string[] {
-  if (typeof value !== "object" || value === null || !("completedIds" in value)) return [];
-  const completedIds = (value as { completedIds?: unknown }).completedIds;
-  if (!Array.isArray(completedIds)) return [];
-  return completedIds.filter((id): id is string => typeof id === "string");
-}
-
-type DashboardLifecycleTransition = {
-  owner: symbol;
-  phase: "pending" | "settled";
-} & ({ action: "complete" } | { action: "restore"; session: SpurSessionView });
-
-function applyDashboardLifecycleTransitions(
-  sessions: readonly SpurSessionView[],
-  transitions: ReadonlyMap<string, DashboardLifecycleTransition>,
-): SpurSessionView[] {
-  if (transitions.size === 0) return [...sessions];
-  const rows = [...sessions];
-  for (const [id, transition] of transitions) {
-    if (transition.action === "restore" && !rows.some((session) => session.id === id)) {
-      rows.push(transition.session);
-    }
-  }
-  return rows.map((session) => {
-    const transition = transitions.get(session.id);
-    if (!transition) return session;
-    if (transition.action === "complete") {
-      return {
-        ...session,
-        status: "completed",
-        state: "stopped",
-        runtimeAlive: false,
-        tmuxSession: null,
-      };
-    }
-    return {
-      ...session,
-      status: transition.session.status,
-      state: transition.session.state,
-      runtimeAlive: transition.session.runtimeAlive,
-      tmuxSession: transition.session.tmuxSession,
-    };
-  });
-}
-
-function hasConfirmedTransition(
-  session: SpurSessionView | undefined,
-  transition: DashboardLifecycleTransition,
-): boolean {
-  if (transition.action === "complete") {
-    return !session || session.status === "completed" || session.status === "killed";
-  }
-  if (!session) return false;
-  return session.runtimeAlive && (session.status === "running" || session.status === "spawning");
 }
 
 function BacklogZone({
@@ -1292,17 +1237,9 @@ export function Dashboard() {
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
-  const transitionsRef = useRef(new Map<string, DashboardLifecycleTransition>());
-  const [lifecycleTransitions, setLifecycleTransitions] = useState<
-    ReadonlyMap<string, DashboardLifecycleTransition>
-  >(() => new Map());
-  const publishTransitions = () => setLifecycleTransitions(new Map(transitionsRef.current));
-  const readCurrentSession = async (id: string): Promise<SpurSessionView> => {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
-    if (!response.ok)
-      throw new Error(await readApiErrorMessage(response, "Failed to reconcile Spur session"));
-    return (await response.json()) as SpurSessionView;
-  };
+  const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const [lifecycleVersion, setLifecycleVersion] = useState(0);
+  const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
     data,
     isPending,
@@ -1310,44 +1247,23 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/sessions", { signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       const result = (await response.json()) as SpurSessionsResponse;
-      for (const [id, transition] of transitionsRef.current) {
-        if (signal.aborted) break;
-        if (transition.phase === "pending") continue;
-        const current = result.sessions.find((session) => session.id === id);
-        if (!hasConfirmedTransition(current, transition)) {
-          try {
-            const resolved = await readCurrentSession(id);
-            if (signal.aborted || transitionsRef.current.get(id) !== transition) continue;
-            const reconciled = current
-              ? {
-                  ...current,
-                  status: resolved.status,
-                  state: resolved.state,
-                  runtimeAlive: resolved.runtimeAlive,
-                  tmuxSession: resolved.tmuxSession,
-                }
-              : resolved;
-            result.sessions = [
-              ...result.sessions.filter((session) => session.id !== id),
-              reconciled,
-            ];
-            if (transition.action === "complete" && hasConfirmedTransition(resolved, transition))
-              continue;
-          } catch (error) {
-            if (signal.aborted) continue;
-            showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
-            if (transition.action === "complete") continue;
-          }
-        }
-        if (!signal.aborted && transitionsRef.current.get(id) === transition) {
-          transitionsRef.current.delete(id);
-        }
+      if (signal.aborted) throw new Error("Session read aborted");
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) {
+        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+        if (current) return current;
+        throw new Error("Session read superseded");
       }
-      if (!signal.aborted) publishTransitions();
-      return result;
+      publishTransitions();
+      return { ...result, sessions: accepted };
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
     refetchIntervalInBackground: true,
@@ -1355,8 +1271,8 @@ export function Dashboard() {
   });
   const rawSessions = data?.sessions ?? [];
   const effectiveRawSessions = useMemo(
-    () => applyDashboardLifecycleTransitions(rawSessions, lifecycleTransitions),
-    [lifecycleTransitions, rawSessions],
+    () => lifecycleRef.current.project(rawSessions),
+    [lifecycleVersion, rawSessions],
   );
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
@@ -2092,6 +2008,7 @@ export function Dashboard() {
         );
         return {
           ...(current ?? {}),
+          lifecycleInstanceId: current?.lifecycleInstanceId ?? session.lifecycle.instanceId,
           sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
@@ -2262,11 +2179,14 @@ export function Dashboard() {
         throw new Error(payload?.error ?? `Failed to update project (${response.status})`);
       }
       const updated = (await response.json()) as UpdateProjectResponse;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => ({
-        ...current,
-        sessions: current?.sessions ?? [],
-        projects: updated.projects,
-      }));
+      queryClient.setQueryData<SpurSessionsResponse>(
+        sessionsQueryKey,
+        (current) =>
+          current && {
+            ...current,
+            projects: updated.projects,
+          },
+      );
       setEditingProject(null);
       setProjectActionError(null);
     } catch (updateError) {
@@ -2340,60 +2260,36 @@ export function Dashboard() {
     sessions: readonly SpurSessionView[],
     action: "complete" | "restore",
   ) => {
-    if (sessions.some((session) => transitionsRef.current.has(session.id))) return null;
-    const owner = Symbol(action);
-    for (const session of sessions) {
-      const pending = { owner, phase: "pending" as const };
-      transitionsRef.current.set(
-        session.id,
-        action === "restore"
-          ? {
-              ...pending,
-              action,
-              session: { ...session, status: "running", state: "working", runtimeAlive: true },
-            }
-          : { ...pending, action },
-      );
-    }
+    const owner = lifecycleRef.current.reserve(sessions, action);
     publishTransitions();
     return owner;
   };
 
-  const reconcileAttempt = async (owner: symbol, ids: Iterable<string>) => {
+  const reconcileAttempt = async (owner: LifecycleIntent, _ids: Iterable<string>) => {
+    if (!lifecycleRef.current.isCurrent(owner)) return;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    await Promise.all(
-      [...ids].map(async (id) => {
-        const transition = transitionsRef.current.get(id);
-        if (transition?.owner !== owner) return;
-        let reconciled: SpurSessionView | undefined;
-        try {
-          const current = await readCurrentSession(id);
-          if (transitionsRef.current.get(id)?.owner !== owner) return;
-          reconciled = current;
-          queryClient.setQueryData<SpurSessionsResponse>(
-            sessionsQueryKey,
-            (data) =>
-              data && {
-                ...data,
-                sessions: [...data.sessions.filter((session) => session.id !== id), current],
-              },
-          );
-        } catch (error) {
-          showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
-        } finally {
-          if (transitionsRef.current.get(id)?.owner === owner) {
-            if (
-              reconciled &&
-              (reconciled.status === "completed" || reconciled.status === "killed")
-            ) {
-              transitionsRef.current.set(id, { owner, action: "complete", phase: "settled" });
-            } else {
-              transitionsRef.current.delete(id);
-            }
-          }
-        }
-      }),
-    );
+    const read = lifecycleRef.current.beginRead();
+    try {
+      const response = await fetch("/api/sessions", { cache: "no-store" });
+      if (!response.ok)
+        throw new Error(await readApiErrorMessage(response, "Failed to reconcile Spur session"));
+      const result = (await response.json()) as SpurSessionsResponse;
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, {
+        ...result,
+        sessions: accepted,
+      });
+    } catch (error) {
+      if (!lifecycleRef.current.isCurrent(owner)) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+    }
     publishTransitions();
   };
 
@@ -2407,24 +2303,40 @@ export function Dashboard() {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operationId: owner.operationId }),
       });
+      const payload = await readResponsePayload(response);
       if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner, [session.id]);
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to restore Spur session"));
       }
-      const restored = (await response.json()) as SpurSessionView;
+      const restored = payload as SpurSessionView;
       await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-      const transition = transitionsRef.current.get(session.id);
-      if (transition?.owner === owner) {
-        transitionsRef.current.set(session.id, {
-          owner,
-          action: "restore",
-          phase: "settled",
-          session: restored,
-        });
+      const accepted = lifecycleRef.current.acceptMutation(restored, owner);
+      if (accepted) {
+        queryClient.setQueryData<SpurSessionsResponse>(
+          sessionsQueryKey,
+          (current) =>
+            current && {
+              ...current,
+              sessions: [...current.sessions.filter((row) => row.id !== session.id), accepted],
+            },
+        );
         publishTransitions();
       }
     } catch (restoreError) {
       await reconcileAttempt(owner, [session.id]);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
@@ -2446,8 +2358,8 @@ export function Dashboard() {
       session,
     );
     if (
-      transitionsRef.current.has(session.id) ||
-      activeDeskSessions.some((candidate) => transitionsRef.current.has(candidate.id))
+      lifecycleRef.current.pending(session.id) ||
+      activeDeskSessions.some((candidate) => lifecycleRef.current.pending(candidate.id))
     )
       return false;
     const activeSubagentCount = activeDeskSessions.filter(
@@ -2472,6 +2384,7 @@ export function Dashboard() {
 
     try {
       const body = {
+        operationId: owner.operationId,
         scope: "desk",
         ...(prAction ? { prAction } : {}),
         ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
@@ -2482,7 +2395,18 @@ export function Dashboard() {
         body: JSON.stringify(body),
       });
       const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       if (!response.ok) {
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner, activeDeskIds);
+          return false;
+        }
         if (isOpenPrActionRequiredPayload(payload)) {
           await reconcileAttempt(owner, activeDeskIds);
           // Only one dashboard dialog is ever mounted.
@@ -2501,22 +2425,11 @@ export function Dashboard() {
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      const completedIds = completedIdsFromResponse(payload);
-      await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-      for (const id of completedIds) {
-        const transition = transitionsRef.current.get(id);
-        if (!transition || transition.owner === owner) {
-          transitionsRef.current.set(id, { owner, action: "complete", phase: "settled" });
-        }
-      }
-      publishTransitions();
-      await reconcileAttempt(
-        owner,
-        [...activeDeskIds].filter((id) => !completedIds.includes(id)),
-      );
+      await reconcileAttempt(owner, activeDeskIds);
       return true;
     } catch (completeError) {
       await reconcileAttempt(owner, activeDeskIds);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {

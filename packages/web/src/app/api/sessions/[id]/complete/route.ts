@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { readRequestRecord, readResponsePayload } from "@/lib/json-payload";
+import { readOptionalRequestRecord, readResponsePayload } from "@/lib/json-payload";
 import { spurJsonInit, spurRequest } from "@/lib/spur-daemon";
 import { isOpenPrAction, type OpenPrAction } from "@/lib/types";
 
@@ -8,13 +8,14 @@ interface RouteContext {
 }
 
 interface CompleteBody {
+  operationId?: unknown;
   prAction?: OpenPrAction;
   scope?: "session" | "desk";
   skipPrCheck?: boolean;
 }
 
 async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
-  const raw = await readRequestRecord(request);
+  const raw = await readOptionalRequestRecord(request);
   if (!raw) return {};
   const scope = raw["scope"];
   if (scope !== undefined && scope !== "session" && scope !== "desk") {
@@ -29,6 +30,7 @@ async function readCompleteBody(request: NextRequest): Promise<CompleteBody> {
     throw new Error("Invalid skipPrCheck");
   }
   return {
+    ...(raw["operationId"] !== undefined ? { operationId: raw["operationId"] } : {}),
     ...(isOpenPrAction(prAction) ? { prAction } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(skipPrCheck === true ? { skipPrCheck: true } : {}),
@@ -46,7 +48,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return NextResponse.json(await readResponsePayload(response), { status: response.status });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to complete Spur session";
-    const status = message.startsWith("Invalid ") ? 400 : 502;
+    const status =
+      message.startsWith("Invalid ") || message === "Expected an object body" ? 400 : 502;
     return NextResponse.json({ error: message }, { status });
   }
 }
