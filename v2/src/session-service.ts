@@ -62,6 +62,7 @@ import {
   assembleSidecarSweepClaims,
   collectTree,
   confirmReaps,
+  findLeakedSidecarTrees,
   reapRecordedIdentity,
   reapRecordedPortDaemon,
   reapSidecarPane,
@@ -69,9 +70,11 @@ import {
   signalSidecarPane,
   snapshotProcesses,
   sweepSidecars,
+  type LeakedSidecarTree,
   type PendingReap,
   type ProcSnapshot,
   type ReapOutcome,
+  type SidecarSweepClaims,
   type SidecarSweepResult,
 } from "./sidecars/reap.js";
 import {
@@ -1021,6 +1024,10 @@ export class SubmitAckTimeoutError extends Error {
   readonly lastScannedFile: string | null;
   readonly elapsedMs: number;
   readonly processAlive: boolean;
+  // True when the liveness read could not report (list-panes killed by its
+  // own timeout), so processAlive:false is not evidence of death. Ambiguous =
+  // refuse recovery, never kill. Never set together with processAlive:true.
+  readonly probeUnresponsive: boolean;
 
   constructor(args: {
     sessionId: string;
@@ -1028,6 +1035,7 @@ export class SubmitAckTimeoutError extends Error {
     lastScannedFile: string | null;
     elapsedMs: number;
     processAlive: boolean;
+    probeUnresponsive: boolean;
   }) {
     super(`Timed out waiting for agent submit acknowledgment for ${args.sessionId}`);
     this.name = "SubmitAckTimeoutError";
@@ -1035,6 +1043,7 @@ export class SubmitAckTimeoutError extends Error {
     this.lastScannedFile = args.lastScannedFile;
     this.elapsedMs = args.elapsedMs;
     this.processAlive = args.processAlive;
+    this.probeUnresponsive = args.probeUnresponsive;
   }
 }
 
@@ -1045,6 +1054,12 @@ export class SubmitAckTimeoutError extends Error {
 // definition, shared by the drain and by flush.
 function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
   return error instanceof SubmitAckTimeoutError && error.processAlive;
+}
+
+// The liveness read could not report: not delivered, and not evidence of a
+// dead agent either. Callers must not kill the pane on this.
+function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
+  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -1096,10 +1111,11 @@ interface SessionRuntimeSnapshot {
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
-  // True only when a `runtimeAlive`/`paneUsable` false reading came from a
-  // tmux probe killed by its own timeout (isTmuxTimeoutKill), never from a
-  // confirmed-absent tmux server. reconcileUnexpectedStop must not treat this
-  // reading as proof the runtime is gone.
+  // True only when a `runtimeAlive`/`paneUsable`/`processAlive` false reading
+  // came from a probe fork (tmux list-windows, list-panes, or ps) killed by
+  // its own timeout (isProbeTimeoutKill), never from a confirmed-absent tmux
+  // server or process. reconcileUnexpectedStop must not treat this reading as
+  // proof the runtime is gone.
   probeUnresponsive: boolean;
 }
 interface SessionStateResult {
@@ -1616,7 +1632,9 @@ async function agentProcessAlive(
 // and an object return there would silently read as "always alive" (tsc
 // cannot catch it; only eslint no-unnecessary-condition would). Keeps
 // agentProcessAlive's signature and all nine call sites unchanged.
-type AgentProcessProbe = { alive: false } | { alive: true; via: "matcher" | "pane_child" };
+type AgentProcessProbe =
+  | { alive: false; unresponsive: boolean }
+  | { alive: true; via: "matcher" | "pane_child" };
 
 // Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
 // second isProcessRunningInTmux read: two separate top-level calls would each
@@ -1637,7 +1655,7 @@ async function probeAgentProcess(
     ...(foreign ? { paneChildFallback: true } : {}),
   });
   if (!result.alive) {
-    return { alive: false };
+    return { alive: false, unresponsive: result.unresponsive };
   }
   return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
@@ -2231,12 +2249,71 @@ const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
 const ATTENTION_PANE_TAIL_LINES = 15;
 
+/**
+ * Detection-only pass over one shared `ps` snapshot: finds every leaked
+ * `worktree-tree` sidecar process tree via `findLeakedSidecarTrees` and
+ * emits `session.sidecar.orphan_detected` for each. Signals or kills
+ * NOTHING — I10. A plain exported function (no `this`) so it is testable
+ * against a synthetic snapshot/claims triple without booting a
+ * SessionService.
+ *
+ * `orphan-daemon` rows are deliberately excluded from both the emitted
+ * events and the returned list: `findLeakedSidecarTrees` scans the WHOLE
+ * host process table for that population (spur#859), not just this
+ * instance's own worktreeDir, so auto-firing it on every reaper tick would
+ * log an event for every reparented Spur daemon on a shared host — most of
+ * them belonging to an unrelated instance this daemon has no business
+ * reporting on. That population is already surfaced on demand via
+ * `spur sidecar sweep` and the `sidecar-orphans` doctor check; this
+ * function stays scoped to the original population — sidecar trees under
+ * THIS instance's own running sessions.
+ */
+export async function detectOrphanedSidecarTrees(
+  snapshot: ProcSnapshot,
+  assembled: SidecarSweepClaims,
+  logEvent: (event: string, entry: Omit<SpurLogEntry, "event" | "timestamp">) => void,
+): Promise<LeakedSidecarTree[]> {
+  const { supported, leaked } = await findLeakedSidecarTrees({
+    snapshot,
+    claims: assembled.claims,
+    worktreePaths: assembled.worktreePaths,
+    worktreeDirRealpath: assembled.worktreeDirRealpath,
+  });
+  if (!supported) {
+    return [];
+  }
+  const worktreeTrees = leaked.filter((tree) => tree.kind === "worktree-tree");
+  for (const tree of worktreeTrees) {
+    logEvent("session.sidecar.orphan_detected", {
+      level: "info",
+      message: `Orphaned sidecar process tree detected at pid ${tree.rootPid} under ${tree.worktreePath}${tree.sidecarName ? ` (${tree.sidecarName})` : ""}.`,
+      details: {
+        rootPid: tree.rootPid,
+        pgid: tree.pgid,
+        treeRssKb: tree.treeRssKb,
+        ageSeconds: tree.ageSeconds,
+        worktreePath: tree.worktreePath,
+        sidecarName: tree.sidecarName,
+        reapable: tree.reapable,
+      },
+    });
+  }
+  return worktreeTrees;
+}
+
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
   const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
-  await killTmuxSession(tmuxSession);
+  // Signal the pane's process tree before tearing down tmux, same as every
+  // other sidecar-kill site — a bare killTmuxSession here would blind-kill
+  // whatever the failed launch already forked. This is a free function with
+  // no record access, so it carries no identity fallback of its own; the
+  // caller's catch block (session-service.ts ~6540) supplies that via
+  // reapSidecarByName against the identity already persisted before this
+  // call runs.
+  await signalSidecarPane(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
@@ -3881,6 +3958,7 @@ export class SessionService {
                 {},
                 {
                   skipEnrichment: true,
+                  stopReason: "memory_shed",
                 },
               ),
             );
@@ -4037,8 +4115,8 @@ export class SessionService {
   private async collectSidecarReapCandidates(
     tmuxNames: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
+    psSnapshot: ProcSnapshot,
   ): Promise<SidecarReapCandidate[]> {
-    const psSnapshot = await snapshotProcesses();
     const seenTmuxNames = new Set<string>();
     const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
@@ -4216,15 +4294,30 @@ export class SessionService {
     sessions: readonly SessionRecord[],
     tmuxNames: ReadonlySet<string>,
   ): Promise<SidecarReapPlan> {
-    // Check the config before any of the expensive work below: a `ps`
-    // snapshot, an `ss` probe per distinct reserved port, and a
-    // listSessions/listDeskSessions scan per candidate all ran unconditionally
-    // even with sidecarGc.enabled: false, since planSidecarReap only decides
+    // ONE `ps` snapshot for the whole pass, shared by detection and the
+    // candidate pass below — a second fork could let a tree be attributed
+    // to two passes (same discipline as executeSidecarReapPlan's own
+    // pre-signal snapshot).
+    const psSnapshot = await snapshotProcesses();
+    // Detection runs BEFORE the sidecarGc.enabled check below: that switch
+    // governs killing, and a detect-only event that kills nothing has no
+    // reason to inherit it — a host with GC disabled still gets orphan
+    // visibility.
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
+    if (assembled) {
+      await detectOrphanedSidecarTrees(psSnapshot, assembled, (event, entry) =>
+        this.logEvent(event, entry),
+      );
+    }
+    // Check the config before any of the expensive work below: an `ss`
+    // probe per distinct reserved port, and a listSessions/listDeskSessions
+    // scan per candidate all ran unconditionally even with
+    // sidecarGc.enabled: false, since planSidecarReap only decides
     // "keep: disabled" per candidate after all of that already happened.
     if (!this.config.sidecarGc.enabled) {
       return { reap: [], warn: [], keep: [] };
     }
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions);
+    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions, psSnapshot);
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
@@ -8505,13 +8598,15 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
-      await verifySidecarStartup(reservedSession.id, args.sidecarName);
-
       // Record this instance's identity so a tree that outlives its
       // tmux supervisor is still identifiable and reapable later — see
       // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
       // (race, no procfs) leaves sidecarProcs unset for this name rather
-      // than blocking the start.
+      // than blocking the start. Recorded BEFORE verifySidecarStartup —
+      // hoisted above it deliberately, so a failed-start catch below has
+      // an identity on disk to reap by even once the pane itself is dead;
+      // recording it only after a successful verify would leave that catch
+      // with nothing to signal (Finding B3).
       const freshPanePid = await getTmuxPanePid(
         sidecarTmuxSession(reservedSession.id, args.sidecarName),
         { fresh: true },
@@ -8553,6 +8648,9 @@ export class SessionService {
         delete updated.sidecarProcs;
       }
       writeSession(this.config.dataDir, updated);
+
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
       this.clearSidecarStartConflict(args.session.id, args.sidecarName);
       this.scheduleSidecarUrlReadyAndPublish(
         reservedSession.id,
@@ -9677,6 +9775,12 @@ export class SessionService {
     // preceded this call, so isStaleParked (which requires
     // status==="stopped") would always return false here and silently
     // disable the sidecar replay.
+    if (record.stopReason === "memory_shed") {
+      // No sidecars to replay; the wake only has to clear the marker so the
+      // running record never carries it (the wake gate keys on it).
+      const { stopReason: _clearedShed, ...awake } = record;
+      return awake;
+    }
     if (record.stopReason !== "stale_timeout") {
       return record;
     }
@@ -9929,7 +10033,10 @@ export class SessionService {
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
-      await killTmuxSession(existing.tmuxSession);
+      // Same launcher as a sidecar (createTmuxCommandSession), same leak
+      // shape; a service records no identity, so this is the un-fallbacked
+      // signal — still a real ps-tree signal instead of a blind tmux kill.
+      await signalSidecarPane(existing.tmuxSession);
       deleteServiceInstance(this.config.dataDir, sessionId, serviceId);
     }
     deleteServiceSourceStatesForService(this.config.dataDir, session.project, sessionId, serviceId);
@@ -9978,7 +10085,7 @@ export class SessionService {
       });
       return await this.enrichService(record);
     } catch (error) {
-      await killTmuxSession(tmuxSession);
+      await signalSidecarPane(tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
       const record: ServiceInstanceRecord = {
         sessionId,
@@ -13527,18 +13634,19 @@ export class SessionService {
       // genuinely dropped Enter (agents/index.ts) without reinstating
       // cursor's old 65s hold.
       let result: SubmitAckScanResult = { found: false, lastScannedFile: null };
-      // Set only when a mid-loop probe observes a dead pane; a confirmed-dead
-      // agent does not come back inside one send, so the loop stops resending
-      // into it instead of burning the rest of the budget. Never set on a
+      // Set only when a mid-loop probe reads not-alive; a dead agent does not
+      // come back inside one send, so the loop stops resending into it instead
+      // of burning the rest of the budget. Keeps unresponsive so an ambiguous
+      // read is not laundered into a plain death verdict. Never set on a
       // live result — see the probe's own fresh:true comment below.
-      let knownDead = false;
+      let latchedNotAlive: Extract<AgentProcessProbe, { alive: false }> | null = null;
       for (let attempt = 0; attempt <= DEFERRED_CONTROLS_MAX_RESENDS; attempt += 1) {
         result = await this.waitForSubmitAck(binding, message, DEFERRED_CONTROLS_ACK_WINDOW_MS);
         if (result.found) return "submitted" as const;
         if (attempt < DEFERRED_CONTROLS_MAX_RESENDS) {
           // fresh:true — a stale cached hit would report an agent that just
           // died as alive.
-          const alive = await agentProcessAlive(
+          const probe = await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -13546,8 +13654,8 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!alive) {
-            knownDead = true;
+          if (!probe.alive) {
+            latchedNotAlive = probe;
             break;
           }
           await sendSubmitKeyToTmux(session.tmuxSession);
@@ -13555,17 +13663,19 @@ export class SessionService {
       }
       // fresh:true — a cached hit could report an agent that just died as
       // alive; this value decides throw vs. treat-as-delivered. Skipped when
-      // already confirmed dead mid-loop.
-      const processAlive = knownDead
-        ? false
-        : await agentProcessAlive(
-            {
-              tmuxSession: session.tmuxSession,
-              agent: session.agent,
-              launchCommand: session.launchCommand,
-            },
-            { fresh: true },
-          );
+      // already non-alive mid-loop.
+      const finalProbe =
+        latchedNotAlive ??
+        (await probeAgentProcess(
+          {
+            tmuxSession: session.tmuxSession,
+            agent: session.agent,
+            launchCommand: session.launchCommand,
+          },
+          { fresh: true },
+        ));
+      const processAlive = finalProbe.alive;
+      const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
       const elapsedMs = Date.now() - startedAt;
       if (processAlive) {
         this.logEvent("session.controls.delivery_recovered", {
@@ -13592,6 +13702,7 @@ export class SessionService {
         lastScannedFile: result.lastScannedFile,
         elapsedMs,
         processAlive: false,
+        probeUnresponsive,
       });
     });
   }
@@ -13668,12 +13779,12 @@ export class SessionService {
       slashCommand: message.trimStart().startsWith("/"),
     });
     let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
-    // Set only when the mid-loop probe below observes a dead pane; reused for
-    // the post-loop processAlive check so a confirmed-dead agent is not
-    // re-probed. Never set on a live result — a live pane can still die before
-    // the next check, so "alive" is never cached, only "dead" (see the probe's
-    // own fresh:true comment).
-    let knownDead = false;
+    // Set only when the mid-loop probe below reads not-alive; reused for the
+    // post-loop check so that agent is not re-probed. Carries `unresponsive`
+    // so an ambiguous read is not laundered into a plain death verdict. Never
+    // set on a live result — a live pane can still die before the next check,
+    // so "alive" is never cached (see the probe's own fresh:true comment).
+    let latchedNotAlive: Extract<AgentProcessProbe, { alive: false }> | null = null;
     // The last scan that missed the text read the transcript before the agent
     // recorded it. An interrupted turn can close after the paste (the agent
     // takes the input once its abort lands), so on an ack the queue fence
@@ -13708,7 +13819,7 @@ export class SessionService {
         // { fresh: true } is mandatory — a stale cached hit would report an
         // agent that just died as alive.
         if (session.agent === "cursor" || interactive || freshLaunch) {
-          const alive = await agentProcessAlive(
+          const probe = await probeAgentProcess(
             {
               tmuxSession: session.tmuxSession,
               agent: session.agent,
@@ -13716,8 +13827,8 @@ export class SessionService {
             },
             { fresh: true },
           );
-          if (!alive) {
-            knownDead = true;
+          if (!probe.alive) {
+            latchedNotAlive = probe;
             break;
           }
         }
@@ -13732,16 +13843,18 @@ export class SessionService {
     // fresh:true — this value decides whether an unacked send throws, and the
     // fleet-pane and ps probes are TTL-cached, so a stale hit would report an
     // agent that just died as alive.
-    const processAlive = knownDead
-      ? false
-      : await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
-            agent: session.agent,
-            launchCommand: session.launchCommand,
-          },
-          { fresh: true },
-        );
+    const finalProbe =
+      latchedNotAlive ??
+      (await probeAgentProcess(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      ));
+    const processAlive = finalProbe.alive;
+    const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
     const elapsedMs = Date.now() - startedAt;
     // Interactive callers own the live-timeout policy (delivered + warn), so
     // they get the typed timeout, never this silent cursor pass. Neither does
@@ -13774,6 +13887,7 @@ export class SessionService {
         elapsedMs,
         ...(freshLaunch ? { freshLaunch } : {}),
         processAlive,
+        probeUnresponsive,
       },
     });
     if (
@@ -13797,6 +13911,7 @@ export class SessionService {
       lastScannedFile: lastResult.lastScannedFile,
       elapsedMs,
       processAlive,
+      probeUnresponsive,
     });
   }
 
@@ -14224,8 +14339,15 @@ export class SessionService {
   // for every single-shot sidecar-kill site; only teardownSessionSidecars
   // bypasses it (signals all its sidecars first, confirms once, batching
   // the grace window instead of paying it once per sidecar here).
+  // Reads the owner record so a blind signalSidecarPane branch (no pane
+  // pid, or an unusable snapshot) still has the recorded identity to reap
+  // by — without this read, every caller upstream of here (the failed-start
+  // catch, the reap pass) is inert (Finding B3).
   private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
-    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    const owner = readSession(this.config.dataDir, ownerId);
+    const identity = owner?.sidecarProcs?.[sidecarName];
+    const fallback = owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
   }
@@ -14530,7 +14652,10 @@ export class SessionService {
           });
         }
       }
-      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+      const identity = record?.sidecarProcs?.[scName];
+      const fallback =
+        record && identity ? { identity, worktreePath: record.worktreePath } : undefined;
+      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName), fallback);
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
@@ -14579,7 +14704,7 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      await killTmuxSession(service.tmuxSession);
+      await signalSidecarPane(service.tmuxSession);
     }
     deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
@@ -14844,7 +14969,12 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
+    options: {
+      retainInList?: boolean;
+      skipEnrichment: true;
+      eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
+    },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
@@ -14855,6 +14985,7 @@ export class SessionService {
       skipEnrichment?: false;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -14866,8 +14997,10 @@ export class SessionService {
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView | void> {
+    const pauseReason = options?.stopReason ?? "manual_pause";
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -14877,7 +15010,7 @@ export class SessionService {
       const migrated: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(session),
         status: "stopped",
-        stopReason: "manual_pause",
+        stopReason: pauseReason,
         updatedAt: nowIso(),
         ...(options?.retainInList ? { retainInList: true } : {}),
       };
@@ -14896,7 +15029,7 @@ export class SessionService {
         const record: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
-          stopReason: "manual_pause",
+          stopReason: pauseReason,
           updatedAt: nowIso(),
           ...(options?.retainInList ? { retainInList: true } : {}),
         };
@@ -14975,7 +15108,7 @@ export class SessionService {
     const record: SessionRecord = {
       ...this.sessionWithReleasedSidecarPorts(cleanedSession),
       status: targetStatus,
-      ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
+      ...(targetStatus === "stopped" ? { stopReason: pauseReason } : {}),
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
@@ -15312,7 +15445,7 @@ export class SessionService {
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
-        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+        `Session ${session.id}'s runtime probe (tmux or ps) timed out; runtime state unknown, not attempting recovery`,
       );
     }
 
@@ -15352,15 +15485,18 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    // A stale-parked session holds zero live slots (isLiveSessionRecord
-    // excludes it by design), so nothing gates how many of them a single
-    // poll cycle can wake at once without this. Gated to stale-parked only:
-    // an ordinary dead-pane recovery is relaunching a session that already
-    // held its slot, so it must not be re-denied here. Thrown before
-    // anything below touches the pane (killAgentPaneAndConfirmExit runs
-    // inside relaunchSessionInPlace, further down) so a refusal never kills
-    // a live process or does any destructive work.
-    if (isStaleParked(session)) {
+    // A stale-parked or memory-shed session holds zero live slots
+    // (isLiveSessionRecord excludes it by design), so nothing gates how many
+    // of them a single poll cycle can wake at once without this. Gated to
+    // those two shapes only: an ordinary dead-pane recovery is relaunching a
+    // session that already held its slot, so it must not be re-denied here.
+    // Thrown before anything below touches the pane (killAgentPaneAndConfirmExit
+    // runs inside relaunchSessionInPlace, further down) so a refusal never
+    // kills a live process or does any destructive work.
+    if (
+      isStaleParked(session) ||
+      (session.status === "stopped" && session.stopReason === "memory_shed")
+    ) {
       this.assertAdmissible(session.project, "wake");
     }
 
@@ -15864,7 +16000,8 @@ export class SessionService {
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
-        current.stopReason !== "stale_timeout";
+        current.stopReason !== "stale_timeout" &&
+        current.stopReason !== "memory_shed";
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
@@ -16078,11 +16215,13 @@ export class SessionService {
         }
       }
     } catch (error) {
-      // Drop the warmup set before startMcpSidecars: every exit from here
-      // either killed the pane below or returns an already-live session, so
-      // leaving it would make classifySessionRecord report "working" with
-      // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
-      // path after this block intentionally keeps its own warmup.
+      // Drop the warmup set before startMcpSidecars: leaving it would make
+      // classifySessionRecord report "working" with fabricated liveness for
+      // the rest of RESTORE_WARMUP_MS. The success path after this block
+      // intentionally keeps its own warmup. Three exits follow: recovered
+      // (live process proven, returns a running session), kill-and-throw
+      // (pane killed), and ambiguous (probe unresponsive: pane left alive,
+      // status untouched, stale error cleared, throws).
       this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
@@ -16135,13 +16274,42 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      // An unresponsive liveness read is not evidence of death: killing here
+      // would destroy a live agent whose tmux server was merely slow (#904).
+      if (isAmbiguousSubmitAckTimeout(error)) {
+        // The error describes the prior dead agent; the pane was just
+        // relaunched. Left in place it blocks reconcileStaleStoppedSession
+        // (hasSessionErrorEvidence) behind a live agent. Liveness is not
+        // proven, so no status is written.
+        // Fresh read: the sidecar start between the pre-launch snapshot and
+        // here already wrote sidecarPorts/Names/Procs; the stale snapshot
+        // would erase them.
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (latest?.error !== undefined) {
+          const { error: _staleError, ...withoutError } = latest;
+          writeSession(this.config.dataDir, withoutError);
+          this.stateCache.delete(sessionId);
+        }
+      } else {
+        await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
+        ...(isAmbiguousSubmitAckTimeout(error)
+          ? {
+              details: {
+                reason: "submit_ack_timeout",
+                agent: error.agent,
+                elapsedMs: error.elapsedMs,
+                processAlive: false,
+                probeUnresponsive: true,
+              },
+            }
+          : {}),
       });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
@@ -17909,7 +18077,8 @@ export class SessionService {
       hookState ? new Date(hookState.updatedAt).getTime() : 0,
     );
 
-    if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
+    // Without hooks, a quiet rollout cannot rule out a tool still running.
+    if (state === "working" && rolloutState && hookState && !codexToolExecuting(hookState)) {
       if (Date.now() - activityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
         state = "waiting";
         source = "codex_stale";
@@ -17960,7 +18129,7 @@ export class SessionService {
             },
             { fresh },
           )
-        : { alive: false };
+        : { alive: false, unresponsive: false };
     // Fires once on the transition into the pane-child fallback answering
     // ALIVE instead of every readRuntimeSnapshot call — see
     // paneChildFallbackNotified's own comment for the event-volume math.
@@ -17982,12 +18151,13 @@ export class SessionService {
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
     const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
+    const processUnresponsive = !processProbe.alive && processProbe.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive: processProbe.alive,
       tmuxActivityAt,
-      probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
+      probeUnresponsive: sessionsUnresponsive || panesUnresponsive || processUnresponsive,
     };
   }
 
@@ -18613,7 +18783,7 @@ export class SessionService {
           level: "warn",
           sessionId: session.id,
           projectId: session.project,
-          message: `Skipped reconciling ${session.id}: tmux probe timed out, runtime state unknown`,
+          message: `Skipped reconciling ${session.id}: runtime probe (tmux or ps) timed out, runtime state unknown`,
           details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
         });
         return { session, runtime: confirmedRuntime };
@@ -18752,6 +18922,7 @@ export class SessionService {
         processAlive: runtime.processAlive,
       },
     });
+    this.scheduleHealedSidecarRestart(updated);
     return updated;
   }
 

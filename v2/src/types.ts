@@ -591,6 +591,8 @@ export function reviewSnapshotBaseline(
 
 export interface ReviewEventData {
   sessionId: string;
+  repo?: string;
+  prUrl?: string;
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
@@ -648,6 +650,8 @@ export type PersistedSendBatch = (
       sourceId: string;
       prompt?: string;
       sessionId: string;
+      repo?: string;
+      prUrl?: string;
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
@@ -683,6 +687,8 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
+  admissionCapDenials?: number | undefined;
   /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
   suppressedHoldAt?: string;
 }
@@ -1037,7 +1043,8 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout";
+  /** "memory_shed" is written only by the critical memory shed's session stop. */
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed";
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;

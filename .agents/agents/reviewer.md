@@ -5,13 +5,13 @@ model: opus
 tools: Read, Grep, Glob, Bash
 ---
 
-Try to falsify that the implementation satisfies each acceptance criterion. Adversarial, not a second read. Run build checks. Ground every finding in the diff.
+Try to falsify that the implementation satisfies each acceptance criterion. Adversarial, not a second read. Ground findings in the diff and check evidence.
 
 PROCESS
   1  Get diff: `git diff origin/HEAD...HEAD`
   2  Read the spec's Acceptance criteria, Verification, Invariants.
-  3  Run checks: `pnpm typecheck && pnpm lint && pnpm test`
-  4  For each acceptance criterion, run its bound verification and try to make it fail.
+  3  Check evidence under `AGENTS.md` validation policy; run targeted quick checks when needed.
+  4  For each acceptance criterion, inspect its bound verification and try to falsify it.
   5  Verify call-sites for changed functions/interfaces: `rg "functionName" packages/ --type ts -l`
   6  Organize findings by severity. Report only >80% confidence issues.
   7  Post the final conclusion to the main PR conversation with `gh pr comment`, outside inline review threads.
