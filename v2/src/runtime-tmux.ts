@@ -190,7 +190,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     } catch (error) {
       if (!isKnownAbsentTmuxServer(error)) {
         readable = false;
-        unresponsive = isTmuxTimeoutKill(error);
+        unresponsive = isProbeTimeoutKill(error);
         diagnostic = probeDiagnostic("tmux list-windows", error);
       }
     }
@@ -352,7 +352,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
     } catch (error) {
       if (!isKnownAbsentTmuxServer(error)) {
         readable = false;
-        unresponsive = isTmuxTimeoutKill(error);
+        unresponsive = isProbeTimeoutKill(error);
         diagnostic = probeDiagnostic("tmux list-panes", error);
       }
     }
@@ -496,9 +496,9 @@ export class SensitiveTmuxCleanupError extends Error {
 // `signal: "SIGTERM"` on the rejected error — distinct from an external
 // SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
 // plain non-zero exit (`killed: false`). This is the only ambiguous failure:
-// the fork MIGHT still be alive server-side, so callers must not treat it the
-// same as a confirmed-absent tmux server.
-function isTmuxTimeoutKill(error: unknown): boolean {
+// the probe fork (tmux or ps) MIGHT still be alive, so callers must not treat
+// it the same as a confirmed-absent tmux server or process.
+function isProbeTimeoutKill(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
@@ -726,14 +726,19 @@ interface PsRow {
   args: string;
 }
 
+interface PsSnapshot {
+  rows: PsRow[];
+  diagnostic?: string;
+  // True only when the `ps` fork was killed by its own timeout, never for a
+  // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
+  // is empty whenever this is true.
+  unresponsive: boolean;
+}
+
 // Shared, TTL-cached `ps` snapshot: the full process table is identical for
 // every session in a tick, so this is one fork per TTL window instead of one
 // per session. Carries rss so getFleetSessionRssBytes (headroom reporting)
 // reuses this exact fork instead of adding a second one.
-interface PsSnapshot {
-  rows: PsRow[];
-  diagnostic?: string;
-}
 const psSnapshotCache = new Map<string, ProbeCacheEntry<PsSnapshot>>();
 const PS_SNAPSHOT_CACHE_KEY = "ps";
 // execFile's default maxBuffer (1 MiB) truncates a large process table
@@ -786,9 +791,13 @@ function getPsSnapshot(): Promise<PsSnapshot> {
           };
         })
         .filter((row): row is PsRow => row !== null);
-      return { rows };
+      return { rows, unresponsive: false };
     } catch (error) {
-      return { rows: [], diagnostic: probeDiagnostic("ps", error) };
+      return {
+        rows: [],
+        unresponsive: isProbeTimeoutKill(error),
+        diagnostic: probeDiagnostic("ps", error),
+      };
     }
   });
 }
@@ -845,8 +854,9 @@ export interface TmuxProcessMatch {
   alive: boolean;
   matchedByName: boolean;
   diagnostic?: string;
-  // True when the fleet-pane read was killed by its own timeout: alive:false
-  // is then not evidence of death. Callers must not kill on it.
+  // True when a probe fork (`list-panes -a` or `ps`) was killed by its own
+  // timeout: alive:false is then not evidence of death. Callers must not kill
+  // on it.
   unresponsive: boolean;
 }
 
@@ -889,6 +899,8 @@ export async function probeTmuxProcessMatch(
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
+      // This list-panes fork is independent of the caller's own pane read, so a
+      // timeout kill here empties `panes` without the caller's flag knowing.
       return { alive: false, matchedByName: false, unresponsive };
     }
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
@@ -901,7 +913,8 @@ export async function probeTmuxProcessMatch(
     if (processRes.length === 0) {
       return { alive: false, matchedByName: false, unresponsive };
     }
-    const { rows, diagnostic } = await getPsSnapshot();
+    const { rows, unresponsive: psUnresponsive, diagnostic } = await getPsSnapshot();
+    unresponsive = unresponsive || psUnresponsive;
     if (diagnostic) {
       return { alive: false, matchedByName: false, unresponsive, diagnostic };
     }

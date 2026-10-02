@@ -90,7 +90,9 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and stale-parked wake. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+
+The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
@@ -101,6 +103,8 @@ Prunes `agent-history-*.jsonl` per [desk group](#desk-groups) workspace (never w
 ## Sidecar reaping
 
 `sidecarGc` kills idle/unowned non-MCP project sidecars (never a built-in MCP one). Shared per [desk group](#desk-groups). Reap/keep rule order: `v2/src/sidecars/policy.ts`, `v2/src/sidecars/reap.ts`. Events: `session.sidecar.reaped`, `session.sidecar.age_warning`.
+
+The same pass also runs a detect-only step over one shared process-table snapshot: an orphaned process tree under a worktree (an unclaimed pgid the sweep predicate would call leaked) logs `session.sidecar.orphan_detected` with `rootPid`, `pgid`, `treeRssKb`, `ageSeconds`, `worktreePath`, `sidecarName`, and `reapable`. This step never signals or kills anything, and runs even when `sidecarGc.enabled` is `false` — that flag governs killing only, not detection.
 
 ## Disk budget
 
