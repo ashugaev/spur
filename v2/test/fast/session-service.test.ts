@@ -4691,9 +4691,15 @@ describe("SessionService", () => {
 
   it("keeps background launches outbound-only despite an old inbound target", async () => {
     mockClaudeJsonlState("waiting");
-    loadConfigMock.mockReturnValue(configWithTelegram({
-      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
-    }));
+    loadConfigMock.mockReturnValue(
+      configWithTelegram({
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+        chatId: 4242,
+      }),
+    );
     readTelegramReplyTargetMock.mockReturnValue({ lastInboundAt: "2026-03-18T10:00:00.000Z" });
     const service = await createDisposedSessionService();
     await service.spawnInBackground({ project: "api", prompt: "hello" });
@@ -4703,41 +4709,72 @@ describe("SessionService", () => {
     expect(prompt).not.toContain("Your terminal output is invisible");
   });
 
-  it.each([false, true])("restores Telegram context from inbound provenance: %s", async (hasInbound) => {
-    mockClaudeJsonlState("waiting");
-    loadConfigMock.mockReturnValue(configWithTelegram({
-      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
-    }));
-    readTelegramReplyTargetMock.mockReturnValue({
-      sessionId: "api-1", projectId: "api", sourceId: "chat", chatId: 4242,
-      ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
-    });
-    findAgentSessionIdMock.mockResolvedValue("session-uuid");
-    readSessionMock.mockReturnValue(sessionRecord({
-      id: "api-1", prompt: "hello", status: "running", worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-    }));
-    mockExitedThenRestoredProcess();
-    const service = await createDisposedSessionService();
-    await service.restore("api-1");
-    const prompt = sendMessageToTmuxMock.mock.calls.at(-1)?.[1];
-    expect(prompt).toContain(hasInbound
-      ? "Telegram: the user reads this session in Telegram."
-      : "Telegram: send when the user requests a Telegram message.");
-    if (!hasInbound) expect(prompt).not.toContain("Your terminal output is invisible");
-  });
+  it.each([false, true])(
+    "restores Telegram context from inbound provenance: %s",
+    async (hasInbound) => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        configWithTelegram({
+          type: "telegram",
+          runOnStart: false,
+          token: "token-123",
+          allowedUsers: [123],
+          chatId: 4242,
+        }),
+      );
+      readTelegramReplyTargetMock.mockReturnValue({
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: 4242,
+        ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
+      });
+      findAgentSessionIdMock.mockResolvedValue("session-uuid");
+      readSessionMock.mockReturnValue(
+        sessionRecord({
+          id: "api-1",
+          prompt: "hello",
+          status: "running",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      mockExitedThenRestoredProcess();
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+      const prompt = sendMessageToTmuxMock.mock.calls.at(-1)?.[1];
+      expect(prompt).toContain(
+        hasInbound
+          ? "Telegram: the user reads this session in Telegram."
+          : "Telegram: send when the user requests a Telegram message.",
+      );
+      if (!hasInbound) expect(prompt).not.toContain("Your terminal output is invisible");
+    },
+  );
 
   it("respawns with outbound capability while retaining the carried Telegram wrapper", async () => {
     mockClaudeJsonlState("waiting");
-    loadConfigMock.mockReturnValue(configWithTelegram({
-      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
-    }));
+    loadConfigMock.mockReturnValue(
+      configWithTelegram({
+        type: "telegram",
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+        chatId: 4242,
+      }),
+    );
     const sessions = createSessionStore();
     const carriedPrompt = "hello\nTelegram: the user reads this session in Telegram.";
-    sessions.set("api-1", sessionRecord({
-      id: "api-1", status: "completed", prompt: carriedPrompt, worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-    }));
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        id: "api-1",
+        status: "completed",
+        prompt: carriedPrompt,
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      }),
+    );
     readTelegramReplyTargetMock.mockReturnValue({ lastInboundAt: "2026-03-18T10:00:00.000Z" });
     tmuxSessionExistsMock.mockResolvedValue(false);
     reserveNextSessionIdMock.mockResolvedValue("api-2");
@@ -47844,90 +47881,102 @@ describe("SessionService", () => {
         expect(persisted).not.toHaveProperty("staleSidecars");
       });
 
-      it.each([false, true])("fresh-launch fallback resends task and Telegram provenance: %s", async (hasInbound) => {
-        // relaunchSessionInPlace's fresh-launch fallback starts a blank agent
-        // process (no --resume, no piped prompt) whenever native resume is
-        // unavailable or fails, so the agent has zero conversation memory.
-        // Left alone, whatever real message triggered the wake becomes,
-        // from the agent's perspective, the first message of a brand new
-        // session with no task context at all. The fix resends the original
-        // task prompt (through the same restore-prompt machinery restore()
-        // uses) before the triggering message is written to the same pane.
-        const config = baseConfig();
-        config.projects.api.sources = {
-          chat: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242 },
-        };
-        config.projects.api.triggers = {
-          tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
-        };
-        loadConfigMock.mockReturnValue(config);
-        readTelegramReplyTargetMock.mockReturnValue({
-          sessionId: "api-1", projectId: "api", sourceId: "chat", chatId: 4242,
-          ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
-        });
-        mockAgentWaitingState(agent);
-        const sessions = createSessionStore();
-        sessions.set("api-1", {
-          id: "api-1",
-          project: "api",
-          agent,
-          agentSessionId: "session-uuid",
-          prompt: "the original task prompt",
-          branch: "api-1",
-          worktree: true,
-          worktreePath: "/tmp/spur-worktrees/api/api-1",
-          tmuxSession: "api-1",
-          launchCommand: agentLaunchCommand(agent),
-          status: "stopped",
-          stopReason: "stale_timeout",
-          createdAt: "2026-03-18T10:00:00.000Z",
-          updatedAt: "2026-03-18T09:00:00.000Z",
-        });
-        listSessionsMock.mockReturnValue([]);
-        let relaunched = false;
-        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
-        // First createTmuxSession/waitForTmuxReady attempt is the native
-        // resume attempt; make it fail so relaunchSessionInPlace falls back
-        // to a fresh launch (its catch block only fires when a
-        // recoveryPlan existed, i.e. agentSessionId was present).
-        let createTmuxSessionCalls = 0;
-        createTmuxSessionMock.mockImplementation(async () => {
-          createTmuxSessionCalls += 1;
-          relaunched = true;
-        });
-        waitForTmuxReadyMock.mockImplementationOnce(async () => {
-          throw new Error("resume failed");
-        });
-        isProcessRunningInTmuxMock.mockImplementation(async () => true);
+      it.each([false, true])(
+        "fresh-launch fallback resends task and Telegram provenance: %s",
+        async (hasInbound) => {
+          // relaunchSessionInPlace's fresh-launch fallback starts a blank agent
+          // process (no --resume, no piped prompt) whenever native resume is
+          // unavailable or fails, so the agent has zero conversation memory.
+          // Left alone, whatever real message triggered the wake becomes,
+          // from the agent's perspective, the first message of a brand new
+          // session with no task context at all. The fix resends the original
+          // task prompt (through the same restore-prompt machinery restore()
+          // uses) before the triggering message is written to the same pane.
+          const config = baseConfig();
+          config.projects.api.sources = {
+            chat: {
+              type: "telegram",
+              runOnStart: false,
+              token: "token-123",
+              allowedUsers: [123],
+              chatId: 4242,
+            },
+          };
+          config.projects.api.triggers = {
+            tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
+          };
+          loadConfigMock.mockReturnValue(config);
+          readTelegramReplyTargetMock.mockReturnValue({
+            sessionId: "api-1",
+            projectId: "api",
+            sourceId: "chat",
+            chatId: 4242,
+            ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
+          });
+          mockAgentWaitingState(agent);
+          const sessions = createSessionStore();
+          sessions.set("api-1", {
+            id: "api-1",
+            project: "api",
+            agent,
+            agentSessionId: "session-uuid",
+            prompt: "the original task prompt",
+            branch: "api-1",
+            worktree: true,
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            tmuxSession: "api-1",
+            launchCommand: agentLaunchCommand(agent),
+            status: "stopped",
+            stopReason: "stale_timeout",
+            createdAt: "2026-03-18T10:00:00.000Z",
+            updatedAt: "2026-03-18T09:00:00.000Z",
+          });
+          listSessionsMock.mockReturnValue([]);
+          let relaunched = false;
+          tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+          // First createTmuxSession/waitForTmuxReady attempt is the native
+          // resume attempt; make it fail so relaunchSessionInPlace falls back
+          // to a fresh launch (its catch block only fires when a
+          // recoveryPlan existed, i.e. agentSessionId was present).
+          let createTmuxSessionCalls = 0;
+          createTmuxSessionMock.mockImplementation(async () => {
+            createTmuxSessionCalls += 1;
+            relaunched = true;
+          });
+          waitForTmuxReadyMock.mockImplementationOnce(async () => {
+            throw new Error("resume failed");
+          });
+          isProcessRunningInTmuxMock.mockImplementation(async () => true);
 
-        const service = await createDisposedSessionService();
-        const result = await service.send("api-1", { message: "the real trigger", queue: false });
+          const service = await createDisposedSessionService();
+          const result = await service.send("api-1", { message: "the real trigger", queue: false });
 
-        expect(result.status).toBe("running");
-        expect(createTmuxSessionCalls).toBe(2);
-        // The fresh-launch fallback's own createTmuxSession call carries no
-        // --resume/session-id continuation flag.
-        const fallbackLaunchCommand = createTmuxSessionMock.mock.calls[1]?.[0]?.launchCommand;
-        expect(fallbackLaunchCommand).not.toContain("resume");
-        // sendMessageToTmux is called twice: first the resent task context
-        // (so the fresh agent process is not blank), then the real
-        // triggering message — in that order.
-        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
-        expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
-        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
-        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
-          hasInbound
-            ? "Telegram: the user reads this session in Telegram."
-            : "Telegram: send when the user requests a Telegram message.",
-        );
-        if (!hasInbound) {
-          expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain(
-            "Your terminal output is invisible",
+          expect(result.status).toBe("running");
+          expect(createTmuxSessionCalls).toBe(2);
+          // The fresh-launch fallback's own createTmuxSession call carries no
+          // --resume/session-id continuation flag.
+          const fallbackLaunchCommand = createTmuxSessionMock.mock.calls[1]?.[0]?.launchCommand;
+          expect(fallbackLaunchCommand).not.toContain("resume");
+          // sendMessageToTmux is called twice: first the resent task context
+          // (so the fresh agent process is not blank), then the real
+          // triggering message — in that order.
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+          expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
+          expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+          expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
+            hasInbound
+              ? "Telegram: the user reads this session in Telegram."
+              : "Telegram: send when the user requests a Telegram message.",
           );
-        }
-        expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
-        expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
-      });
+          if (!hasInbound) {
+            expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain(
+              "Your terminal output is invisible",
+            );
+          }
+          expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
+          expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+        },
+      );
     });
 
     describe("context resend verification on a fresh-launch relaunch", () => {
