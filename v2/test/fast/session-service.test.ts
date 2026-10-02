@@ -14893,6 +14893,41 @@ describe("SessionService", () => {
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 
+  it.each(["task_started", "function_call"] as const)(
+    "keeps hookless codex working after a ten-minute-old %s rollout",
+    async (reason) => {
+      const now = new Date("2026-04-14T19:30:00.000Z");
+      vi.setSystemTime(now);
+      const timestampMs = now.getTime() - 10 * 60_000;
+      readSessionMock.mockReturnValue(runningSession({ agent: "codex" }));
+      readAgentHookStateMock.mockReturnValue(null);
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: {
+          state: "working",
+          timestamp: new Date(timestampMs).toISOString(),
+          timestampMs,
+          filePath: "/tmp/api-1/rollout.jsonl",
+          reason,
+        },
+        rateLimit: null,
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        expect((await service.get("api-1")).state).toBe("working");
+        const classified = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+        );
+        expect(classified).toHaveLength(1);
+        expect(classified[0]?.[1].message).toBe(`State: working (codex jsonl=${reason})`);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
   describe("session.state.classified dedupe", () => {
     function classifiedCalls(sessionId = "api-1") {
       return logSpurEventMock.mock.calls.filter(
@@ -15487,10 +15522,72 @@ describe("SessionService", () => {
     }
   });
 
+  it("blocks hookless codex queued delivery across polls until task_complete", async () => {
+    mockTimerPromisesSleepWithFakeTimers();
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const timestampMs = now.getTime() - 10 * 60_000;
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({
+        agent: "codex",
+        queuedMessages: { messages: ["please continue"], awaitingPrompt: false },
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(timestampMs).toISOString(),
+        timestampMs,
+        filePath: "/tmp/api-1/rollout.jsonl",
+        reason: "function_call",
+        callId: "call_1",
+      },
+      rateLimit: null,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      for (let poll = 0; poll < 3; poll += 1) {
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect((await service.get("api-1")).state).toBe("working");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["please continue"]);
+      }
+      expect(readCodexRolloutStateMock.mock.calls.length).toBeGreaterThan(3);
+
+      const completedAtMs = Date.now();
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: {
+          state: "waiting",
+          timestamp: new Date(completedAtMs).toISOString(),
+          timestampMs: completedAtMs,
+          filePath: "/tmp/api-1/rollout.jsonl",
+          reason: "task_complete",
+        },
+        rateLimit: null,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect((await service.get("api-1")).state).toBe("waiting");
+      await vi.advanceTimersByTimeAsync(32_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "please continue", {
+        interrupt: false,
+        agent: "codex",
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("keeps codex working while a long exec_command tool call is still pending", async () => {
     const now = new Date("2026-04-14T19:30:00.000Z");
     vi.setSystemTime(now);
-    const fourMinAgoMs = now.getTime() - 4 * 60_000;
+    const tenMinAgoMs = now.getTime() - 10 * 60_000;
     readSessionMock.mockReturnValue({
       id: "spur-exec",
       project: "sp",
@@ -15507,15 +15604,15 @@ describe("SessionService", () => {
     });
     readAgentHookStateMock.mockReturnValue({
       state: "working",
-      updatedAt: new Date(fourMinAgoMs).toISOString(),
+      updatedAt: new Date(tenMinAgoMs).toISOString(),
       hookEvent: "PreToolUse",
       turnId: "019efdf7",
     });
     readCodexRolloutStateMock.mockResolvedValue({
       rollout: {
         state: "working",
-        timestamp: new Date(fourMinAgoMs).toISOString(),
-        timestampMs: fourMinAgoMs,
+        timestamp: new Date(tenMinAgoMs).toISOString(),
+        timestampMs: tenMinAgoMs,
         filePath: "/tmp/spur-exec/rollout.jsonl",
         reason: "function_call",
         callId: "call_1",
