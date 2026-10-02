@@ -303,6 +303,7 @@ describe("Dashboard lifecycle reconciliation", () => {
   let posts: string[];
   let detailFailure: boolean;
   let otherPost: ReturnType<typeof deferredResponse>;
+  let nextDetail: ReturnType<typeof deferredResponse> | undefined;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -314,6 +315,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     nextList = undefined;
     post = deferredResponse();
     otherPost = deferredResponse();
+    nextDetail = undefined;
     posts = [];
     detailFailure = false;
     vi.spyOn(global, "fetch").mockImplementation((input) => {
@@ -334,6 +336,11 @@ describe("Dashboard lifecycle reconciliation", () => {
         return url.includes("api-other") ? otherPost.promise : post.promise;
       }
       const session = current.get(url.replace("/api/sessions/", ""));
+      if (nextDetail) {
+        const held = nextDetail;
+        nextDetail = undefined;
+        return held.promise;
+      }
       if (session) return json(detailFailure ? { error: "detail failed" } : session, detailFailure ? 500 : 200);
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -420,26 +427,128 @@ describe("Dashboard lifecycle reconciliation", () => {
     expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions[0]?.status).toBe(outcome.status);
   });
 
-  it("releases empty completion results and reconciles partial desk failures without reverting other rows", async () => {
-    const child: SpurSessionView = { ...source, id: "api-child", parentSessionId: source.id };
-    list = { ...list, sessions: [source, child] };
+  it("reconciles a partially failed grouped desk without reverting unrelated rows", async () => {
+    const anchor: SpurSessionView = { ...source, workspaceId: "desk-partial" };
+    const child: SpurSessionView = { ...anchor, id: "api-child", parentSessionId: source.id };
+    list = { ...list, sessions: [anchor, child] };
     current.set(child.id, child);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const { client } = render(<Dashboard />);
     await clickDone();
+    await waitFor(() => expect(screen.queryByText("Cross repo session")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: `Mark ${child.id} as done` })).not.toBeInTheDocument();
+    expect(window.confirm).toHaveBeenCalledWith("Complete this desk? 1 subagent on this checkout will be ended.");
     const addition: SpurSessionView = { ...source, id: "api-new", worktreePath: "/tmp/new", slots: { ...source.slots, title: "New row" } };
-    list = { ...list, sessions: [source, child, addition] };
+    list = { ...list, sessions: [anchor, child, addition] };
     await refetch(client);
-    current.set(source.id, { ...source, status: "completed" });
+    const failed: SpurSessionView = { ...child, status: "errored", state: "error", slots: { ...child.slots, title: "Current failed member" } };
+    current.set(source.id, { ...anchor, status: "completed" });
+    current.set(child.id, failed);
+    const reconciliation = deferredResponse();
+    nextList = reconciliation;
     await act(async () => { post.resolve(new Response(JSON.stringify({ error: "partial failure" }), { status: 500 })); });
     await waitFor(() => expect(screen.getByText("partial failure")).toBeInTheDocument());
     expect(doneButton()).not.toBeInTheDocument();
     expect(screen.getByText("New row")).toBeInTheDocument();
-    expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions.find((row) => row.id === child.id)?.status).toBe("stopped");
+    expect(screen.getByText("Current failed member")).toBeInTheDocument();
+    expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions.find((row) => row.id === child.id)?.status).toBe("errored");
+    reconciliation.resolve(new Response(JSON.stringify({ ...list, sessions: [{ ...anchor, status: "completed" }, failed, addition] })));
+  });
+
+  it("protects returned desk members absent from the initial reservation", async () => {
+    const anchor: SpurSessionView = { ...source, workspaceId: "desk-added" };
+    const added: SpurSessionView = { ...anchor, id: "api-member", slots: { ...source.slots, title: "Added member" } };
+    list = { ...list, sessions: [anchor] };
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    list = { ...list, sessions: [anchor, added] };
+    await refetch(client);
+    expect(screen.getByText("Added member")).toBeInTheDocument();
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [anchor.id, added.id] }))); });
+    await refetch(client);
+    expect(screen.queryByText("Added member")).not.toBeInTheDocument();
+    expect(doneButton()).not.toBeInTheDocument();
+    list = { ...list, sessions: [{ ...anchor, status: "completed" }, { ...added, status: "completed" }] };
+    await refetch(client);
+    list = { ...list, sessions: [anchor, added] };
+    await refetch(client);
+    expect(doneButton()).toBeInTheDocument();
+  });
+
+  it.each(["subset", "empty", "omitted"] as const)("releases every reserved desk ID after a %s success outcome", async (outcome) => {
+    const anchor: SpurSessionView = { ...source, deskId: "desk-outcome" };
+    const child: SpurSessionView = { ...anchor, id: "api-child", parentSessionId: source.id };
+    list = { ...list, sessions: [anchor, child] };
+    current.set(anchor.id, anchor);
+    current.set(child.id, child);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    await waitFor(() => expect(doneButton()).not.toBeInTheDocument());
+    if (outcome === "omitted") {
+      list = { ...list, sessions: [anchor] };
+      await refetch(client);
+    }
+    const completedIds = outcome === "empty" ? [] : [child.id];
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds }))); });
+    await refetch(client);
+    expect(doneButton()).toBeInTheDocument();
+    if (outcome !== "empty") {
+      list = { ...list, sessions: [anchor, { ...child, status: "completed" }] };
+      await refetch(client);
+    }
+    list = { ...list, sessions: [anchor, child] };
+    await refetch(client);
     post = deferredResponse();
-    fireEvent.click(await screen.findByRole("button", { name: `Mark ${child.id} as done` }));
-    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [] }))); });
-    await waitFor(() => expect(screen.getByRole("button", { name: `Mark ${child.id} as done` })).toBeInTheDocument());
+    await clickDone();
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(window.confirm).toHaveBeenLastCalledWith("Complete this desk? 1 subagent on this checkout will be ended.");
+  });
+
+  it("rejects intersecting desk actions while reconciliation awaits current detail", async () => {
+    const anchor: SpurSessionView = { ...source, workspaceId: "desk-intersection" };
+    const child: SpurSessionView = { ...anchor, id: "api-child", parentSessionId: source.id };
+    list = { ...list, sessions: [anchor, child] };
+    current.set(anchor.id, anchor);
+    current.set(child.id, child);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { client } = render(<Dashboard />);
+    const anchorButton = await screen.findByRole("button", { name: `Mark ${anchor.id} as done` });
+    fireEvent.click(anchorButton);
+    const added: SpurSessionView = { ...anchor, id: "api-new-member", lastActivityAt: "2026-08-01T12:00:00.000Z" };
+    list = { ...list, sessions: [anchor, child, added] };
+    await refetch(client);
+    const intersecting = screen.getByRole("button", { name: `Mark ${added.id} as done` });
+    fireEvent.click(intersecting);
+    expect(posts).toHaveLength(1);
+    const detail = deferredResponse();
+    nextDetail = detail;
+    await act(async () => { post.resolve(new Response(JSON.stringify({ error: "failed" }), { status: 500 })); });
+    fireEvent.click(intersecting);
+    fireEvent.click(intersecting);
+    expect(posts).toHaveLength(1);
+    detail.resolve(new Response(JSON.stringify(anchor)));
+    await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
+    post = deferredResponse();
+    fireEvent.click(screen.getByRole("button", { name: `Mark ${added.id} as done` }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+  });
+
+  it("keeps a different pending owner when an older completion returns its ID", async () => {
+    const other: SpurSessionView = { ...source, id: "api-other", workspaceId: "other-desk", slots: { ...source.slots, title: "Other desk" } };
+    list = { ...list, sessions: [source, other] };
+    current.set(other.id, other);
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    fireEvent.click(screen.getByRole("button", { name: `Mark ${other.id} as done` }));
+    list = { ...list, sessions: [source, { ...other, status: "completed" }] };
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [source.id, other.id] }))); });
+    await refetch(client);
+    list = { ...list, sessions: [source, other] };
+    await refetch(client);
+    expect(screen.queryByRole("button", { name: `Mark ${other.id} as done` })).not.toBeInTheDocument();
+    await act(async () => { otherPost.resolve(new Response(JSON.stringify({ error: "other failed" }), { status: 500 })); });
+    await waitFor(() => expect(screen.getByRole("button", { name: `Mark ${other.id} as done` })).toBeInTheDocument());
   });
 
   it("rejects repeated attempts and releases failed reconciliation for retry", async () => {

@@ -249,9 +249,10 @@ function completedIdsFromResponse(value: unknown): string[] {
 type DashboardLifecycleTransition = {
   owner: symbol;
   phase: "pending" | "settled";
-  action: "complete" | "restore";
-  session: SpurSessionView;
-};
+} & (
+  | { action: "complete" }
+  | { action: "restore"; session: SpurSessionView }
+);
 
 function applyDashboardLifecycleTransitions(
   sessions: readonly SpurSessionView[],
@@ -2223,12 +2224,10 @@ export function Dashboard() {
     if (sessions.some((session) => transitionsRef.current.has(session.id))) return null;
     const owner = Symbol(action);
     for (const session of sessions) {
-      transitionsRef.current.set(session.id, {
-        owner, action, phase: "pending",
-        session: action === "restore"
-          ? { ...session, status: "running", state: "working", runtimeAlive: true }
-          : session,
-      });
+      const pending = { owner, phase: "pending" as const };
+      transitionsRef.current.set(session.id, action === "restore"
+        ? { ...pending, action, session: { ...session, status: "running", state: "working", runtimeAlive: true } }
+        : { ...pending, action });
     }
     publishTransitions();
     return owner;
@@ -2253,7 +2252,7 @@ export function Dashboard() {
       } finally {
         if (transitionsRef.current.get(id)?.owner === owner) {
           if (reconciled && (reconciled.status === "completed" || reconciled.status === "killed")) {
-            transitionsRef.current.set(id, { ...transition, action: "complete", phase: "settled", session: reconciled });
+            transitionsRef.current.set(id, { owner, action: "complete", phase: "settled" });
           } else {
             transitionsRef.current.delete(id);
           }
@@ -2281,7 +2280,7 @@ export function Dashboard() {
       await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
       const transition = transitionsRef.current.get(session.id);
       if (transition?.owner === owner) {
-        transitionsRef.current.set(session.id, { ...transition, phase: "settled", session: restored });
+        transitionsRef.current.set(session.id, { owner, action: "restore", phase: "settled", session: restored });
         publishTransitions();
       }
     } catch (restoreError) {
@@ -2358,7 +2357,9 @@ export function Dashboard() {
       await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
       for (const id of completedIds) {
         const transition = transitionsRef.current.get(id);
-        if (transition?.owner === owner) transitionsRef.current.set(id, { ...transition, phase: "settled" });
+        if (!transition || transition.owner === owner) {
+          transitionsRef.current.set(id, { owner, action: "complete", phase: "settled" });
+        }
       }
       publishTransitions();
       await reconcileAttempt(owner, [...activeDeskIds].filter((id) => !completedIds.includes(id)));
