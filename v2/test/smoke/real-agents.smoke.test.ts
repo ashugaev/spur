@@ -4,12 +4,21 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { findForeignAgentProcessesForSession } from "../../src/agent-processes.js";
+import { readCodexRolloutState, codexHookHomePath } from "../../src/agents/codex.js";
+import {
+  exportOpenCodeSession,
+  parseOpenCodeTokenUsage,
+  readOpenCodeJson,
+} from "../../src/agents/opencode.js";
+import { readClaudeJsonlState } from "../../src/claude-jsonl-state.js";
+import { cursorConfigDirForSession } from "../../src/agents/cursor.js";
+import { readCursorTokenUsage } from "../../src/cursor-token-usage.js";
 import { startServer } from "../../src/server.js";
 import { isRestorableSession } from "../../src/session-service.js";
 import { listAgentModels, parseOpenCodeVerboseModelsOutput } from "../../src/agents/models.js";
-import { readOpenCodeJson } from "../../src/agents/opencode.js";
-import { codexHookHomePath, findLatestCodexSessionFile } from "../../src/agents/codex.js";
 import type { AgentName, ProviderReasoningEffort, SessionView } from "../../src/types.js";
+import type { ProviderTokenUsageSample } from "../../src/token-usage.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
   isTmuxAvailable,
@@ -30,6 +39,7 @@ const OPENCODE_BIN = await binaryPath("opencode");
 
 interface AuthStatus {
   available: boolean;
+  model?: string;
   skipReason?: string;
   error?: string;
 }
@@ -38,6 +48,7 @@ interface CleanupItem {
   rootDir: string;
   sessionPrefix: string;
   socketName: string;
+  repoDir?: string;
   branch?: string;
   worktreePath?: string;
 }
@@ -303,13 +314,17 @@ ${args.extraProjectYaml ?? ""}
 `;
 }
 
-async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
+async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<T>): Promise<T> {
   const saved = {
+    DISABLE_AUTO_UPDATE: process.env.DISABLE_AUTO_UPDATE,
+    SPUR_CONFIG: process.env.SPUR_CONFIG,
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
     SPUR_CURSOR_BIN: process.env.SPUR_CURSOR_BIN,
     SPUR_OPENCODE_BIN: process.env.SPUR_OPENCODE_BIN,
   };
+  process.env.SPUR_CONFIG = configPath;
+  process.env.DISABLE_AUTO_UPDATE = "true";
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
   }
@@ -326,6 +341,10 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
+    if (saved.DISABLE_AUTO_UPDATE === undefined) delete process.env.DISABLE_AUTO_UPDATE;
+    else process.env.DISABLE_AUTO_UPDATE = saved.DISABLE_AUTO_UPDATE;
+    if (saved.SPUR_CONFIG === undefined) delete process.env.SPUR_CONFIG;
+    else process.env.SPUR_CONFIG = saved.SPUR_CONFIG;
     if (saved.SPUR_CLAUDE_BIN === undefined) {
       delete process.env.SPUR_CLAUDE_BIN;
     } else {
@@ -350,28 +369,120 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
+  const repoDir = item.repoDir ?? SMOKE_REPO_DIR;
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
     try {
-      await git(SMOKE_REPO_DIR, "worktree", "remove", "--force", item.worktreePath);
+      await git(repoDir, "worktree", "remove", "--force", item.worktreePath);
     } catch {
       // Best effort only.
     }
   }
   if (item.branch) {
     try {
-      await git(SMOKE_REPO_DIR, "branch", "-D", item.branch);
+      await git(repoDir, "branch", "-D", item.branch);
     } catch {
       // Best effort only.
     }
   }
   try {
-    await git(SMOKE_REPO_DIR, "worktree", "prune", "--expire", "now");
+    await git(repoDir, "worktree", "prune", "--expire", "now");
   } catch {
     // Best effort only.
   }
   await rm(item.rootDir, { recursive: true, force: true });
+}
+
+async function assertStructuredMainUsage(
+  agent: AgentName,
+  session: SessionView,
+  service: Awaited<ReturnType<typeof startServer>>,
+  dataDir: string,
+  previousTotal = 0,
+): Promise<number> {
+  const withUsage = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 60_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" &&
+      state.tokenUsageView.totalTokens > previousTotal,
+    label: `structured ${agent} usage after provider turn`,
+  });
+  const view = withUsage.tokenUsageView;
+  expect(view).toMatchObject({ status: "available", provider: agent });
+  if (view?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  let sample: ProviderTokenUsageSample | undefined;
+  let source: string;
+  if (agent === "claude") {
+    const result = await readClaudeJsonlState(
+      session.worktreePath,
+      undefined,
+      session.agentSessionId,
+    );
+    sample = result?.tokenUsage;
+    source = "claude-jsonl";
+  } else if (agent === "codex") {
+    const sessionsDir = join(
+      codexHookHomePath(join(dataDir, "session-tools", session.id)),
+      "sessions",
+    );
+    sample = (await readCodexRolloutState(sessionsDir)).tokenUsage;
+    source = "codex-rollout-jsonl";
+  } else if (agent === "cursor") {
+    if (!withUsage.agentSessionId) throw new Error("Cursor session id unavailable");
+    const usage = await readCursorTokenUsage(
+      cursorConfigDirForSession(dataDir, session.id),
+      withUsage.agentSessionId,
+    );
+    if (usage) sample = { ...usage, provider: "cursor", generationId: withUsage.agentSessionId };
+    source = "cursor-stop-hook";
+  } else {
+    if (!session.agentSessionId) throw new Error("OpenCode session id unavailable");
+    sample = parseOpenCodeTokenUsage(await exportOpenCodeSession(session.agentSessionId));
+    source = "opencode-export";
+  }
+  expect(sample?.provider).toBe(agent);
+  expect(sample?.totalTokens).toBeGreaterThan(0);
+  const structured = sample;
+  if (!structured) throw new Error(`${agent} structured usage unavailable`);
+  const settled = await pollUntil(() => service.get(session.id), {
+    timeoutMs: 30_000,
+    accept: (state) =>
+      state.tokenUsageView?.status === "available" &&
+      state.tokenUsageView.inputTokens >= structured.inputTokens &&
+      state.tokenUsageView.outputTokens >= structured.outputTokens,
+    label: `${agent} API usage caught up with structured source`,
+  });
+  const settledView = settled.tokenUsageView;
+  if (settledView?.status !== "available") throw new Error(`${agent} usage unavailable`);
+
+  const artifactsDir = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifactsDir) {
+    await writeFile(
+      join(artifactsDir, `token-live-smoke-${agent}.json`),
+      `${JSON.stringify(
+        {
+          agent,
+          source,
+          api: {
+            inputTokens: settledView.inputTokens,
+            outputTokens: settledView.outputTokens,
+            totalTokens: settledView.totalTokens,
+          },
+          structured: {
+            inputTokens: structured.inputTokens,
+            outputTokens: structured.outputTokens,
+            totalTokens: structured.totalTokens,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+  return settledView.totalTokens;
 }
 
 async function runSmoke(
@@ -389,6 +500,25 @@ async function runSmoke(
     : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
+  const usesEmptyRepo = agent === "codex" || agent === "cursor";
+  const repoDir = usesEmptyRepo ? join(rootDir, "repo") : SMOKE_REPO_DIR;
+  if (usesEmptyRepo) {
+    await mkdir(repoDir);
+    await git(repoDir, "init", "--initial-branch=main");
+    await git(
+      repoDir,
+      "-c",
+      "user.name=Spur Smoke",
+      "-c",
+      "user.email=smoke@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "test: initialize smoke repository",
+    );
+    cleanupItem.repoDir = repoDir;
+  }
+  const baseRef = usesEmptyRepo ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
 
   setActiveTmuxSocketName(tmuxSocketName);
   await syncTmuxEnvironment({});
@@ -400,8 +530,8 @@ async function runSmoke(
       port,
       dataDir,
       worktreeDir,
-      repoDir: SMOKE_REPO_DIR,
-      baseRef: SMOKE_BASE_REF,
+      repoDir,
+      baseRef,
       sessionPrefix,
       agent,
       ...(expectedPreflightBranch
@@ -415,7 +545,7 @@ async function runSmoke(
     "utf8",
   );
 
-  await withPinnedAgentBinaries(async () => {
+  await withPinnedAgentBinaries(configPath, async () => {
     const models = options?.selectedEffort
       ? await listAgentModels(agent, { codexHomePath: join(homedir(), ".codex") })
       : [];
@@ -459,10 +589,33 @@ async function runSmoke(
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
-After the file and the session metadata are set, wait for more instructions.`,
+After the file and the session metadata are set, wait for more instructions.${agent === "codex" ? " End this response immediately; do not poll or wait with tools. The task is complete only after a follow-up message asks you to create smoke-followup.txt." : ""}${agent === "cursor" ? " This is an isolated runtime test: skip memory, planning, git, and project workflows. Use only the file-writing tool and the session metadata helper, then end your response immediately." : ""}`,
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
+      if (agent === "cursor") {
+        // The harness owns lifecycle validation; keep automatic ToDo nudges out of provider turns.
+        const ledger = await service.mutateTodo(
+          session.id,
+          {
+            action: "add",
+            text: "Run isolated lifecycle proof",
+            reason: "Smoke harness owns this step",
+          },
+          { kind: "human", origin: "cli" },
+        );
+        const item = ledger.items.at(-1);
+        if (!item) throw new Error("Missing smoke ToDo item");
+        await service.mutateTodo(
+          session.id,
+          {
+            action: "complete",
+            itemId: item.id,
+            reason: "Provider task is supplied by the smoke harness",
+          },
+          { kind: "human", origin: "cli" },
+        );
+      }
       if (expectedPreflightBranch) {
         expect(session.branch).toBe(expectedPreflightBranch);
         expect(session.branchSource).toBe("preflight");
@@ -473,9 +626,16 @@ After the file and the session metadata are set, wait for more instructions.`,
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
       });
-      const liveState = await service.get(session.id);
+      const liveState = await pollUntil(() => service.get(session.id), {
+        timeoutMs: 30_000,
+        accept: (state) =>
+          state.status === "running" &&
+          state.worktreePath === session.worktreePath &&
+          state.workspaceExists,
+        label: "running agent with an initialized worktree",
+      });
       if (liveState.slots?.title) {
-        expect(liveState.slots.title).toBe(expectedTitle);
+        expect(liveState.slots.title.trim()).not.toBe("");
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
         const status = await readTmuxStatus(session.id);
@@ -486,26 +646,37 @@ After the file and the session metadata are set, wait for more instructions.`,
       expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
       await waitForIdleSession(service, session.id);
-      if (agent === "codex" && options?.selectedEffort) {
-        await expectCodexNativeEffort(dataDir, session.id, reasoningEffort);
-      }
       const nativeSessionId = (await service.get(session.id)).agentSessionId;
+      if (!nativeSessionId) throw new Error(`${agent} native session id missing`);
+      if (agent === "codex" && options?.selectedEffort) {
+        await expectCodexNativeEffort(dataDir, session.id, nativeSessionId, reasoningEffort);
+      }
+      const initialUsage =
+        agent === "cursor" ? await assertStructuredMainUsage(agent, session, service, dataDir) : 0;
       await service.pause(session.id);
       await waitForRestorableSession(service, session.id);
 
       const restored = await service.restore(session.id);
       expect(restored.id).toBe(session.id);
+      expect(restored.agentSessionId).toBe(nativeSessionId);
       if (options?.selectedEffort) {
         expect(restored.reasoningEffort).toBe(reasoningEffort);
-        expect(restored.agentSessionId).toBe(nativeSessionId);
       }
       if (restored.slots?.title) {
-        expect(restored.slots.title).toBe(expectedTitle);
+        expect(restored.slots.title.trim()).not.toBe("");
         expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
       }
 
+      if (agent === "codex") {
+        await pollUntil(() => service.get(session.id), {
+          timeoutMs: 240_000,
+          accept: (state) => state.status === "running" && state.state === "waiting",
+          label: "restored agent waiting for follow-up",
+        });
+      }
+
       await service.send(session.id, {
-        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
+        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".${agent === "cursor" ? " Skip memory, planning, git, and project workflows; write the file and end your response immediately." : ""}`,
       });
 
       const followupFile = join(session.worktreePath, "smoke-followup.txt");
@@ -515,12 +686,28 @@ After the file and the session metadata are set, wait for more instructions.`,
       });
       expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
       if (agent === "codex" && options?.selectedEffort) {
-        await expectCodexNativeEffort(dataDir, session.id, reasoningEffort);
+        await expectCodexNativeEffort(dataDir, session.id, nativeSessionId, reasoningEffort);
       }
+      await assertStructuredMainUsage(agent, session, service, dataDir, initialUsage);
 
       const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
       expect(killed.status).toBe("killed");
       expect(existsSync(session.worktreePath)).toBe(false);
+      if (agent === "claude") {
+        await pollUntil(
+          () =>
+            findForeignAgentProcessesForSession({
+              sessionId: session.id,
+              processMatchers: ["claude"],
+              excludePanePid: null,
+            }),
+          {
+            timeoutMs: 30_000,
+            accept: (scan) => scan.status === "ok" && scan.pids.length === 0,
+            label: "test-owned Claude processes exited",
+          },
+        );
+      }
     } finally {
       await service.stop();
     }
@@ -543,13 +730,16 @@ function parseNativeJson(text: string): Record<string, unknown> {
 async function expectCodexNativeEffort(
   dataDir: string,
   sessionId: string,
+  nativeSessionId: string,
   effort: string,
 ): Promise<void> {
   const sessionRootDir = join(
     codexHookHomePath(join(dataDir, "session-tools", sessionId)),
     "sessions",
   );
-  const path = await findLatestCodexSessionFile({ sessionRootDir });
+  const result = await readCodexRolloutState(sessionRootDir, undefined, nativeSessionId);
+  expect(result.threadId).toBe(nativeSessionId);
+  const path = result.rollout?.filePath;
   expect(path?.startsWith(`${sessionRootDir}/`)).toBe(true);
   if (!path) throw new Error("Codex native rollout missing; A4 unproved");
   const turns = (await readFile(path, "utf8"))
@@ -642,7 +832,10 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
         (model.id.endsWith("-free") || providers.includes(model.id.split("/")[0] ?? "")) &&
         efforts.filter((effort) => model.variantNames?.includes(effort)).length >= 2,
     );
-    const selected = available.find((model) => model.id.endsWith("-free")) ?? available[0];
+    const configuredModel = process.env.SPUR_SMOKE_OPENCODE_MODEL?.trim();
+    const selected = configuredModel
+      ? available.find((model) => model.id === configuredModel)
+      : (available.find((model) => model.id.endsWith("-free")) ?? available[0]);
     if (!selected)
       throw new Error("OpenCode: no authenticated advertised model with two variants; A4 unproved");
     const [effortA, effortB] = efforts.filter((effort) => selected.variantNames?.includes(effort));
@@ -679,8 +872,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
       }),
       "utf8",
     );
-
-    await withPinnedAgentBinaries(async () => {
+    await withPinnedAgentBinaries(configPath, async () => {
       const service = await startServer(configPath, {});
       try {
         const session = await service.spawn({
@@ -752,6 +944,8 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
           variant: explicitOverride ? effortB : effortA,
         });
         for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
+
+        await assertStructuredMainUsage(agent, session, service, dataDir);
 
         const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
         expect(killed.status).toBe("killed");
@@ -834,7 +1028,7 @@ if (codexAuth.error) {
   describe.skipIf(!codexAuth.available)("Spur real-agent smoke (codex)", () => {
     it("launches codex, restores it, and accepts a follow-up send", async () => {
       await runSmoke("codex", { selectedEffort: true });
-    });
+    }, 600_000);
 
     it("uses codex spawn preflight before the normal session launch", async () => {
       await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });

@@ -592,17 +592,16 @@ function isClosedState(state: SessionView["state"]): boolean {
 
 /**
  * True when a queued send to this session is dropped instead of delivered.
- * A live server-error wedge and a stop caused by the memory hold are exempt:
- * the hold's own pause must not destroy the batch it exists to cover.
+ * A live server-error wedge and a stop written by the memory shed are exempt:
+ * the shed's own pause must not destroy the batch it exists to cover.
  */
 export function dropsQueuedSend(
-  session: Pick<SessionView, "state" | "status">,
-  memoryHeld: boolean,
+  session: Pick<SessionView, "state" | "status" | "stopReason">,
 ): boolean {
   return (
     isClosedState(session.state) &&
     !isLiveServerErrorWedge(session) &&
-    !(session.state === "stopped" && memoryHeld)
+    !(session.state === "stopped" && session.stopReason === "memory_shed")
   );
 }
 
@@ -1310,12 +1309,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    // The memory shed pauses a session by writing status "stopped", which
-    // isClosedState treats as closed. Without this exemption the shed's own
-    // pausing would destroy the batch during the very episode this hold
-    // exists to cover; a session still "stopped" once the hold clears falls
-    // back to the ordinary closed_session drop below.
-    if (dropsQueuedSend(session, memoryHoldEngaged())) {
+    // The memory shed pauses a session by writing status "stopped" with
+    // stopReason "memory_shed"; dropsQueuedSend exempts exactly that marker so
+    // the shed's own pause does not destroy the batch.
+    if (dropsQueuedSend(session)) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1508,9 +1505,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       scheduleInteractiveFlush(queueKey, batch, session);
     }
 
-    // Same shed-pause exemption as flushPending: while the memory hold is
-    // engaged a "stopped" session is deferred, not dropped.
-    if (dropsQueuedSend(session, memoryHoldEngaged())) {
+    // Same shed-pause exemption as flushPending: a memory_shed session is
+    // deferred, not dropped.
+    if (dropsQueuedSend(session)) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",

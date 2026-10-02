@@ -32,6 +32,7 @@ import {
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
+import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
   persistCursorSubmitBaseline,
@@ -616,6 +617,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (cursorConfigDir) {
+        ensureCursorTokenUsageHook();
+      }
       if (restrictWrites && cursorConfigDir) {
         await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
       }
