@@ -8468,8 +8468,13 @@ export class SessionService {
               await refreshTmuxFleetSnapshot();
               freshFleetReadDone = true;
             }
-            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName);
-            if (!otherAlive && (await isHostPortFree(port))) {
+            const otherPresence = await getSidecarTmuxPresence(otherOwnerId, scName);
+            if (
+              !otherPresence.present &&
+              !otherPresence.unresponsive &&
+              !otherPresence.diagnostic &&
+              (await isHostPortFree(port))
+            ) {
               // The one write in this scan pass that escapes the plan/apply
               // split below (:6890): it writes liveSession's record
               // immediately, before this attempt's own reservation is known
@@ -8734,6 +8739,7 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     if (args.clearPort === undefined) {
       const cached = await this.sidecarStartConflictGate(args.session.id, args.sidecarName);
@@ -8751,6 +8757,7 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       // Mutated only while the lock is held: the only racer is
@@ -8781,11 +8788,14 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
     // Presence AND unresponsiveness off one read each: a timeout-killed probe
     // reports "absent"/"dead", and acting on that reaps a healthy sidecar.
-    const presence = await getSidecarTmuxPresence(args.session.id, args.sidecarName);
+    const presence = await getSidecarTmuxPresence(args.session.id, args.sidecarName, {
+      fresh: true,
+    });
     const alive = presence.present;
     // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
     // "session exists" — that pane's escapee tree can hold a reserved port
@@ -8793,7 +8803,7 @@ export class SessionService {
     const panePresence = alive ? await getTmuxPanePresence(tmuxName, { fresh: true }) : null;
     // Unconditional: reapSidecarByName kills by tmux name, destructive with
     // or without a recorded identity.
-    if (panePresence?.dead && panePresence.unresponsive) {
+    if (panePresence?.unresponsive || panePresence?.diagnostic) {
       throw new SidecarProbeUnresponsiveError(
         `Sidecar ${args.sidecarName} pane state is unreadable (tmux did not answer); retry shortly`,
       );
@@ -8827,7 +8837,7 @@ export class SessionService {
       // identity, so reapRecordedIdentity and clearSidecarProcEntry below are
       // both no-ops there — refusing it would turn a harmless launch into a
       // hard failure. Thrown before any write.
-      if (presence.unresponsive && owner && identity) {
+      if ((presence.unresponsive || presence.diagnostic) && owner && identity) {
         throw new SidecarProbeUnresponsiveError(
           `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
         );
@@ -8969,6 +8979,7 @@ export class SessionService {
     // a `let`: control-flow analysis does not follow the callback's write and
     // reads a captured `let` as still-false in the catch.
     const launch = { paneCreated: false };
+    let startedSession: SessionRecord;
     try {
       await createTmuxSidecarSession({
         sessionId: reservedSession.id,
@@ -9046,7 +9057,7 @@ export class SessionService {
         args.sidecar,
         updated,
       );
-      return readSession(this.config.dataDir, updated.id) ?? updated;
+      startedSession = readSession(this.config.dataDir, updated.id) ?? updated;
     } catch (error) {
       // Keyed on whether `new-session` actually created the session, never on
       // the pre-launch probe. The only thing that ever justified skipping is
@@ -9098,6 +9109,8 @@ export class SessionService {
       }
       throw error;
     }
+    args.onStarted?.();
+    return startedSession;
   }
 
   // Pre-launch pass for sidecars that must exist before the agent's launch
@@ -9392,7 +9405,6 @@ export class SessionService {
       // every call site) get updated — a sibling starting an anchor-owned
       // sidecar must get its own record back unchanged, never the anchor's.
       const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
-      const wasAlive = await sidecarTmuxAlive(owner.id, sidecarName);
       const updated = await this.startSidecarInternal({
         session: owner,
         project: args.project,
@@ -9400,12 +9412,10 @@ export class SessionService {
         sidecar,
         sidecarDepth: args.sidecarDepth,
         ...(clearPort !== undefined ? { clearPort } : {}),
+        onStarted: () => args.onStarted(sidecarName, sidecar),
       });
       if (owner.id === currentSession.id) {
         currentSession = updated;
-      }
-      if (!wasAlive) {
-        args.onStarted(sidecarName, sidecar);
       }
     };
 

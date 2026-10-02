@@ -288,7 +288,7 @@ projects:
     // instance, so the refusal left nothing behind (no conflict-gate entry,
     // no cleared identity) for the retry to trip over.
     const retried = await startSidecar(session.id, "dev");
-    expect(retried.status).toBe(200);
+    expect(retried.status, retried.body).toBe(200);
     expect(processAlive(pid)).toBe(true);
     expect(await readPid(session, "dev")).toBe(pid);
   });
@@ -389,7 +389,7 @@ projects:
 
       const calls = await callsLog();
       expect(calls).toContain("HANG list-windows");
-      expect(calls).toContain(`HANG ${postStep}`);
+      expect(calls, `${failed.body}\n${calls.join("\n")}`).toContain(`HANG ${postStep}`);
       expect(calls.indexOf("new-session")).toBeGreaterThanOrEqual(0);
       expect(calls.indexOf("new-session")).toBeLessThan(calls.indexOf(`HANG ${postStep}`));
       expect.soft(failed.status, "launch failure surfaces").toBeGreaterThanOrEqual(400);

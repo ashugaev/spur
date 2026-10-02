@@ -291,10 +291,15 @@ const getTmuxPanePresenceMock = vi.fn(
 );
 // Same delegation for the sidecar-name composition: existing sidecar-start
 // tests keep driving this call site through sidecarTmuxAliveMock.
-const getSidecarTmuxPresenceMock = vi.fn(async (sessionId: string, sidecarName: string) => ({
-  present: await sidecarTmuxAliveMock(sessionId, sidecarName),
-  unresponsive: false,
-}));
+const getSidecarTmuxPresenceMock = vi.fn(
+  async (
+    sessionId: string,
+    sidecarName: string,
+  ): Promise<{ present: boolean; unresponsive: boolean; diagnostic?: string }> => ({
+    present: await sidecarTmuxAliveMock(sessionId, sidecarName),
+    unresponsive: false,
+  }),
+);
 const waitForTmuxReadyMock = vi.fn();
 const createWorktreeMock = vi.fn();
 const findWorktreePathForBranchMock = vi.fn();
@@ -25405,6 +25410,128 @@ describe("SessionService", () => {
           .map(([, entry]) => entry)
           .filter((entry) => entry.event === "session.sidecar.launch_reap_skipped");
       }
+
+      it.each([true, false])(
+        "keeps a foreign reservation unavailable only while its probe is unknown %s",
+        async (unknown) => {
+          const config = devSidecarProjectConfig();
+          const http = config.projects.api.sidecars.dev.ports?.http;
+          if (http) http.end = 4101;
+          loadConfigMock.mockReturnValue(config);
+          const sessions = seedApiOne({ identity: false, ports: false });
+          const own = sessions.get("api-1");
+          if (!own) throw new Error("missing fixture");
+          sessions.set("api-2", {
+            ...own,
+            id: "api-2",
+            tmuxSession: "api-2",
+            sidecarPorts: { dev: { SPUR_RESERVED_PORT_DEV: 4100 } },
+          });
+          getSidecarTmuxPresenceMock.mockImplementation(async (id) => ({
+            present: false,
+            unresponsive: false,
+            ...(id === "api-2" && unknown ? { diagnostic: "tmux probe failed" } : {}),
+          }));
+          const { SessionService } = await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          await service.startSidecar("api-1", "dev");
+          expect(sessions.get("api-1")?.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV).toBe(
+            unknown ? 4101 : 4100,
+          );
+          expect(sessions.get("api-2")?.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV).toBe(
+            unknown ? 4100 : undefined,
+          );
+          expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-2--dev");
+        },
+      );
+
+      it.each([true, false])(
+        "routes a diagnostic session probe through ownership handling with recorded identity %s",
+        async (identity) => {
+          loadConfigMock.mockReturnValue(devSidecarProjectConfig({ ports: false }));
+          const sessions = seedApiOne({ identity, ports: false });
+          const before = structuredClone(sessions.get("api-1"));
+          getSidecarTmuxPresenceMock.mockResolvedValue({
+            present: false,
+            unresponsive: false,
+            diagnostic: "tmux list-windows failed: permission denied",
+          });
+          sidecarTmuxAliveMock.mockImplementation(async () => {
+            if (createTmuxSidecarSessionMock.mock.calls.length === 0) {
+              throw new Error("Boolean probe must not precede ownership");
+            }
+            return true;
+          });
+          const { SessionService, SidecarProbeUnresponsiveError } =
+            await loadSessionServiceModule();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+          if (identity) {
+            await expect(service.startSidecar("api-1", "dev")).rejects.toBeInstanceOf(
+              SidecarProbeUnresponsiveError,
+            );
+            expect(sessions.get("api-1")).toEqual(before);
+            expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+          } else {
+            await service.startSidecar("api-1", "dev");
+            expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+            expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+              "session.sidecar.started",
+            );
+          }
+          expect(getSidecarTmuxPresenceMock).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it("refuses a diagnostic pane probe before reaping a recorded sidecar", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig({ ports: false }));
+        const sessions = seedApiOne({ identity: true, ports: false });
+        const before = structuredClone(sessions.get("api-1"));
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+        getTmuxPanePresenceMock.mockResolvedValue({
+          dead: false,
+          unresponsive: false,
+          diagnostic: "tmux list-panes failed: permission denied",
+        });
+        const { SessionService, SidecarProbeUnresponsiveError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await expect(service.startSidecar("api-1", "dev")).rejects.toBeInstanceOf(
+          SidecarProbeUnresponsiveError,
+        );
+        expect(sessions.get("api-1")?.sidecarProcs).toEqual(before?.sidecarProcs);
+        expect(sessions.get("api-1")?.sidecarPorts).toEqual(before?.sidecarPorts);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      });
+
+      it("does not report a new start for an already-live sidecar", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig({ ports: false }));
+        seedApiOne({ identity: true, ports: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+        getTmuxPanePresenceMock.mockResolvedValue({ dead: false, unresponsive: false });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.startSidecar("api-1", "dev");
+        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "session.sidecar.started",
+        );
+      });
+
+      it("does not reap a successful launch when its started-event logger throws", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig({ ports: false }));
+        seedApiOne({ identity: false, ports: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+        logSpurEventMock.mockImplementation((_dataDir, entry) => {
+          if (entry.event === "session.sidecar.started") throw new Error("logger unavailable");
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await expect(service.startSidecar("api-1", "dev")).rejects.toThrow("logger unavailable");
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapSkippedEvents()).toHaveLength(0);
+      });
 
       // AC1 + AC3: the recorded identity survives the refusal, and an
       // immediate retry (no timer advance, so a poisoned conflict gate would
