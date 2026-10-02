@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   test,
   expect,
@@ -21,7 +23,6 @@ import {
   type SpurSessionView,
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
-import { join } from "node:path";
 import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
@@ -239,6 +240,175 @@ test.describe("Lifecycle reconciliation", () => {
     await expect(done).toBeVisible();
     await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
   });
+});
+
+test("token counts preserve exhaustion, rounding, and meaningful keyboard stops", async ({
+  page,
+}, testInfo) => {
+  const measured = makeWorkingSession({
+    id: "token-boundary",
+    tokenUsageView: {
+      status: "available",
+      provider: "codex",
+      inputTokens: 999500,
+      outputTokens: 0,
+      totalTokens: 999500,
+      exhausted: false,
+    },
+    tokenBudgetView: {
+      budget: 999500,
+      knownTotalTokens: 999500,
+      exhausted: true,
+      enforced: true,
+      warnOnly: true,
+    },
+  });
+  await mockSessions(page, [
+    measured,
+    makeWorkingSession({ id: "token-empty" }),
+    makeWorkingSession({
+      id: "token-unknown",
+      preflightTokenUsageView: {
+        status: "unknown",
+        attemptCount: 1,
+        unknownAttemptCount: 1,
+        providerIterationCount: 0,
+      },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 999,500", { exact: true });
+  await expect(count).toHaveText("1M");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-error);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Token budget reached");
+  await expect(page.getByRole("tooltip")).not.toContainText("Stopped by token budget");
+  await page.screenshot({ path: testInfo.outputPath("conflicting-exhaustion.png") });
+  const dashes = page.getByLabel("Tokens: unavailable", { exact: true });
+  await expect(dashes).toHaveCount(2);
+  const unknown = page.locator('[aria-label="Tokens: unavailable"][tabindex="0"]');
+  await expect(unknown).toHaveCount(1);
+  await unknown.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Unknown attempts");
+  await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
+  await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
+  for (const status of ["stopped", "budget_limited"] as const) {
+    await mockSessions(page, [
+      {
+        ...measured,
+        status,
+        state: status,
+        tokenBudgetView: {
+          ...measured.tokenBudgetView,
+          warnOnly: false,
+        },
+      },
+    ]);
+    await page.reload();
+    await count.focus();
+    await expect(page.getByRole("tooltip")).toContainText(
+      status === "budget_limited" ? "Stopped by token budget" : "Token budget reached",
+    );
+  }
+  await mockSessions(page, [
+    {
+      ...measured,
+      tokenBudgetView: {
+        budget: 999500,
+        knownTotalTokens: 999500,
+        exhausted: false,
+        overridden: true,
+        enforced: false,
+        warnOnly: false,
+      },
+    },
+  ]);
+  await page.reload();
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("limit ignored");
+  await page.screenshot({ path: testInfo.outputPath("override.png") });
+});
+
+test("token count shows budget tone and isolated hover card, hides on mobile", async ({ page }) => {
+  await mockSessions(page, [
+    makeWorkingSession({
+      id: "token-count-dashboard",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 600,
+        outputTokens: 100,
+        totalTokens: 700,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "measured",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        attemptCount: 1,
+        unknownAttemptCount: 0,
+        providerIterationCount: 1,
+        byProvider: {},
+      },
+      tokenBudgetView: { budget: 1000, knownTotalTokens: 800, exhausted: false, enforced: true },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 800", { exact: true });
+  await expect(count).toHaveText("800");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+  await count.hover();
+  await expect(page.getByRole("tooltip").getByRole("row", { name: "Total 100 700" })).toBeVisible();
+  await expect(page.locator(".data-row").first().getByRole("tooltip")).toHaveCount(1);
+  await page.mouse.move(0, 0);
+  await page
+    .locator(".data-row")
+    .first()
+    .hover({ position: { x: 5, y: 5 } });
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  for (const width of [640, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await count.hover();
+    await expect
+      .poll(async () => {
+        const bounds = await page.getByRole("tooltip").boundingBox();
+        const viewportWidth = page.viewportSize()?.width ?? 0;
+        return bounds ? bounds.x >= 0 && bounds.x + bounds.width <= viewportWidth : false;
+      })
+      .toBe(true);
+  }
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "token-count"), { recursive: true });
+    await page.screenshot({ path: join(artifacts, "token-count", "dashboard-hover.png") });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(count).toBeHidden();
+});
+
+test("budget-limited dashboard row links to approval", async ({ page }) => {
+  await mockSessions(page, [
+    makeStoppedSession({
+      id: "budget-dashboard",
+      status: "budget_limited",
+      state: "budget_limited",
+    }),
+  ]);
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
+    "href",
+    /sessions\/budget-dashboard/,
+  );
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "budget-approval-ui"), { recursive: true });
+    await page.screenshot({
+      path: join(artifacts, "budget-approval-ui", "dashboard.png"),
+      fullPage: true,
+    });
+  }
 });
 
 test("loads local JetBrains Mono faces in both dashboard themes", async ({ page }, testInfo) => {
@@ -1450,6 +1620,30 @@ test.describe("D4: Terminal button state", () => {
       page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${session.id}`, "i"),
       }),
+    ).toHaveCount(0);
+  });
+
+  test("token-budget exhausted session hides restore", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "restore-token-exhausted",
+      prompt: "Token exhausted",
+      stopReason: "token_budget",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        budget: 100,
+        exhausted: true,
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByText("Token exhausted")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
     ).toHaveCount(0);
   });
 
@@ -3063,6 +3257,151 @@ test.describe("D7: Spawn modal", () => {
 
 // D7b: Silent branch preflight
 test.describe("D7b: Silent branch preflight", () => {
+  test("keeps paid usage visible after failed previews", async ({ page }, testInfo) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    const batchIds: string[] = [];
+    let finishFirstPreview: (() => void) | undefined;
+    const firstPreviewPending = new Promise<void>((resolve) => {
+      finishFirstPreview = resolve;
+    });
+    const capture = async (name: string) => {
+      const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      if (artifacts) mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({
+        path: artifacts ? join(artifacts, "token-ui", name) : testInfo.outputPath(name),
+      });
+    };
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 1) await firstPreviewPending;
+      const unknown = batchIds.length > 1;
+      await route.fulfill({
+        status: unknown ? 409 : 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: unknown ? "Pre-flight token usage is unknown" : "Provider failed after output",
+          preflightBatchId: body.preflightBatchId,
+          preflightTokenUsageView: unknown
+            ? {
+                status: "unknown",
+                attemptCount: 2,
+                unknownAttemptCount: 1,
+                providerIterationCount: 1,
+              }
+            : {
+                status: "measured",
+                attemptCount: 1,
+                unknownAttemptCount: 0,
+                providerIterationCount: 1,
+                byProvider: { codex: { totalTokens: 12 } },
+                inputTokens: 10,
+                outputTokens: 2,
+                totalTokens: 12,
+              },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First paid preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await expect(
+      page.getByRole("status").filter({ hasText: "Checking branch preview" }),
+    ).toBeVisible();
+    await capture("preflight-preview-loading.png");
+    finishFirstPreview?.();
+    await expect(page.getByText("Pre-flight tokens: 12")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
+    await expect(page.getByText("Provider failed after output")).toHaveCount(0);
+    await capture("preflight-preview-error-measured.png");
+    await prompt.fill("Second paid preview");
+    await expect(page.getByText("Pre-flight tokens: unavailable")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
+    expect(batchIds).toHaveLength(2);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    await capture("preflight-preview-failed.png");
+  });
+
+  test("keeps one paid batch through measured and superseded previews", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let allocations = 0;
+    const allocatedId = "20000000-0000-4000-8000-000000000001";
+    await page.route("**/api/projects/my-project/preflight-batches", async (route) => {
+      allocations += 1;
+      expect(route.request().postData()).toBeNull();
+      await route.fulfill({ json: { preflightBatchId: allocatedId } });
+    });
+    const batchIds: string[] = [];
+    let firstRequest: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      firstRequest = resolve;
+    });
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 2) await firstPending;
+      const replacement = batchIds.length === 4;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          branch: "feature/preview",
+          preflightBatchId: replacement
+            ? "30000000-0000-4000-8000-000000000001"
+            : body.preflightBatchId,
+          preflightTokenUsageView: {
+            status: replacement ? "partial" : "measured",
+            attemptCount: replacement ? 1 : batchIds.length,
+            unknownAttemptCount: 0,
+            providerIterationCount: batchIds.length,
+            byProvider: {},
+            inputTokens: batchIds.length,
+            outputTokens: 0,
+            totalTokens: batchIds.length,
+          },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 1", { exact: true })).toBeVisible();
+    await prompt.fill("Second preview");
+    await expect.poll(() => batchIds.length).toBe(2);
+    await prompt.fill("Supersede paid preview");
+    firstRequest?.();
+    await expect.poll(() => batchIds.length).toBe(3);
+    expect(batchIds[0]).toBe(allocatedId);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    expect(batchIds[2]).toBe(batchIds[0]);
+    expect(allocations).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 3", { exact: true })).toBeVisible();
+    await prompt.fill("Recover corrupted batch");
+    await expect(page.getByText("Pre-flight tokens: 4 · partial", { exact: true })).toBeVisible();
+    let spawnedBatchId: string | undefined;
+    await page.route("**/api/spawn", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId?: string };
+      spawnedBatchId = body.preflightBatchId;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "preview-claimed" })),
+      });
+    });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+    await expect.poll(() => spawnedBatchId).toBe("30000000-0000-4000-8000-000000000001");
+  });
+
   test("preflight called and branch input auto-populated", async ({ page }) => {
     await mockSessions(
       page,
@@ -3765,6 +4104,10 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
     const sessions: SpurSessionView[] = [];
     let spawnCalls = 0;
+
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: placeholder.branch } }),
+    );
 
     await page.route("**/api/spawn", async (route) => {
       spawnCalls += 1;
