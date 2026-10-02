@@ -1266,6 +1266,18 @@ function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean
   return typeof session.error === "string" && session.error.trim().length > 0;
 }
 
+function sameSessionRuntimeOwner(left: SessionRecord, right: SessionRecord): boolean {
+  return (
+    left.agent === right.agent &&
+    left.agentSessionId === right.agentSessionId &&
+    left.tmuxSession === right.tmuxSession &&
+    left.launchCommand === right.launchCommand &&
+    left.worktreePath === right.worktreePath &&
+    left.project === right.project &&
+    workspaceIdOf(left) === workspaceIdOf(right)
+  );
+}
+
 function statusFallbackState(
   session: Pick<SessionRecord, "status" | "error" | "stopReason">,
 ): SessionState {
@@ -5842,12 +5854,7 @@ export class SessionService {
             !current ||
             current.status !== "running" ||
             hasRetainedSessionError(current) ||
-            current.agent !== candidate.agent ||
-            current.agentSessionId !== candidate.agentSessionId ||
-            current.tmuxSession !== candidate.tmuxSession ||
-            current.worktreePath !== candidate.worktreePath ||
-            current.project !== candidate.project ||
-            workspaceIdOf(current) !== workspaceIdOf(candidate)
+            !sameSessionRuntimeOwner(current, candidate)
           )
             return undefined;
           return current;
@@ -6530,7 +6537,19 @@ export class SessionService {
         nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
       }
 
-      const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
+      const enriched = await Promise.all(
+        due.map((session) =>
+          this.enrichDashboard(session).catch((error: unknown) => {
+            if (
+              error instanceof SessionResourceNotFoundError &&
+              !readSession(this.config.dataDir, session.id)
+            ) {
+              return undefined;
+            }
+            throw error;
+          }),
+        ),
+      );
       for (const [index, session] of due.entries()) {
         const view = enriched[index];
         if (!view) {
@@ -7008,6 +7027,14 @@ export class SessionService {
       }
       this.dashboardCache.set(record.id, enriched);
     } catch (error) {
+      if (
+        error instanceof SessionResourceNotFoundError &&
+        !readSession(this.config.dataDir, record.id)
+      ) {
+        this.dashboardCache.delete(record.id);
+        this.dashboardEnrichedRecords.delete(record.id);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.refresh_failed", {
         level: "warn",
@@ -19933,8 +19960,12 @@ export class SessionService {
       session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
       !session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
     ) {
-      const latest = readSession(this.config.dataDir, session.id) ?? session;
+      const latest = readSession(this.config.dataDir, session.id);
+      if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      effectiveSession = latest;
       if (
+        !isTerminalSessionStatus(latest.status) &&
+        sameSessionRuntimeOwner(latest, session) &&
         latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
         !latest.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
       ) {
@@ -20471,21 +20502,34 @@ export class SessionService {
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
-    const classified = await this.classifySessionRecord(session, { scanPane: false }).catch(
-      (error: unknown) => {
-        if (
-          error instanceof SessionResourceNotFoundError &&
-          !readSession(this.config.dataDir, session.id)
-        ) {
-          return undefined;
-        }
-        throw error;
-      },
-    );
-    if (!classified) return undefined;
+    const classified = await this.classifySessionRecord(session, { scanPane: false });
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
+    const workspacePresent = classified.workspacePresent;
+    const lastActivityAt = buildLastActivityAt(session, classified);
+    const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
+    // Same owner resolution as enrich's sidecars loop: without it, every
+    // desk sibling would render the anchor-owned shared sidecar as offline
+    // (it probes its own tmux id, which never has the pane). Still gated on
+    // being a desk member with sidecars — a non-desk session always owns its
+    // own panes, so this 2s-tick path skips even the cached lookup.
+    const sidecarNames = session.sidecarNames ?? [];
+    const deskProject =
+      workspaceIdOf(session) !== session.id && sidecarNames.length > 0
+        ? this.resolveProjectForSession(session)
+        : undefined;
+    const runningSidecars = await Promise.all(
+      sidecarNames.map(async (name) => {
+        const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
+        const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
+        return exists && !paneDead ? name : null;
+      }),
+    );
+    const runningSidecarNames = runningSidecars.filter((name): name is string => name !== null);
+
+    const hasServiceIssues = await this.hasServiceIssues(session);
+    session = this.withReportingError(session);
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -20503,31 +20547,6 @@ export class SessionService {
       error: _error,
       ...dashboardSession
     } = session;
-    const workspacePresent = classified.workspacePresent;
-    const lastActivityAt = buildLastActivityAt(session, classified);
-    const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
-    // Same owner resolution as enrich's sidecars loop: without it, every
-    // desk sibling would render the anchor-owned shared sidecar as offline
-    // (it probes its own tmux id, which never has the pane). Still gated on
-    // being a desk member with sidecars — a non-desk session always owns its
-    // own panes, so this 2s-tick path skips even the cached lookup.
-    const sidecarNames = session.sidecarNames ?? [];
-    const deskProject =
-      workspaceIdOf(session) !== session.id && sidecarNames.length > 0
-        ? this.resolveProjectForSession(session)
-        : undefined;
-    const runningSidecarNames = (
-      await Promise.all(
-        sidecarNames.map(async (name) => {
-          const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
-          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
-          return exists && !paneDead ? name : null;
-        }),
-      )
-    ).filter((name): name is string => name !== null);
-
-    const hasServiceIssues = await this.hasServiceIssues(session);
-    session = this.withReportingError(session);
     const state = this.stabilizeState(
       session.id,
       hasRetainedSessionError(session) ? "error" : classified.state,
@@ -20672,10 +20691,20 @@ export class SessionService {
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
     try {
       const exists = await readExists();
+      if (session && !readSession(this.config.dataDir, session.id)) {
+        throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      }
       const paneDead = exists && (await tmuxPaneDead(tmuxSession));
-      if (session && exists && !paneDead) {
-        const latest = readSession(this.config.dataDir, session.id) ?? session;
-        if (latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)) {
+      if (session) {
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+        if (
+          exists &&
+          !paneDead &&
+          !isTerminalSessionStatus(latest.status) &&
+          sameSessionRuntimeOwner(latest, session) &&
+          latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
+        ) {
           const { error: _error, ...recovered } = latest;
           writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
           this.stateCache.delete(session.id);
@@ -20692,15 +20721,8 @@ export class SessionService {
 
   private withReportingError(session: SessionRecord): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
-    if (
-      latest &&
-      (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX) ||
-        session.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX))
-    ) {
-      const { error: _error, ...base } = session;
-      return latest.error ? { ...base, error: latest.error } : base;
-    }
-    return session;
+    if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    return latest;
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.

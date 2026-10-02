@@ -47115,6 +47115,7 @@ describe("SessionService", () => {
         "agent",
         "native",
         "pane",
+        "launch",
         "workspace",
         "project",
         "owner",
@@ -47166,6 +47167,7 @@ describe("SessionService", () => {
               ...(mutation === "agent" ? { agent: "codex" as const } : {}),
               ...(mutation === "native" ? { agentSessionId: "replacement" } : {}),
               ...(mutation === "pane" ? { tmuxSession: "replacement" } : {}),
+              ...(mutation === "launch" ? { launchCommand: "replacement" } : {}),
               ...(mutation === "workspace" ? { worktreePath: "/replacement" } : {}),
               ...(mutation === "project" ? { project: "replacement" } : {}),
               ...(mutation === "owner" ? { workspaceId: "replacement" } : {}),
@@ -47280,6 +47282,255 @@ describe("SessionService", () => {
         const internals = service as unknown as UsageInternals;
         return { service, sessions, original, internals };
       }
+
+      describe("positive healing safety", () => {
+        async function prepare(phase: "runtime" | "reporting exists" | "reporting pane") {
+          const fixture = await setup();
+          const original = {
+            ...fixture.original,
+            error:
+              phase === "runtime"
+                ? "Session status detection failed: previous probe"
+                : "Session status detection failed: Resource readout api-1--dev: previous probe",
+          };
+          fixture.sessions.set(original.id, original);
+          let enter!: () => void;
+          let resume!: () => void;
+          const entered = new Promise<void>((resolve) => {
+            enter = resolve;
+          });
+          const deferred = new Promise<void>((resolve) => {
+            resume = resolve;
+          });
+          const pause = async () => {
+            enter();
+            await deferred;
+          };
+          if (phase === "runtime") {
+            vi.spyOn(
+              sessionServiceInternals(fixture.service),
+              "readRuntimeSnapshot",
+            ).mockImplementation(async () => {
+              await pause();
+              return {
+                runtimeAlive: true,
+                paneUsable: true,
+                processAlive: true,
+                tmuxActivityAt: null,
+                probeUnresponsive: false,
+              };
+            });
+          } else if (phase === "reporting exists") {
+            sidecarTmuxAliveMock.mockImplementation(async () => {
+              await pause();
+              return true;
+            });
+          } else {
+            sidecarTmuxAliveMock.mockResolvedValue(true);
+            tmuxPaneDeadMock.mockImplementation(async (name: string) => {
+              if (name === "api-1--dev") await pause();
+              return false;
+            });
+          }
+          const persisted = vi.spyOn(fixture.internals, "persistClassifiedTokenUsage");
+          const kill = vi.spyOn(fixture.internals, "killAgentPaneAndConfirmExit");
+          const teardown = vi.spyOn(fixture.internals, "teardownSessionSidecars");
+          const release = vi.spyOn(fixture.internals, "sessionWithReleasedSidecarPorts");
+          return { ...fixture, original, entered, resume, persisted, kill, teardown, release };
+        }
+
+        it.each(["dashboard batch", "dashboard refresh"] as const)(
+          "keeps later registered-service reporting deletion absent through %s",
+          async (caller) => {
+            const { sessions, original, internals } = await setup();
+            const record = {
+              ...original,
+              sidecarNames: [],
+              error:
+                "Session status detection failed: Resource readout service-web: previous probe",
+            };
+            sessions.set(record.id, record);
+            serviceRecords.set(serviceKey(record.id, "web"), {
+              sessionId: record.id,
+              project: record.project,
+              serviceId: "web",
+              command: "web",
+              cwd: record.worktreePath,
+              tmuxSession: "service-web",
+              status: "running",
+              createdAt: record.createdAt,
+              updatedAt: record.updatedAt,
+              port: 12346,
+            });
+            let enter!: () => void;
+            let resume!: () => void;
+            const entered = new Promise<void>((resolve) => {
+              enter = resolve;
+            });
+            const deferred = new Promise<void>((resolve) => {
+              resume = resolve;
+            });
+            tmuxSessionExistsMock.mockImplementation(async (name: string) => {
+              if (name === "service-web") {
+                enter();
+                await deferred;
+              }
+              return true;
+            });
+            const persisted = vi.spyOn(internals, "persistClassifiedTokenUsage");
+            internals.dashboardCache.set(record.id, {
+              ...record,
+              state: "error",
+              runtimeAlive: true,
+              workspaceExists: true,
+              hasUnseenAttention: false,
+              lastActivityAt: record.updatedAt,
+            });
+            internals.dashboardEnrichedRecords.set(record.id, record);
+            const reading =
+              caller === "dashboard batch"
+                ? internals.runDashboardCacheTick()
+                : internals.refreshDashboardCacheEntry(record);
+            await entered;
+            expect(persisted).toHaveBeenCalled();
+            sessions.delete(record.id);
+            writeSessionMock.mockClear();
+            logSpurEventMock.mockClear();
+            resume();
+            await reading;
+            expect(sessions.has(record.id)).toBe(false);
+            expect(writeSessionMock).not.toHaveBeenCalled();
+            expect(logSpurEventMock).not.toHaveBeenCalled();
+            expect(internals.dashboardCache.has(record.id)).toBe(false);
+            expect(internals.dashboardEnrichedRecords.has(record.id)).toBe(false);
+            expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          },
+        );
+
+        for (const phase of ["runtime", "reporting exists", "reporting pane"] as const) {
+          it.each(["detail", "list", "dashboard batch", "dashboard refresh", "attention"] as const)(
+            `keeps deletion during ${phase} healing absent through %s`,
+            async (caller) => {
+              const {
+                service,
+                sessions,
+                original,
+                internals,
+                entered,
+                resume,
+                persisted,
+                kill,
+                teardown,
+                release,
+              } = await prepare(phase);
+              internals.dashboardCache.set(original.id, {
+                ...original,
+                state: "error",
+                runtimeAlive: true,
+                workspaceExists: true,
+                hasUnseenAttention: false,
+                lastActivityAt: original.updatedAt,
+              });
+              internals.dashboardEnrichedRecords.set(original.id, original);
+              const reading =
+                caller === "detail"
+                  ? service.get(original.id)
+                  : caller === "list"
+                    ? service.list({ view: "full" })
+                    : caller === "dashboard batch"
+                      ? internals.runDashboardCacheTick()
+                      : caller === "dashboard refresh"
+                        ? internals.refreshDashboardCacheEntry(original)
+                        : internals.pollAttentionStates(false);
+              const observed = reading.then(
+                (value) => ({ value }),
+                (error: unknown) => ({ error }),
+              );
+              await entered;
+              if (phase === "runtime") expect(persisted).not.toHaveBeenCalled();
+              else expect(persisted).toHaveBeenCalled();
+              sessions.delete(original.id);
+              writeSessionMock.mockClear();
+              logSpurEventMock.mockClear();
+              resume();
+              const result = await observed;
+              if (caller === "detail") {
+                const { SessionResourceNotFoundError } =
+                  await import("../../src/session-service.js");
+                expect(result).toEqual({ error: expect.any(SessionResourceNotFoundError) });
+              } else if (caller === "list") expect(result).toEqual({ value: [] });
+              else expect(result).not.toHaveProperty("error");
+              if (caller.startsWith("dashboard")) {
+                expect(internals.dashboardCache.has(original.id)).toBe(false);
+                expect(internals.dashboardEnrichedRecords.has(original.id)).toBe(false);
+              }
+              expect(sessions.has(original.id)).toBe(false);
+              expect(writeSessionMock).not.toHaveBeenCalled();
+              expect(logSpurEventMock).not.toHaveBeenCalled();
+              expect(kill).not.toHaveBeenCalled();
+              expect(teardown).not.toHaveBeenCalled();
+              expect(release).not.toHaveBeenCalled();
+            },
+          );
+
+          it.each([
+            "agent",
+            "native",
+            "launch",
+            "killed",
+            "dashboard killed",
+            "unowned error",
+            "healthy",
+          ] as const)(
+            `preserves current ownership during ${phase} healing when %s`,
+            async (mutation) => {
+              const { service, sessions, original, internals, entered, resume, persisted } =
+                await prepare(phase);
+              const reading =
+                mutation === "dashboard killed"
+                  ? internals.enrichDashboard(original)
+                  : service.get(original.id);
+              await entered;
+              if (phase === "runtime") expect(persisted).not.toHaveBeenCalled();
+              else expect(persisted).toHaveBeenCalled();
+              const current: SessionRecord = {
+                ...original,
+                slots: { title: "current title", links: [] },
+                queuedMessages: { messages: ["current queue"], awaitingPrompt: false },
+              };
+              if (mutation === "agent") current.agent = "codex";
+              if (mutation === "native") current.agentSessionId = "replacement-native";
+              if (mutation === "launch") current.launchCommand = "replacement-launch";
+              if (mutation === "killed" || mutation === "dashboard killed")
+                current.status = "killed";
+              if (mutation === "unowned error") current.error = "unrelated current error";
+              sessions.set(current.id, current);
+              writeSessionMock.mockClear();
+              resume();
+              const view = await reading;
+              if (mutation === "healthy") {
+                const { error: _error, updatedAt: _updatedAt, ...expected } = current;
+                expect(sessions.get(current.id)).toEqual({
+                  ...expected,
+                  updatedAt: expect.any(String),
+                });
+                expect(sessions.get(current.id)).not.toHaveProperty("error");
+              } else {
+                expect(sessions.get(current.id)).toEqual(current);
+                expect(view).toMatchObject({
+                  status: current.status,
+                  agent: current.agent,
+                  ...(mutation !== "dashboard killed"
+                    ? { agentSessionId: current.agentSessionId }
+                    : {}),
+                  error: current.error,
+                });
+                expect(writeSessionMock).not.toHaveBeenCalled();
+              }
+            },
+          );
+        }
+      });
 
       it.each(["no sample", "sample"])("returns typed missing with %s", async (kind) => {
         const { sessions, original, internals } = await setup();
