@@ -119,6 +119,7 @@ class MobilePwaMediaRecorder extends MockMediaRecorder {
 
 function sessionFixture(overrides?: Partial<SpurSessionView>) {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-a1",
     project: "api",
     agent: "claude",
@@ -6465,7 +6466,7 @@ describe("SessionDetail token usage", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/api/sessions/api-a1/restore",
-        expect.objectContaining({ body: JSON.stringify({ overrideTokenBudget: true }) }),
+        expect.objectContaining({ body: expect.stringContaining('"overrideTokenBudget":true') }),
       ),
     );
   });
@@ -6491,7 +6492,7 @@ describe("SessionDetail token usage", () => {
       await waitFor(() =>
         expect(fetchMock).toHaveBeenCalledWith(
           "/api/sessions/api-a1/restore",
-          expect.objectContaining({ body: undefined }),
+          expect.objectContaining({ body: expect.stringContaining('"operationId":') }),
         ),
       );
     },
@@ -7433,7 +7434,182 @@ describe("SessionDetail GitHub PR check unavailable", () => {
       ).not.toBeInTheDocument();
     });
 
-    expect(completeBodies).toEqual([{}, { skipPrCheck: true }]);
+    expect(completeBodies).toEqual([
+      { operationId: expect.any(String) },
+      { skipPrCheck: true, operationId: expect.any(String) },
+    ]);
+  });
+});
+
+describe("SessionDetail lifecycle operation", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.useFakeTimers();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function receipt(
+    operationId: string,
+    phase: "pending" | "succeeded" | "failed",
+    revision: number,
+    action: "complete" | "restore" | "reopen" = "restore",
+    instanceId = "test-instance",
+  ): NonNullable<SpurSessionView["lifecycle"]> {
+    return { instanceId, revision, operation: {
+      operationId, phase, action, targetIds: ["api-a1"],
+      outcomes: phase === "pending" ? [] : [{ sessionId: "api-a1", phase }],
+    } };
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  function mockLifecycleFetch(read: () => Promise<SpurSessionView> | SpurSessionView,
+    post: (body: { operationId: string }) => Promise<Response>) {
+    return vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(await read()));
+      if (url === "/api/sessions/api-a1/restore" || url === "/api/sessions/api-a1/reopen" ||
+        url === "/api/sessions/api-a1/complete") return post(JSON.parse(String(init?.body)));
+      if (url === "/api/sessions/api-a1/conversation") return new Response(JSON.stringify(conversationFixture()));
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "" }));
+      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  async function advance(ms = 0) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+
+  it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
+    const delivery = deferred<Response>();
+    let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
+    let operationId = "";
+    mockLifecycleFetch(() => current, async (body) => {
+      operationId = body.operationId;
+      return delivery.promise;
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await advance();
+    expect(operationId).toMatch(/^[\da-f-]{36}$/);
+    current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false,
+      lifecycle: receipt(operationId, "succeeded", 2) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    delivery.resolve(new Response(JSON.stringify(sessionFixture({ state: "working",
+      lifecycle: receipt(operationId, "pending", 1) }))));
+    await advance();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+  });
+
+  it("recovers backend pending restore across remount and uses actual settled error", async () => {
+    let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false,
+      lifecycle: receipt("server-operation", "pending", 1) });
+    const fetchMock = mockLifecycleFetch(() => current, async () => new Response("{}"));
+    const mounted = render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    mounted.unmount();
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    current = sessionFixture({ status: "errored", state: "error", runtimeAlive: false,
+      lifecycle: receipt("server-operation", "failed", 2) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
+  it.each(["complete", "reopen"] as const)("guards pending %s through polls and accepts later current state", async (action) => {
+    const delivery = deferred<Response>();
+    let current = sessionFixture(action === "reopen" ? { status: "completed", runtimeAlive: false } : {});
+    let operationId = "";
+    let posts = 0;
+    mockLifecycleFetch(() => current, async (body) => {
+      posts += 1;
+      operationId = body.operationId;
+      return delivery.promise;
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    const button = screen.getByRole("button", { name: action === "complete" ? "Complete" : "Reopen" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await advance();
+    expect(posts).toBe(1);
+    current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
+    await advance(12_000);
+    expect(posts).toBe(1);
+    current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2, action) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    current = sessionFixture({ lifecycle: receipt(operationId, "pending", 1, action) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    delivery.resolve(new Response(JSON.stringify(current)));
+    await advance();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+  });
+
+  it.each(["lost response", "delivery 503"])("reconciles %s without replay or rollback", async (failure) => {
+    const delivery = deferred<Response>();
+    let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
+    let operationId = "";
+    const fetchMock = mockLifecycleFetch(() => current, async (body) => {
+      operationId = body.operationId;
+      return delivery.promise;
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await advance();
+    current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2) });
+    if (failure === "lost response") delivery.reject(new Error("Connection lost"));
+    else delivery.resolve(new Response(JSON.stringify({ code: "session_lifecycle_snapshot_changed",
+      error: "Retry current read", lifecycle: receipt(operationId, "succeeded", 2) }), { status: 503 }));
+    await advance();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(fetchMock.mock.calls.filter(([input]) => input === "/api/sessions/api-a1/restore")).toHaveLength(1);
+  });
+
+  it("rejects old POST errors after a newer server owner and retired epoch", async () => {
+    const delivery = deferred<Response>();
+    let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
+    mockLifecycleFetch(() => current, async () => delivery.promise);
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await advance();
+    current = sessionFixture({ lifecycle: receipt("new-owner", "pending", 3) });
+    await advance(4_000);
+    delivery.resolve(new Response(JSON.stringify({ error: "Old action error" }), { status: 409 }));
+    await advance();
+    expect(screen.queryByText("Old action error")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false,
+      lifecycle: { instanceId: "new-instance", revision: 0, operation: null } });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    current = sessionFixture({ lifecycle: receipt("new-owner", "pending", 4) });
+    await advance(4_000);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
   });
 });
 
