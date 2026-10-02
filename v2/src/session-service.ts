@@ -5538,7 +5538,7 @@ export class SessionService {
     settled = this.settleLifecycle(owner, true);
     if ("completedIds" in result) return { ...result, lifecycle: settled };
     // Handoff returns the spawned session, while its owner belongs to the original.
-    if (!targetIds.includes(result.id)) return { ...result, lifecycle: result.lifecycle };
+    if (!targetIds.includes(result.id)) return result;
     try {
       const current = await this.get(result.id);
       if (

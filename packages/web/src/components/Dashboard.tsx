@@ -2266,7 +2266,7 @@ export function Dashboard() {
     return owner;
   };
 
-  const reconcileAttempt = async (owner: LifecycleIntent, _ids: Iterable<string>) => {
+  const reconcileAttempt = async (owner: LifecycleIntent) => {
     if (!lifecycleRef.current.isCurrent(owner)) return;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
     const read = lifecycleRef.current.beginRead();
@@ -2317,7 +2317,7 @@ export function Dashboard() {
           "code" in payload &&
           payload.code === "session_lifecycle_snapshot_changed"
         ) {
-          await reconcileAttempt(owner, [session.id]);
+          await reconcileAttempt(owner);
           return;
         }
         throw new Error(responseErrorMessage(payload, "Failed to restore Spur session"));
@@ -2337,7 +2337,7 @@ export function Dashboard() {
         publishTransitions();
       }
     } catch (restoreError) {
-      await reconcileAttempt(owner, [session.id]);
+      await reconcileAttempt(owner);
       if (!lifecycleRef.current.isCurrent(owner)) return;
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
@@ -2408,18 +2408,18 @@ export function Dashboard() {
           "code" in payload &&
           payload.code === "session_lifecycle_snapshot_changed"
         ) {
-          await reconcileAttempt(owner, activeDeskIds);
+          await reconcileAttempt(owner);
           return false;
         }
         if (isOpenPrActionRequiredPayload(payload)) {
-          await reconcileAttempt(owner, activeDeskIds);
+          await reconcileAttempt(owner);
           // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
           return false;
         }
         if (isGithubPrCheckUnavailablePayload(payload)) {
-          await reconcileAttempt(owner, activeDeskIds);
+          await reconcileAttempt(owner);
           // The two PR dialogs are alternatives for one complete attempt. Leaving
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
@@ -2429,10 +2429,10 @@ export function Dashboard() {
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      await reconcileAttempt(owner, activeDeskIds);
+      await reconcileAttempt(owner);
       return true;
     } catch (completeError) {
-      await reconcileAttempt(owner, activeDeskIds);
+      await reconcileAttempt(owner);
       if (!lifecycleRef.current.isCurrent(owner)) return false;
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;

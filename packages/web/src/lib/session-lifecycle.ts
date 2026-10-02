@@ -114,8 +114,7 @@ export class SessionLifecycleConsumer {
   }
 
   private acceptRow(row: SpurSessionView): SpurSessionView {
-    const snapshot = readLifecycleSnapshot(row.lifecycle);
-    if (!snapshot) throw new Error("Invalid session lifecycle snapshot");
+    const snapshot = row.lifecycle;
     const previous = this.rows.get(row.id);
     if (previous?.lifecycle && previous.lifecycle.revision > snapshot.revision) {
       this.rejectedRows.add(row.id);
