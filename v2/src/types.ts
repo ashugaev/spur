@@ -592,6 +592,8 @@ export function reviewSnapshotBaseline(
 
 export interface ReviewEventData {
   sessionId: string;
+  repo?: string;
+  prUrl?: string;
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
@@ -649,6 +651,8 @@ export type PersistedSendBatch = (
       sourceId: string;
       prompt?: string;
       sessionId: string;
+      repo?: string;
+      prUrl?: string;
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
@@ -684,6 +688,8 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
+  admissionCapDenials?: number | undefined;
   /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
   suppressedHoldAt?: string;
 }

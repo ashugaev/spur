@@ -74,8 +74,8 @@ function selectProjectFilter(name: string) {
   fireEvent.click(screen.getByRole("menuitemradio", { name }));
 }
 
-vi.mock("next/font/google", () => ({
-  JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
+vi.mock("next/font/local", () => ({
+  default: () => ({ variable: "--font-jetbrains-mono" }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
