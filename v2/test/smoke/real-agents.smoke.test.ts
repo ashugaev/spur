@@ -48,7 +48,6 @@ interface CleanupItem {
   rootDir: string;
   sessionPrefix: string;
   socketName: string;
-  repoDir?: string;
   branch?: string;
   worktreePath?: string;
 }
@@ -369,25 +368,24 @@ async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<
 }
 
 async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
-  const repoDir = item.repoDir ?? SMOKE_REPO_DIR;
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
     try {
-      await git(repoDir, "worktree", "remove", "--force", item.worktreePath);
+      await git(SMOKE_REPO_DIR, "worktree", "remove", "--force", item.worktreePath);
     } catch {
       // Best effort only.
     }
   }
   if (item.branch) {
     try {
-      await git(repoDir, "branch", "-D", item.branch);
+      await git(SMOKE_REPO_DIR, "branch", "-D", item.branch);
     } catch {
       // Best effort only.
     }
   }
   try {
-    await git(repoDir, "worktree", "prune", "--expire", "now");
+    await git(SMOKE_REPO_DIR, "worktree", "prune", "--expire", "now");
   } catch {
     // Best effort only.
   }
@@ -500,25 +498,6 @@ async function runSmoke(
     : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
-  const usesEmptyRepo = agent === "codex" || agent === "cursor";
-  const repoDir = usesEmptyRepo ? join(rootDir, "repo") : SMOKE_REPO_DIR;
-  if (usesEmptyRepo) {
-    await mkdir(repoDir);
-    await git(repoDir, "init", "--initial-branch=main");
-    await git(
-      repoDir,
-      "-c",
-      "user.name=Spur Smoke",
-      "-c",
-      "user.email=smoke@example.invalid",
-      "commit",
-      "--allow-empty",
-      "-m",
-      "test: initialize smoke repository",
-    );
-    cleanupItem.repoDir = repoDir;
-  }
-  const baseRef = usesEmptyRepo ? await git(repoDir, "rev-parse", "HEAD") : SMOKE_BASE_REF;
 
   setActiveTmuxSocketName(tmuxSocketName);
   await syncTmuxEnvironment({});
@@ -530,8 +509,8 @@ async function runSmoke(
       port,
       dataDir,
       worktreeDir,
-      repoDir,
-      baseRef,
+      repoDir: SMOKE_REPO_DIR,
+      baseRef: SMOKE_BASE_REF,
       sessionPrefix,
       agent,
       ...(expectedPreflightBranch
@@ -593,6 +572,23 @@ After the file and the session metadata are set, wait for more instructions.${ag
       });
       cleanupItem.branch = session.branch;
       cleanupItem.worktreePath = session.worktreePath;
+      if ((agent === "codex" || agent === "cursor") && options?.selectedEffort) {
+        expect(session.worktree).toBe(true);
+        expect(
+          await git(
+            session.worktreePath,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+          ),
+        ).toBe(
+          await git(SMOKE_REPO_DIR, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+        );
+        expect(await git(session.worktreePath, "rev-parse", "HEAD")).toBe(SMOKE_BASE_REF);
+        expect(await git(session.worktreePath, "ls-files", "--", "v2/src/session-service.ts")).toBe(
+          "v2/src/session-service.ts",
+        );
+      }
       if (agent === "cursor") {
         // The harness owns lifecycle validation; keep automatic ToDo nudges out of provider turns.
         const ledger = await service.mutateTodo(
