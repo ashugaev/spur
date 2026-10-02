@@ -614,7 +614,7 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
     protectedFiles.push({ path, bytes: await readFile(path) });
   }
   const nativeConfigPath = join(nativeConfig, "opencode.json");
-  await writeFile(nativeConfigPath, "{}\n");
+  await writeFile(nativeConfigPath, '{"$schema":"https://opencode.ai/config.json"}\n');
   protectedFiles.push({ path: nativeConfigPath, bytes: await readFile(nativeConfigPath) });
   process.env.XDG_DATA_HOME = join(rootDir, "native-data");
   process.env.XDG_CONFIG_HOME = join(rootDir, "native-config");
