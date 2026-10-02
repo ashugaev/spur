@@ -18356,7 +18356,8 @@ export class SessionService {
       hookState ? new Date(hookState.updatedAt).getTime() : 0,
     );
 
-    if (state === "working" && rolloutState && !codexToolExecuting(hookState)) {
+    // Without hooks, a quiet rollout cannot rule out a tool still running.
+    if (state === "working" && rolloutState && hookState && !codexToolExecuting(hookState)) {
       if (Date.now() - activityMs >= CODEX_HUNG_AFTER_TOOLS_MS) {
         state = "waiting";
         source = "codex_stale";
