@@ -24152,9 +24152,10 @@ describe("SessionService", () => {
         );
       });
 
-      // AC11: the launch may have failed on a DUPLICATE tmux name — a live
-      // sidecar the probe could not see. Reaping by name would kill it.
-      it("skips the launch-failure reap when the probe was unresponsive", async () => {
+      // AC11: `new-session` never created anything, so the name it failed on
+      // may be held by a live sidecar the probe could not see. Reaping by
+      // name would kill it.
+      it("skips the launch-failure reap when no tmux session was created", async () => {
         loadConfigMock.mockReturnValue(devSidecarProjectConfig());
         seedApiOne({ identity: false });
         getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
@@ -24170,8 +24171,37 @@ describe("SessionService", () => {
         expect(reapSkippedEvents()).toHaveLength(1);
       });
 
-      // AC12: the reap is narrowed, not removed — a readable probe still reaps.
-      it("still reaps on a launch failure when the probe was readable", async () => {
+      // AC13: `new-session` carries no timeout, the `set-option`/`respawn-pane`
+      // after it do — so a slow tmux can create the session and then throw. The
+      // pane is ours (a duplicate would have failed `new-session`) and may
+      // already be listening on the port this failure rolls back, so it MUST be
+      // reaped even though the pre-launch probe was unreadable.
+      it("reaps on a launch failure after new-session created the tmux session, even under an unresponsive probe", async () => {
+        loadConfigMock.mockReturnValue(devSidecarProjectConfig());
+        seedApiOne({ identity: false });
+        getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+        createTmuxSidecarSessionMock.mockImplementation(
+          async (input: { onCreated: () => void }) => {
+            input.onCreated();
+            throw new Error("tmux respawn-pane timed out");
+          },
+        );
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const failure = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(Error);
+        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+        expect(reapSkippedEvents()).toHaveLength(0);
+      });
+
+      // AC12: the gate reads ownership ONLY — re-adding `presence.unresponsive`
+      // to it fails here. A readable probe confirmed the name absent and
+      // `new-session` created nothing, so the kill-by-name it skips is inert;
+      // in the one race where it is not inert, the occupant is not ours.
+      it("skips the launch-failure reap when nothing was created, even under a readable probe", async () => {
         loadConfigMock.mockReturnValue(devSidecarProjectConfig());
         seedApiOne({ identity: false });
         getSidecarTmuxPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
@@ -24183,8 +24213,8 @@ describe("SessionService", () => {
         const failure = await service.startSidecar("api-1", "dev").catch((error: unknown) => error);
 
         expect(failure).toBeInstanceOf(Error);
-        expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
-        expect(reapSkippedEvents()).toHaveLength(0);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--dev");
+        expect(reapSkippedEvents()).toHaveLength(1);
       });
     });
 

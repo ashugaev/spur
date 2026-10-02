@@ -242,6 +242,60 @@ describe("runtime-tmux", () => {
     expect(sleepMock).not.toHaveBeenCalled();
   });
 
+  // `new-session` carries no timeout while the `set-option`/`respawn-pane`
+  // after it do, so a slow tmux can create the session and still reject the
+  // call. `onCreated` is the caller's only way to tell that apart from a
+  // launch that created nothing — the ownership question a cleanup path must
+  // answer before it kills by tmux name.
+  it("fires onCreated as soon as new-session lands, before the steps that can still throw", async () => {
+    const order: string[] = [];
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      const subcommand = args.find((arg) =>
+        ["new-session", "set-option", "respawn-pane"].includes(arg),
+      );
+      order.push(subcommand ?? args.join(" "));
+      if (subcommand === "respawn-pane") {
+        throw new Error("tmux respawn-pane timed out");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxCommandSession({
+        sessionName: "api-1--dev",
+        cwd: "/tmp/worktree",
+        launchCommand: "pnpm dev",
+        onCreated: () => order.push("onCreated"),
+      }),
+    ).rejects.toThrow("tmux respawn-pane timed out");
+
+    expect(order).toEqual(["new-session", "onCreated", "set-option", "respawn-pane"]);
+  });
+
+  it("never fires onCreated when new-session itself fails", async () => {
+    let created = 0;
+    execFileAsyncMock.mockImplementation(async () => {
+      throw new Error("duplicate session: api-1--dev");
+    });
+
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+    await expect(
+      createTmuxCommandSession({
+        sessionName: "api-1--dev",
+        cwd: "/tmp/worktree",
+        launchCommand: "pnpm dev",
+        onCreated: () => {
+          created += 1;
+        },
+      }),
+    ).rejects.toThrow("duplicate session");
+
+    expect(created).toBe(0);
+  });
+
   it("keeps a launch past tmux's command-length limit off the tmux command line", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => ({
       stdout: args.includes("new-session") ? "" : "ok",

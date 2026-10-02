@@ -8514,12 +8514,21 @@ export class SessionService {
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
+    // Ownership of the tmux name for the catch below: set the instant
+    // `new-session` creates the session, so a failure in any later step is
+    // still a failure on a pane that is ours to reap. Held on an object, not
+    // a `let`: control-flow analysis does not follow the callback's write and
+    // reads a captured `let` as still-false in the catch.
+    const launch = { paneCreated: false };
     try {
       await createTmuxSidecarSession({
         sessionId: reservedSession.id,
         sidecarName: args.sidecarName,
         cwd: reservedSession.worktreePath,
         command: resolvedCommand,
+        onCreated: () => {
+          launch.paneCreated = true;
+        },
         env: buildSidecarRuntimeEnv(
           sessionEnv,
           reservedSession,
@@ -8585,17 +8594,27 @@ export class SessionService {
       );
       return readSession(this.config.dataDir, updated.id) ?? updated;
     } catch (error) {
-      // An unreadable probe got here only as a first start (an identity-present
-      // frame threw at the session-leg gate), so the launch may have failed on
-      // a DUPLICATE tmux name — i.e. a live sidecar the probe could not see.
-      // Reaping by name would kill it. clearSidecarProcEntry is a no-op here
-      // anyway (no identity recorded), so both are skipped as one branch; the
-      // port rollback and slot unlink below still run.
-      if (presence.unresponsive) {
+      // Keyed on whether `new-session` actually created the session, never on
+      // the pre-launch probe. The only thing that ever justified skipping is
+      // ownership: a launch that created nothing may have failed on a tmux
+      // name already held by a live sidecar an unreadable probe could not
+      // see, and reaping by name would kill it. Once `new-session` succeeds
+      // there is no such occupant — whatever carries that name is ours — so
+      // every later failure reaps, exactly as on a readable probe. That case
+      // is NOT a mere leak: `new-session` carries no timeout while the
+      // `set-option`/`respawn-pane` after it do, so a slow tmux can leave a
+      // respawned sidecar listening on a port the rollback below just
+      // released, and the next start's alive-and-not-dead early return
+      // returns before it can reserve or relink anything.
+      // clearSidecarProcEntry is a no-op on the skip path anyway (the
+      // pre-launch branches already cleared any recorded identity), so both
+      // are skipped as one branch; the port rollback and slot unlink below
+      // still run.
+      if (!launch.paneCreated) {
         this.logEvent("session.sidecar.launch_reap_skipped", {
           level: "warn",
           sessionId: args.session.id,
-          message: `Sidecar ${args.sidecarName} launch failed under an unreadable tmux probe; skipping the reap so a live instance is not destroyed. A half-started pane may survive.`,
+          message: `Sidecar ${args.sidecarName} launch created no tmux session; skipping the reap so an instance the probe could not see is not destroyed.`,
           details: { sidecarName: args.sidecarName },
         });
       } else {
