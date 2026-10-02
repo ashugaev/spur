@@ -289,8 +289,8 @@ describe("listAgentModels claude", () => {
   it("returns the curated static list", async () => {
     const models = await listAgentModels("claude");
     expect(models.map((m) => m.id)).toEqual(["opus", "sonnet", "haiku", "fable"]);
-    expect(models.find((m) => m.id === "opus")?.isDefault).toBe(true);
-    expect(models.find((m) => m.id === "sonnet")?.isDefault).toBeUndefined();
+    expect(models.find((m) => m.id === "opus")?.isDefault).toBeUndefined();
+    expect(models.find((m) => m.id === "sonnet")?.isDefault).toBe(true);
   });
 });
 
