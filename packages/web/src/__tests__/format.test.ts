@@ -121,12 +121,18 @@ describe("formatTokenCount", () => {
     expect(formatTokenCount(4100)).toBe("4.1K");
     expect(formatTokenCount(184200)).toBe("184K");
     expect(formatTokenCount(1200000)).toBe("1.2M");
+    expect(formatTokenCount(1000000000)).toBe("1B");
+    expect(formatTokenCount(1200000000)).toBe("1.2B");
+    expect(formatTokenCount(1000000000000)).toBe("1T");
+    expect(formatTokenCount(1200000000000)).toBe("1.2T");
   });
 
   it("keeps one decimal of precision in detail mode", () => {
     expect(formatTokenCount(184200, true)).toBe("184.2K");
     expect(formatTokenCount(22400, true)).toBe("22.4K");
     expect(formatTokenCount(500000, true)).toBe("500K");
+    expect(formatTokenCount(1200000000, true)).toBe("1.2B");
+    expect(formatTokenCount(1200000000000, true)).toBe("1.2T");
   });
 });
 
