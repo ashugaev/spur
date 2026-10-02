@@ -35,7 +35,7 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
   Default close-out                                      `self-verify`
   Wording-only docs or analysis                          `tester` -> close-out
 
-Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Reviewer applies to code changes; tester applies to every task. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
+Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
 
 CANONICAL GATE ORDER
 
