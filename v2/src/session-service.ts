@@ -1111,10 +1111,11 @@ interface SessionRuntimeSnapshot {
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
-  // True only when a `runtimeAlive`/`paneUsable` false reading came from a
-  // tmux probe killed by its own timeout (isTmuxTimeoutKill), never from a
-  // confirmed-absent tmux server. reconcileUnexpectedStop must not treat this
-  // reading as proof the runtime is gone.
+  // True only when a `runtimeAlive`/`paneUsable`/`processAlive` false reading
+  // came from a probe fork (tmux list-windows, list-panes, or ps) killed by
+  // its own timeout (isProbeTimeoutKill), never from a confirmed-absent tmux
+  // server or process. reconcileUnexpectedStop must not treat this reading as
+  // proof the runtime is gone.
   probeUnresponsive: boolean;
 }
 interface SessionStateResult {
@@ -15422,7 +15423,7 @@ export class SessionService {
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
-        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+        `Session ${session.id}'s runtime probe (tmux or ps) timed out; runtime state unknown, not attempting recovery`,
       );
     }
 
@@ -18118,12 +18119,13 @@ export class SessionService {
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
     const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
+    const processUnresponsive = !processProbe.alive && processProbe.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive: processProbe.alive,
       tmuxActivityAt,
-      probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
+      probeUnresponsive: sessionsUnresponsive || panesUnresponsive || processUnresponsive,
     };
   }
 
@@ -18749,7 +18751,7 @@ export class SessionService {
           level: "warn",
           sessionId: session.id,
           projectId: session.project,
-          message: `Skipped reconciling ${session.id}: tmux probe timed out, runtime state unknown`,
+          message: `Skipped reconciling ${session.id}: runtime probe (tmux or ps) timed out, runtime state unknown`,
           details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
         });
         return { session, runtime: confirmedRuntime };
