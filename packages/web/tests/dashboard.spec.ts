@@ -1703,6 +1703,9 @@ test.describe("D4: Terminal button state", () => {
   test("restore failure leaves row visible and shows error", async ({ page }) => {
     const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
     await mockSessions(page, [session]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: session });
+    });
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
       await route.fulfill({
         status: 502,
@@ -1717,11 +1720,15 @@ test.describe("D4: Terminal button state", () => {
       .click();
 
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Dismiss toast" })).toHaveCount(1);
     await page.waitForTimeout(3000);
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
     await page.getByRole("button", { name: "Dismiss toast" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toHaveCount(0);
     await expect(page.getByText("Restore fails")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
+    ).toBeVisible();
   });
 });
 
@@ -1832,7 +1839,11 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let current = session;
+    await mockSessions(page, () => [current]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: current });
+    });
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1869,10 +1880,17 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         });
         return;
       }
+      current = {
+        ...session,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id] }),
       });
     });
 
@@ -1889,6 +1907,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
 
     await expect.poll(() => completeAttempts).toBe(2);
     expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
 
   test("done click confirms active desk subagents and sends desk-scoped complete", async ({
