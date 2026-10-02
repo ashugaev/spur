@@ -2732,6 +2732,9 @@ test.describe("D7: Spawn modal", () => {
   test("spawn prompt accepts image attachments and forwards them in the request body", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     await mockSessions(
       page,
@@ -3127,6 +3130,9 @@ test.describe("D7d: Branch name normalization", () => {
   });
 
   test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
     await page.route("**/api/spawn", async (route) => {
@@ -3695,6 +3701,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
   test("the user can retry manually after an ack failure without losing content or creating duplicate cards", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     const placeholder = makeSpawningSession({
       id: "spawn-bg-manual-retry-1",
       project: "my-project",
