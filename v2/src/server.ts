@@ -51,6 +51,7 @@ import {
   ForeignAgentProcessError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
+  PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionEndedError,
@@ -508,7 +509,10 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
-  return raw["force"] === true ? { force: true } : {};
+  return {
+    ...(raw["force"] === true ? { force: true } : {}),
+    ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
+  };
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -756,7 +760,7 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
-            ...(dropsQueuedSend(session, service.memoryHoldEngaged()) ? { inactive: true } : {}),
+            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
@@ -1284,6 +1288,12 @@ export async function startServer(
           configPath: body.configPath,
           projects: service.listProjects(),
         });
+        return;
+      }
+
+      const preflightBatchProjectId = path.match(/^\/projects\/([^/]+)\/preflight-batches$/)?.[1];
+      if (method === "POST" && preflightBatchProjectId) {
+        sendJson(response, 200, await service.createPreflightBatch(preflightBatchProjectId));
         return;
       }
 
@@ -2001,6 +2011,18 @@ export async function startServer(
           method,
           path,
           payload: { error: { code: error.code, message } },
+        });
+        return;
+      }
+      if (error instanceof PreflightPreviewError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            error: message,
+            preflightBatchId: error.preflightBatchId,
+            preflightTokenUsageView: error.preflightTokenUsageView,
+          },
         });
         return;
       }

@@ -4,6 +4,7 @@ export type SpurSessionStatus =
   | "spawning"
   | "running"
   | "stopped"
+  | "budget_limited"
   | "paused"
   | "errored"
   | "completed"
@@ -16,6 +17,7 @@ export type SpurSessionState =
   | "rate_limited"
   | "stale"
   | "stopped"
+  | "budget_limited"
   | "error"
   | "killed";
 
@@ -306,6 +308,80 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
+export type SpurSessionTokenUsageView =
+  | {
+      status: "available";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      provider: "claude" | "codex" | "opencode" | "cursor";
+      budget?: number;
+      exhausted: boolean;
+    }
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "opencode" | "cursor";
+      budget?: number;
+      exhausted: false;
+    }
+  | {
+      status: "unavailable";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+      provider: "cursor";
+      reason: "structured_usage_unavailable";
+    };
+
+export type SpurPreflightTokenUsageView =
+  | {
+      status: "measured" | "partial";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+      byProvider: Partial<
+        Record<"claude" | "codex" | "cursor" | "opencode", { totalTokens: number }>
+      >;
+    }
+  | {
+      status: "unknown" | "legacy_unknown";
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+    };
+
+export interface SpurTokenBudgetView {
+  overridden?: boolean;
+  budget?: number;
+  warnOnly?: boolean;
+  knownTotalTokens: number;
+  exhausted: boolean;
+  enforced: boolean;
+  reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
+}
+
+export function isTokenBudgetBlocked(
+  session: Pick<SpurSessionView, "tokenBudgetView" | "tokenUsageView">,
+): boolean {
+  const budget = session.tokenBudgetView;
+  if (budget?.overridden) return false;
+  if (budget) return budget.exhausted === true && budget.warnOnly !== true;
+  return session.tokenUsageView?.exhausted === true;
+}
+
 export type SpurSidecarStopReport =
   | { outcome: "reaped" }
   | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
@@ -371,6 +447,9 @@ export interface SpurSessionView {
     enabled: boolean;
     conditions?: string;
   };
+  tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
 }
 
 /** `POST /sessions/:id/sidecars/:name/stop`'s response: the session view
@@ -736,6 +815,9 @@ export interface DashboardSession {
     enabled: boolean;
     conditions?: string;
   };
+  tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
 }
 
 export interface SpawnOverrides {
@@ -820,6 +902,11 @@ export function toDashboardSession(
       : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
+    ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
+    ...(session.preflightTokenUsageView
+      ? { preflightTokenUsageView: session.preflightTokenUsageView }
+      : {}),
+    ...(session.tokenBudgetView ? { tokenBudgetView: session.tokenBudgetView } : {}),
   };
 }
 
@@ -855,7 +942,12 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
   if (!session.workspaceExists) return false;
-  if (session.status === "paused" || session.status === "stopped") return true;
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.status === "budget_limited"
+  )
+    return true;
   return !session.runtimeAlive;
 }
 
@@ -941,6 +1033,7 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
+  if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";
   }

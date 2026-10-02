@@ -55,7 +55,7 @@ describe("renderSidecarSweepResult", () => {
     const result: SidecarSweepResult = {
       supported: true,
       leaked: [tree({ rootPid: 500 })],
-      reaped: [{ sessionName: "leaked:500", panePid: 500, survivors: [] }],
+      reaped: [{ sessionName: "leaked:500", panePid: 500, survivors: [], blindKill: false }],
     };
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[reaped]");
@@ -66,7 +66,9 @@ describe("renderSidecarSweepResult", () => {
     const result: SidecarSweepResult = {
       supported: true,
       leaked: [tree({ rootPid: 500 })],
-      reaped: [{ sessionName: "leaked:500", panePid: 500, survivors: [501, 502] }],
+      reaped: [
+        { sessionName: "leaked:500", panePid: 500, survivors: [501, 502], blindKill: false },
+      ],
     };
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[partial]");
@@ -86,6 +88,23 @@ describe("renderSidecarSweepResult", () => {
     const output = renderSidecarSweepResult(result);
     expect(output).toContain("[reapable] pid 500");
     expect(output).toContain("[report-only] pid 600");
+  });
+
+  // AC-f: the tree pid list and a total would-free RSS line.
+  it("shows the tree pid list per line and a trailing total would-free RSS line", () => {
+    const result: SidecarSweepResult = {
+      supported: true,
+      leaked: [
+        tree({ rootPid: 500, tree: [500, 501, 502], treeRssKb: 4096 }),
+        tree({ rootPid: 600, tree: [600], treeRssKb: 2048 }),
+      ],
+      reaped: [],
+    };
+    const output = renderSidecarSweepResult(result);
+    const lines = output.split("\n");
+    expect(lines[0]).toContain("tree [500,501,502]");
+    expect(lines[1]).toContain("tree [600]");
+    expect(lines.at(-1)).toContain("Total would-free: 6.0 MB");
   });
 
   it("AC11: marks an orphan-daemon row report-only, shows its configPath, and warns to verify before killing", () => {

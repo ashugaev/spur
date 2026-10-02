@@ -98,7 +98,7 @@ interface FleetSessionSnapshot {
   activity: Map<string, Date | null>;
   readable: boolean;
   // True only when `readable` is false AND the fork that failed was killed by
-  // its own `TMUX_COMMAND_TIMEOUT_MS` timeout (see isTmuxTimeoutKill) rather
+  // its own `TMUX_COMMAND_TIMEOUT_MS` timeout (see isProbeTimeoutKill) rather
   // than genuinely failing (e.g. no tmux server running). Ambiguous — the
   // fleet could not be read, not "the fleet is empty" — so callers reasoning
   // about a session's ABSENCE must treat this apart from an ordinary
@@ -160,7 +160,7 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
       // No tmux server running (or another list-windows failure) — an empty
       // fleet, never a thrown error.
       readable = false;
-      unresponsive = isTmuxTimeoutKill(error);
+      unresponsive = isProbeTimeoutKill(error);
     }
     return { names, activity, readable, unresponsive };
   });
@@ -309,7 +309,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
       // fleet, never a thrown error. `readable: false` keeps that
       // distinguishable from a server that answered with no panes.
       readable = false;
-      unresponsive = isTmuxTimeoutKill(error);
+      unresponsive = isProbeTimeoutKill(error);
     }
     return { readable, unresponsive, panes };
   });
@@ -448,9 +448,9 @@ export class SensitiveTmuxCleanupError extends Error {
 // `signal: "SIGTERM"` on the rejected error — distinct from an external
 // SIGTERM (`killed: false`), a maxBuffer overrun (`killed` undefined), and a
 // plain non-zero exit (`killed: false`). This is the only ambiguous failure:
-// the fork MIGHT still be alive server-side, so callers must not treat it the
-// same as a confirmed-absent tmux server.
-function isTmuxTimeoutKill(error: unknown): boolean {
+// the probe fork (tmux or ps) MIGHT still be alive, so callers must not treat
+// it the same as a confirmed-absent tmux server or process.
+function isProbeTimeoutKill(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
@@ -678,11 +678,19 @@ interface PsRow {
   args: string;
 }
 
+interface PsSnapshot {
+  rows: PsRow[];
+  // True only when the `ps` fork was killed by its own timeout, never for a
+  // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
+  // is empty whenever this is true.
+  unresponsive: boolean;
+}
+
 // Shared, TTL-cached `ps` snapshot: the full process table is identical for
 // every session in a tick, so this is one fork per TTL window instead of one
 // per session. Carries rss so getFleetSessionRssBytes (headroom reporting)
 // reuses this exact fork instead of adding a second one.
-const psSnapshotCache = new Map<string, ProbeCacheEntry<PsRow[]>>();
+const psSnapshotCache = new Map<string, ProbeCacheEntry<PsSnapshot>>();
 const PS_SNAPSHOT_CACHE_KEY = "ps";
 // execFile's default maxBuffer (1 MiB) truncates a large process table
 // instead of erroring; the catch below would then treat the truncation the
@@ -701,7 +709,7 @@ const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 // are Linux procps/BSD ps fields, not POSIX; this repo already assumes a
 // Linux `ps` at runtime (see also process-tree.ts), so this is an existing
 // exposure shape, not a new one — documented here, not solved.
-function getPsSnapshot(): Promise<PsRow[]> {
+function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
       const { stdout: psOut } = await execFileAsync(
@@ -712,7 +720,7 @@ function getPsSnapshot(): Promise<PsRow[]> {
           maxBuffer: PS_MAX_BUFFER_BYTES,
         },
       );
-      return psOut
+      const rows = psOut
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
@@ -737,8 +745,9 @@ function getPsSnapshot(): Promise<PsRow[]> {
           };
         })
         .filter((row): row is PsRow => row !== null);
-    } catch {
-      return [];
+      return { rows, unresponsive: false };
+    } catch (error) {
+      return { rows: [], unresponsive: isProbeTimeoutKill(error) };
     }
   });
 }
@@ -756,7 +765,10 @@ function getPsSnapshot(): Promise<PsRow[]> {
 export async function getFleetSessionRssBytes(
   liveSessionByWorkspaceId: ReadonlyMap<string, string> = new Map(),
 ): Promise<Map<string, number>> {
-  const [{ panes }, psRows] = await Promise.all([getFleetPaneSnapshot(), getPsSnapshot()]);
+  const [{ panes }, { rows: psRows }] = await Promise.all([
+    getFleetPaneSnapshot(),
+    getPsSnapshot(),
+  ]);
   const rssKbByTty = new Map<string, number>();
   for (const row of psRows) {
     if (!row.tty) continue;
@@ -791,8 +803,9 @@ export async function getFleetSessionRssBytes(
 export interface TmuxProcessMatch {
   alive: boolean;
   matchedByName: boolean;
-  // True when the fleet-pane read was killed by its own timeout: alive:false
-  // is then not evidence of death. Callers must not kill on it.
+  // True when a probe fork (`list-panes -a` or `ps`) was killed by its own
+  // timeout: alive:false is then not evidence of death. Callers must not kill
+  // on it.
   unresponsive: boolean;
 }
 
@@ -832,6 +845,8 @@ export async function probeTmuxProcessMatch(
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
+      // This list-panes fork is independent of the caller's own pane read, so a
+      // timeout kill here empties `panes` without the caller's flag knowing.
       return { alive: false, matchedByName: false, unresponsive };
     }
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
@@ -844,7 +859,8 @@ export async function probeTmuxProcessMatch(
     if (processRes.length === 0) {
       return { alive: false, matchedByName: false, unresponsive };
     }
-    const rows = await getPsSnapshot();
+    const { rows, unresponsive: psUnresponsive } = await getPsSnapshot();
+    unresponsive = unresponsive || psUnresponsive;
     // tpgid on the row whose pid IS a pane pid is that tty's foreground
     // process group, shared by every process attached to the tty.
     const allPanePids = entry?.allPanePids ?? [];

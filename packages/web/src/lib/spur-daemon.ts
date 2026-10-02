@@ -17,11 +17,13 @@ function jsonHeaders(): Record<string, string> {
 
 export class SpurDaemonError extends Error {
   readonly status: number;
+  readonly payload: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, payload?: unknown) {
     super(message);
     this.name = "SpurDaemonError";
     this.status = status;
+    this.payload = payload;
   }
 }
 
@@ -69,7 +71,7 @@ export async function spurRequestJson<T>(path: string, init?: SpurRequestInit): 
       typeof payload === "object" && payload !== null && "error" in payload
         ? String((payload as { error?: unknown }).error ?? "Spur daemon request failed")
         : `Spur daemon request failed (${response.status})`;
-    throw new SpurDaemonError(message, response.status);
+    throw new SpurDaemonError(message, response.status, payload);
   }
 
   return payload as T;

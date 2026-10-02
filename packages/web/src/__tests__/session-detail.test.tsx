@@ -6171,6 +6171,439 @@ describe("SessionDetail display state", () => {
   });
 });
 
+describe("SessionDetail token usage", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  function stubFetch(session: Partial<SpurSessionView>) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture(session)), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("shows used and budget tokens in the runtime sidebar", async () => {
+    stubFetch({
+      tokenUsageView: {
+        status: "available",
+        provider: "claude",
+        inputTokens: 1000,
+        outputTokens: 234,
+        totalTokens: 1234,
+        cacheReadInputTokens: 300,
+        cacheWriteInputTokens: 200,
+        reasoningOutputTokens: 34,
+        cacheWrite5mInputTokens: 50,
+        cacheWrite1hInputTokens: 150,
+        budget: 2000,
+        exhausted: false,
+      },
+      tokenBudgetView: { budget: 2000, knownTotalTokens: 1234, exhausted: false, enforced: true },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Tokens")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: 1,234"));
+    expect(screen.getByText("1.2K / 2K")).toBeInTheDocument();
+    expect(screen.getByText("Cache read")).toBeInTheDocument();
+    expect(screen.getByText("300")).toBeInTheDocument();
+    expect(screen.getByText("Cache write 5m")).toBeInTheDocument();
+    expect(screen.getByText("50")).toBeInTheDocument();
+  });
+
+  it("keeps pre-flight usage separate and shows the combined budget", async () => {
+    stubFetch({
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 2,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    expect(screen.getByText("≥100 / 100")).toBeInTheDocument();
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Total2080");
+    expect(screen.getByText("Token budget reached")).toBeInTheDocument();
+  });
+
+  it("shows pre-flight components, unknown fields, and combined-budget Restore gating", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 60,
+        outputTokens: 20,
+        totalTokens: 80,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "partial",
+        inputTokens: 15,
+        outputTokens: 5,
+        totalTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheWrite5mInputTokens: 5,
+        attemptCount: 2,
+        unknownAttemptCount: 1,
+        providerIterationCount: 3,
+        byProvider: { claude: { totalTokens: 20 } },
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 100,
+        exhausted: true,
+        enforced: false,
+        reason: "preflight_unknown",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 100"));
+    const row = (label: string) =>
+      within(screen.getByRole("tooltip")).getByText(label).closest("tr");
+    expect(row("Input")).toHaveTextContent("1560");
+    expect(row("Output")).toHaveTextContent("520");
+    expect(row("Cache read")).toHaveTextContent("0?");
+    expect(row("Cache write")).toHaveTextContent("5?");
+    expect(row("Reasoning")).toHaveTextContent("2?");
+    expect(row("Cache write 5m")).toHaveTextContent("5?");
+    expect(screen.queryByText("Cache write 1h")).not.toBeInTheDocument();
+    expect(screen.getByText("Pre-flight status").closest("div")).toHaveTextContent("partial");
+    expect(screen.getByText("Pre-flight Claude").closest("div")).toHaveTextContent("20");
+    expect(screen.getByText("Pre-flight attempts").closest("div")).toHaveTextContent("2");
+    expect(screen.getByText("Unknown attempts").closest("div")).toHaveTextContent("1");
+    expect(screen.getByText("Provider iterations").closest("div")).toHaveTextContent("3");
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
+  it("marks the combined budget as a known minimum when main usage is unavailable", async () => {
+    stubFetch({
+      agent: "cursor",
+      tokenUsageView: {
+        status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        exhausted: false,
+        unenforced: true,
+      },
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        reason: "main_usage_unavailable",
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.focus(await screen.findByLabelText("Tokens: at least 20"));
+    expect(screen.getByText("≥20 / 100")).toBeInTheDocument();
+    expect(screen.getByText("Budget not enforced · main usage unavailable")).toBeInTheDocument();
+  });
+
+  it("marks unsupported live sessions as unenforced", async () => {
+    stubFetch({
+      agent: "cursor",
+      tokenUsageView: {
+        status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        exhausted: false,
+        unenforced: true,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("Tokens")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tokens: unavailable")).toHaveTextContent("—");
+  });
+
+  it.each([
+    [
+      {
+        status: "available",
+        provider: "cursor",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        exhausted: false,
+      } as const,
+      { knownTotalTokens: 100, exhausted: false, enforced: true },
+      "100",
+    ],
+    [
+      { status: "waiting", provider: "codex", budget: 2000, exhausted: false } as const,
+      undefined,
+      "—",
+    ],
+    [
+      {
+        status: "unavailable",
+        provider: "cursor",
+        reason: "structured_usage_unavailable",
+        budget: 2000,
+        exhausted: false,
+        unenforced: false,
+      } as const,
+      undefined,
+      "—",
+    ],
+    [
+      {
+        status: "available",
+        provider: "opencode",
+        inputTokens: 1000,
+        outputTokens: 234,
+        totalTokens: 1234,
+        exhausted: false,
+      } as const,
+      { knownTotalTokens: 1234, exhausted: false, enforced: true },
+      "1.2K",
+    ],
+  ])(
+    "renders token status %# without assuming a budget",
+    async (tokenUsageView, tokenBudgetView, label) => {
+      stubFetch({ tokenUsageView, tokenBudgetView });
+
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(await screen.findByText(label)).toBeInTheDocument();
+    },
+  );
+
+  it("hides Restore when the token budget is exhausted", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      stopReason: "token_budget",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 1700,
+        outputTokens: 300,
+        totalTokens: 2000,
+        budget: 2000,
+        exhausted: true,
+      },
+      tokenBudgetView: {
+        budget: 2000,
+        knownTotalTokens: 2000,
+        exhausted: true,
+        enforced: true,
+      },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("2K / 2K")).toBeInTheDocument();
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByText("Not accepting input. Restore to continue.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue anyway" })).toBeInTheDocument();
+  });
+
+  it("approves a budget-limited session and forwards the explicit override", async () => {
+    stubFetch({
+      status: "budget_limited",
+      state: "budget_limited",
+      runtimeAlive: false,
+      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("BUDGET LIMITED")).toBeInTheDocument();
+    const fetchMock = vi.mocked(global.fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+    fireEvent.click(screen.getByRole("button", { name: "Continue anyway" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/api-a1/restore",
+        expect.objectContaining({ body: JSON.stringify({ overrideTokenBudget: true }) }),
+      ),
+    );
+  });
+
+  it.each([
+    { budget: 200, knownTotalTokens: 100, exhausted: false, enforced: true },
+    { knownTotalTokens: 100, exhausted: false, enforced: true },
+  ])(
+    "restores a historical budget stop normally after raising or removing its budget %#",
+    async (tokenBudgetView) => {
+      stubFetch({
+        status: "budget_limited",
+        state: "budget_limited",
+        runtimeAlive: false,
+        tokenBudgetView,
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      expect(await screen.findByText("BUDGET LIMITED")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
+      const fetchMock = vi.mocked(global.fetch);
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/sessions/api-a1/restore",
+          expect.objectContaining({ body: undefined }),
+        ),
+      );
+    },
+  );
+
+  it("allows input after approval and displays the ignored limit", async () => {
+    stubFetch({
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 110,
+        exhausted: false,
+        enforced: false,
+        overridden: true,
+      },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("110 / 100")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: 110"));
+    expect(screen.getByText("110 of 100 · 110% · limit ignored")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
+  });
+
+  it("keeps an approved unknown total labeled as a minimum", async () => {
+    stubFetch({
+      tokenBudgetView: {
+        budget: 100,
+        knownTotalTokens: 20,
+        exhausted: false,
+        enforced: false,
+        overridden: true,
+        reason: "preflight_unknown",
+      },
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
+    fireEvent.focus(screen.getByLabelText("Tokens: at least 20"));
+    expect(screen.getByText("20 of 100 · 20% · limit ignored")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Budget not enforced · pre-flight usage unknown"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Restore blocked when the combined budget view reports exhaustion", async () => {
+    stubFetch({
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 75,
+        outputTokens: 25,
+        totalTokens: 100,
+        budget: 100,
+        exhausted: true,
+      },
+      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    expect(await screen.findByText("100 / 100")).toBeInTheDocument();
+    expect(screen.getByText("Not accepting input. Token budget limit hit.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
+
+  it.each(["legacy_unknown", "preflight_unknown"] as const)(
+    "allows normal Restore for paused %s usage",
+    async (reason) => {
+      stubFetch({
+        status: "paused",
+        state: "stopped",
+        runtimeAlive: false,
+        tokenBudgetView: {
+          budget: 100,
+          knownTotalTokens: 20,
+          exhausted: false,
+          enforced: false,
+          reason,
+        },
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+
+      expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["legacy_unknown", "preflight_unknown", "main_usage_unavailable"] as const)(
+    "keeps active input enabled for %s usage",
+    async (reason) => {
+      stubFetch({
+        tokenBudgetView: {
+          budget: 100,
+          knownTotalTokens: 20,
+          exhausted: false,
+          enforced: false,
+          reason,
+        },
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      expect(await screen.findByText("≥20 / 100")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Message...")).toBeEnabled();
+      expect(screen.queryByText(/Not accepting input/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Continue anyway" })).not.toBeInTheDocument();
+    },
+  );
+});
+
 describe("SessionDetail document title", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
