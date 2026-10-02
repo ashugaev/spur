@@ -3951,6 +3951,7 @@ export class SessionService {
                 {},
                 {
                   skipEnrichment: true,
+                  stopReason: "memory_shed",
                 },
               ),
             );
@@ -9767,6 +9768,12 @@ export class SessionService {
     // preceded this call, so isStaleParked (which requires
     // status==="stopped") would always return false here and silently
     // disable the sidecar replay.
+    if (record.stopReason === "memory_shed") {
+      // No sidecars to replay; the wake only has to clear the marker so the
+      // running record never carries it (the wake gate keys on it).
+      const { stopReason: _clearedShed, ...awake } = record;
+      return awake;
+    }
     if (record.stopReason !== "stale_timeout") {
       return record;
     }
@@ -14955,7 +14962,12 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
+    options: {
+      retainInList?: boolean;
+      skipEnrichment: true;
+      eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
+    },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
@@ -14966,6 +14978,7 @@ export class SessionService {
       skipEnrichment?: false;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -14977,8 +14990,10 @@ export class SessionService {
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView | void> {
+    const pauseReason = options?.stopReason ?? "manual_pause";
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -14988,7 +15003,7 @@ export class SessionService {
       const migrated: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(session),
         status: "stopped",
-        stopReason: "manual_pause",
+        stopReason: pauseReason,
         updatedAt: nowIso(),
         ...(options?.retainInList ? { retainInList: true } : {}),
       };
@@ -15007,7 +15022,7 @@ export class SessionService {
         const record: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
-          stopReason: "manual_pause",
+          stopReason: pauseReason,
           updatedAt: nowIso(),
           ...(options?.retainInList ? { retainInList: true } : {}),
         };
@@ -15086,7 +15101,7 @@ export class SessionService {
     const record: SessionRecord = {
       ...this.sessionWithReleasedSidecarPorts(cleanedSession),
       status: targetStatus,
-      ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
+      ...(targetStatus === "stopped" ? { stopReason: pauseReason } : {}),
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
@@ -15463,15 +15478,18 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    // A stale-parked session holds zero live slots (isLiveSessionRecord
-    // excludes it by design), so nothing gates how many of them a single
-    // poll cycle can wake at once without this. Gated to stale-parked only:
-    // an ordinary dead-pane recovery is relaunching a session that already
-    // held its slot, so it must not be re-denied here. Thrown before
-    // anything below touches the pane (killAgentPaneAndConfirmExit runs
-    // inside relaunchSessionInPlace, further down) so a refusal never kills
-    // a live process or does any destructive work.
-    if (isStaleParked(session)) {
+    // A stale-parked or memory-shed session holds zero live slots
+    // (isLiveSessionRecord excludes it by design), so nothing gates how many
+    // of them a single poll cycle can wake at once without this. Gated to
+    // those two shapes only: an ordinary dead-pane recovery is relaunching a
+    // session that already held its slot, so it must not be re-denied here.
+    // Thrown before anything below touches the pane (killAgentPaneAndConfirmExit
+    // runs inside relaunchSessionInPlace, further down) so a refusal never
+    // kills a live process or does any destructive work.
+    if (
+      isStaleParked(session) ||
+      (session.status === "stopped" && session.stopReason === "memory_shed")
+    ) {
       this.assertAdmissible(session.project, "wake");
     }
 
@@ -15972,7 +15990,8 @@ export class SessionService {
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
-        current.stopReason !== "stale_timeout";
+        current.stopReason !== "stale_timeout" &&
+        current.stopReason !== "memory_shed";
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
