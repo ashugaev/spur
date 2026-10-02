@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
-import type { SpurSessionLink, SpurSessionsResponse, SpurSessionView } from "@/lib/types";
+import type { LifecycleAction, SessionLifecycleSnapshot, SpurSessionLink, SpurSessionsResponse, SpurSessionView } from "@/lib/types";
 
 const useSessionLinkPrInfoMock = vi.fn();
 
@@ -38,7 +38,8 @@ function render(ui: ReactElement, options?: RenderOptions) {
   return { ...rtlRender(ui, { wrapper: Wrapper, ...options }), client };
 }
 
-const sessionsResponse = {
+const sessionsResponse: SpurSessionsResponse = {
+  lifecycleInstanceId: "test-instance",
   projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
   sessions: [
     {
@@ -55,6 +56,7 @@ const sessionsResponse = {
       updatedAt: "2026-08-01T10:00:00.000Z",
       lastActivityAt: "2026-08-01T10:00:00.000Z",
       runtimeAlive: false,
+      lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
       workspaceExists: true,
       worktreePath: "/tmp/api-c9e9",
       services: [],
@@ -83,22 +85,38 @@ function deferredResponse() {
   return { promise, resolve };
 }
 
+function completeReceipt(body: Record<string, unknown>, revision: number, succeeded: boolean): SessionLifecycleSnapshot {
+  expect(body.operationId).toMatch(/^[\da-f-]{36}$/i);
+  return {
+    instanceId: "test-instance", revision,
+    operation: {
+      operationId: body.operationId as string, action: "complete",
+      phase: succeeded ? "succeeded" : "failed", targetIds: ["api-c9e9"],
+      outcomes: [{ sessionId: "api-c9e9", phase: succeeded ? "succeeded" : "failed" }],
+    },
+  };
+}
+
 function mockFetch(completeBodies: unknown[], options?: { skipAlsoFails?: true }) {
+  let rows: SpurSessionView[] = sessionsResponse.sessions;
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
       completeBodies.push(body);
       const record = body as Record<string, unknown>;
+      const succeeds = record["skipPrCheck"] === true && !options?.skipAlsoFails;
+      const lifecycle = completeReceipt(record, completeBodies.length * 2, succeeds);
+      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
       if (record["skipPrCheck"] === true && !options?.skipAlsoFails) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
+        return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
-      return new Response(JSON.stringify(prCheckUnavailablePayload), { status: 409 });
+      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), { status: 409 });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -113,24 +131,28 @@ const openPrActionPayload = {
 // First complete asks for an open-PR action, the follow-up hits the PR-check
 // 409, and the skip succeeds — the sequence that stacked both dialogs.
 function mockFetchOpenPrThenUnavailable(completeBodies: unknown[]) {
+  let rows: SpurSessionView[] = sessionsResponse.sessions;
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
       completeBodies.push(body);
       const record = body as Record<string, unknown>;
+      const succeeds = record["skipPrCheck"] === true;
+      const lifecycle = completeReceipt(record, completeBodies.length * 2, succeeds);
+      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
       if (record["skipPrCheck"] === true) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
+        return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
       if (record["prAction"] === "close") {
-        return new Response(JSON.stringify(prCheckUnavailablePayload), { status: 409 });
+        return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), { status: 409 });
       }
-      return new Response(JSON.stringify(openPrActionPayload), { status: 409 });
+      return new Response(JSON.stringify({ ...openPrActionPayload, lifecycle }), { status: 409 });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -139,20 +161,24 @@ function mockFetchOpenPrThenUnavailable(completeBodies: unknown[]) {
 // Retry is offered only for a rate limit, the one failure that clears on its
 // own. The second complete lands after the window resets.
 function mockFetchRateLimitedThenRetryOk(completeBodies: unknown[]) {
+  let rows: SpurSessionView[] = sessionsResponse.sessions;
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify(sessionsResponse));
+    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
       completeBodies.push(body);
+      const succeeds = completeBodies.length > 1;
+      const lifecycle = completeReceipt(body as Record<string, unknown>, completeBodies.length * 2, succeeds);
+      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
       if (completeBodies.length > 1) {
-        return new Response(JSON.stringify({ completedIds: ["api-c9e9"] }));
+        return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
-      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, rateLimited: true }), {
+      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, rateLimited: true, lifecycle }), {
         status: 409,
       });
     }
@@ -210,7 +236,11 @@ describe("Dashboard complete with an unavailable PR check", () => {
     fireEvent.click(skip);
 
     await waitFor(() => expect(completeBodies).toHaveLength(2));
-    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", skipPrCheck: true }]);
+    expect(completeBodies).toEqual([
+      { scope: "desk", operationId: expect.any(String) },
+      { scope: "desk", skipPrCheck: true, operationId: expect.any(String) },
+    ]);
+    expect(completeBodies[0]).not.toEqual(completeBodies[1]);
     await waitFor(() =>
       expect(
         screen.queryByRole("dialog", { name: "GitHub PR Check Unavailable" }),
@@ -242,7 +272,11 @@ describe("Dashboard complete with an unavailable PR check", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Retry PR Check/i }));
 
     await waitFor(() => expect(completeBodies).toHaveLength(2));
-    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk" }]);
+    expect(completeBodies).toEqual([
+      { scope: "desk", operationId: expect.any(String) },
+      { scope: "desk", operationId: expect.any(String) },
+    ]);
+    expect(completeBodies[0]).not.toEqual(completeBodies[1]);
     await waitFor(() =>
       expect(
         screen.queryByRole("dialog", { name: "GitHub PR Check Unavailable" }),
@@ -304,6 +338,7 @@ describe("Dashboard lifecycle reconciliation", () => {
   let detailFailure: boolean;
   let otherPost: ReturnType<typeof deferredResponse>;
   let nextDetail: ReturnType<typeof deferredResponse> | undefined;
+  let revision: number;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -318,11 +353,18 @@ describe("Dashboard lifecycle reconciliation", () => {
     nextDetail = undefined;
     posts = [];
     detailFailure = false;
-    vi.spyOn(global, "fetch").mockImplementation((input) => {
+    revision = 0;
+    vi.spyOn(global, "fetch").mockImplementation((input, init) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       const json = (body: unknown, status = 200) =>
         Promise.resolve(new Response(JSON.stringify(body), { status }));
       if (url === "/api/sessions") {
+        if (detailFailure) return json({ error: "detail failed" }, 500);
+        if (nextDetail) {
+          const held = nextDetail;
+          nextDetail = undefined;
+          return held.promise.then(() => json(list));
+        }
         if (nextList) {
           const held = nextList;
           nextList = undefined;
@@ -332,9 +374,52 @@ describe("Dashboard lifecycle reconciliation", () => {
       }
       if (url === "/api/tags") return json({ tags: [] });
       if (url.startsWith("/api/runtime/")) return json({ available: false });
-      if (url.endsWith("/complete") || url.endsWith("/restore")) {
+      if (url.startsWith("/api/sessions/") && (url.endsWith("/complete") || url.endsWith("/restore"))) {
         posts.push(url);
-        return url.includes("api-other") ? otherPost.promise : post.promise;
+        const body: unknown = JSON.parse(String(init?.body));
+        expect(body).toMatchObject({ operationId: expect.any(String) });
+        const { operationId } = body as { operationId: string };
+        const id = url.split("/")[3];
+        const action: LifecycleAction = url.endsWith("/complete") ? "complete" : "restore";
+        const anchor = list.sessions.find((row) => row.id === id)!;
+        const key = anchor.workspaceId ?? anchor.deskId ?? anchor.id;
+        const targets = action === "complete"
+          ? list.sessions.filter((row) => (row.workspaceId ?? row.deskId ?? row.id) === key).map((row) => row.id)
+          : [id];
+        const snapshot = (phase: "pending" | "succeeded" | "failed"): SessionLifecycleSnapshot => ({
+          instanceId: "test-instance", revision: ++revision,
+          operation: { operationId, action, phase, targetIds: targets,
+            outcomes: phase === "pending" ? [] : targets.map((sessionId) => ({ sessionId,
+              phase: action === "complete"
+                ? current.get(sessionId)?.status === "completed" ? "succeeded" : "failed"
+                : phase === "succeeded" ? "succeeded" : "failed" })) },
+        });
+        const pendingLifecycle = snapshot("pending");
+        for (const target of targets) {
+          const row = current.get(target);
+          if (row) current.set(target, { ...row, lifecycle: pendingLifecycle });
+        }
+        list = { ...list, sessions: list.sessions.map((row) => targets.includes(row.id)
+          ? { ...row, lifecycle: pendingLifecycle } : row) };
+        return (url.includes("api-other") ? otherPost.promise : post.promise).then(async (response) => {
+          const payload = await response.json() as Record<string, unknown>;
+          if (Array.isArray(payload.completedIds)) {
+            for (const completedId of payload.completedIds) {
+              if (typeof completedId === "string" && !targets.includes(completedId)) targets.push(completedId);
+            }
+          }
+          const lifecycle = snapshot(response.ok ? "succeeded" : "failed");
+          list = { ...list, sessions: list.sessions.map((row) => {
+            if (!targets.includes(row.id)) return row;
+            const actual = current.get(row.id) ?? row;
+            if (actual.lifecycle?.operation?.phase === "pending" &&
+              actual.lifecycle.operation.operationId !== operationId) return row;
+            const next = { ...actual, lifecycle };
+            current.set(row.id, next);
+            return next;
+          }) };
+          return new Response(JSON.stringify({ ...payload, lifecycle }), { status: response.status });
+        });
       }
       const session = current.get(url.replace("/api/sessions/", ""));
       if (nextDetail) {
@@ -408,7 +493,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     expect(doneButton()).not.toBeInTheDocument();
     list = { ...list, sessions: [] };
     await refetch(client);
-    list = { ...list, sessions: [source] };
+    list = { ...list, sessions: [{ ...source, lifecycle: current.get(source.id)!.lifecycle }] };
     await refetch(client);
     expect(doneButton()).toBeInTheDocument();
   });
@@ -441,6 +526,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     held.resolve(new Response(JSON.stringify(list)));
     await waitFor(() => expect(restoreButton()).not.toBeInTheDocument());
     current.set(source.id, source);
+    list = { ...list, sessions: [{ ...source, lifecycle: list.sessions[0]?.lifecycle ?? current.get(source.id)!.lifecycle }] };
     await refetch(client);
     expect(restoreButton()).toBeInTheDocument();
   });
@@ -517,8 +603,6 @@ describe("Dashboard lifecycle reconciliation", () => {
     };
     current.set(source.id, { ...anchor, status: "completed" });
     current.set(child.id, failed);
-    const reconciliation = deferredResponse();
-    nextList = reconciliation;
     await act(async () => {
       post.resolve(new Response(JSON.stringify({ error: "partial failure" }), { status: 500 }));
     });
@@ -531,14 +615,6 @@ describe("Dashboard lifecycle reconciliation", () => {
         .getQueryData<SpurSessionsResponse>(["sessions"])
         ?.sessions.find((row) => row.id === child.id)?.status,
     ).toBe("errored");
-    reconciliation.resolve(
-      new Response(
-        JSON.stringify({
-          ...list,
-          sessions: [{ ...anchor, status: "completed" }, failed, addition],
-        }),
-      ),
-    );
   });
 
   it("protects returned desk members absent from the initial reservation", async () => {
@@ -570,7 +646,10 @@ describe("Dashboard lifecycle reconciliation", () => {
       ],
     };
     await refetch(client);
-    list = { ...list, sessions: [anchor, added] };
+    list = { ...list, sessions: [
+      { ...anchor, lifecycle: current.get(anchor.id)!.lifecycle },
+      { ...added, lifecycle: current.get(added.id)!.lifecycle },
+    ] };
     await refetch(client);
     expect(doneButton()).toBeInTheDocument();
   });
@@ -785,7 +864,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     },
   );
 
-  it("keeps completion hidden through terminal detail reads, then accepts an actual reopened session", async () => {
+  it("keeps completion hidden through terminal list reads, then accepts an actual reopened session", async () => {
     const { client } = render(<Dashboard />);
     await clickDone();
     current.set(source.id, { ...source, status: "completed" });
@@ -797,7 +876,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     await refetch(client);
     expect(doneButton()).not.toBeInTheDocument();
     expect(
-      vi.mocked(global.fetch).mock.calls.filter(([url]) => url === `/api/sessions/${source.id}`)
+      vi.mocked(global.fetch).mock.calls.filter(([url]) => url === "/api/sessions")
         .length,
     ).toBeGreaterThanOrEqual(2);
     const reopened: SpurSessionView = {
@@ -807,6 +886,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       runtimeAlive: true,
     };
     current.set(source.id, reopened);
+    list = { ...list, sessions: [{ ...reopened, lifecycle: list.sessions[0].lifecycle }] };
     await refetch(client);
     expect(doneButton()).toBeInTheDocument();
     expect(screen.getByText("Waiting")).toBeInTheDocument();

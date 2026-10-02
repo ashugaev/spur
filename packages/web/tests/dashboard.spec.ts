@@ -24,9 +24,24 @@ import {
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
+import type { LifecycleAction, SessionLifecycleSnapshot } from "../src/lib/types";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+function lifecycleReceipt(
+  operationId: string,
+  targetIds: string[],
+  action: LifecycleAction,
+  phase: "pending" | "succeeded" | "failed",
+  revision = phase === "pending" ? 1 : 2,
+): SessionLifecycleSnapshot {
+  expect(operationId).toMatch(/^[\da-f-]{36}$/i);
+  return { instanceId: "test-instance", revision, operation: {
+    operationId, targetIds, action, phase,
+    outcomes: phase === "pending" ? [] : targetIds.map((sessionId) => ({ sessionId, phase })),
+  } };
+}
 
 test.describe("Lifecycle reconciliation", () => {
   test("complete stays hidden across three polls and stale settlement data", async ({
@@ -57,8 +72,12 @@ test.describe("Lifecycle reconciliation", () => {
       release = resolve;
     });
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      rows = [{ ...session, lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "pending") }];
       await held;
-      await route.fulfill({ json: { completedIds: [session.id] } });
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }];
+      await route.fulfill({ json: { completedIds: [session.id], lifecycle } });
     });
     await page.clock.install();
     await page.goto("/");
@@ -70,11 +89,12 @@ test.describe("Lifecycle reconciliation", () => {
       await expect(done).toHaveCount(0);
     }
     expect(polls).toBeGreaterThanOrEqual(before + 3);
+    await page.reload();
+    await expect(done).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("complete-pending.png") });
     release();
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toHaveCount(0);
-    rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false }];
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("complete-success.png") });
@@ -84,7 +104,7 @@ test.describe("Lifecycle reconciliation", () => {
     page,
   }, testInfo) => {
     const stopped = makeStoppedSession({ id: "lifecycle-restore", prompt: "Lifecycle restore" });
-    const waiting = makeWaitingSession({
+    let waiting = makeWaitingSession({
       ...stopped,
       status: "running",
       state: "waiting",
@@ -99,7 +119,10 @@ test.describe("Lifecycle reconciliation", () => {
       release = resolve;
     });
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       await held;
+      waiting = { ...waiting, lifecycle: lifecycleReceipt(operationId, [stopped.id], "restore", "succeeded") };
+      rows = [waiting];
       await route.fulfill({ json: waiting });
     });
     await page.clock.install();
@@ -120,7 +143,7 @@ test.describe("Lifecycle reconciliation", () => {
     rows = [waiting];
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await page.screenshot({ path: testInfo.outputPath("restore-waiting.png") });
-    rows = [stopped];
+    rows = [{ ...stopped, lifecycle: waiting.lifecycle }];
     current = stopped;
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(restore).toBeVisible();
@@ -143,8 +166,11 @@ test.describe("Lifecycle reconciliation", () => {
     let calls = 0;
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       calls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (calls === 1) await held;
-      await route.fulfill({ status: 500, json: { error: "Restore failed" } });
+      const lifecycle = lifecycleReceipt(operationId, [stopped.id], "restore", "failed", calls * 2);
+      rows = rows.map((row) => row.id === stopped.id ? { ...stopped, lifecycle } : row);
+      await route.fulfill({ status: 500, json: { error: "Restore failed", lifecycle } });
     });
     await page.clock.install();
     await page.goto("/");
@@ -170,32 +196,25 @@ test.describe("Lifecycle reconciliation", () => {
       prompt: "Dead runtime restore",
       runtimeAlive: false,
     });
-    const waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
+    let waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
     let rows = [old];
     await mockSessions(page, () => rows);
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let detailCalls = 0;
-    await page.route(`**/api/sessions/${old.id}`, async (route) => {
-      detailCalls += 1;
-      await held;
+    let restoreCalls = 0;
+    await page.route(`**/api/sessions/${old.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      waiting = { ...waiting, lifecycle: lifecycleReceipt(operationId, [old.id], "restore", "succeeded") };
       await route.fulfill({ json: waiting });
     });
-    await page.route(`**/api/sessions/${old.id}/restore`, (route) =>
-      route.fulfill({ json: waiting }),
-    );
     await page.clock.install();
     await page.goto("/");
     const restore = page.getByRole("button", { name: `Restore session ${old.id}` });
     await restore.click();
-    await expect.poll(() => detailCalls).toBe(1);
+    await expect.poll(() => restoreCalls).toBe(1);
     await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(restore).toHaveCount(0);
     rows = [waiting];
-    release();
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(restore).toHaveCount(0);
   });
@@ -217,25 +236,30 @@ test.describe("Lifecycle reconciliation", () => {
       state: "stopped" as SpurSessionView["state"],
       runtimeAlive: false,
     };
-    let detailCalls = 0;
-    await mockSessions(page, [old]);
+    let rows = [old];
+    let polls = 0;
+    await mockSessions(page, () => { polls += 1; return rows; });
     await mockPrState(page, "merged");
     await page.route(`**/api/sessions/${old.id}`, (route) => {
-      detailCalls += 1;
       return route.fulfill({ json: current });
     });
-    await page.route(`**/api/sessions/${old.id}/complete`, (route) =>
-      route.fulfill({ json: { completedIds: [old.id] } }),
-    );
+    await page.route(`**/api/sessions/${old.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      const lifecycle = lifecycleReceipt(operationId, [old.id], "complete", "succeeded");
+      current = { ...current, lifecycle };
+      rows = [current];
+      await route.fulfill({ json: { completedIds: [old.id], lifecycle } });
+    });
     await page.clock.install();
     await page.goto("/");
     const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
     await done.click();
-    await expect.poll(() => detailCalls).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
     await expect(done).toHaveCount(0);
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toHaveCount(0);
-    current = { ...old, status: "running", state: "waiting", runtimeAlive: true };
+    current = { ...old, status: "running", state: "waiting", runtimeAlive: true, lifecycle: current.lifecycle };
+    rows = [current];
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toBeVisible();
     await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
@@ -1668,7 +1692,7 @@ test.describe("D4: Terminal button state", () => {
 
   test("clicking restore posts and refetches sessions", async ({ page }) => {
     const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
-    const restored = makeWorkingSession({
+    let restored = makeWorkingSession({
       ...stopped,
       status: "running",
       state: "working",
@@ -1681,6 +1705,9 @@ test.describe("D4: Terminal button state", () => {
     await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       restoreCalls += 1;
+      const body = route.request().postDataJSON() as { operationId: string };
+      expect(body).toEqual({ operationId: expect.any(String) });
+      restored = { ...restored, lifecycle: lifecycleReceipt(body.operationId, [stopped.id], "restore", "succeeded") };
       restoredState = true;
       await route.fulfill({
         status: 200,
@@ -1783,7 +1810,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let rows = [session];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1806,11 +1834,14 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeRequestSeen = true;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       await completeHold;
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle }),
       });
     });
 
@@ -1864,12 +1895,15 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
       completeBodies.push(route.request().postDataJSON());
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (completeAttempts === 1) {
+        current = { ...current, lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "failed") };
         await route.fulfill({
           status: 409,
           contentType: "application/json",
           body: JSON.stringify({
             code: "open_pr_action_required",
+            lifecycle: current.lifecycle,
             sessionId: session.id,
             pr: {
               number: 42,
@@ -1886,11 +1920,12 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         state: "stopped",
         runtimeAlive: false,
         tmuxSession: null,
+        lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "succeeded", 4),
       };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ completedIds: [session.id] }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle: current.lifecycle }),
       });
     });
 
@@ -1906,7 +1941,11 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+    expect(completeBodies).toEqual([
+      { scope: "desk", operationId: expect.any(String) },
+      { scope: "desk", prAction: "leave_open", operationId: expect.any(String) },
+    ]);
+    expect(completeBodies[0]).not.toEqual(completeBodies[1]);
     await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
@@ -1930,7 +1969,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       prompt: "Desk helper",
       slots: { title: "Desk helper", links: [] },
     });
-    await mockSessions(page, [session, subagent]);
+    let rows = [session, subagent];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1949,10 +1989,13 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     let completeBody: unknown = null;
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeBody = route.request().postDataJSON();
+      const { operationId } = completeBody as { operationId: string };
+      const lifecycle = lifecycleReceipt(operationId, [session.id, subagent.id], "complete", "succeeded");
+      rows = rows.map((row) => ({ ...row, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }));
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+        body: JSON.stringify({ completedIds: [session.id, subagent.id], lifecycle }),
       });
     });
     page.on("dialog", async (dialog) => {
@@ -1965,7 +2008,7 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.goto("/");
     await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
 
-    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
+    await expect.poll(() => completeBody).toEqual({ scope: "desk", operationId: expect.any(String) });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -4228,6 +4271,7 @@ test.describe("D8: Loading feedback", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
+          lifecycleInstanceId: "test-instance",
           sessions: [],
           projects: [{ id: "my-project", name: "my-project", configured: true }],
           backlog: [],
