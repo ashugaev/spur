@@ -18,8 +18,8 @@ SELF VERIFY
 
 RULES
 
-  No PASS without an open PR, with a missing required check, or on
-  stale review/validation. Report short, concrete.
+  Reject PASS with missing required checks, stale review/validation or PR state violating github close-out rules.
+  Report short, concrete.
   Reject missing, failed, skipped or stale required manual scenarios.
   Enforce manager's manual-proof and required-CI release gate.
   Report pending CI separately; never claim an unrun check passed.
