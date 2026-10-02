@@ -6,10 +6,10 @@ description: Validate manager close-out for repo work. Use when implementation i
 SELF VERIFY
 
   1  Confirm scope: branch, open PR, touched files.
-  2  Evidence checklist: tester PASS, scope's automated/build checks passed,
+  2  Evidence checklist: tester PASS, scope's build and required targeted checks passed,
      every acceptance criterion covered, no unsupported assumptions,
      diff carries nothing unrelated.
-  3  Evidence from current branch state; rerun stale or missing checks.
+  3  Evidence from current branch state; rerun stale manual/build evidence and required targeted checks. Follow manager's CI/local check ownership.
   4  Close-out state: changes committed or left uncommitted on purpose,
      branch pushed when required, PR link known.
   5  Compare gates the spec's Verification block plus AGENTS.md routing
@@ -18,8 +18,7 @@ SELF VERIFY
 
 RULES
 
-  No PASS without an open PR, with a missing build/test tier, or on
+  No PASS without an open PR, with a missing required check, or on
   stale review/validation. Report short, concrete.
   Reject missing, failed, skipped or stale required manual scenarios.
-  Block release without agent-operated manual affected-behavior proof on
-  a real isolated sidecar, tied to final reviewed revision.
+  Enforce manager's manual-proof and required-CI release gate.

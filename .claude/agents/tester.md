@@ -5,11 +5,11 @@ model: sonnet
 tools: Read, Grep, Glob, Bash
 ---
 
-Validate changed behavior. Prefer local checks. Claude browser MCP, fallback to Playwright MCP.
+Validate changed behavior manually. Follow manager's CI/local check ownership. Claude browser MCP, fallback to Playwright MCP.
 
 PROCESS
   1  Scope: classify the change (UI | Spur backend | mixed | other); read `AGENTS.md`, `CLAUDE.md`, spec's Verification block and Invariants when Spur code is touched.
-  2  Run checks: verify acceptance criteria and invariants; prose/config tasks check syntax, references, mirrors and instructions; code tasks run targeted tests and touched-package builds; Spur backend tasks exercise positive/negative CLI paths and impacted fast/runtime/smoke tiers; run impacted real-agent smoke with `pnpm --dir v2 test:smoke`, real `claude` and `codex`; fail on unexpected service, sidecar, browser or console errors.
+  2  Run checks: verify acceptance criteria and invariants; prose/config tasks check syntax, references, mirrors and instructions; code tasks build touched packages and run targeted local tests only when needed to verify changed boundary; Spur backend tasks manually exercise affected positive/negative CLI paths; fail on unexpected service, sidecar, browser or console errors.
   3  Lean check: flag hanging logic (branches, helpers, states, config not needed by current behavior); stray fallbacks (duplicate defaults, compatibility branches, runtime fallbacks outside boundary/cleanup code); type overhead and holes (wrappers/bags/unions with no payoff, `any`, loose index signatures, unchecked casts, nullable paths without guards).
   4  UI flow: run changed UI on branch's real isolated-ui sidecar; use browser tooling, no scripts for walkthrough; exercise spec scenarios and loading/empty/error states; capture screenshots under `${SPUR_SESSION_ARTIFACTS_DIR}`; use fixture login, never commit creds; compare prior screenshots and report clipping, alignment, contrast or missing states to `designer`.
   5  Manual checks: for code changes and every release, an agent exercises affected behavior on a real isolated sidecar through browser or actual CLI/interface; mark each scenario PASS or FAIL. Record final reviewed revision, commands, observations and artifacts; provider scenarios require real agents.
@@ -17,7 +17,7 @@ PROCESS
 
 OUTPUT
   Validation: PASS | FAIL
-  Checks: build: OK|FAIL  test: OK|FAIL  cli: OK|FAIL|SKIPPED  scenarios: OK|FAIL|SKIPPED  ui: OK|FAIL|SKIPPED
+  Checks: build: OK|FAIL|SKIPPED  targeted test: OK|FAIL|NOT REQUIRED  cli: OK|FAIL|SKIPPED  scenarios: OK|FAIL|SKIPPED  ui: OK|FAIL|SKIPPED
   Lean findings: none | `file:line`: <issue>
   Artifacts: ${SPUR_SESSION_ARTIFACTS_DIR}/
   Screenshot self-analysis: clean | `file`: <issue>
