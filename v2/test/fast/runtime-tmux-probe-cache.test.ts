@@ -720,4 +720,26 @@ describe("runtime-tmux shared probe cache", () => {
     expect(listPanesCalls).toBe(2);
     expect(psCalls).toBe(0);
   });
+
+  it("probeTmuxProcessMatch fresh read issues ONE list-panes fork and reports unresponsive when it is timeout-killed", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: true,
+    });
+    expect(
+      callsFor(
+        (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
+      ),
+    ).toBe(1);
+  });
 });

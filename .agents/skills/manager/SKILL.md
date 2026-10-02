@@ -58,7 +58,7 @@ RULES
   - One manager step = one Spur ToDo item = one phase = one owner = one output; every dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
   - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
-  - Local checks only. Never wait for remote CI.
+  - Follow `AGENTS.md` validation policy. Never poll or wait for remote CI.
 
 CONTEXT HANDOFF
 

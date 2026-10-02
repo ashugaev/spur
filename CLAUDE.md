@@ -100,6 +100,7 @@ ALWAYS-ON RULES
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
   Never publish operator environment detail to GitHub — issue and PR titles, bodies, comments, commit messages, CI logs. Banned: IP addresses, hostnames, VM and machine names, OS usernames, internal URLs and ports, tokens, absolute home paths, names of the operator's personal skills, agents, or unrelated projects and repos. Say `the host`, `a dev box`, `a local daemon` instead. Real names stay in session artifacts and local notes. Redact before posting, never after.
+  Run full test suites in GitHub CI; consume automatic result notifications. Locally run only targeted quick checks when needed.
   Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).

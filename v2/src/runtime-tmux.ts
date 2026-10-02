@@ -803,8 +803,9 @@ export async function getFleetSessionRssBytes(
 export interface TmuxProcessMatch {
   alive: boolean;
   matchedByName: boolean;
-  // A probe fork (`list-panes -a` or `ps`) could not be read because it was
-  // killed by its own timeout; `alive: false` here is not proof of absence.
+  // True when a probe fork (`list-panes -a` or `ps`) was killed by its own
+  // timeout: alive:false is then not evidence of death. Callers must not kill
+  // on it.
   unresponsive: boolean;
 }
 
@@ -836,14 +837,17 @@ export async function probeTmuxProcessMatch(
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
   }
+  let unresponsive = false;
   try {
-    const { panes, unresponsive: panesUnresponsive } = await getFleetPaneSnapshot();
+    const snapshot = await getFleetPaneSnapshot();
+    unresponsive = snapshot.unresponsive;
+    const { panes } = snapshot;
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
       // This list-panes fork is independent of the caller's own pane read, so a
       // timeout kill here empties `panes` without the caller's flag knowing.
-      return { alive: false, matchedByName: false, unresponsive: panesUnresponsive };
+      return { alive: false, matchedByName: false, unresponsive };
     }
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
     const processRes = processMatchers
@@ -853,9 +857,10 @@ export async function probeTmuxProcessMatch(
           new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
       );
     if (processRes.length === 0) {
-      return { alive: false, matchedByName: false, unresponsive: false };
+      return { alive: false, matchedByName: false, unresponsive };
     }
     const { rows, unresponsive: psUnresponsive } = await getPsSnapshot();
+    unresponsive = unresponsive || psUnresponsive;
     // tpgid on the row whose pid IS a pane pid is that tty's foreground
     // process group, shared by every process attached to the tty.
     const allPanePids = entry?.allPanePids ?? [];
@@ -890,7 +895,7 @@ export async function probeTmuxProcessMatch(
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
-        return { alive: true, matchedByName: true, unresponsive: false };
+        return { alive: true, matchedByName: true, unresponsive };
       }
     }
     // Pane-child fallback (issue #806, hardened against #857 P1): a
@@ -927,13 +932,13 @@ export async function probeTmuxProcessMatch(
           continue;
         }
         if (row.pgid === fgPgid) {
-          return { alive: true, matchedByName: false, unresponsive: false };
+          return { alive: true, matchedByName: false, unresponsive };
         }
       }
     }
-    return { alive: false, matchedByName: false, unresponsive: psUnresponsive };
+    return { alive: false, matchedByName: false, unresponsive };
   } catch {
-    return { alive: false, matchedByName: false, unresponsive: false };
+    return { alive: false, matchedByName: false, unresponsive };
   }
 }
 
