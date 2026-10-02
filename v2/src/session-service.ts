@@ -1056,12 +1056,6 @@ function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutE
   return error instanceof SubmitAckTimeoutError && error.processAlive;
 }
 
-// The liveness read could not report: not delivered, and not evidence of a
-// dead agent either. Callers must not kill the pane on this.
-function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
-  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
-}
-
 const RESTORE_PROMPT_PREFIX =
   'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:';
 const PLAN_MODE_PROMPT_SUFFIX =
@@ -16416,7 +16410,7 @@ export class SessionService {
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
-        ...(isAmbiguousSubmitAckTimeout(error)
+        ...(error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive
           ? {
               details: {
                 reason: "submit_ack_timeout",
