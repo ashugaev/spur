@@ -39,13 +39,14 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
       inputTokens: 999500,
       outputTokens: 0,
       totalTokens: 999500,
-      exhausted: true,
+      exhausted: false,
     },
     tokenBudgetView: {
-      budget: 1000000,
+      budget: 999500,
       knownTotalTokens: 999500,
-      exhausted: false,
+      exhausted: true,
       enforced: true,
+      warnOnly: true,
     },
   });
   await mockSessions(page, [
@@ -78,7 +79,17 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
   await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
   await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
   for (const status of ["stopped", "budget_limited"] as const) {
-    await mockSessions(page, [{ ...measured, status, state: status }]);
+    await mockSessions(page, [
+      {
+        ...measured,
+        status,
+        state: status,
+        tokenBudgetView: {
+          ...measured.tokenBudgetView,
+          warnOnly: false,
+        },
+      },
+    ]);
     await page.reload();
     await count.focus();
     await expect(page.getByRole("tooltip")).toContainText(
@@ -89,11 +100,12 @@ test("token counts preserve exhaustion, rounding, and meaningful keyboard stops"
     {
       ...measured,
       tokenBudgetView: {
-        budget: 1000000,
+        budget: 999500,
         knownTotalTokens: 999500,
         exhausted: false,
         overridden: true,
         enforced: false,
+        warnOnly: false,
       },
     },
   ]);

@@ -1319,6 +1319,8 @@ type SessionServiceInternals = {
   lastClassifiedLogStates: Map<string, SessionState>;
   paneWriteLocks: Map<string, Promise<void>>;
   deliveryRuns: Map<string, Promise<void>>;
+  runDeliveryLoop(sessionId: string): Promise<void>;
+  tokenBudgetActivationError(session: SessionRecord): string | undefined;
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   deliverPreparedLocked(
@@ -46496,6 +46498,81 @@ describe("SessionService", () => {
           agent: "claude",
         });
       });
+
+      it("guards the next pipeline step in stop and warn-only modes", async () => {
+        const { SessionService } = await loadSessionServiceModule();
+        for (const { warnOnly, expectedSends } of [
+          { warnOnly: false, expectedSends: 0 },
+          { warnOnly: true, expectedSends: 1 },
+        ]) {
+          loadConfigMock.mockReturnValue({
+            ...baseConfig(),
+            projects: {
+              api: {
+                ...baseConfig().projects.api,
+                tokenBudget: 100,
+                tokenBudgetWarnOnly: warnOnly,
+              },
+            },
+          });
+          const sessions = createSessionStore();
+          const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+          const internals = sessionServiceInternals(service);
+          const session = runningSession({
+            id: "api-1",
+            preflightTokenUsage: {
+              status: "measured",
+              attemptCount: 0,
+              unknownAttemptCount: 0,
+              providerIterationCount: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              byProvider: {},
+            },
+            tokenUsage: {
+              provider: "claude",
+              inputTokens: 80,
+              outputTokens: 20,
+              totalTokens: 100,
+              generations: {},
+            },
+            pipeline: {
+              steps: ["research", "test"],
+              nextStepIndex: 1,
+              status: "running",
+            },
+          });
+          sessions.set(session.id, session);
+          const send = vi.spyOn(internals, "sendAgentMessage").mockResolvedValue(SUBMITTED);
+          timerPromisesSleepMock.mockImplementation(async () => service.dispose());
+
+          expect(internals.tokenBudgetActivationError(session)).toBe(
+            warnOnly ? undefined : "Session api-1 exhausted its token budget (100 / 100)",
+          );
+
+          await internals.runDeliveryLoop(session.id);
+          service.dispose();
+
+          expect(send).toHaveBeenCalledTimes(expectedSends);
+          if (warnOnly) {
+            expect(sessions.get(session.id)?.pipeline).toMatchObject({
+              status: "running",
+              nextStepIndex: 2,
+              awaitingStepIndex: 1,
+            });
+          } else {
+            expect(sessions.get(session.id)).toEqual(session);
+          }
+          expect(sessions.get(session.id)?.status).toBe("running");
+          expect(
+            logSpurEventMock.mock.calls.some(
+              ([, entry]) =>
+                entry.event === "session.pipeline.errored" && entry.sessionId === session.id,
+            ),
+          ).toBe(false);
+        }
+      }, 10_000);
 
       it.each([false, true])(
         "guards the in-flight queue fast path when warn-only=%s",

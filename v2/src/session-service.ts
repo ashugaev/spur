@@ -18036,6 +18036,9 @@ export class SessionService {
             `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
           );
         }
+        if (this.tokenBudgetActivationError(session)) {
+          return;
+        }
         await this.sendAgentMessage(
           session,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
