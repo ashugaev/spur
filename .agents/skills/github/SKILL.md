@@ -7,6 +7,26 @@ allowed-tools: Read, Grep, Glob, Bash
 
 GITHUB OPERATIONS VIA gh
 
+ISSUE PRIORITY
+
+  Assign exactly one label: priority:critical, priority:medium, priority:low.
+  Judge body/comments by impact, scope, and workaround; never title, age, or effort alone.
+  critical  Reported secret exposure, unrecoverable data loss, or outage blocking core workflows across users without safe workaround.
+  medium    Reproducible workflow failure, incorrect state/delivery/lifecycle, recurring CI failure, or measured resource degradation; scoped impact or workaround exists.
+  low       Docs, enhancements, refactors, telemetry, cosmetic/recoverable nuisance, or mechanisms without demonstrated workflow impact.
+  Promote enhancements only with documented measurable core blockage meeting critical/medium criteria.
+  Keep uncertainty low until impact evidence supports promotion.
+  Keep valid priority unless new evidence changes classification.
+  Triage newly created/reopened issues in same workflow; triage missing/conflicting labels before worker selection.
+  Read current state before mutation; skip closed issues.
+  Preserve non-priority labels; remove competing priority labels; verify exactly one remains.
+  Leave failed classification/write ineligible for automatic spawn.
+
+  LABELS
+    priority:critical  B60205  Secret exposure, unrecoverable loss, or core outage without workaround
+    priority:medium    FBCA04  Workflow failure or measured degradation with scoped impact or workaround
+    priority:low       808080  Docs, enhancements, cleanup, or nuisance without demonstrated workflow impact
+
 CLOSE-OUT GATE, mandatory after any code change
 
   1  Branch main/master/empty -> SKIPPED.
@@ -47,5 +67,5 @@ ISSUE REPORTING, for a problem outside the current request
 
   1  `gh issue list --state all --search "<keywords>"` — search open and closed, never open only.
   2  Open match wins over a closed one: `gh issue comment` the new evidence onto it. Never open a duplicate.
-  3  Closed match, none open: `gh issue reopen`, then comment the new evidence. Keeps the fix history on the regression.
-  4  No match: `gh issue create`. Body states what breaks, where (`file:line`), how to reproduce, and the PR or task that surfaced it.
+  3  Closed match, none open: `gh issue reopen`, then comment new evidence and triage per ISSUE PRIORITY.
+  4  No match: `gh issue create`. State what breaks, where (`file:line`), reproduction, and source PR/task; triage per ISSUE PRIORITY.

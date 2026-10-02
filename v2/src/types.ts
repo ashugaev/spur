@@ -1122,7 +1122,8 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout" | "token_budget";
+  /** "memory_shed" is written only by the critical memory shed's session stop. */
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
   tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;

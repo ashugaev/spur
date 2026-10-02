@@ -62,6 +62,7 @@ import {
   assembleSidecarSweepClaims,
   collectTree,
   confirmReaps,
+  findLeakedSidecarTrees,
   reapRecordedIdentity,
   reapRecordedPortDaemon,
   reapSidecarPane,
@@ -69,9 +70,11 @@ import {
   signalSidecarPane,
   snapshotProcesses,
   sweepSidecars,
+  type LeakedSidecarTree,
   type PendingReap,
   type ProcSnapshot,
   type ReapOutcome,
+  type SidecarSweepClaims,
   type SidecarSweepResult,
 } from "./sidecars/reap.js";
 import {
@@ -1133,10 +1136,11 @@ interface SessionRuntimeSnapshot {
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
-  // True only when a `runtimeAlive`/`paneUsable` false reading came from a
-  // tmux probe killed by its own timeout (isTmuxTimeoutKill), never from a
-  // confirmed-absent tmux server. reconcileUnexpectedStop must not treat this
-  // reading as proof the runtime is gone.
+  // True only when a `runtimeAlive`/`paneUsable`/`processAlive` false reading
+  // came from a probe fork (tmux list-windows, list-panes, or ps) killed by
+  // its own timeout (isProbeTimeoutKill), never from a confirmed-absent tmux
+  // server or process. reconcileUnexpectedStop must not treat this reading as
+  // proof the runtime is gone.
   probeUnresponsive: boolean;
 }
 interface SessionStateResult {
@@ -2272,12 +2276,71 @@ const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
 const ATTENTION_PANE_TAIL_LINES = 15;
 
+/**
+ * Detection-only pass over one shared `ps` snapshot: finds every leaked
+ * `worktree-tree` sidecar process tree via `findLeakedSidecarTrees` and
+ * emits `session.sidecar.orphan_detected` for each. Signals or kills
+ * NOTHING — I10. A plain exported function (no `this`) so it is testable
+ * against a synthetic snapshot/claims triple without booting a
+ * SessionService.
+ *
+ * `orphan-daemon` rows are deliberately excluded from both the emitted
+ * events and the returned list: `findLeakedSidecarTrees` scans the WHOLE
+ * host process table for that population (spur#859), not just this
+ * instance's own worktreeDir, so auto-firing it on every reaper tick would
+ * log an event for every reparented Spur daemon on a shared host — most of
+ * them belonging to an unrelated instance this daemon has no business
+ * reporting on. That population is already surfaced on demand via
+ * `spur sidecar sweep` and the `sidecar-orphans` doctor check; this
+ * function stays scoped to the original population — sidecar trees under
+ * THIS instance's own running sessions.
+ */
+export async function detectOrphanedSidecarTrees(
+  snapshot: ProcSnapshot,
+  assembled: SidecarSweepClaims,
+  logEvent: (event: string, entry: Omit<SpurLogEntry, "event" | "timestamp">) => void,
+): Promise<LeakedSidecarTree[]> {
+  const { supported, leaked } = await findLeakedSidecarTrees({
+    snapshot,
+    claims: assembled.claims,
+    worktreePaths: assembled.worktreePaths,
+    worktreeDirRealpath: assembled.worktreeDirRealpath,
+  });
+  if (!supported) {
+    return [];
+  }
+  const worktreeTrees = leaked.filter((tree) => tree.kind === "worktree-tree");
+  for (const tree of worktreeTrees) {
+    logEvent("session.sidecar.orphan_detected", {
+      level: "info",
+      message: `Orphaned sidecar process tree detected at pid ${tree.rootPid} under ${tree.worktreePath}${tree.sidecarName ? ` (${tree.sidecarName})` : ""}.`,
+      details: {
+        rootPid: tree.rootPid,
+        pgid: tree.pgid,
+        treeRssKb: tree.treeRssKb,
+        ageSeconds: tree.ageSeconds,
+        worktreePath: tree.worktreePath,
+        sidecarName: tree.sidecarName,
+        reapable: tree.reapable,
+      },
+    });
+  }
+  return worktreeTrees;
+}
+
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
   if (!(await tmuxPaneDead(tmuxSession))) return;
   const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
-  await killTmuxSession(tmuxSession);
+  // Signal the pane's process tree before tearing down tmux, same as every
+  // other sidecar-kill site — a bare killTmuxSession here would blind-kill
+  // whatever the failed launch already forked. This is a free function with
+  // no record access, so it carries no identity fallback of its own; the
+  // caller's catch block (session-service.ts ~6540) supplies that via
+  // reapSidecarByName against the identity already persisted before this
+  // call runs.
+  await signalSidecarPane(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
@@ -3933,6 +3996,7 @@ export class SessionService {
                 {},
                 {
                   skipEnrichment: true,
+                  stopReason: "memory_shed",
                 },
               ),
             );
@@ -4089,8 +4153,8 @@ export class SessionService {
   private async collectSidecarReapCandidates(
     tmuxNames: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
+    psSnapshot: ProcSnapshot,
   ): Promise<SidecarReapCandidate[]> {
-    const psSnapshot = await snapshotProcesses();
     const seenTmuxNames = new Set<string>();
     const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
@@ -4268,15 +4332,30 @@ export class SessionService {
     sessions: readonly SessionRecord[],
     tmuxNames: ReadonlySet<string>,
   ): Promise<SidecarReapPlan> {
-    // Check the config before any of the expensive work below: a `ps`
-    // snapshot, an `ss` probe per distinct reserved port, and a
-    // listSessions/listDeskSessions scan per candidate all ran unconditionally
-    // even with sidecarGc.enabled: false, since planSidecarReap only decides
+    // ONE `ps` snapshot for the whole pass, shared by detection and the
+    // candidate pass below — a second fork could let a tree be attributed
+    // to two passes (same discipline as executeSidecarReapPlan's own
+    // pre-signal snapshot).
+    const psSnapshot = await snapshotProcesses();
+    // Detection runs BEFORE the sidecarGc.enabled check below: that switch
+    // governs killing, and a detect-only event that kills nothing has no
+    // reason to inherit it — a host with GC disabled still gets orphan
+    // visibility.
+    const assembled = assembleSidecarSweepClaims(sessions, this.config.worktreeDir);
+    if (assembled) {
+      await detectOrphanedSidecarTrees(psSnapshot, assembled, (event, entry) =>
+        this.logEvent(event, entry),
+      );
+    }
+    // Check the config before any of the expensive work below: an `ss`
+    // probe per distinct reserved port, and a listSessions/listDeskSessions
+    // scan per candidate all ran unconditionally even with
+    // sidecarGc.enabled: false, since planSidecarReap only decides
     // "keep: disabled" per candidate after all of that already happened.
     if (!this.config.sidecarGc.enabled) {
       return { reap: [], warn: [], keep: [] };
     }
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions);
+    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions, psSnapshot);
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
@@ -8704,13 +8783,15 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
-      await verifySidecarStartup(reservedSession.id, args.sidecarName);
-
       // Record this instance's identity so a tree that outlives its
       // tmux supervisor is still identifiable and reapable later — see
       // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
       // (race, no procfs) leaves sidecarProcs unset for this name rather
-      // than blocking the start.
+      // than blocking the start. Recorded BEFORE verifySidecarStartup —
+      // hoisted above it deliberately, so a failed-start catch below has
+      // an identity on disk to reap by even once the pane itself is dead;
+      // recording it only after a successful verify would leave that catch
+      // with nothing to signal (Finding B3).
       const freshPanePid = await getTmuxPanePid(
         sidecarTmuxSession(reservedSession.id, args.sidecarName),
         { fresh: true },
@@ -8752,6 +8833,9 @@ export class SessionService {
         delete updated.sidecarProcs;
       }
       writeSession(this.config.dataDir, updated);
+
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
+
       this.clearSidecarStartConflict(args.session.id, args.sidecarName);
       this.scheduleSidecarUrlReadyAndPublish(
         reservedSession.id,
@@ -9876,6 +9960,12 @@ export class SessionService {
     // preceded this call, so isStaleParked (which requires
     // status==="stopped") would always return false here and silently
     // disable the sidecar replay.
+    if (record.stopReason === "memory_shed") {
+      // No sidecars to replay; the wake only has to clear the marker so the
+      // running record never carries it (the wake gate keys on it).
+      const { stopReason: _clearedShed, ...awake } = record;
+      return awake;
+    }
     if (record.stopReason !== "stale_timeout") {
       return record;
     }
@@ -10137,7 +10227,10 @@ export class SessionService {
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
-      await killTmuxSession(existing.tmuxSession);
+      // Same launcher as a sidecar (createTmuxCommandSession), same leak
+      // shape; a service records no identity, so this is the un-fallbacked
+      // signal — still a real ps-tree signal instead of a blind tmux kill.
+      await signalSidecarPane(existing.tmuxSession);
       deleteServiceInstance(this.config.dataDir, sessionId, serviceId);
     }
     deleteServiceSourceStatesForService(this.config.dataDir, session.project, sessionId, serviceId);
@@ -10186,7 +10279,7 @@ export class SessionService {
       });
       return await this.enrichService(record);
     } catch (error) {
-      await killTmuxSession(tmuxSession);
+      await signalSidecarPane(tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
       const record: ServiceInstanceRecord = {
         sessionId,
@@ -14588,8 +14681,15 @@ export class SessionService {
   // for every single-shot sidecar-kill site; only teardownSessionSidecars
   // bypasses it (signals all its sidecars first, confirms once, batching
   // the grace window instead of paying it once per sidecar here).
+  // Reads the owner record so a blind signalSidecarPane branch (no pane
+  // pid, or an unusable snapshot) still has the recorded identity to reap
+  // by — without this read, every caller upstream of here (the failed-start
+  // catch, the reap pass) is inert (Finding B3).
   private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
-    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName));
+    const owner = readSession(this.config.dataDir, ownerId);
+    const identity = owner?.sidecarProcs?.[sidecarName];
+    const fallback = owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
+    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
   }
@@ -14894,7 +14994,10 @@ export class SessionService {
           });
         }
       }
-      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName));
+      const identity = record?.sidecarProcs?.[scName];
+      const fallback =
+        record && identity ? { identity, worktreePath: record.worktreePath } : undefined;
+      const pending = await signalSidecarPane(sidecarTmuxSession(ownerId, scName), fallback);
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
@@ -14943,7 +15046,7 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     await this.teardownSessionSidecars(session);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      await killTmuxSession(service.tmuxSession);
+      await signalSidecarPane(service.tmuxSession);
     }
     deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
@@ -15208,7 +15311,12 @@ export class SessionService {
     sessionId: string,
     targetStatus: ManualSessionStatus,
     request: CompleteSessionRequest,
-    options: { retainInList?: boolean; skipEnrichment: true; eventAction?: ManualStatusAction },
+    options: {
+      retainInList?: boolean;
+      skipEnrichment: true;
+      eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
+    },
   ): Promise<void>;
   private async applyManualStatusLocked(
     sessionId: string,
@@ -15219,6 +15327,7 @@ export class SessionService {
       skipEnrichment?: false;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView>;
   private async applyManualStatusLocked(
@@ -15230,8 +15339,10 @@ export class SessionService {
       skipEnrichment?: boolean;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
+      stopReason?: SessionRecord["stopReason"];
     },
   ): Promise<SessionView | void> {
+    const pauseReason = options?.stopReason ?? "manual_pause";
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -15241,7 +15352,7 @@ export class SessionService {
       const migrated: SessionRecord = {
         ...this.sessionWithReleasedSidecarPorts(session),
         status: "stopped",
-        stopReason: "manual_pause",
+        stopReason: pauseReason,
         updatedAt: nowIso(),
         ...(options?.retainInList ? { retainInList: true } : {}),
       };
@@ -15260,7 +15371,7 @@ export class SessionService {
         const record: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
           status: "stopped",
-          stopReason: "manual_pause",
+          stopReason: pauseReason,
           updatedAt: nowIso(),
           ...(options?.retainInList ? { retainInList: true } : {}),
         };
@@ -15339,7 +15450,7 @@ export class SessionService {
     const record: SessionRecord = {
       ...this.sessionWithReleasedSidecarPorts(cleanedSession),
       status: targetStatus,
-      ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
+      ...(targetStatus === "stopped" ? { stopReason: pauseReason } : {}),
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
@@ -15674,7 +15785,7 @@ export class SessionService {
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       throw new Error(
-        `Session ${session.id}'s tmux probe timed out; runtime state unknown, not attempting recovery`,
+        `Session ${session.id}'s runtime probe (tmux or ps) timed out; runtime state unknown, not attempting recovery`,
       );
     }
 
@@ -15714,15 +15825,18 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    // A stale-parked session holds zero live slots (isLiveSessionRecord
-    // excludes it by design), so nothing gates how many of them a single
-    // poll cycle can wake at once without this. Gated to stale-parked only:
-    // an ordinary dead-pane recovery is relaunching a session that already
-    // held its slot, so it must not be re-denied here. Thrown before
-    // anything below touches the pane (killAgentPaneAndConfirmExit runs
-    // inside relaunchSessionInPlace, further down) so a refusal never kills
-    // a live process or does any destructive work.
-    if (isStaleParked(session)) {
+    // A stale-parked or memory-shed session holds zero live slots
+    // (isLiveSessionRecord excludes it by design), so nothing gates how many
+    // of them a single poll cycle can wake at once without this. Gated to
+    // those two shapes only: an ordinary dead-pane recovery is relaunching a
+    // session that already held its slot, so it must not be re-denied here.
+    // Thrown before anything below touches the pane (killAgentPaneAndConfirmExit
+    // runs inside relaunchSessionInPlace, further down) so a refusal never
+    // kills a live process or does any destructive work.
+    if (
+      isStaleParked(session) ||
+      (session.status === "stopped" && session.stopReason === "memory_shed")
+    ) {
       this.assertAdmissible(session.project, "wake");
     }
 
@@ -16248,7 +16362,8 @@ export class SessionService {
       const shouldSendRestoreMessage =
         current.status !== "paused" &&
         current.stopReason !== "manual_pause" &&
-        current.stopReason !== "stale_timeout";
+        current.stopReason !== "stale_timeout" &&
+        current.stopReason !== "memory_shed";
       const restorePrompt = shouldSendRestoreMessage
         ? buildRestorePrompt(current.prompt, planMode, restrictWrites, mode)
         : "";
@@ -18432,12 +18547,13 @@ export class SessionService {
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
     const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
+    const processUnresponsive = !processProbe.alive && processProbe.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive: processProbe.alive,
       tmuxActivityAt,
-      probeUnresponsive: sessionsUnresponsive || panesUnresponsive,
+      probeUnresponsive: sessionsUnresponsive || panesUnresponsive || processUnresponsive,
     };
   }
 
@@ -19063,7 +19179,7 @@ export class SessionService {
           level: "warn",
           sessionId: session.id,
           projectId: session.project,
-          message: `Skipped reconciling ${session.id}: tmux probe timed out, runtime state unknown`,
+          message: `Skipped reconciling ${session.id}: runtime probe (tmux or ps) timed out, runtime state unknown`,
           details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
         });
         return { session, runtime: confirmedRuntime };

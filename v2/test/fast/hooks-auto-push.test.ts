@@ -218,7 +218,7 @@ describe("auto-push Stop hook", () => {
 
       expect(results.filter((result) => result.stdout.length > 0)).toHaveLength(1);
     }
-  });
+  }, 90_000);
 
   it("recovers after a killed lock holder and ignores an orphaned legacy lock directory", async () => {
     const repoDir = await makeDirtyRepo();

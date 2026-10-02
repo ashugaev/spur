@@ -759,7 +759,7 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
-            ...(dropsQueuedSend(session, service.memoryHoldEngaged()) ? { inactive: true } : {}),
+            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
