@@ -3797,11 +3797,13 @@ test.describe("S4b: Artifacts section", () => {
       await expect(lastArtifact).toBeVisible();
       const lastArtifactIntersects = await lastArtifact.evaluate((element) => {
         const artifactRect = element.getBoundingClientRect();
-        const collectionRect = element.closest("[data-artifact-collection]")?.getBoundingClientRect();
+        const collectionRect = element
+          .closest("[data-artifact-collection]")
+          ?.getBoundingClientRect();
         return Boolean(
           collectionRect &&
-            artifactRect.bottom > collectionRect.top &&
-            artifactRect.top < collectionRect.bottom,
+          artifactRect.bottom > collectionRect.top &&
+          artifactRect.top < collectionRect.bottom,
         );
       });
       expect(lastArtifactIntersects).toBe(true);
@@ -3816,9 +3818,7 @@ test.describe("S4b: Artifacts section", () => {
     await collection.hover();
     const pageScrollBefore = await page.evaluate(() => window.scrollY);
     await page.mouse.wheel(0, 600);
-    await expect
-      .poll(() => page.evaluate(() => window.scrollY))
-      .toBeGreaterThan(pageScrollBefore);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(pageScrollBefore);
   });
 
   test("keeps few and zero artifact collections at intrinsic height", async ({ page }) => {

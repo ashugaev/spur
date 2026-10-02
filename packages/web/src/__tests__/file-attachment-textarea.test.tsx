@@ -93,10 +93,7 @@ describe("FileAttachmentTextarea", () => {
 
   it("keeps the default resizable minimum outside adaptive layouts", () => {
     render(<HostedTextarea onChange={vi.fn()} value="" />);
-    expect(screen.getByRole("textbox", { name: "composer" })).toHaveClass(
-      "resize-y",
-      "min-h-24",
-    );
+    expect(screen.getByRole("textbox", { name: "composer" })).toHaveClass("resize-y", "min-h-24");
   });
 
   it("uses a four-line floor and internal scrolling in adaptive layouts", () => {
@@ -109,10 +106,7 @@ describe("FileAttachmentTextarea", () => {
       "overflow-y-auto",
       "leading-[1.5]",
     );
-    expect(textarea.parentElement).toHaveClass(
-      "min-h-[calc(6em+4rem+2px)]",
-      "flex-1",
-    );
+    expect(textarea.parentElement).toHaveClass("min-h-[calc(6em+4rem+2px)]", "flex-1");
   });
 
   it("renders clear button when value.length > 0", () => {

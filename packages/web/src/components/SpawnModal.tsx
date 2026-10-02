@@ -396,10 +396,7 @@ export function SpawnModal({
           className="grid min-h-0 flex-1 grid-rows-[minmax(0,auto)_minmax(calc(6em+4rem+2px),1fr)_minmax(0,auto)] gap-3 overflow-hidden"
           data-spawn-modal-body
         >
-          <div
-            className="min-h-0 overflow-y-auto overscroll-y-auto"
-            data-spawn-modal-controls
-          >
+          <div className="min-h-0 overflow-y-auto overscroll-y-auto" data-spawn-modal-controls>
             <div className="space-y-3">
               {noteSlot}
               <ModeFields

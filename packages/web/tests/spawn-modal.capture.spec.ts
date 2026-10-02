@@ -106,9 +106,7 @@ async function expectAuxiliaryTargetVisible(
     const targetRect = element.getBoundingClientRect();
     const scrollerRect = element.closest(selector)?.getBoundingClientRect();
     return Boolean(
-      scrollerRect &&
-        targetRect.bottom > scrollerRect.top &&
-        targetRect.top < scrollerRect.bottom,
+      scrollerRect && targetRect.bottom > scrollerRect.top && targetRect.top < scrollerRect.bottom,
     );
   }, scrollerSelector);
   expect(intersects).toBe(true);
