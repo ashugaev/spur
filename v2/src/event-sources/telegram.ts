@@ -1240,13 +1240,12 @@ async function routeTelegramPrompt(
   // doc comment above and spec revision 2 G2).
   const hasAwaitingProject = peekedSpawn !== null;
 
-  // In a private chat a reply to a bot message belongs to the session that sent
-  // it, whatever the chat is bound to. Unlike the binding it never unbinds or
-  // auto-spawns.
+  // Private/group-main bot-message replies reach their sender without
+  // changing bindings or auto-spawning.
   const repliedTo = message.reply_to_message?.message_id;
-  // Only a private chat routes by reply: a group thread belongs to its binding.
+  // Forum topics retain their binding, including after another session takes over.
   const ownerId =
-    repliedTo === undefined || message.chat.id < 0
+    repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
       ? null
       : findTelegramMessageSession(
           deps.dataDir,

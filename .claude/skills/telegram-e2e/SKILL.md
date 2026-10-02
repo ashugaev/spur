@@ -13,7 +13,7 @@ NEVER
   - Production bot token. A second getUpdates poller returns 409 and steals live chat bindings.
   - Default-port daemon. Isolated daemon only.
   - Manual getUpdates on the test bot while the isolated daemon polls it.
-  - A sidecar start while `v2/src` is newer than `v2/dist`. The sidecar script then runs `pnpm --dir v2 build`, whose hook restarts the production daemon. Compile first.
+  - A sidecar start while `v2/src` is newer than `v2/dist`. Compile first; unset `SPUR_BUILD_RESTART`. Build restart requires opt-in and refuses default instance (`v2/bin/restart-daemon-if-running.mjs`).
   - Env values in transcript, PR, or commit. Names only.
 
 

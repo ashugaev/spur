@@ -4658,7 +4658,7 @@ describe("SessionService", () => {
     return config;
   }
 
-  it("advertises Telegram in the launch prompt when the project can send and deliver back", async () => {
+  it.each([false, true])("distinguishes Telegram launch origin: %s", async (hasInbound) => {
     mockClaudeJsonlState("waiting");
     loadConfigMock.mockReturnValue(
       configWithTelegram({
@@ -4672,11 +4672,82 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await service.spawn({ project: "api", prompt: "hello" });
-
-    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
-      `slot-instructions\nhello\n\n${TODO_PROMPT}\n\n${TELEGRAM_PROMPT}`,
+    await service.spawn(
+      { project: "api", prompt: "hello" },
+      hasInbound ? { telegramOrigin: { projectId: "api", sourceId: "chat", chatId: 4242 } } : {},
     );
+
+    const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
+    if (hasInbound) {
+      expect(prompt).toBe(`slot-instructions\nhello\n\n${TODO_PROMPT}\n\n${TELEGRAM_PROMPT}`);
+    } else {
+      expect(prompt).toContain("Telegram: send when the user requests a Telegram message.");
+      expect(prompt).not.toContain("the user reads this session in Telegram");
+      expect(prompt).not.toContain("Your terminal output is invisible");
+      expect(prompt).not.toContain("Ask this way when you need a decision");
+      expect(prompt).toContain('"$SPUR_SESSION_TOOL_DIR/spur" source reply');
+    }
+  });
+
+  it("keeps background launches outbound-only despite an old inbound target", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithTelegram({
+      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
+    }));
+    readTelegramReplyTargetMock.mockReturnValue({ lastInboundAt: "2026-03-18T10:00:00.000Z" });
+    const service = await createDisposedSessionService();
+    await service.spawnInBackground({ project: "api", prompt: "hello" });
+    await vi.waitFor(() => expect(buildAgentLaunchPlanMock).toHaveBeenCalled());
+    const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
+    expect(prompt).toContain("Telegram: send when the user requests a Telegram message.");
+    expect(prompt).not.toContain("Your terminal output is invisible");
+  });
+
+  it.each([false, true])("restores Telegram context from inbound provenance: %s", async (hasInbound) => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithTelegram({
+      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
+    }));
+    readTelegramReplyTargetMock.mockReturnValue({
+      sessionId: "api-1", projectId: "api", sourceId: "chat", chatId: 4242,
+      ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
+    });
+    findAgentSessionIdMock.mockResolvedValue("session-uuid");
+    readSessionMock.mockReturnValue(sessionRecord({
+      id: "api-1", prompt: "hello", status: "running", worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+    }));
+    mockExitedThenRestoredProcess();
+    const service = await createDisposedSessionService();
+    await service.restore("api-1");
+    const prompt = sendMessageToTmuxMock.mock.calls.at(-1)?.[1];
+    expect(prompt).toContain(hasInbound
+      ? "Telegram: the user reads this session in Telegram."
+      : "Telegram: send when the user requests a Telegram message.");
+    if (!hasInbound) expect(prompt).not.toContain("Your terminal output is invisible");
+  });
+
+  it("respawns with outbound capability while retaining the carried Telegram wrapper", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue(configWithTelegram({
+      type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242,
+    }));
+    const sessions = createSessionStore();
+    const carriedPrompt = "hello\nTelegram: the user reads this session in Telegram.";
+    sessions.set("api-1", sessionRecord({
+      id: "api-1", status: "completed", prompt: carriedPrompt, worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+    }));
+    readTelegramReplyTargetMock.mockReturnValue({ lastInboundAt: "2026-03-18T10:00:00.000Z" });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    reserveNextSessionIdMock.mockResolvedValue("api-2");
+    const service = await createDisposedSessionService();
+    await service.respawn("api-1");
+    const prompt = buildAgentLaunchPlanMock.mock.calls[0]?.[1];
+    expect(prompt).toContain(carriedPrompt);
+    expect(prompt).toContain("Telegram: send when the user requests a Telegram message.");
+    expect(prompt).not.toContain("Your terminal output is invisible");
+    expect(writeTelegramReplyTargetMock).not.toHaveBeenCalled();
   });
 
   it("omits the Telegram block without an outbound chat or without inbound delivery", async () => {
@@ -47773,7 +47844,7 @@ describe("SessionService", () => {
         expect(persisted).not.toHaveProperty("staleSidecars");
       });
 
-      it("fresh-launch fallback on native-resume failure resends the original task prompt (wrapped as restore context) before the triggering message", async () => {
+      it.each([false, true])("fresh-launch fallback resends task and Telegram provenance: %s", async (hasInbound) => {
         // relaunchSessionInPlace's fresh-launch fallback starts a blank agent
         // process (no --resume, no piped prompt) whenever native resume is
         // unavailable or fails, so the agent has zero conversation memory.
@@ -47782,7 +47853,18 @@ describe("SessionService", () => {
         // session with no task context at all. The fix resends the original
         // task prompt (through the same restore-prompt machinery restore()
         // uses) before the triggering message is written to the same pane.
-        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        const config = baseConfig();
+        config.projects.api.sources = {
+          chat: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123], chatId: 4242 },
+        };
+        config.projects.api.triggers = {
+          tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
+        };
+        loadConfigMock.mockReturnValue(config);
+        readTelegramReplyTargetMock.mockReturnValue({
+          sessionId: "api-1", projectId: "api", sourceId: "chat", chatId: 4242,
+          ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
+        });
         mockAgentWaitingState(agent);
         const sessions = createSessionStore();
         sessions.set("api-1", {
@@ -47833,6 +47915,16 @@ describe("SessionService", () => {
         expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
         expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
         expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+        expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
+          hasInbound
+            ? "Telegram: the user reads this session in Telegram."
+            : "Telegram: send when the user requests a Telegram message.",
+        );
+        if (!hasInbound) {
+          expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain(
+            "Your terminal output is invisible",
+          );
+        }
         expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
         expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
       });
