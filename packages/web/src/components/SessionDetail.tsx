@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   type MouseEvent,
   type PointerEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -18,6 +19,7 @@ import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { ModelSelect } from "@/components/ModelSelect";
+import { TokenCount } from "@/components/TokenCount";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -112,6 +114,7 @@ import {
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
+  isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
@@ -2509,6 +2512,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
+    if (session.status === "budget_limited") return "budget_limited";
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
       return session.state;
     }
@@ -2795,6 +2799,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
+  const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -3053,7 +3058,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) ? (
+            {isRestorable(session) && !tokenBudgetBlocked ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -3063,6 +3068,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 <BusyContent busy={busyAction === "restore"}>Restore</BusyContent>
+              </button>
+            ) : null}
+            {isRestorable(session) && tokenBudgetBlocked ? (
+              <button
+                aria-busy={busyAction === "restore" || undefined}
+                aria-label={
+                  busyAction === "restore" ? "Approving and restoring session" : undefined
+                }
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("restore", { overrideTokenBudget: true })}
+                title="Ignore the token budget for this session and resume work"
+                className="border border-[var(--color-status-attention)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                <BusyContent busy={busyAction === "restore"}>Continue anyway</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (
@@ -3287,7 +3307,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   Message
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
-                {canSendMessage(session) ? (
+                {canSendMessage(session) && !tokenBudgetBlocked ? (
                   <div className="space-y-2">
                     {launchPending ? (
                       <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
@@ -3395,7 +3415,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    Not accepting input. Restore to continue.
+                    {tokenBudgetBlocked
+                      ? "Not accepting input. Token budget limit hit."
+                      : "Not accepting input. Restore to continue."}
                   </p>
                 )}
               </section>
@@ -3582,29 +3604,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
               </h2>
               <dl className="space-y-2 text-[var(--color-text-secondary)]">
-                {[
-                  ["Created", formatAbsoluteTime(session.createdAt)],
-                  ["Last activity", formatRelativeTime(session.lastActivityAt)],
-                  ["Worktree", session.worktree ? "isolated" : "shared"],
-                  ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
-                  ["Workspace", session.workspaceExists ? "present" : "missing"],
-                  ...(wakeSummary && wakeCountdown
-                    ? ([
-                        ["Wake", wakeSummary.label],
-                        ["Next wake", wakeCountdown],
-                      ] as Array<[string, string]>)
-                    : []),
-                  ...(wakeSummary?.intervalMs
-                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                  ...(wakeSummary?.dailyAt
-                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                ].map(([label, value]) => (
+                {(
+                  [
+                    ["Created", formatAbsoluteTime(session.createdAt)],
+                    ["Last activity", formatRelativeTime(session.lastActivityAt)],
+                    ["Worktree", session.worktree ? "isolated" : "shared"],
+                    ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
+                    ["Workspace", session.workspaceExists ? "present" : "missing"],
+                    ["Tokens", <TokenCount session={session} sidebar />],
+                    ...(wakeSummary && wakeCountdown
+                      ? [
+                          ["Wake", wakeSummary.label],
+                          ["Next wake", wakeCountdown],
+                        ]
+                      : []),
+                    ...(wakeSummary?.intervalMs
+                      ? [["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]]
+                      : []),
+                    ...(wakeSummary?.dailyAt
+                      ? [["Wake daily at", wakeSummary.dailyAt.join(", ")]]
+                      : []),
+                  ] as Array<[string, ReactNode]>
+                ).map(([label, value]) => (
                   <div
                     key={label}
                     className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"

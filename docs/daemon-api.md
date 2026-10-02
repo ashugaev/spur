@@ -28,6 +28,7 @@
 - `GET /projects/:id/slash-commands`
 - `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, worktree}`
 - `GET /projects/:id/branches/exists?name=<branch>`
+- `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight`
 
 ## Session routes

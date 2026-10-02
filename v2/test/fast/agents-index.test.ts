@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
 import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
 
+vi.mock("../../src/cursor-token-usage.js", () => ({
+  ensureCursorTokenUsageHook: vi.fn(() => true),
+}));
+
 const {
   ensureCodexHooksConfigMock,
   ensureClaudeRestrictWritesSettingsMock,

@@ -5,11 +5,13 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/spur-daemon", () => ({
   SpurDaemonError: class SpurDaemonError extends Error {
     readonly status: number;
+    readonly payload: unknown;
 
-    constructor(message: string, status: number) {
+    constructor(message: string, status: number, payload?: unknown) {
       super(message);
       this.name = "SpurDaemonError";
       this.status = status;
+      this.payload = payload;
     }
   },
   isSpurDaemonError: (error: unknown) =>
@@ -95,6 +97,7 @@ import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as postPrStatusBatch } from "@/app/api/pr-status/batch/route";
 import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
+import { POST as allocatePreflight } from "@/app/api/projects/[id]/preflight-batches/route";
 import { GET as getSessionConversation } from "@/app/api/sessions/[id]/conversation/route";
 import { DELETE as deleteProject, PATCH as updateProject } from "@/app/api/projects/[id]/route";
 import { POST as createProject } from "@/app/api/projects/route";
@@ -1167,6 +1170,34 @@ describe("Spur web API routes", () => {
 
   // ── Lifecycle actions ──────────────────────────────────────────────────
 
+  it("restore forwards explicit token budget approval", async () => {
+    mockedSpurRequest.mockResolvedValue(new Response(JSON.stringify({ ok: true })));
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", {
+        method: "POST",
+        body: JSON.stringify({ overrideTokenBudget: true }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequest).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ body: JSON.stringify({ overrideTokenBudget: true }) }),
+    );
+  });
+
+  it.each(["{", "null", "[]"])("restore rejects malformed approval body %s", async (body) => {
+    const response = await restoreSession(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/restore", {
+        method: "POST",
+        body,
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequest).not.toHaveBeenCalled();
+  });
+
   it("POST lifecycle actions proxy to Spur daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
     mockedSpurRequest.mockImplementation(async () => {
@@ -1668,6 +1699,19 @@ describe("Spur web API routes", () => {
 
   // ── POST /api/preflight ────────────────────────────────────────────────
 
+  it("allocates a server-owned preflight batch before paid preview", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ preflightBatchId: "server-id" });
+    const response = await allocatePreflight(
+      new NextRequest("http://localhost/api/projects/api/preflight-batches", { method: "POST" }),
+      { params: Promise.resolve({ id: "api" }) },
+    );
+    expect(await response.json()).toEqual({ preflightBatchId: "server-id" });
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/projects/api/preflight-batches",
+      expect.objectContaining({ method: "POST", body: undefined }),
+    );
+  });
+
   it("POST /api/preflight returns suggested branch", async () => {
     mockedSpurRequestJson.mockResolvedValue({ branch: "feature/my-fix" });
 
@@ -1755,6 +1799,36 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(502);
+  });
+
+  it("POST /api/preflight keeps paid usage on a daemon failure", async () => {
+    const usage = {
+      status: "unknown",
+      attemptCount: 1,
+      unknownAttemptCount: 1,
+      providerIterationCount: 0,
+    };
+    mockedSpurRequestJson.mockRejectedValue(
+      new SpurDaemonError("Pre-flight token usage is unknown", 409, {
+        error: "Pre-flight token usage is unknown",
+        preflightBatchId: "4c39ea91-df66-427f-b4ef-7b44fe7f6479",
+        preflightTokenUsageView: usage,
+      }),
+    );
+
+    const response = await runPreflight(
+      new NextRequest("http://localhost:3000/api/preflight", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "api", prompt: "Fix it" }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Pre-flight token usage is unknown",
+      preflightBatchId: "4c39ea91-df66-427f-b4ef-7b44fe7f6479",
+      preflightTokenUsageView: usage,
+    });
   });
 
   it("POST /api/preflight treats rejected branch suggestions as no suggestion", async () => {

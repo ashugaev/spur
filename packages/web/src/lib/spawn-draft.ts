@@ -1,7 +1,7 @@
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { WorkspaceMode } from "@/lib/types";
 
-const SPAWN_DRAFT_VERSION = 3;
+const SPAWN_DRAFT_VERSION = 4;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SPAWN_DRAFT_STORAGE_KEY = "spur:spawn-draft";
 
@@ -30,10 +30,12 @@ export interface SpawnDraft {
   steps: string[];
   trackerUrl: string | null;
   sessionMode: string | null;
+  preflightBatchId?: string | null;
+  preflightBatchProjectId?: string | null;
 }
 
 interface StoredSpawnDraft extends SpawnDraft {
-  version: typeof SPAWN_DRAFT_VERSION;
+  version: 3 | typeof SPAWN_DRAFT_VERSION;
   savedAt: number;
 }
 
@@ -58,7 +60,7 @@ function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDr
   if (!value || typeof value !== "object") return false;
   const draft = value as Record<string, unknown>;
   return (
-    draft.version === SPAWN_DRAFT_VERSION &&
+    (draft.version === 3 || draft.version === SPAWN_DRAFT_VERSION) &&
     typeof draft.savedAt === "number" &&
     Number.isFinite(draft.savedAt) &&
     draft.savedAt <= now &&
@@ -78,7 +80,11 @@ function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDr
     Array.isArray(draft.steps) &&
     draft.steps.every((step) => typeof step === "string") &&
     (draft.trackerUrl === null || typeof draft.trackerUrl === "string") &&
-    (draft.sessionMode === null || typeof draft.sessionMode === "string")
+    (draft.sessionMode === null || typeof draft.sessionMode === "string") &&
+    (draft.version === 3 ||
+      ((draft.preflightBatchId === null || typeof draft.preflightBatchId === "string") &&
+        (draft.preflightBatchProjectId === null ||
+          typeof draft.preflightBatchProjectId === "string")))
   );
 }
 
@@ -95,8 +101,10 @@ export function readSpawnDraft(
       storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
       return null;
     }
-    const { version: _version, savedAt: _savedAt, ...draft } = parsed;
-    return draft;
+    const { version, savedAt: _savedAt, ...draft } = parsed;
+    return version === 3
+      ? { ...draft, preflightBatchId: null, preflightBatchProjectId: null }
+      : draft;
   } catch {
     try {
       storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
@@ -116,7 +124,13 @@ export function writeSpawnDraft(
   try {
     storage.setItem(
       SPAWN_DRAFT_STORAGE_KEY,
-      JSON.stringify({ ...draft, version: SPAWN_DRAFT_VERSION, savedAt: now }),
+      JSON.stringify({
+        ...draft,
+        preflightBatchId: draft.preflightBatchId ?? null,
+        preflightBatchProjectId: draft.preflightBatchProjectId ?? null,
+        version: SPAWN_DRAFT_VERSION,
+        savedAt: now,
+      }),
     );
   } catch {
     // Draft persistence must not block spawning when storage is unavailable.

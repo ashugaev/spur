@@ -82,6 +82,20 @@ describe("runNpmInit --tailscale forwarding", () => {
     expect(execFileSyncCalls[0]?.args).not.toContain("--no-tailscale");
   });
 
+  it("installs Cursor metering during cold init before any session exists", async () => {
+    runNpmInit(cliEntrypoint, { noStart: true });
+    const hooks = JSON.parse(await readFile(join(fakeHome, ".cursor", "hooks.json"), "utf8"));
+    expect(hooks.hooks.stop).toHaveLength(1);
+    expect(hooks.hooks.stop[0].command).toContain("spur-cursor-token-usage.mjs");
+    expect(
+      await readFile(join(fakeHome, ".cursor", "spur-cursor-token-usage.mjs"), "utf8"),
+    ).toContain("process.env.SPUR_SESSION");
+    runNpmInit(cliEntrypoint, { noStart: true });
+    expect(
+      JSON.parse(await readFile(join(fakeHome, ".cursor", "hooks.json"), "utf8")).hooks.stop,
+    ).toHaveLength(1);
+  });
+
   it("forwards --tailscale when explicitly true", () => {
     runNpmInit(cliEntrypoint, { tailscale: true });
     expect(execFileSyncCalls[0]?.args).toContain("--tailscale");

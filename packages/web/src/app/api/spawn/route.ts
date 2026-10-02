@@ -19,6 +19,7 @@ interface SpawnBody {
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
   slots?: { links?: Array<{ label: string; url: string }> };
+  preflightBatchId?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -46,6 +47,7 @@ export async function POST(request: NextRequest) {
     }
     if (body.agent) payload.agent = body.agent;
     if (body.model?.trim()) payload.model = body.model.trim();
+    if (body.preflightBatchId?.trim()) payload.preflightBatchId = body.preflightBatchId.trim();
     if (body.mode?.trim()) payload.mode = body.mode.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
