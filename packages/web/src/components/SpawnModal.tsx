@@ -117,7 +117,6 @@ interface SpawnModalProps {
   onPromptChange: (next: string) => void;
   promptRef: RefObject<HTMLTextAreaElement | null>;
   promptPlaceholder: string;
-  promptMinHeightClass: string;
   promptAriaLabel?: string;
   clearLabel: string;
   attachments: FileAttachment[];
@@ -348,7 +347,6 @@ export function SpawnModal({
   onPromptChange,
   promptRef,
   promptPlaceholder,
-  promptMinHeightClass,
   promptAriaLabel,
   clearLabel,
   attachments,
@@ -372,7 +370,7 @@ export function SpawnModal({
       }}
     >
       <div
-        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] pb-[max(1rem,var(--safe-bottom))] pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))] pt-[max(1rem,var(--safe-top))] shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
+        className="flex h-[100dvh] max-h-[100dvh] w-screen flex-col overflow-hidden bg-[var(--color-bg-base)] pb-[max(1rem,var(--safe-bottom))] pl-[max(1rem,var(--safe-left))] pr-[max(1rem,var(--safe-right))] pt-[max(1rem,var(--safe-top))] shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:h-[calc(100dvh-2rem)] sm:max-h-[44rem] sm:w-full sm:max-w-lg sm:border sm:border-[var(--color-border-default)] sm:p-5"
         onKeyDown={(event) => {
           if (isVoiceToggleHotkey(event)) {
             event.preventDefault();
@@ -385,7 +383,7 @@ export function SpawnModal({
           }
         }}
       >
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex shrink-0 items-center justify-between">
           <h2
             className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
             id="spawn-modal-title"
@@ -394,35 +392,48 @@ export function SpawnModal({
           </h2>
           <IconCloseButton label="Close" onClick={onClose} disabled={!canClose} />
         </div>
-        {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
-          <ModeFields
-            agent={agent}
-            agentAriaLabel={agentAriaLabel}
-            mode={mode}
-            onAgentChange={onAgentChange}
-          />
+        <div
+          className="grid min-h-0 flex-1 grid-rows-[minmax(0,auto)_minmax(calc(6em+4rem+2px),1fr)_minmax(0,auto)] gap-3 overflow-hidden"
+          data-spawn-modal-body
+        >
+          <div
+            className="min-h-0 overflow-y-auto overscroll-y-auto"
+            data-spawn-modal-controls
+          >
+            <div className="space-y-3">
+              {noteSlot}
+              <ModeFields
+                agent={agent}
+                agentAriaLabel={agentAriaLabel}
+                mode={mode}
+                onAgentChange={onAgentChange}
+              />
+            </div>
+          </div>
           <FileAttachmentTextarea
+            adaptiveHeight
             ariaLabel={promptAriaLabel}
             attachments={attachments}
             clearLabel={clearLabel}
-            containerClassName="min-h-24 flex-1"
-            minHeightClass={promptMinHeightClass}
             onAddFiles={onAddFiles}
             onChange={onPromptChange}
             onRemoveAttachment={onRemoveAttachment}
             placeholder={voicePlaceholder(promptPlaceholder, voice)}
             textareaRef={promptRef}
-            textareaClassName="h-full max-h-full"
             value={prompt}
             voice={voice}
           />
-          {voice.voiceError ? (
-            <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
-              {voice.voiceError}
-            </div>
-          ) : null}
-          {artifactSlot}
+          <div
+            className="min-h-0 space-y-3 overflow-y-auto overscroll-y-auto"
+            data-spawn-modal-extras
+          >
+            {voice.voiceError ? (
+              <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                {voice.voiceError}
+              </div>
+            ) : null}
+            {artifactSlot}
+          </div>
         </div>
         <div className="mt-3 flex shrink-0 items-center justify-between">
           <span className="text-[10px] text-[var(--color-text-tertiary)]">

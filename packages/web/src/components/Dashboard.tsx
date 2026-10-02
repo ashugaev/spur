@@ -2844,7 +2844,6 @@ export function Dashboard() {
               onSubmit={() => void handleSpawn()}
               prompt={spawnPrompt}
               promptAriaLabel="Prompt..."
-              promptMinHeightClass="min-h-24"
               promptPlaceholder="Prompt..."
               promptRef={spawnPromptRef}
               showCancel={false}

@@ -53,6 +53,100 @@ function modalShot(page: Page, heading: RegExp | string, name: string) {
     .screenshot({ path: join(ARTIFACTS_DIR, name) });
 }
 
+function modalForHeading(page: Page, heading: RegExp | string) {
+  return page
+    .getByRole("heading", { name: heading })
+    .locator("xpath=ancestor::div[contains(@class,'shadow')][1]");
+}
+
+async function expectModalGeometry(page: Page, heading: RegExp | string): Promise<number> {
+  const modal = modalForHeading(page, heading);
+  const box = await modal.boundingBox();
+  expect(box).not.toBeNull();
+  if (box) {
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual((page.viewportSize()?.height ?? 0) + 1);
+  }
+
+  const body = modal.locator("[data-spawn-modal-body]");
+  await expect(body).toBeVisible();
+  const bodyGeometry = await body.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }));
+  expect(bodyGeometry.scrollHeight).toBeLessThanOrEqual(bodyGeometry.clientHeight + 1);
+  expect(bodyGeometry.scrollTop).toBe(0);
+
+  const textarea = modal.getByRole("textbox").last();
+  const promptGeometry = await textarea.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const padding = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+    return {
+      clientHeight: element.clientHeight,
+      lineHeight: Number.parseFloat(style.lineHeight),
+      writingHeight: element.clientHeight - padding,
+    };
+  });
+  expect(promptGeometry.writingHeight).toBeGreaterThanOrEqual(promptGeometry.lineHeight * 4 - 1);
+  return promptGeometry.clientHeight;
+}
+
+async function expectAuxiliaryTargetVisible(
+  modal: ReturnType<typeof modalForHeading>,
+  scrollerSelector: string,
+  target: ReturnType<Page["locator"]>,
+): Promise<void> {
+  const scroller = modal.locator(scrollerSelector);
+  await scroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(target).toBeVisible();
+  const intersects = await target.evaluate((element, selector) => {
+    const targetRect = element.getBoundingClientRect();
+    const scrollerRect = element.closest(selector)?.getBoundingClientRect();
+    return Boolean(
+      scrollerRect &&
+        targetRect.bottom > scrollerRect.top &&
+        targetRect.top < scrollerRect.bottom,
+    );
+  }, scrollerSelector);
+  expect(intersects).toBe(true);
+}
+
+async function expectFooterInViewport(
+  page: Page,
+  modal: ReturnType<typeof modalForHeading>,
+  submitName: RegExp,
+): Promise<void> {
+  const box = await modal.getByRole("button", { name: submitName }).boundingBox();
+  expect(box).not.toBeNull();
+  if (box) {
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()?.height ?? 0);
+  }
+}
+
+async function installDeniedVoiceMock(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => {
+          throw new Error("Microphone denied in test");
+        },
+      },
+    });
+  });
+  await page.route("**/api/runtime/voice", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ available: true, modelPath: "/test/model.bin" }),
+    });
+  });
+}
+
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -244,5 +338,154 @@ test.describe("spawn modal capture", () => {
       expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()?.height ?? 0);
     }
     await modal.screenshot({ path: join(ARTIFACTS_DIR, "spawn-modal-06-mobile-spawn.png") });
+  });
+
+  test("desktop prompt shrinks to four lines and owns long-text scrolling", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "capture-spawn-responsive", project: "my-project" })],
+      DEFAULT_PROJECTS,
+    );
+
+    const promptHeights: number[] = [];
+    for (const height of [900, 600]) {
+      await page.setViewportSize({ width: 1440, height });
+      await page.goto("/");
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+      promptHeights.push(await expectModalGeometry(page, /spawn session/i));
+      await expect(page.getByRole("button", { name: /^spawn$/i })).toBeVisible();
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+    }
+
+    expect(promptHeights[1]).toBeLessThan(promptHeights[0]);
+
+    await page.setViewportSize({ width: 1440, height: 600 });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    const modal = modalForHeading(page, /spawn session/i);
+    const textarea = modal.getByRole("textbox").last();
+    await textarea.fill(Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"));
+    const textScroll = await textarea.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(textScroll.scrollHeight).toBeGreaterThan(textScroll.clientHeight);
+    expect(textScroll.scrollTop).toBeGreaterThan(0);
+    await expectModalGeometry(page, /spawn session/i);
+  });
+
+  test("dense spawn controls remain reachable at the short viewport", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "capture-spawn-dense", project: "my-project" })],
+      [
+        {
+          id: "my-project",
+          name: "A project name long enough to wrap modal fields",
+          modes: {
+            "principal-engineering-review-committee": { skill: "review", default: true },
+          },
+        },
+      ],
+    );
+    await page.setViewportSize({ width: 375, height: 340 });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    const modal = modalForHeading(page, /spawn session/i);
+    await modal.getByLabel("Self-destruct").check();
+    const addStep = modal.getByRole("button", { name: "+ Step" });
+    for (let index = 0; index < 8; index += 1) {
+      await addStep.evaluate((button: HTMLButtonElement) => button.click());
+    }
+
+    await expectModalGeometry(page, /spawn session/i);
+    await expectAuxiliaryTargetVisible(modal, "[data-spawn-modal-controls]", addStep);
+    await expect(modal.getByLabel("Self-destruct conditions")).toBeAttached();
+    await expect(modal.getByPlaceholder("Base branch")).toBeAttached();
+    await expectFooterInViewport(page, modal, /^spawn$/i);
+  });
+
+  test("dense respawn extras remain reachable at the short viewport", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    await installDeniedVoiceMock(page);
+    const startupArtifacts = Array.from({ length: 12 }, (_, index) => ({
+      id: `startup-${index}.png`,
+      name: `startup-${index}.png`,
+      size: 128,
+      mimeType: "image/png",
+      kind: "image" as const,
+      origin: "intentional" as const,
+      createdAt: "2026-04-02T10:00:00.000Z",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+    }));
+    const session = makeCompletedSession({
+      id: "capture-respawn-dense",
+      project: "my-project",
+      prompt: "Retry with all context",
+      startupAttachmentIds: startupArtifacts.map((artifact) => artifact.id),
+      artifacts: startupArtifacts,
+      slots: {
+        links: [{ label: "pr", url: "https://github.com/example/repo/pull/1" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.setViewportSize({ width: 375, height: 340 });
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    const modal = modalForHeading(page, "Edit & Respawn");
+    const textarea = modal.getByPlaceholder("Initial message...");
+    await textarea.evaluate((element) => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["PNG"], "new-context.png", { type: "image/png" }));
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: transfer,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await expect(modal.locator('img[alt="new-context.png"]')).toBeAttached();
+    await modal.getByRole("button", { name: /start voice recording/i }).click();
+    await expect(modal.getByText(/Microphone denied in test/i)).toBeAttached();
+
+    await expectModalGeometry(page, "Edit & Respawn");
+    await expect(modal.getByRole("note")).toBeAttached();
+    const lastImage = modal.locator('img[alt="startup-11.png"]');
+    await expectAuxiliaryTargetVisible(modal, "[data-spawn-modal-extras]", lastImage);
+    await expectFooterInViewport(page, modal, /^respawn$/i);
+  });
+
+  test("dense desk steps remain reachable at the short viewport", async ({ page }) => {
+    await mockModels(page);
+    await mockSlashCommands(page);
+    const session = makeWorkingSession({
+      id: "capture-desk-dense",
+      project: "my-project",
+      worktree: true,
+    });
+    await mockSessionDetail(page, session);
+    await page.setViewportSize({ width: 375, height: 340 });
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^desk agent$/i }).click();
+    const modal = modalForHeading(page, "Desk agent");
+    const addStep = modal.getByRole("button", { name: "+ Step" });
+    for (let index = 0; index < 8; index += 1) {
+      await addStep.evaluate((button: HTMLButtonElement) => button.click());
+    }
+
+    await expectModalGeometry(page, "Desk agent");
+    await expectAuxiliaryTargetVisible(modal, "[data-spawn-modal-controls]", addStep);
+    await expectFooterInViewport(page, modal, /^spawn$/i);
   });
 });

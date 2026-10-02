@@ -92,7 +92,6 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
     onPromptChange: vi.fn(),
     promptRef: createRef<HTMLTextAreaElement>(),
     promptPlaceholder: "Prompt",
-    promptMinHeightClass: "min-h-24",
     clearLabel: "Clear",
     attachments: [],
     onAddFiles: vi.fn(),
@@ -255,16 +254,41 @@ describe("SpawnModal", () => {
     expect(submitButton).toBeDisabled();
   });
 
-  it("panel is full-screen on small mobile with tall prompt textarea", () => {
-    renderModal(spawnMode, {
-      promptAriaLabel: "Prompt input",
-      promptMinHeightClass: "min-h-[24rem]",
-    });
+  it("owns responsive panel and prompt sizing for every caller", () => {
+    renderModal(spawnMode, { promptAriaLabel: "Prompt input" });
     const panel = document.querySelector(".fixed.inset-0")?.firstElementChild;
     expect(panel).not.toBeNull();
     expect(panel).toHaveClass("h-[100dvh]");
     expect(panel).toHaveClass("w-screen");
     expect(panel).toHaveClass("sm:max-w-lg");
-    expect(screen.getByLabelText("Prompt input")).toHaveClass("min-h-[24rem]");
+    expect(panel).toHaveClass("sm:h-[calc(100dvh-2rem)]", "sm:max-h-[44rem]");
+    expect(document.querySelector("[data-spawn-modal-body]")).toHaveClass("overflow-hidden");
+    expect(document.querySelector("[data-spawn-modal-controls]")).toHaveClass(
+      "overflow-y-auto",
+      "overscroll-y-auto",
+    );
+    expect(screen.getByLabelText("Prompt input")).toHaveClass(
+      "min-h-[calc(6em+4rem+2px)]",
+      "resize-none",
+      "overflow-y-auto",
+    );
+  });
+
+  it("keeps optional controls in reachable auxiliary scrollers", () => {
+    renderModal(
+      {
+        ...respawnMode,
+        noteSlot: <div>Pull request warning</div>,
+        artifactSlot: <div>Startup images</div>,
+      },
+      { voice: makeVoiceInput({ voiceError: "Voice failed" }) },
+    );
+
+    const controls = document.querySelector("[data-spawn-modal-controls]");
+    const extras = document.querySelector("[data-spawn-modal-extras]");
+    expect(controls).toHaveTextContent("Pull request warning");
+    expect(extras).toHaveTextContent("Voice failed");
+    expect(extras).toHaveTextContent("Startup images");
+    expect(extras).toHaveClass("overflow-y-auto", "overscroll-y-auto");
   });
 });

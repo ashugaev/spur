@@ -3497,7 +3497,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (
-                    <div className="max-h-[min(36rem,55dvh)] overflow-y-auto pr-1">
+                    <div
+                      className="max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-y-auto pr-1"
+                      data-artifact-collection
+                    >
                       {artifactViewMode === "list" ? (
                         <ArtifactList
                           artifacts={visibleArtifacts}
@@ -4200,7 +4203,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-24"
               promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -4261,7 +4263,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-24"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel
