@@ -2772,6 +2772,7 @@ async function runSpawnPreflightForSpawn(args: {
   worktree: boolean;
   prompt: string;
   runAttempt?: (execute: () => Promise<SpawnPreflightResult>) => Promise<SpawnPreflightResult>;
+  assertActive?: () => void;
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
@@ -2782,6 +2783,7 @@ async function runSpawnPreflightForSpawn(args: {
     : "";
 
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    args.assertActive?.();
     let preflight: SpawnPreflightResult;
     try {
       const execute = () =>
@@ -2796,6 +2798,7 @@ async function runSpawnPreflightForSpawn(args: {
         });
       preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
+      args.assertActive?.();
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -11839,6 +11842,7 @@ export class SessionService {
             baseBranch: prepared.defaultBranch,
             worktree: prepared.worktree,
             prompt,
+            assertActive: () => this.assertSpawnNotKilled(sessionId),
             runAttempt: async (execute) => {
               let result: SpawnPreflightResult | undefined;
               let executionError: unknown;

@@ -50033,8 +50033,9 @@ describe("SessionService", () => {
       preflight.resolve({ branch: "feat/hello" });
 
       await expectKilledSpawnLeftAlone(sessions, 0);
+      expect(runSpawnPreflightMock).toHaveBeenCalledTimes(1);
       service.dispose();
-    }, 10_000);
+    });
 
     it.each(["spawn", "spawnInBackground"] as const)(
       "keeps a kill during worktree creation: no tmux, nothing typed (%s)",
