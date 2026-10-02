@@ -376,6 +376,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       await refetch(client);
       expect(doneButton()).not.toBeInTheDocument();
     }
+    current.set(source.id, { ...source, status: "completed" });
     await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [source.id] }))); });
     await refetch(client);
     expect(doneButton()).not.toBeInTheDocument();
@@ -464,6 +465,8 @@ describe("Dashboard lifecycle reconciliation", () => {
     list = { ...list, sessions: [anchor, added] };
     await refetch(client);
     expect(screen.getByText("Added member")).toBeInTheDocument();
+    current.set(anchor.id, { ...anchor, status: "completed" });
+    current.set(added.id, { ...added, status: "completed" });
     await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [anchor.id, added.id] }))); });
     await refetch(client);
     expect(screen.queryByText("Added member")).not.toBeInTheDocument();
@@ -490,6 +493,7 @@ describe("Dashboard lifecycle reconciliation", () => {
       await refetch(client);
     }
     const completedIds = outcome === "empty" ? [] : [child.id];
+    if (outcome !== "empty") current.set(child.id, { ...child, status: "completed" });
     await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds }))); });
     await refetch(client);
     expect(doneButton()).toBeInTheDocument();
@@ -542,6 +546,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     await clickDone();
     fireEvent.click(screen.getByRole("button", { name: `Mark ${other.id} as done` }));
     list = { ...list, sessions: [source, { ...other, status: "completed" }] };
+    current.set(source.id, { ...source, status: "completed" });
     await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [source.id, other.id] }))); });
     await refetch(client);
     list = { ...list, sessions: [source, other] };
@@ -594,5 +599,47 @@ describe("Dashboard lifecycle reconciliation", () => {
     const waiting: SpurSessionView = { ...source, status: "running", state: "waiting", runtimeAlive: true };
     await act(async () => { post.resolve(new Response(JSON.stringify(waiting))); });
     await waitFor(() => expect(restoreButton()).toBeInTheDocument());
+  });
+
+  it.each([
+    ["running", "stopped"],
+    ["errored", "error"],
+    ["running", "working"],
+    ["running", "stale"],
+  ] as const)("does not confirm restore from old %s/%s rows with a dead runtime", async (status, state) => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: null });
+    const old: SpurSessionView = { ...source, status, state, runtimeAlive: false };
+    list = { ...list, sessions: [old] };
+    const waiting: SpurSessionView = { ...old, status: "running", state: "waiting", runtimeAlive: true };
+    current.set(source.id, waiting);
+    const detail = deferredResponse();
+    nextDetail = detail;
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: `Restore session ${source.id}` }));
+    await act(async () => { post.resolve(new Response(JSON.stringify(waiting))); });
+    await waitFor(() => expect(nextDetail).toBeUndefined());
+    expect(restoreButton()).not.toBeInTheDocument();
+    expect(screen.getByText("Waiting")).toBeInTheDocument();
+    list = { ...list, sessions: [waiting] };
+    await act(async () => { detail.resolve(new Response(JSON.stringify(waiting))); });
+    expect(restoreButton()).not.toBeInTheDocument();
+  });
+
+  it("keeps completion hidden through terminal detail reads, then accepts an actual reopened session", async () => {
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    current.set(source.id, { ...source, status: "completed" });
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [source.id] }))); });
+    await refetch(client);
+    expect(doneButton()).not.toBeInTheDocument();
+    await refetch(client);
+    expect(doneButton()).not.toBeInTheDocument();
+    expect(vi.mocked(global.fetch).mock.calls.filter(([url]) => url === `/api/sessions/${source.id}`).length).toBeGreaterThanOrEqual(2);
+    const reopened: SpurSessionView = { ...source, status: "running", state: "waiting", runtimeAlive: true };
+    current.set(source.id, reopened);
+    await refetch(client);
+    expect(doneButton()).toBeInTheDocument();
+    expect(screen.getByText("Waiting")).toBeInTheDocument();
+    expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions[0]?.runtimeAlive).toBe(true);
   });
 });

@@ -34,6 +34,9 @@ test.describe("Lifecycle reconciliation", () => {
     let polls = 0;
     await mockSessions(page, () => { polls += 1; return rows; });
     await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${session.id}`, (route) => route.fulfill({
+      json: { ...session, status: "completed", state: "stopped", runtimeAlive: false },
+    }));
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
@@ -123,6 +126,59 @@ test.describe("Lifecycle reconciliation", () => {
     await page.screenshot({ path: testInfo.outputPath("restore-failure.png") });
     await restore.click();
     await expect.poll(() => calls).toBe(2);
+  });
+
+  test("dead-runtime running restore reconciles current Waiting without reverting to Restore", async ({ page }) => {
+    const old = makeWorkingSession({ id: "lifecycle-dead-runtime", prompt: "Dead runtime restore", runtimeAlive: false });
+    const waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
+    let rows = [old];
+    await mockSessions(page, () => rows);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let detailCalls = 0;
+    await page.route(`**/api/sessions/${old.id}`, async (route) => {
+      detailCalls += 1;
+      await held;
+      await route.fulfill({ json: waiting });
+    });
+    await page.route(`**/api/sessions/${old.id}/restore`, (route) => route.fulfill({ json: waiting }));
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${old.id}` });
+    await restore.click();
+    await expect.poll(() => detailCalls).toBe(1);
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+    rows = [waiting];
+    release();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+  });
+
+  test("completed overlay follows a real reopen before terminal list confirmation", async ({ page }) => {
+    const old = makeSessionWithPR({ id: "lifecycle-reopened", prompt: "Reopened completion", slots: { title: "Reopened completion", links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }] } });
+    let current = { ...old, status: "completed" as SpurSessionView["status"], state: "stopped" as SpurSessionView["state"], runtimeAlive: false };
+    let detailCalls = 0;
+    await mockSessions(page, [old]);
+    await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${old.id}`, (route) => {
+      detailCalls += 1;
+      return route.fulfill({ json: current });
+    });
+    await page.route(`**/api/sessions/${old.id}/complete`, (route) => route.fulfill({ json: { completedIds: [old.id] } }));
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
+    await done.click();
+    await expect.poll(() => detailCalls).toBeGreaterThanOrEqual(1);
+    await expect(done).toHaveCount(0);
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    current = { ...old, status: "running", state: "waiting", runtimeAlive: true };
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toBeVisible();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
   });
 });
 

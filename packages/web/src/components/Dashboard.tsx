@@ -295,18 +295,8 @@ function hasConfirmedTransition(
     return !session || session.status === "completed" || session.status === "killed";
   }
   if (!session) return false;
-  return (
-    session.status === "running" ||
-    session.status === "spawning" ||
-    session.status === "errored" ||
-    session.runtimeAlive ||
-    session.state === "working" ||
-    session.state === "waiting" ||
-    session.state === "needs_input" ||
-    session.state === "rate_limited" ||
-    session.state === "stale" ||
-    session.state === "error"
-  );
+  return session.runtimeAlive &&
+    (session.status === "running" || session.status === "spawning");
 }
 
 function BacklogZone({
@@ -1319,14 +1309,22 @@ export function Dashboard() {
         if (transition.phase === "pending") continue;
         const current = result.sessions.find((session) => session.id === id);
         if (!hasConfirmedTransition(current, transition)) {
-          if (transition.action === "complete") continue;
           try {
             const resolved = await readCurrentSession(id);
             if (signal.aborted || transitionsRef.current.get(id) !== transition) continue;
-            result.sessions = [...result.sessions.filter((session) => session.id !== id), resolved];
+            const reconciled = current ? {
+              ...current,
+              status: resolved.status,
+              state: resolved.state,
+              runtimeAlive: resolved.runtimeAlive,
+              tmuxSession: resolved.tmuxSession,
+            } : resolved;
+            result.sessions = [...result.sessions.filter((session) => session.id !== id), reconciled];
+            if (transition.action === "complete" && hasConfirmedTransition(resolved, transition)) continue;
           } catch (error) {
             if (signal.aborted) continue;
             showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+            if (transition.action === "complete") continue;
           }
         }
         if (!signal.aborted && transitionsRef.current.get(id) === transition) {

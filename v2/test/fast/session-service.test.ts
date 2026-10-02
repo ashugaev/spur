@@ -40399,6 +40399,42 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("retains the refresh fence after enrichment fails and recovers on the next tick", async () => {
+      const sessions = seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.list({ view: "dashboard" });
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+        refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+      };
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const enrich = vi.spyOn(internals, "enrichDashboard");
+      enrich.mockImplementationOnce(async (record) => {
+        await blocked;
+        return { id: record.id, model: "obsolete" };
+      });
+      const tick = internals.runDashboardCacheTick();
+      const original = sessions.get("api-1");
+      if (!original) throw new Error("missing seeded session");
+      const completed: SessionRecord = { ...original, status: "completed" };
+      sessions.set(completed.id, completed);
+      enrich.mockImplementation(async (record) => ({ id: record.id, model: "completed" }));
+      await internals.refreshDashboardCacheEntry(completed);
+      const restored: SessionRecord = { ...completed, status: "running" };
+      sessions.set(restored.id, restored);
+      enrich.mockRejectedValueOnce(new Error("refresh failed"));
+      await internals.refreshDashboardCacheEntry(restored);
+      release();
+      await tick;
+      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe("completed");
+      enrich.mockImplementation(async (record) => ({ id: record.id, model: "restored" }));
+      await internals.runDashboardCacheTick();
+      expect((await service.list({ view: "dashboard", includeCompleted: true }))[0]?.model).toBe("restored");
+      service.dispose();
+    });
+
     it("cache evicts removed sessions", async () => {
       const sessions = seedDashboardSessions(2);
       const { SessionService } = await loadSessionServiceModule();
