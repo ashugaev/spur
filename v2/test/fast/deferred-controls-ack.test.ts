@@ -229,6 +229,12 @@ const getTmuxPanePresenceMock = vi.fn(async (name: string, options?: { fresh?: b
   dead: await (options ? tmuxPaneDeadMock(name, options) : tmuxPaneDeadMock(name)),
   unresponsive: false,
 }));
+// Same delegation for the sidecar-name composition: existing sidecar flows
+// keep driving this call site through sidecarTmuxAliveMock.
+const getSidecarTmuxPresenceMock = vi.fn(async (sessionId: string, sidecarName: string) => ({
+  present: await sidecarTmuxAliveMock(sessionId, sidecarName),
+  unresponsive: false,
+}));
 const waitForTmuxReadyMock = vi.fn();
 const createWorktreeMock = vi.fn();
 const findWorktreePathForBranchMock = vi.fn();
@@ -680,6 +686,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     createTmuxCommandSession: createTmuxCommandSessionMock,
     createTmuxSidecarSession: createTmuxSidecarSessionMock,
     sidecarTmuxAlive: sidecarTmuxAliveMock,
+    getSidecarTmuxPresence: getSidecarTmuxPresenceMock,
     refreshTmuxFleetSnapshot: refreshTmuxFleetSnapshotMock,
     sidecarTmuxSession: sidecarTmuxSessionMock,
     listTmuxSessionNames: listTmuxSessionNamesMock,
@@ -1315,6 +1322,10 @@ describe("SessionService", () => {
       .mockReset()
       .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
+    getSidecarTmuxPresenceMock.mockReset().mockImplementation(async (sessionId, sidecarName) => ({
+      present: await sidecarTmuxAliveMock(sessionId, sidecarName),
+      unresponsive: false,
+    }));
     refreshTmuxFleetSnapshotMock.mockReset().mockResolvedValue(undefined);
     sidecarTmuxSessionMock
       .mockReset()

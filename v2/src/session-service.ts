@@ -255,6 +255,7 @@ import {
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
+  getSidecarTmuxPresence,
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
@@ -907,6 +908,14 @@ export class SidecarPortConflictError extends Error {
       candidates,
     };
   }
+}
+
+// Deliberately a SIBLING of SidecarPortConflictError, never a subclass:
+// startSidecarInternalLocked's catch is an `instanceof SidecarPortConflictError`
+// test that feeds the conflict cache, and an unreadable tmux probe is not a
+// conflict. Retryable by construction — thrown before any side effect.
+export class SidecarProbeUnresponsiveError extends Error {
+  readonly statusCode = 503;
 }
 
 export class OpenPrActionRequiredError extends Error {
@@ -8774,11 +8783,22 @@ export class SessionService {
     clearPort?: number;
   }): Promise<SessionRecord> {
     const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
-    const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+    // Presence AND unresponsiveness off one read each: a timeout-killed probe
+    // reports "absent"/"dead", and acting on that reaps a healthy sidecar.
+    const presence = await getSidecarTmuxPresence(args.session.id, args.sidecarName);
+    const alive = presence.present;
     // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
     // "session exists" — that pane's escapee tree can hold a reserved port
     // forever unless treated as not-alive here and reaped before restart.
-    const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+    const panePresence = alive ? await getTmuxPanePresence(tmuxName, { fresh: true }) : null;
+    // Unconditional: reapSidecarByName kills by tmux name, destructive with
+    // or without a recorded identity.
+    if (panePresence?.dead && panePresence.unresponsive) {
+      throw new SidecarProbeUnresponsiveError(
+        `Sidecar ${args.sidecarName} pane state is unreadable (tmux did not answer); retry shortly`,
+      );
+    }
+    const paneDead = panePresence?.dead ?? false;
     if (alive && !paneDead) {
       if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
         this.scheduleSidecarUrlReadyAndPublish(
@@ -8802,6 +8822,16 @@ export class SessionService {
       // old instance keeps running under the reused port.
       const owner = readSession(this.config.dataDir, args.session.id);
       const identity = owner?.sidecarProcs?.[args.sidecarName];
+      // Narrowed to an identity-present start: "absent" from an unreadable
+      // probe must not reap a recorded identity. A first start has no
+      // identity, so reapRecordedIdentity and clearSidecarProcEntry below are
+      // both no-ops there — refusing it would turn a harmless launch into a
+      // hard failure. Thrown before any write.
+      if (presence.unresponsive && owner && identity) {
+        throw new SidecarProbeUnresponsiveError(
+          `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
       // Own-identity no-op: the tmux supervisor is gone, but the recorded
       // process is still the exact one genuinely serving the recorded
       // ports — a retry against a repeat-failing caller (e.g. a wake
@@ -8933,12 +8963,21 @@ export class SessionService {
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
+    // Ownership of the tmux name for the catch below: set the instant
+    // `new-session` creates the session, so a failure in any later step is
+    // still a failure on a pane that is ours to reap. Held on an object, not
+    // a `let`: control-flow analysis does not follow the callback's write and
+    // reads a captured `let` as still-false in the catch.
+    const launch = { paneCreated: false };
     try {
       await createTmuxSidecarSession({
         sessionId: reservedSession.id,
         sidecarName: args.sidecarName,
         cwd: reservedSession.worktreePath,
         command: resolvedCommand,
+        onCreated: () => {
+          launch.paneCreated = true;
+        },
         env: buildSidecarRuntimeEnv(
           sessionEnv,
           reservedSession,
@@ -9009,8 +9048,33 @@ export class SessionService {
       );
       return readSession(this.config.dataDir, updated.id) ?? updated;
     } catch (error) {
-      await this.reapSidecarByName(reservedSession.id, args.sidecarName);
-      this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      // Keyed on whether `new-session` actually created the session, never on
+      // the pre-launch probe. The only thing that ever justified skipping is
+      // ownership: a launch that created nothing may have failed on a tmux
+      // name already held by a live sidecar an unreadable probe could not
+      // see, and reaping by name would kill it. Once `new-session` succeeds
+      // there is no such occupant — whatever carries that name is ours — so
+      // every later failure reaps, exactly as on a readable probe. That case
+      // is NOT a mere leak: `new-session` carries no timeout while the
+      // `set-option`/`respawn-pane` after it do, so a slow tmux can leave a
+      // respawned sidecar listening on a port the rollback below just
+      // released, and the next start's alive-and-not-dead early return
+      // returns before it can reserve or relink anything.
+      // clearSidecarProcEntry is a no-op on the skip path anyway (the
+      // pre-launch branches already cleared any recorded identity), so both
+      // are skipped as one branch; the port rollback and slot unlink below
+      // still run.
+      if (!launch.paneCreated) {
+        this.logEvent("session.sidecar.launch_reap_skipped", {
+          level: "warn",
+          sessionId: args.session.id,
+          message: `Sidecar ${args.sidecarName} launch created no tmux session; skipping the reap so an instance the probe could not see is not destroyed.`,
+          details: { sidecarName: args.sidecarName },
+        });
+      } else {
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      }
       const baseRecord =
         reservedSession !== args.session
           ? args.session

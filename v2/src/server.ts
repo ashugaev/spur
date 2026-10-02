@@ -62,6 +62,7 @@ import {
   SessionService,
   SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -2044,7 +2045,8 @@ export async function startServer(
         error instanceof SessionStartingError ||
         error instanceof SessionEndedError ||
         error instanceof ForeignAgentProcessError ||
-        error instanceof LaunchPromptPendingError
+        error instanceof LaunchPromptPendingError ||
+        error instanceof SidecarProbeUnresponsiveError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;
