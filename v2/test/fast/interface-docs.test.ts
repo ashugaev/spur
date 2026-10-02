@@ -39,6 +39,7 @@ describe("published interface contracts", () => {
     expect(daemonApi).toMatch(/auto-ping-suppressions[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
+    expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");
     expect(configuration).toContain("session.token_budget.exhausted");
     expect(configuration).toContain("session.token_budget.unenforced");
     expect(configuration).toContain("session.token_budget.teardown_failed");

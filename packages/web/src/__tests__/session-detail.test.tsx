@@ -6535,7 +6535,7 @@ describe("SessionDetail token usage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps Restore blocked when only the main usage view reports exhaustion", async () => {
+  it("keeps Restore blocked when the combined budget view reports exhaustion", async () => {
     stubFetch({
       status: "stopped",
       state: "stopped",
@@ -6549,7 +6549,7 @@ describe("SessionDetail token usage", () => {
         budget: 100,
         exhausted: true,
       },
-      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: false, enforced: true },
+      tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
     });
 
     render(<SessionDetail sessionId="api-a1" />);

@@ -4015,7 +4015,25 @@ test.describe("S5: Runtime sidebar", () => {
           budget: 100,
           exhausted: true,
         },
-        tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: false, enforced: true },
+        tokenBudgetView: { budget: 100, knownTotalTokens: 100, exhausted: true, enforced: true },
+      }),
+      makeWorkingSession({
+        id: "detail-s5-token-warn-only",
+        tokenUsageView: {
+          status: "available",
+          provider: "codex",
+          inputTokens: 75,
+          outputTokens: 25,
+          totalTokens: 100,
+          exhausted: false,
+        },
+        tokenBudgetView: {
+          budget: 100,
+          knownTotalTokens: 100,
+          exhausted: true,
+          enforced: true,
+          warnOnly: true,
+        },
       }),
       makeWorkingSession({
         id: "detail-s5-cursor-measured",
@@ -4064,6 +4082,14 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText("100 / 100")).toBeVisible();
     await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Restore" })).toHaveCount(0);
+    await page.goto("/sessions/detail-s5-token-warn-only");
+    const warnOnlyCount = page.getByLabel("Tokens: 100", { exact: true });
+    await expect(warnOnlyCount).toHaveAttribute("style", /--color-status-error/);
+    await expect(warnOnlyCount).toHaveClass(/font-bold/);
+    await warnOnlyCount.focus();
+    await expect(page.getByRole("tooltip")).toContainText("Token budget reached");
+    await expect(page.getByText(/Not accepting input/)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Send now" })).toBeVisible();
   });
 
   test("pre-flight components stay separate from main usage and exhaust Restore", async ({

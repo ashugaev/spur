@@ -47,13 +47,14 @@ export function TokenCount({
   const budget = session.tokenBudgetView;
   const limit = budget?.budget;
   const total = budget?.knownTotalTokens ?? 0;
-  const hit = isTokenBudgetBlocked(session);
+  const exceeded = budget ? budget.exhausted === true : session.tokenUsageView?.exhausted === true;
+  const blocked = isTokenBudgetBlocked(session);
   const unenforced =
     budget !== undefined && limit !== undefined && !budget.enforced && !budget.overridden;
   const floor = limit !== undefined && Boolean(budget?.reason);
   const tone = !budget
     ? "none"
-    : hit
+    : exceeded
       ? "hit"
       : unenforced
         ? "unenf"
@@ -105,7 +106,7 @@ export function TokenCount({
         aria-describedby={hasDetails && (hovered || focused) ? id : undefined}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
-        className={`cursor-default outline-none focus-visible:underline focus-visible:decoration-dotted focus-visible:underline-offset-4 ${hit ? "font-bold" : ""}`}
+        className={`cursor-default outline-none focus-visible:underline focus-visible:decoration-dotted focus-visible:underline-offset-4 ${exceeded ? "font-bold" : ""}`}
         style={{ color: `var(--color-${toneColor})` }}
       >
         {available
@@ -182,12 +183,12 @@ export function TokenCount({
                 ))}
               </dl>
             ) : null}
-            {hit || unenforced || limit !== undefined || budget?.overridden ? (
+            {exceeded || unenforced || limit !== undefined || budget?.overridden ? (
               <span
-                className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${hit ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-chip-warn-text)]" : "text-[var(--color-text-tertiary)]"}`}
+                className={`mt-2 block border-t border-[var(--color-border-subtle)] pt-2 text-left ${exceeded ? "text-[var(--color-status-error)]" : unenforced ? "text-[var(--color-chip-warn-text)]" : "text-[var(--color-text-tertiary)]"}`}
               >
-                {hit
-                  ? session.status === "budget_limited"
+                {exceeded
+                  ? blocked && session.status === "budget_limited"
                     ? "Stopped by token budget"
                     : "Token budget reached"
                   : unenforced

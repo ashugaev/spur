@@ -366,6 +366,7 @@ export type SpurPreflightTokenUsageView =
 export interface SpurTokenBudgetView {
   overridden?: boolean;
   budget?: number;
+  warnOnly?: boolean;
   knownTotalTokens: number;
   exhausted: boolean;
   enforced: boolean;
@@ -377,7 +378,8 @@ export function isTokenBudgetBlocked(
 ): boolean {
   const budget = session.tokenBudgetView;
   if (budget?.overridden) return false;
-  return budget?.exhausted === true || session.tokenUsageView?.exhausted === true;
+  if (budget) return budget.exhausted === true && budget.warnOnly !== true;
+  return session.tokenUsageView?.exhausted === true;
 }
 
 export type SpurSidecarStopReport =

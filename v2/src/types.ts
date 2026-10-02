@@ -738,6 +738,7 @@ export interface ProjectConfig {
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
   tokenBudget?: number;
+  tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
 }
 
@@ -779,6 +780,7 @@ export type PreflightTokenUsageView =
 export interface TokenBudgetView {
   budget?: number;
   overridden?: boolean;
+  warnOnly: boolean;
   knownTotalTokens: number;
   exhausted: boolean;
   enforced: boolean;

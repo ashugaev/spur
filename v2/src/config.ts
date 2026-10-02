@@ -1573,6 +1573,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     `${label}.maxLiveSessions`,
   );
   const tokenBudget = asOptionalPositiveInteger(raw["tokenBudget"], `${label}.tokenBudget`);
+  const tokenBudgetWarnOnly =
+    asOptionalBoolean(raw["tokenBudgetWarnOnly"], `${label}.tokenBudgetWarnOnly`) ?? false;
   const staleAfterMinutes = asNonNegativeNumber(
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
@@ -1676,6 +1678,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
     ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    tokenBudgetWarnOnly,
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }

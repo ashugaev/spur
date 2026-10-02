@@ -4953,6 +4953,37 @@ projects:
     );
   });
 
+  it("parses projects.<id>.tokenBudgetWarnOnly in both config modes and defaults false", async () => {
+    const enabledPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+    tokenBudgetWarnOnly: true
+`);
+    expect(loadConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+    expect(loadProjectConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+
+    const defaultPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(defaultPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(false);
+  });
+
+  it("rejects a non-boolean projects.<id>.tokenBudgetWarnOnly", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudgetWarnOnly: yes
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudgetWarnOnly must be a boolean",
+    );
+  });
+
   it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
     const configPath = await writeConfig(`
 projects:

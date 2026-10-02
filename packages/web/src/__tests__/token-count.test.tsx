@@ -168,7 +168,7 @@ describe("TokenCount", () => {
         session={{
           status,
           tokenUsageView: { ...usage, exhausted: true },
-          tokenBudgetView: { knownTotalTokens: 800, exhausted: false, enforced: true },
+          tokenBudgetView: { knownTotalTokens: 800, exhausted: true, enforced: true },
         }}
       />,
     );
@@ -178,7 +178,7 @@ describe("TokenCount", () => {
       expect(screen.getByRole("tooltip")).not.toHaveTextContent("Stopped by token budget");
   });
 
-  it.each([false, true])("uses either exhaustion signal unless overridden=%s", (overridden) => {
+  it.each([false, true])("uses combined exhaustion unless overridden=%s", (overridden) => {
     render(
       <TokenCount
         session={{
@@ -187,7 +187,7 @@ describe("TokenCount", () => {
           tokenBudgetView: {
             budget: 1000,
             knownTotalTokens: 800,
-            exhausted: false,
+            exhausted: !overridden,
             enforced: !overridden,
             overridden,
           },
@@ -318,6 +318,30 @@ describe("TokenCount", () => {
     expect(screen.queryByText("Stopped by token budget")).not.toBeInTheDocument();
     expect(screen.queryByText("Token budget reached")).not.toBeInTheDocument();
     expect(screen.getByText("110 of 100 · 110% · limit ignored")).toBeInTheDocument();
+  });
+
+  it("marks a warn-only exceeded budget red without reporting a stop", () => {
+    render(
+      <TokenCount
+        session={{
+          status: "running",
+          tokenUsageView: { ...usage, exhausted: false },
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 800,
+            exhausted: true,
+            enforced: true,
+            warnOnly: true,
+          },
+        }}
+      />,
+    );
+    const count = screen.getByLabelText("Tokens: 800");
+    expect(count).toHaveAttribute("style", "color: var(--color-status-error);");
+    expect(count).toHaveClass("font-bold");
+    fireEvent.focus(count);
+    expect(screen.getByText("Token budget reached")).toBeInTheDocument();
+    expect(screen.queryByText("Stopped by token budget")).not.toBeInTheDocument();
   });
 
   it("absent tokenBudgetView wins over exhausted usage", () => {

@@ -5657,7 +5657,9 @@ export class SessionService {
     session: Pick<SessionRecord, "id" | "project" | "worktreePath" | "tokenBudgetOverride">,
   ): number | undefined {
     if (session.tokenBudgetOverride) return undefined;
-    return this.resolveProjectForSession(session)?.tokenBudget;
+    const project = this.resolveProjectForSession(session);
+    if (project?.tokenBudgetWarnOnly === true) return undefined;
+    return project?.tokenBudget;
   }
 
   private tokenBudgetActivationError(session: SessionRecord): string | undefined {
@@ -5754,29 +5756,17 @@ export class SessionService {
     });
   }
 
-  private async holdBudgetLimitedLaunch(
-    session: SessionRecord,
-  ): Promise<SessionRecord | undefined> {
+  private holdBudgetLimitedLaunch(session: SessionRecord): SessionRecord | undefined {
     if (!this.tokenBudgetActivationError(session)) return undefined;
-    try {
-      await this.teardownSessionSidecars(session);
-    } catch (error) {
-      this.logEvent("session.token_budget.teardown_failed", {
-        level: "error",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Sidecar teardown failed after token budget exhaustion for ${session.id}: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
     const limited: SessionRecord = {
-      ...this.sessionWithReleasedSidecarPorts(session),
+      ...session,
       status: "budget_limited",
       stopReason: "token_budget",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, limited);
     this.stateCache.delete(limited.id);
-    await this.refreshDashboardCacheEntry(limited);
+    this.dashboardCache.delete(limited.id);
     this.logEvent("session.token_budget.exhausted", {
       level: "warn",
       sessionId: limited.id,
@@ -6002,7 +5992,11 @@ export class SessionService {
             allSessions,
             sidecarProcSnapshot,
           );
-          if (view.status === "running" && view.tokenBudgetView?.exhausted) {
+          if (
+            view.status === "running" &&
+            view.tokenBudgetView?.exhausted &&
+            view.tokenBudgetView.warnOnly !== true
+          ) {
             await this.stopForTokenBudget(view);
             continue;
           }
@@ -10948,6 +10942,14 @@ export class SessionService {
             selfDestruct,
             telegramAgentInstructions(project),
           );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...placeholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) return await this.enrich(budgetLimited);
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
         project,
@@ -11032,9 +11034,6 @@ export class SessionService {
         ...(pipeline ? { pipeline } : {}),
         originalTaskPrompt,
       };
-
-      const budgetLimited = await this.holdBudgetLimitedLaunch(runningRecord);
-      if (budgetLimited) return await this.enrich(budgetLimited);
 
       const sessionEnv = buildSessionEnv({
         agent,
@@ -12027,6 +12026,17 @@ export class SessionService {
         selfDestruct,
         telegramAgentInstructions(project),
       );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...spawnPlaceholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) {
+        prepared.placeholder = budgetLimited;
+        return "completed";
+      }
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
@@ -12084,12 +12094,6 @@ export class SessionService {
           : {}),
         ...(pipeline ? { pipeline } : {}),
       };
-
-      const budgetLimited = await this.holdBudgetLimitedLaunch(runningRecord);
-      if (budgetLimited) {
-        prepared.placeholder = budgetLimited;
-        return "completed";
-      }
 
       const sessionEnv = buildSessionEnv({
         agent,
@@ -12960,7 +12964,8 @@ export class SessionService {
       !session ||
       session.status !== "running" ||
       submitPending(session) ||
-      !hasMessageContent(request)
+      !hasMessageContent(request) ||
+      this.tokenBudgetActivationError(session) !== undefined
     ) {
       return null;
     }
@@ -19907,7 +19912,9 @@ export class SessionService {
   }
 
   private deriveTokenBudgetView(session: SessionRecord) {
-    const budget = this.resolveProjectForSession(session)?.tokenBudget;
+    const project = this.resolveProjectForSession(session);
+    const budget = project?.tokenBudget;
+    const warnOnly = budget !== undefined && project?.tokenBudgetWarnOnly === true;
     const overridden = session.tokenBudgetOverride === true;
     const preflight = session.preflightTokenUsage;
     const knownTotalTokens = (preflight?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
@@ -19920,6 +19927,7 @@ export class SessionService {
           : undefined;
     return {
       ...(budget !== undefined ? { budget } : {}),
+      warnOnly,
       knownTotalTokens,
       overridden,
       exhausted: !overridden && budget !== undefined && knownTotalTokens >= budget,
