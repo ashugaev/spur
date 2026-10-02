@@ -115,6 +115,7 @@ describe("runtime-tmux shared probe cache", () => {
         expect(await probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).toEqual({
           alive: true,
           matchedByName: true,
+          unresponsive: false,
         });
       }
     },
@@ -136,6 +137,7 @@ describe("runtime-tmux shared probe cache", () => {
     expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
       alive: false,
       matchedByName: false,
+      unresponsive: false,
       diagnostic: `ps failed: ${error.message}`,
     });
     await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow(error.message);
@@ -150,6 +152,7 @@ describe("runtime-tmux shared probe cache", () => {
     expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
       alive: false,
       matchedByName: false,
+      unresponsive: false,
     });
   });
 
@@ -752,5 +755,28 @@ describe("runtime-tmux shared probe cache", () => {
 
     expect(listWindowsCalls).toBe(1);
     expect(listPanesCalls).toBe(1);
+  });
+
+  it("probeTmuxProcessMatch fresh read issues ONE list-panes fork and reports unresponsive when it is timeout-killed", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed: tmux timed out"),
+    });
+    expect(
+      callsFor(
+        (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
+      ),
+    ).toBe(1);
   });
 });

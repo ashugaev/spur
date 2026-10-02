@@ -845,6 +845,9 @@ export interface TmuxProcessMatch {
   alive: boolean;
   matchedByName: boolean;
   diagnostic?: string;
+  // True when the fleet-pane read was killed by its own timeout: alive:false
+  // is then not evidence of death. Callers must not kill on it.
+  unresponsive: boolean;
 }
 
 // `fresh` busts the shared fleet-pane and ps-snapshot caches before reading —
@@ -875,15 +878,18 @@ export async function probeTmuxProcessMatch(
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
     psSnapshotCache.delete(PS_SNAPSHOT_CACHE_KEY);
   }
+  let unresponsive = false;
   try {
-    const { panes, diagnostic: paneDiagnostic } = await getFleetPaneSnapshot();
-    if (paneDiagnostic) {
-      return { alive: false, matchedByName: false, diagnostic: paneDiagnostic };
+    const snapshot = await getFleetPaneSnapshot();
+    unresponsive = snapshot.unresponsive;
+    const { panes } = snapshot;
+    if (snapshot.diagnostic) {
+      return { alive: false, matchedByName: false, unresponsive, diagnostic: snapshot.diagnostic };
     }
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
-      return { alive: false, matchedByName: false };
+      return { alive: false, matchedByName: false, unresponsive };
     }
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
     const processRes = processMatchers
@@ -893,11 +899,11 @@ export async function probeTmuxProcessMatch(
           new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
       );
     if (processRes.length === 0) {
-      return { alive: false, matchedByName: false };
+      return { alive: false, matchedByName: false, unresponsive };
     }
     const { rows, diagnostic } = await getPsSnapshot();
     if (diagnostic) {
-      return { alive: false, matchedByName: false, diagnostic };
+      return { alive: false, matchedByName: false, unresponsive, diagnostic };
     }
     // tpgid on the row whose pid IS a pane pid is that tty's foreground
     // process group, shared by every process attached to the tty.
@@ -933,7 +939,7 @@ export async function probeTmuxProcessMatch(
         continue;
       }
       if (processRes.some((processRe) => processRe.test(row.args))) {
-        return { alive: true, matchedByName: true };
+        return { alive: true, matchedByName: true, unresponsive };
       }
     }
     // Pane-child fallback (issue #806, hardened against #857 P1): a
@@ -970,15 +976,16 @@ export async function probeTmuxProcessMatch(
           continue;
         }
         if (row.pgid === fgPgid) {
-          return { alive: true, matchedByName: false };
+          return { alive: true, matchedByName: false, unresponsive };
         }
       }
     }
-    return { alive: false, matchedByName: false };
+    return { alive: false, matchedByName: false, unresponsive };
   } catch (error) {
     return {
       alive: false,
       matchedByName: false,
+      unresponsive,
       diagnostic: probeDiagnostic("tmux process", error),
     };
   }

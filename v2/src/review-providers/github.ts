@@ -1,5 +1,11 @@
 import { existsSync } from "node:fs";
-import { gh, pollBudgetState, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "../gh.js";
+import {
+  extractGithubErrorText,
+  gh,
+  pollBudgetState,
+  recordGraphqlBudgetFromEnvelope,
+  withGhPollBudget,
+} from "../gh.js";
 import {
   readCommentSeenRegistry,
   readGitHubReviewPagination,
@@ -29,7 +35,11 @@ import {
   normalizeReviewState,
   shortText,
 } from "./shared.js";
-import type { ReviewProvider } from "./types.js";
+import type {
+  RefreshReviewSignalsInput,
+  ReviewProvider,
+  ReviewSignalRefreshResult,
+} from "./types.js";
 
 export { hasMergeConflict, normalizeReviewDecision, shortText } from "./shared.js";
 
@@ -265,6 +275,13 @@ type PullRequestReviewComment = {
 type ReviewSignalWithThreadTarget = ReviewSignal & {
   providerThreadTarget?: AutoPingThreadTarget;
 };
+type RefreshableCommentKind = "issue-comment" | "review-comment" | "review";
+
+interface RefreshableCommentSignal {
+  kind: RefreshableCommentKind;
+  id: string;
+  signal: ReviewSignal;
+}
 
 type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
@@ -748,6 +765,156 @@ function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal
   });
 }
 
+function parseSignalId(signal: ReviewSignal, prefix: string): string | null {
+  if (!signal.key.startsWith(prefix)) return null;
+  const id = signal.key.slice(prefix.length);
+  return /^\d+$/.test(id) ? id : null;
+}
+
+function refreshableCommentSignal(signal: ReviewSignal): RefreshableCommentSignal | null {
+  if (signal.kind !== "comment") return null;
+  const issueCommentId = parseSignalId(signal, "comment:");
+  if (issueCommentId) return { kind: "issue-comment", id: issueCommentId, signal };
+  const reviewCommentId = parseSignalId(signal, "review-comment:");
+  if (reviewCommentId) return { kind: "review-comment", id: reviewCommentId, signal };
+  const reviewId = parseSignalId(signal, "review:");
+  if (reviewId) return { kind: "review", id: reviewId, signal };
+  return null;
+}
+
+function isGithubNotFound(error: unknown): boolean {
+  const text = extractGithubErrorText(error).toLowerCase();
+  return /\bhttp 404\b/.test(text);
+}
+
+export function githubFeedbackIdentity(
+  prUrl: string,
+  prNumber: number,
+  repo?: string,
+): {
+  hostname: string;
+  repo: string;
+} {
+  const url = new URL(prUrl);
+  const path = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(url.pathname);
+  const slug = path ? `${path[1]}/${path[2]}`.toLowerCase() : "";
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    !path ||
+    Number(path[3]) !== prNumber ||
+    (repo !== undefined && repo.toLowerCase() !== slug)
+  )
+    throw new Error("Invalid GitHub feedback identity");
+  return { hostname: url.hostname, repo: slug };
+}
+
+function liveIssueCommentSignal(signal: ReviewSignal, raw: unknown): ReviewSignal {
+  if (!isRecord(raw) || typeof raw["body"] !== "string") {
+    throw new Error("Invalid GitHub comment response");
+  }
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : "unknown";
+  return {
+    ...signal,
+    text: `New PR comment from ${login}: "${shortText(raw["body"])}"`,
+  };
+}
+
+function liveReviewCommentSignal(signal: ReviewSignal, raw: unknown): ReviewSignal {
+  if (
+    !isRecord(raw) ||
+    typeof raw["body"] !== "string" ||
+    typeof raw["path"] !== "string" ||
+    (raw["line"] !== null && typeof raw["line"] !== "number")
+  ) {
+    throw new Error("Invalid GitHub review comment response");
+  }
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : "unknown";
+  const path = raw["path"];
+  const line = raw["line"];
+  const location = path ? ` on ${path}${line ? `:${line}` : ""}` : "";
+  return {
+    ...signal,
+    text: `New review comment from ${login}${location}: "${shortText(raw["body"])}"`,
+  };
+}
+
+function liveReviewBodySignal(signal: ReviewSignal, raw: unknown): ReviewSignal | null {
+  if (!isRecord(raw) || typeof raw["body"] !== "string" || typeof raw["state"] !== "string") {
+    throw new Error("Invalid GitHub review response");
+  }
+  const body = raw["body"].trim();
+  const state = raw["state"];
+  if (!body || !REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(state))) return null;
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : null;
+  return {
+    ...signal,
+    text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
+  };
+}
+
+async function refreshGitHubCommentSignal(
+  hostname: string,
+  repo: string,
+  prNumber: number,
+  cwd: string,
+  refreshable: RefreshableCommentSignal,
+): Promise<ReviewSignal | null> {
+  const endpoint =
+    refreshable.kind === "issue-comment"
+      ? `repos/${repo}/issues/comments/${refreshable.id}`
+      : refreshable.kind === "review-comment"
+        ? `repos/${repo}/pulls/comments/${refreshable.id}`
+        : `repos/${repo}/pulls/${prNumber}/reviews/${refreshable.id}`;
+  try {
+    const raw = parseJson(await gh(cwd, "api", endpoint, "--hostname", hostname, "--cache", "0s"));
+    if (refreshable.kind === "issue-comment") {
+      return liveIssueCommentSignal(refreshable.signal, raw);
+    }
+    if (refreshable.kind === "review-comment") {
+      return liveReviewCommentSignal(refreshable.signal, raw);
+    }
+    return liveReviewBodySignal(refreshable.signal, raw);
+  } catch (error) {
+    if (isGithubNotFound(error)) return null;
+    throw error;
+  }
+}
+
+async function refreshSignals(
+  input: RefreshReviewSignalsInput,
+): Promise<ReviewSignalRefreshResult[]> {
+  return Promise.all(
+    input.signals.map(async (signal): Promise<ReviewSignalRefreshResult> => {
+      try {
+        const refreshable = refreshableCommentSignal(signal);
+        if (!refreshable) throw new Error(`Cannot resolve GitHub comment signal ${signal.key}`);
+        const live = await refreshGitHubCommentSignal(
+          input.hostname,
+          input.repo,
+          input.prNumber,
+          input.cwd,
+          refreshable,
+        );
+        return live
+          ? { status: "live", key: signal.key, signal: live }
+          : { status: "deleted", key: signal.key };
+      } catch (error) {
+        return {
+          status: "failed",
+          key: signal.key,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }),
+  );
+}
+
 function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
@@ -840,6 +1007,8 @@ function collectSignalsFromNode(
   return {
     data: {
       sessionId: session.id,
+      repo: pr.repo,
+      prUrl: pr.url,
       prNumber: pr.number,
       prTitle: pr.title,
       signals: [],
@@ -1782,4 +1951,5 @@ export const githubReviewProvider: ReviewProvider = {
     return pr?.url ?? null;
   },
   collectSignals,
+  refreshSignals,
 };

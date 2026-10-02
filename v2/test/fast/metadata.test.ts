@@ -523,6 +523,99 @@ function telegramPendingBatch(
 }
 
 describe("pending send batches", () => {
+  describe("admission cap metadata", () => {
+    it("loads legacy records and round-trips a positive finite deadline", async () => {
+      const dataDir = await newDataDir();
+      const legacy = reviewPendingBatch();
+      recordPendingSendBatch(dataDir, legacy);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(legacy);
+      const held = { ...legacy, admissionCapRetryAt: 1_800_000_000_000 };
+      recordPendingSendBatch(dataDir, held);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual({
+        ...held,
+        admissionCapDenials: 1,
+      });
+      for (const admissionCapDenials of [1, 7]) {
+        const counted = { ...held, admissionCapDenials };
+        recordPendingSendBatch(dataDir, counted);
+        expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(counted);
+        const countOnly = { ...legacy, admissionCapDenials };
+        recordPendingSendBatch(dataDir, countOnly);
+        expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(countOnly);
+      }
+      const expiredLegacy = { ...legacy, admissionCapRetryAt: 1 };
+      recordPendingSendBatch(dataDir, expiredLegacy);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual({
+        ...expiredLegacy,
+        admissionCapDenials: 1,
+      });
+    });
+
+    it.each(["later", null, 0, -1, 1.5, 8, NaN, Infinity, -Infinity])(
+      "rejects an invalid serialized denial count %s",
+      async (admissionCapDenials) => {
+        const dataDir = await newDataDir();
+        writeFileSync(
+          join(dataDir, "pending-send-batches.json"),
+          JSON.stringify({ records: [{ ...reviewPendingBatch(), admissionCapDenials }] }),
+        );
+        expect(readPendingSendBatches(dataDir).size).toBe(0);
+      },
+    );
+
+    it.each(["later", null, 0, -1, NaN, Infinity, -Infinity])(
+      "rejects an invalid serialized deadline %s",
+      async (admissionCapRetryAt) => {
+        const dataDir = await newDataDir();
+        writeFileSync(
+          join(dataDir, "pending-send-batches.json"),
+          JSON.stringify({ records: [{ ...reviewPendingBatch(), admissionCapRetryAt }] }),
+        );
+        expect(readPendingSendBatches(dataDir).size).toBe(0);
+      },
+    );
+
+    it("clears the deadline only for the owned work revision and claim", async () => {
+      const dataDir = await newDataDir();
+      const record = reviewPendingBatch({
+        workId: "held-work",
+        revision: 4,
+        admissionCapRetryAt: 1_800_000_000_000,
+        admissionCapDenials: 3,
+        claim: {
+          controllerId: "controller",
+          routeLeaseId: "lease",
+          claimId: "owned-claim",
+          claimedAt: "2026-10-01T00:00:00.000Z",
+        },
+      });
+      recordPendingSendBatch(dataDir, record);
+      const cleared = {
+        ...record,
+        revision: 5,
+        admissionCapRetryAt: undefined,
+        admissionCapDenials: undefined,
+      };
+      for (const expected of [
+        { workId: "other-work", revision: 4, claimId: "owned-claim" },
+        { workId: "held-work", revision: 3, claimId: "owned-claim" },
+        { workId: "held-work", revision: 4, claimId: "other-claim" },
+      ]) {
+        expect(updatePendingSendBatchConditional(dataDir, expected, cleared)).toBe(false);
+        expect(readPendingSendBatch(dataDir, "held-work")).toEqual(record);
+      }
+      expect(
+        updatePendingSendBatchConditional(
+          dataDir,
+          { workId: "held-work", revision: 4, claimId: "owned-claim" },
+          cleared,
+        ),
+      ).toBe(true);
+      expect(readPendingSendBatch(dataDir, "held-work")).not.toHaveProperty("admissionCapRetryAt");
+      expect(readPendingSendBatch(dataDir, "held-work")).not.toHaveProperty("admissionCapDenials");
+    });
+  });
+
   it("round-trips retry tombstones and rejects malformed present accounting", async () => {
     const dataDir = await newDataDir();
     const entry = {

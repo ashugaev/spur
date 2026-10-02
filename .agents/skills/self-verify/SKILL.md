@@ -6,10 +6,9 @@ description: Validate manager close-out for repo work. Use when implementation i
 SELF VERIFY
 
   1  Confirm scope: branch, open PR, touched files.
-  2  Evidence checklist: tests passed, typecheck passed, every acceptance
-     criterion covered by a run verification, no unsupported assumptions,
-     diff carries nothing unrelated.
-  3  Evidence from current branch state; rerun stale or missing checks.
+  2  Check criterion evidence and CI notifications; label pending checks.
+     No unsupported assumptions or unrelated diff.
+  3  Evidence from current branch state; follow `AGENTS.md` validation policy.
   4  Close-out state: changes committed or left uncommitted on purpose,
      branch pushed when required, PR link known.
   5  Compare gates the spec's Verification block plus AGENTS.md routing
@@ -18,5 +17,5 @@ SELF VERIFY
 
 RULES
 
-  No PASS without an open PR, with a missing build/test tier, or on
-  stale review/validation. Report short, concrete.
+  No PASS without an open PR or on stale review/validation.
+  Report pending CI separately; never claim an unrun check passed.
