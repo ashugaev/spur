@@ -24,6 +24,7 @@ import {
   SessionResourceNotFoundError,
   SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -1135,6 +1136,53 @@ describe("startServer", () => {
           },
         ],
       });
+    } finally {
+      SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
+  // 503, not the 500 catch-all: the refusal is "could not determine, retry".
+  it("answers 503 when the sidecar start refuses on an unresponsive tmux probe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStartSidecar = SessionService.prototype.startSidecar;
+    SessionService.prototype.startSidecar = async function mockStartSidecar() {
+      throw new SidecarProbeUnresponsiveError("Sidecar dev tmux state is unreadable");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(503);
     } finally {
       SessionService.prototype.startSidecar = originalStartSidecar;
       await server.stop();

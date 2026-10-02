@@ -40,7 +40,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
-  readOpenCodeState,
+  readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
   withOpenCodeLaunchIdentityLock,
@@ -255,13 +255,13 @@ import {
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
+  getSidecarTmuxPresence,
   getFleetSessionRssBytes,
   getTmuxSessionActivity,
   getTmuxPanePid,
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
-  isProcessRunningInTmux,
   probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
@@ -277,6 +277,7 @@ import {
   tmuxSessionExists,
   waitForTmuxReady,
   PromptReadyTimeoutError,
+  TmuxProbeUnknownError,
   type TmuxPanePidLookup,
 } from "./runtime-tmux.js";
 import {
@@ -392,12 +393,19 @@ import {
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
+import {
+  PreflightUsageStore,
+  aggregatePreflightAttempts,
+  preflightUsageView,
+} from "./preflight-usage-store.js";
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
   isRespawnableStatus,
   isStaleParked,
   isTerminalSessionStatus,
+  hasRetainedSessionError,
   type AdmissionCapSource,
   type AgentName,
   type ProviderReasoningEffort,
@@ -425,6 +433,7 @@ import {
   type SpawnDefaultsResponse,
   type PreflightRequest,
   type PreflightResponse,
+  type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type HandoffSessionRequest,
@@ -468,10 +477,12 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesView,
   type SessionState,
+  type SessionTokenUsageView,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
@@ -508,7 +519,9 @@ import {
   unfinishedTodo,
 } from "./todo.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
+import { readCursorTokenUsage } from "./cursor-token-usage.js";
 import {
+  captureCursorRestoreBoundary,
   configureCursorTurnEndedStore,
   readCursorJsonlState,
   resolveCursorBuild,
@@ -548,6 +561,8 @@ import { getReleases } from "./releases-cache.js";
 import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./update-ledger.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
+const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
+const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
@@ -895,6 +910,14 @@ export class SidecarPortConflictError extends Error {
   }
 }
 
+// Deliberately a SIBLING of SidecarPortConflictError, never a subclass:
+// startSidecarInternalLocked's catch is an `instanceof SidecarPortConflictError`
+// test that feeds the conflict cache, and an unreadable tmux probe is not a
+// conflict. Retryable by construction — thrown before any side effect.
+export class SidecarProbeUnresponsiveError extends Error {
+  readonly statusCode = 503;
+}
+
 export class OpenPrActionRequiredError extends Error {
   readonly statusCode = 409;
   readonly payload: OpenPrActionRequiredPayload;
@@ -1056,12 +1079,6 @@ function isRecoveredSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutE
   return error instanceof SubmitAckTimeoutError && error.processAlive;
 }
 
-// The liveness read could not report: not delivered, and not evidence of a
-// dead agent either. Callers must not kill the pane on this.
-function isAmbiguousSubmitAckTimeout(error: unknown): error is SubmitAckTimeoutError {
-  return error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive;
-}
-
 const RESTORE_PROMPT_PREFIX =
   'This session was restored after the agent exited. You are back in the same worktree and branch. Pull the latest main first, then check whether the original task is still needed — another agent may have already done it. If it is already done, run `"$SPUR_SESSION_TOOL_DIR/spur-self-destruct"` and close this session\'s pull request if it duplicates that work; if it is not a duplicate but only extends or overlaps work already merged, trim this PR down to the remaining necessary changes. Otherwise continue the original task. Original task:';
 const PLAN_MODE_PROMPT_SUFFIX =
@@ -1106,17 +1123,28 @@ export class SpawnPreflightError extends Error {
   }
 }
 
+export class PreflightPreviewError extends Error {
+  readonly statusCode: number;
+
+  constructor(
+    error: unknown,
+    readonly preflightBatchId: string,
+    readonly preflightTokenUsageView: PreflightTokenUsageView,
+  ) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "PreflightPreviewError";
+    this.statusCode = 500;
+  }
+}
+
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
   processAlive: boolean;
   tmuxActivityAt: Date | null;
-  // True only when a `runtimeAlive`/`paneUsable`/`processAlive` false reading
-  // came from a probe fork (tmux list-windows, list-panes, or ps) killed by
-  // its own timeout (isProbeTimeoutKill), never from a confirmed-absent tmux
-  // server or process. reconcileUnexpectedStop must not treat this reading as
-  // proof the runtime is gone.
+  // Failed tmux/ps probes leave runtime state unknown; never confirm absence.
   probeUnresponsive: boolean;
+  diagnostic?: string;
 }
 interface SessionStateResult {
   session: SessionRecord;
@@ -1133,6 +1161,8 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
+  tokenUsage?: ProviderTokenUsageSample;
+  tokenUsages?: ProviderTokenUsageSample[];
   // Epoch ms of the parsed claude rate-limit reset instant, set on every
   // classify call for as long as the expired detection stays in the tail
   // (see the expired arm below) — level-triggered, not edge-triggered. Safe
@@ -1197,6 +1227,7 @@ function assertSendableStatus(session: Pick<SessionRecord, "id" | "status">): vo
   switch (status) {
     case "running":
     case "stopped":
+    case "budget_limited":
     case "paused":
       return;
     case "spawning":
@@ -1244,6 +1275,18 @@ function hasSessionErrorEvidence(session: Pick<SessionRecord, "error">): boolean
   return typeof session.error === "string" && session.error.trim().length > 0;
 }
 
+function sameSessionRuntimeOwner(left: SessionRecord, right: SessionRecord): boolean {
+  return (
+    left.agent === right.agent &&
+    left.agentSessionId === right.agentSessionId &&
+    left.tmuxSession === right.tmuxSession &&
+    left.launchCommand === right.launchCommand &&
+    left.worktreePath === right.worktreePath &&
+    left.project === right.project &&
+    workspaceIdOf(left) === workspaceIdOf(right)
+  );
+}
+
 function statusFallbackState(
   session: Pick<SessionRecord, "status" | "error" | "stopReason">,
 ): SessionState {
@@ -1252,7 +1295,13 @@ function statusFallbackState(
   if (status === "errored") return "error";
   if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
   if (isStaleParked(session)) return "stale";
-  if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
+  if (
+    status === "stopped" ||
+    status === "budget_limited" ||
+    status === "paused" ||
+    status === "completed"
+  )
+    return "stopped";
   return "working"; // running, spawning
 }
 
@@ -1621,10 +1670,12 @@ async function agentProcessAlive(
 ): Promise<boolean> {
   const matchers = agentProcessMatchers(input.agent, input.launchCommand);
   const foreign = agentLaunchUsesForeignBinary(input.agent, input.launchCommand);
-  return isProcessRunningInTmux(input.tmuxSession, matchers, {
+  const result = await probeTmuxProcessMatch(input.tmuxSession, matchers, {
     ...(options?.fresh ? { fresh: true } : {}),
     ...(foreign ? { paneChildFallback: true } : {}),
   });
+  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  return result.alive;
 }
 
 // Distinguishes which pass answered ALIVE without widening agentProcessAlive's
@@ -1633,7 +1684,7 @@ async function agentProcessAlive(
 // cannot catch it; only eslint no-unnecessary-condition would). Keeps
 // agentProcessAlive's signature and all nine call sites unchanged.
 type AgentProcessProbe =
-  | { alive: false; unresponsive: boolean }
+  | { alive: false; unresponsive: boolean; diagnostic?: string }
   | { alive: true; via: "matcher" | "pane_child" };
 
 // Single probeTmuxProcessMatch call, not agentProcessAlive followed by a
@@ -1655,7 +1706,11 @@ async function probeAgentProcess(
     ...(foreign ? { paneChildFallback: true } : {}),
   });
   if (!result.alive) {
-    return { alive: false, unresponsive: result.unresponsive };
+    return {
+      alive: false,
+      unresponsive: result.unresponsive,
+      ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
+    };
   }
   return { alive: true, via: result.matchedByName ? "matcher" : "pane_child" };
 }
@@ -2029,7 +2084,7 @@ export function isRestorableSession(
   // so that combination is not a case to guard against here.
   return (
     ((session.status === "running" && session.state === "stopped") ||
-      (session.status === "stopped" &&
+      ((session.status === "stopped" || session.status === "budget_limited") &&
         (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
       (session.status === "paused" && (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
@@ -2649,6 +2704,7 @@ interface PreparedSpawn {
   placeholder: SessionRecord;
   sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
+  preflightBatchId: string;
 }
 
 function resolveCarriedSpawnModel(
@@ -2820,6 +2876,8 @@ async function runSpawnPreflightForSpawn(args: {
   baseBranch: string;
   worktree: boolean;
   prompt: string;
+  runAttempt?: (execute: () => Promise<SpawnPreflightResult>) => Promise<SpawnPreflightResult>;
+  assertActive?: () => void;
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
@@ -2830,18 +2888,22 @@ async function runSpawnPreflightForSpawn(args: {
     : "";
 
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    args.assertActive?.();
     let preflight: SpawnPreflightResult;
     try {
-      preflight = await runSpawnPreflight({
-        agent: args.agent,
-        projectId: args.projectId,
-        project: args.project,
-        baseBranch: args.baseBranch,
-        worktree: args.worktree,
-        prompt: args.prompt,
-        ...(feedback ? { feedback } : {}),
-      });
+      const execute = () =>
+        runSpawnPreflight({
+          agent: args.agent,
+          projectId: args.projectId,
+          project: args.project,
+          baseBranch: args.baseBranch,
+          worktree: args.worktree,
+          prompt: args.prompt,
+          ...(feedback ? { feedback } : {}),
+        });
+      preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
+      args.assertActive?.();
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -2921,6 +2983,7 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 }
 
 export class SessionService {
+  private readonly preflightUsageStore: PreflightUsageStore;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -3047,6 +3110,7 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  private readonly tokenBudgetUnsupportedWarnings = new Set<string>();
   // Tracks sessions currently reading ALIVE via the pane-child fallback (not
   // matched by pass 1), so session.runtime.pane_child_fallback fires once on
   // the transition into that state instead of every readRuntimeSnapshot call
@@ -3311,6 +3375,8 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
+    void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
     // whether this cursor build closes turns with turn_ended.
     configureCursorTurnEndedStore(
@@ -3760,7 +3826,15 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session || this.isInRestoreWarmup(session.id)) return null;
     try {
-      const state = (await this.classifySessionRecord(session, { scanPane: false })).state;
+      const classified = await this.classifySessionRecord(session, { scanPane: false });
+      if (
+        hasRetainedSessionError(
+          readSession(this.config.dataDir, session.id) ?? session,
+          classified.state,
+        )
+      )
+        return null;
+      const state = classified.state;
       return state === "rate_limited" || state === "waiting" ? session : null;
     } catch {
       return null;
@@ -3777,6 +3851,7 @@ export class SessionService {
     const sidecar = project?.sidecars[sidecarName];
     if (!sidecar) return null;
     const ownerId = this.sidecarOwnerIdForName(candidate, project, sidecarName);
+    if (await this.workspaceRetainsResources(candidate)) return null;
     if (!sidecar.mcp) {
       const workspaceId = workspaceIdOf(candidate);
       const liveMembers = listSessions(this.config.dataDir).filter(
@@ -4027,7 +4102,9 @@ export class SessionService {
       // ensureSessionReadyForSend(), which set restoreWarmupUntil before that
       // call for exactly this gap).
       const allSessions = listSessions(this.config.dataDir);
-      const liveSessions = allSessions.filter((session) => this.isLiveSessionRecord(session));
+      const liveSessions = allSessions.filter(
+        (session) => this.isLiveSessionRecord(session) || hasRetainedSessionError(session),
+      );
       // Protect every sidecar tmux name a live session is entitled to (agent
       // built-in sidecars plus any project-declared user sidecar), and also
       // the raw `${id}--` prefix as a belt-and-suspenders guard against
@@ -4133,6 +4210,7 @@ export class SessionService {
     };
 
     const candidates: SidecarReapCandidate[] = [];
+    const retainedMembers = new Map<string, Promise<boolean>>();
     for (const session of sessions) {
       let project: ProjectConfig | undefined;
       try {
@@ -4176,6 +4254,18 @@ export class SessionService {
         const workspaceRunning =
           workspaceMembers.some((m) => !isTerminalSessionStatus(m.status)) ||
           workspaceMembers.some((m) => this.isInRestoreWarmup(m.id));
+        const workspaceRetainedError = (
+          await Promise.all(
+            workspaceMembers.map((member) => {
+              let pending = retainedMembers.get(member.id);
+              if (!pending) {
+                pending = this.memberRetainsResources(member);
+                retainedMembers.set(member.id, pending);
+              }
+              return pending;
+            }),
+          )
+        ).some(Boolean);
 
         let lastActivityAtMs: number | null = null;
         for (const member of workspaceMembers) {
@@ -4202,6 +4292,7 @@ export class SessionService {
           ownerExists: owner !== null,
           worktreeExists: owner ? workspaceExists(owner.worktreePath) : false,
           workspaceRunning,
+          workspaceRetainedError,
           hasRecordedIdentity: identity !== undefined,
           lastActivityAtMs,
           idleTtlMinutes: resolveSidecarIdleTtlMinutes(
@@ -4235,6 +4326,7 @@ export class SessionService {
         : { ok: false, byPid: new Map(), byPgid: new Map() };
     for (const entry of plan.reap) {
       const owner = readSession(this.config.dataDir, entry.ownerId);
+      if (owner && (await this.workspaceRetainsResources(owner))) continue;
       const identity = owner?.sidecarProcs?.[entry.sidecarName];
       const treeRssKb =
         identity && preSignalSnapshot.ok
@@ -4251,6 +4343,14 @@ export class SessionService {
       // touchUpdatedAt: false — a reap is the opposite of activity; bumping
       // it here would reset the workspace idle clock and buy every other
       // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
+      const currentOwner = readSession(this.config.dataDir, entry.ownerId);
+      if (
+        currentOwner &&
+        this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
+          hasRetainedSessionError(member),
+        )
+      )
+        continue;
       const outcome = await this.killSidecarAndUnlinkSlot(entry.ownerId, entry.sidecarName, {
         touchUpdatedAt: false,
       });
@@ -4469,6 +4569,16 @@ export class SessionService {
     try {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
+        const tokenBudgetError = this.tokenBudgetActivationError(session);
+        if (tokenBudgetError) {
+          this.logEvent("session.wake.token_budget_blocked", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: tokenBudgetError,
+          });
+          continue;
+        }
         const scheduledWake = session.scheduledWake;
         if (
           scheduledWake &&
@@ -5698,6 +5808,171 @@ export class SessionService {
     return minutes * 60_000;
   }
 
+  private resolveTokenBudget(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath" | "tokenBudgetOverride">,
+  ): number | undefined {
+    if (session.tokenBudgetOverride) return undefined;
+    const project = this.resolveProjectForSession(session);
+    if (project?.tokenBudgetWarnOnly === true) return undefined;
+    return project?.tokenBudget;
+  }
+
+  private tokenBudgetActivationError(session: SessionRecord): string | undefined {
+    const budget = this.resolveTokenBudget(session);
+    if (budget === undefined) return undefined;
+    const total =
+      (session.preflightTokenUsage?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
+    if (total >= budget) {
+      return `Session ${session.id} exhausted its token budget (${total} / ${budget})`;
+    }
+    return undefined;
+  }
+
+  private assertTokenBudgetAllowsActivation(session: SessionRecord): void {
+    const error = this.tokenBudgetActivationError(session);
+    if (error) throw new Error(error);
+  }
+
+  private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
+    const budget = this.resolveTokenBudget(session);
+    const reason = !session.preflightTokenUsage
+      ? "legacy pre-flight usage is unknown"
+      : session.preflightTokenUsage.status !== "measured"
+        ? "pre-flight usage is unknown"
+        : !session.tokenUsage
+          ? "main-session usage is unknown"
+          : undefined;
+    if (budget === undefined || session.status !== "running" || !reason) {
+      this.tokenBudgetUnsupportedWarnings.delete(session.id);
+      return;
+    }
+    if (this.tokenBudgetUnsupportedWarnings.has(session.id)) return;
+    this.tokenBudgetUnsupportedWarnings.add(session.id);
+    this.logEvent("session.token_budget.unenforced", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Token budget is not enforced for ${session.id}: ${reason}`,
+      details: { budget, agent: session.agent, reason },
+    });
+  }
+
+  private async stopForTokenBudget(view: Pick<SessionRecord, "id">): Promise<boolean> {
+    return this.withWorkspaceLifecycleLocks(view.id, async () => {
+      const candidate = readSession(this.config.dataDir, view.id);
+      if (!candidate || candidate.status !== "running" || hasRetainedSessionError(candidate)) {
+        return false;
+      }
+      return this.withPaneWriteLock(candidate.tmuxSession, async () => {
+        const readEligible = (): SessionRecord | undefined => {
+          const current = readSession(this.config.dataDir, candidate.id);
+          if (
+            !current ||
+            current.status !== "running" ||
+            hasRetainedSessionError(current) ||
+            !sameSessionRuntimeOwner(current, candidate)
+          )
+            return undefined;
+          return current;
+        };
+        const probeEligible = async (requireLive = false): Promise<SessionRecord | undefined> => {
+          const current = readEligible();
+          if (!current) return undefined;
+          const runtime = await this.readRuntimeSnapshot(current, { fresh: true });
+          const latest = readEligible();
+          if (!latest) return undefined;
+          const workspace = probeWorkspace(latest.worktreePath);
+          if (runtime.probeUnresponsive || runtime.diagnostic || workspace.diagnostic) {
+            this.retainDetectionError(
+              latest,
+              runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
+            );
+            return undefined;
+          }
+          return workspace.exists &&
+            (!requireLive || (runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive))
+            ? latest
+            : undefined;
+        };
+        const latest = readEligible();
+        if (!latest) return false;
+        const classified = await this.classifySessionRecord(latest, { reconcileRuntime: false });
+        if (
+          hasRetainedSessionError(classified.session, classified.state) ||
+          classified.runtime.probeUnresponsive ||
+          classified.runtime.diagnostic
+        ) {
+          return false;
+        }
+        const fresh = await probeEligible(true);
+        if (!fresh) return false;
+        const usage = this.reconcileClassifiedTokenUsage(fresh.tokenUsage, classified);
+        const budget = this.resolveTokenBudget(fresh);
+        const preflight = fresh.preflightTokenUsage;
+        const combined = (preflight?.totalTokens ?? 0) + (usage?.totalTokens ?? 0);
+        if (budget === undefined || combined < budget) return false;
+        await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
+        const afterKill = await probeEligible();
+        if (!afterKill) return false;
+        try {
+          await this.teardownSessionSidecars(afterKill);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.token_budget.teardown_failed", {
+            level: "error",
+            sessionId: latest.id,
+            projectId: latest.project,
+            message: `Sidecar teardown failed after token budget exhaustion for ${latest.id}: ${message}`,
+          });
+        }
+        const cleaned = await probeEligible();
+        if (!cleaned) return false;
+        const finalUsage =
+          cleaned.tokenUsage && (!usage || cleaned.tokenUsage.totalTokens >= usage.totalTokens)
+            ? cleaned.tokenUsage
+            : usage;
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(cleaned),
+          ...(finalUsage ? { tokenUsage: finalUsage } : {}),
+          status: "budget_limited",
+          stopReason: "token_budget",
+          updatedAt: nowIso(),
+        };
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(stopped.id);
+        await this.refreshDashboardCacheEntry(stopped);
+        this.logEvent("session.token_budget.exhausted", {
+          level: "warn",
+          sessionId: stopped.id,
+          projectId: stopped.project,
+          message: `Stopped ${stopped.id} after observing ${(preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0)} / ${budget} tokens`,
+          details: { used: (preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0), budget },
+        });
+        return true;
+      });
+    });
+  }
+
+  private holdBudgetLimitedLaunch(session: SessionRecord): SessionRecord | undefined {
+    if (!this.tokenBudgetActivationError(session)) return undefined;
+    const limited: SessionRecord = {
+      ...session,
+      status: "budget_limited",
+      stopReason: "token_budget",
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, limited);
+    this.stateCache.delete(limited.id);
+    this.dashboardCache.delete(limited.id);
+    this.logEvent("session.token_budget.exhausted", {
+      level: "warn",
+      sessionId: limited.id,
+      projectId: limited.project,
+      message: `Held ${limited.id} after pre-flight exhausted its token budget`,
+    });
+    return limited;
+  }
+
   // Parks a running/waiting session that has been idle past staleAfterMinutes:
   // kills the agent pane, tears down its sidecars (not cleanupSessionServices —
   // service instances are out of scope here, matching reconcileUnexpectedStop),
@@ -5721,6 +5996,8 @@ export class SessionService {
     const deliveryPending: boolean = this.shouldRunDelivery(latest);
     if (
       latest.project === SHEPHERD_PROJECT_ID ||
+      hasRetainedSessionError(latest, classified.state) ||
+      classified.runtime.probeUnresponsive ||
       this.spawnsInFlight.has(latest.id) ||
       this.isInRestoreWarmup(latest.id) ||
       deliveryPending ||
@@ -5770,6 +6047,14 @@ export class SessionService {
           }),
         )
       ).filter((name): name is string => name !== null);
+      const current = readSession(this.config.dataDir, latest.id);
+      if (!current || hasRetainedSessionError(current)) return;
+      const confirmed = await this.readRuntimeSnapshot(current, { fresh: true });
+      if (confirmed.probeUnresponsive) {
+        this.retainDetectionError(current, confirmed.diagnostic ?? "runtime state unknown");
+        return;
+      }
+      if (hasRetainedSessionError(readSession(this.config.dataDir, latest.id) ?? latest)) return;
       await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
       // A throw here must never abort the park: the agent pane is already
       // dead (confirmed above), so leaving status "running" on disk would
@@ -5810,7 +6095,12 @@ export class SessionService {
         });
       };
       const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
-      if (!cleaned || cleaned.status !== "running" || deliveryPending) {
+      if (
+        !cleaned ||
+        cleaned.status !== "running" ||
+        hasRetainedSessionError(cleaned) ||
+        deliveryPending
+      ) {
         abandonPark();
         // deliveryPending means a message queued in mid-teardown, on a pane we
         // just confirmed dead above — the record is left status:"running" with
@@ -5907,13 +6197,34 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
-          const { view, classified } = await this.enrichWithClassified(
+          this.warnIfTokenBudgetUnenforced(session);
+          const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
             sidecarProcSnapshot,
           );
+          if (
+            view.status === "running" &&
+            view.tokenBudgetView?.exhausted &&
+            view.tokenBudgetView.warnOnly !== true
+          ) {
+            if (!(await this.stopForTokenBudget(view))) {
+              const previousAttention = this.attentionStates.get(view.id);
+              if (previousAttention !== undefined) nextStates.set(view.id, previousAttention);
+              const previousRunState = this.lastObservedRunStates.get(view.id);
+              if (previousRunState !== undefined) nextRunStates.set(view.id, previousRunState);
+            }
+            continue;
+          }
           await this.checkPrForSession(session, view.state);
+          if (detectionOnlyError) {
+            const previousAttention = this.attentionStates.get(view.id);
+            if (previousAttention !== undefined) nextStates.set(view.id, previousAttention);
+            const previousRunState = this.lastObservedRunStates.get(view.id);
+            if (previousRunState !== undefined) nextRunStates.set(view.id, previousRunState);
+            continue;
+          }
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
           if (!baseline && prevRunState === "working" && view.state === "waiting") {
@@ -5969,6 +6280,12 @@ export class SessionService {
             await this.notifyAttention(view, attention);
           }
         } catch (error) {
+          if (
+            error instanceof SessionResourceNotFoundError &&
+            !readSession(this.config.dataDir, session.id)
+          ) {
+            continue;
+          }
           // Carry the previous tick's values forward so an aborted tick can
           // neither erase a still-current attention state (spurious
           // re-notify next tick) nor erase a still-current run state (a
@@ -6077,6 +6394,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.tokenBudgetUnsupportedWarnings) {
+      if (!liveIds.has(sessionId)) {
+        this.tokenBudgetUnsupportedWarnings.delete(sessionId);
       }
     }
     for (const sessionId of this.paneChildFallbackNotified) {
@@ -6231,9 +6553,29 @@ export class SessionService {
         nextDashboardIdleCursor = (this.dashboardIdleCursor + quota) % idle.length;
       }
 
-      const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
-      for (const view of enriched) {
+      const enriched = await Promise.all(
+        due.map((session) =>
+          this.enrichDashboard(session).catch((error: unknown) => {
+            if (
+              error instanceof SessionResourceNotFoundError &&
+              !readSession(this.config.dataDir, session.id)
+            ) {
+              return undefined;
+            }
+            throw error;
+          }),
+        ),
+      );
+      for (const [index, session] of due.entries()) {
+        const view = enriched[index];
+        if (!view) {
+          this.dashboardCache.delete(session.id);
+          this.dashboardEnrichedRecords.delete(session.id);
+          includedIds.delete(session.id);
+          continue;
+        }
         this.dashboardCache.set(view.id, view);
+        this.dashboardEnrichedRecords.set(session.id, session);
       }
       // Store the pre-enrich listSessions reference, NOT the classified
       // session enrichDashboard derived. This map is only ever compared by
@@ -6243,9 +6585,6 @@ export class SessionService {
       // record look changed. Reconcile-driven disk writes are picked up by
       // the parse cache's inode check on the next listSessions, not from
       // anything stored here.
-      for (const session of due) {
-        this.dashboardEnrichedRecords.set(session.id, session);
-      }
       this.dashboardIdleCursor = nextDashboardIdleCursor;
 
       // Prune off the enumerated+filtered set, never off the enriched
@@ -6371,6 +6710,7 @@ export class SessionService {
       const sessions = listSessions(this.config.dataDir).filter(
         (session) =>
           REAPABLE_SESSION_STATUSES.has(session.status) &&
+          !hasRetainedSessionError(session) &&
           // manual_pause's agent pane is deliberately left alive (pause never
           // kills it) — unlike stale_timeout, whose pane parkStaleSession
           // already confirmed dead before writing the record, so this loop's
@@ -6402,10 +6742,12 @@ export class SessionService {
               details: { status: session.status },
             });
           } else {
+            const current = readSession(this.config.dataDir, session.id);
+            if (!current || hasRetainedSessionError(current)) continue;
             await killTmuxSession(session.tmuxSession);
             reaped += 1;
           }
-        } else if (presence.unresponsive) {
+        } else if (presence.unresponsive || presence.diagnostic) {
           // A timeout-killed probe is ambiguous, not confirmed absence — the
           // one mistake this loop must never make is treating a slow-but-alive
           // tmux as gone and reaping a live session's sidecars under it.
@@ -6467,6 +6809,15 @@ export class SessionService {
           if (connections === "established" || connections === "unknown") {
             continue;
           }
+          if (owner && (await this.workspaceRetainsResources(owner))) continue;
+          const currentOwner = readSession(this.config.dataDir, ownerId);
+          if (
+            currentOwner &&
+            this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
+              hasRetainedSessionError(member),
+            )
+          )
+            continue;
           if (paneAlive) {
             await this.reapSidecarByName(ownerId, sidecarName);
             this.clearSidecarProcEntry(ownerId, sidecarName);
@@ -6684,8 +7035,22 @@ export class SessionService {
         this.dashboardCache.delete(record.id);
         return;
       }
-      this.dashboardCache.set(record.id, await this.enrichDashboard(record));
+      const enriched = await this.enrichDashboard(record);
+      if (!enriched) {
+        this.dashboardCache.delete(record.id);
+        this.dashboardEnrichedRecords.delete(record.id);
+        return;
+      }
+      this.dashboardCache.set(record.id, enriched);
     } catch (error) {
+      if (
+        error instanceof SessionResourceNotFoundError &&
+        !readSession(this.config.dataDir, record.id)
+      ) {
+        this.dashboardCache.delete(record.id);
+        this.dashboardEnrichedRecords.delete(record.id);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.refresh_failed", {
         level: "warn",
@@ -8110,8 +8475,13 @@ export class SessionService {
               await refreshTmuxFleetSnapshot();
               freshFleetReadDone = true;
             }
-            const otherAlive = await sidecarTmuxAlive(otherOwnerId, scName);
-            if (!otherAlive && (await isHostPortFree(port))) {
+            const otherPresence = await getSidecarTmuxPresence(otherOwnerId, scName);
+            if (
+              !otherPresence.present &&
+              !otherPresence.unresponsive &&
+              !otherPresence.diagnostic &&
+              (await isHostPortFree(port))
+            ) {
               // The one write in this scan pass that escapes the plan/apply
               // split below (:6890): it writes liveSession's record
               // immediately, before this attempt's own reservation is known
@@ -8376,6 +8746,7 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     if (args.clearPort === undefined) {
       const cached = await this.sidecarStartConflictGate(args.session.id, args.sidecarName);
@@ -8393,6 +8764,7 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       // Mutated only while the lock is held: the only racer is
@@ -8423,13 +8795,27 @@ export class SessionService {
     sidecar: ProjectConfig["sidecars"][string];
     sidecarDepth: number;
     clearPort?: number;
+    onStarted?: () => void;
   }): Promise<SessionRecord> {
     const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
-    const alive = await sidecarTmuxAlive(args.session.id, args.sidecarName);
+    // Presence AND unresponsiveness off one read each: a timeout-killed probe
+    // reports "absent"/"dead", and acting on that reaps a healthy sidecar.
+    const presence = await getSidecarTmuxPresence(args.session.id, args.sidecarName, {
+      fresh: true,
+    });
+    const alive = presence.present;
     // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
     // "session exists" — that pane's escapee tree can hold a reserved port
     // forever unless treated as not-alive here and reaped before restart.
-    const paneDead = alive && (await tmuxPaneDead(tmuxName, { fresh: true }));
+    const panePresence = alive ? await getTmuxPanePresence(tmuxName, { fresh: true }) : null;
+    // Unconditional: reapSidecarByName kills by tmux name, destructive with
+    // or without a recorded identity.
+    if (panePresence?.unresponsive || panePresence?.diagnostic) {
+      throw new SidecarProbeUnresponsiveError(
+        `Sidecar ${args.sidecarName} pane state is unreadable (tmux did not answer); retry shortly`,
+      );
+    }
+    const paneDead = panePresence?.dead ?? false;
     if (alive && !paneDead) {
       if (this.shouldScheduleSidecarUrlProbe(args.session, args.sidecarName, args.sidecar)) {
         this.scheduleSidecarUrlReadyAndPublish(
@@ -8453,6 +8839,16 @@ export class SessionService {
       // old instance keeps running under the reused port.
       const owner = readSession(this.config.dataDir, args.session.id);
       const identity = owner?.sidecarProcs?.[args.sidecarName];
+      // Narrowed to an identity-present start: "absent" from an unreadable
+      // probe must not reap a recorded identity. A first start has no
+      // identity, so reapRecordedIdentity and clearSidecarProcEntry below are
+      // both no-ops there — refusing it would turn a harmless launch into a
+      // hard failure. Thrown before any write.
+      if ((presence.unresponsive || presence.diagnostic) && owner && identity) {
+        throw new SidecarProbeUnresponsiveError(
+          `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
       // Own-identity no-op: the tmux supervisor is gone, but the recorded
       // process is still the exact one genuinely serving the recorded
       // ports — a retry against a repeat-failing caller (e.g. a wake
@@ -8584,12 +8980,22 @@ export class SessionService {
       ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
     });
 
+    // Ownership of the tmux name for the catch below: set the instant
+    // `new-session` creates the session, so a failure in any later step is
+    // still a failure on a pane that is ours to reap. Held on an object, not
+    // a `let`: control-flow analysis does not follow the callback's write and
+    // reads a captured `let` as still-false in the catch.
+    const launch = { paneCreated: false };
+    let startedSession: SessionRecord;
     try {
       await createTmuxSidecarSession({
         sessionId: reservedSession.id,
         sidecarName: args.sidecarName,
         cwd: reservedSession.worktreePath,
         command: resolvedCommand,
+        onCreated: () => {
+          launch.paneCreated = true;
+        },
         env: buildSidecarRuntimeEnv(
           sessionEnv,
           reservedSession,
@@ -8658,10 +9064,35 @@ export class SessionService {
         args.sidecar,
         updated,
       );
-      return readSession(this.config.dataDir, updated.id) ?? updated;
+      startedSession = readSession(this.config.dataDir, updated.id) ?? updated;
     } catch (error) {
-      await this.reapSidecarByName(reservedSession.id, args.sidecarName);
-      this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      // Keyed on whether `new-session` actually created the session, never on
+      // the pre-launch probe. The only thing that ever justified skipping is
+      // ownership: a launch that created nothing may have failed on a tmux
+      // name already held by a live sidecar an unreadable probe could not
+      // see, and reaping by name would kill it. Once `new-session` succeeds
+      // there is no such occupant — whatever carries that name is ours — so
+      // every later failure reaps, exactly as on a readable probe. That case
+      // is NOT a mere leak: `new-session` carries no timeout while the
+      // `set-option`/`respawn-pane` after it do, so a slow tmux can leave a
+      // respawned sidecar listening on a port the rollback below just
+      // released, and the next start's alive-and-not-dead early return
+      // returns before it can reserve or relink anything.
+      // clearSidecarProcEntry is a no-op on the skip path anyway (the
+      // pre-launch branches already cleared any recorded identity), so both
+      // are skipped as one branch; the port rollback and slot unlink below
+      // still run.
+      if (!launch.paneCreated) {
+        this.logEvent("session.sidecar.launch_reap_skipped", {
+          level: "warn",
+          sessionId: args.session.id,
+          message: `Sidecar ${args.sidecarName} launch created no tmux session; skipping the reap so an instance the probe could not see is not destroyed.`,
+          details: { sidecarName: args.sidecarName },
+        });
+      } else {
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+        this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+      }
       const baseRecord =
         reservedSession !== args.session
           ? args.session
@@ -8685,6 +9116,8 @@ export class SessionService {
       }
       throw error;
     }
+    args.onStarted?.();
+    return startedSession;
   }
 
   // Pre-launch pass for sidecars that must exist before the agent's launch
@@ -8979,7 +9412,6 @@ export class SessionService {
       // every call site) get updated — a sibling starting an anchor-owned
       // sidecar must get its own record back unchanged, never the anchor's.
       const owner = this.resolveSidecarOwnerRecord(currentSession, sidecar);
-      const wasAlive = await sidecarTmuxAlive(owner.id, sidecarName);
       const updated = await this.startSidecarInternal({
         session: owner,
         project: args.project,
@@ -8987,12 +9419,10 @@ export class SessionService {
         sidecar,
         sidecarDepth: args.sidecarDepth,
         ...(clearPort !== undefined ? { clearPort } : {}),
+        onStarted: () => args.onStarted(sidecarName, sidecar),
       });
       if (owner.id === currentSession.id) {
         currentSession = updated;
-      }
-      if (!wasAlive) {
-        args.onStarted(sidecarName, sidecar);
       }
     };
 
@@ -9184,19 +9614,27 @@ export class SessionService {
       ? await snapshotProcesses()
       : undefined;
     const views = await Promise.all(
-      sessions.map(
-        async (session) =>
-          (
+      sessions.map(async (session) => {
+        try {
+          return (
             await this.enrichWithClassified(
               session,
               claudeAccounts,
               allSessions,
               sidecarProcSnapshot,
             )
-          ).view,
-      ),
+          ).view;
+        } catch (error) {
+          if (
+            error instanceof SessionResourceNotFoundError &&
+            !readSession(this.config.dataDir, session.id)
+          )
+            return undefined;
+          throw error;
+        }
+      }),
     );
-    return views;
+    return views.filter((view): view is SessionListItemView => view !== undefined);
   }
 
   async get(sessionId: string): Promise<SessionView> {
@@ -9888,13 +10326,37 @@ export class SessionService {
 
     for (const session of candidates) {
       const runtime = await this.readRuntimeSnapshot(session);
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) continue;
+      const workspace = probeWorkspace(current.worktreePath);
       const reconciled = await this.reconcileUnexpectedStop(
-        session,
+        current,
         runtime,
         "boot",
-        probeWorkspace(session.worktreePath).missing,
-      );
+        workspace.missing,
+      ).catch((error: unknown) => {
+        if (
+          error instanceof SessionResourceNotFoundError &&
+          !readSession(this.config.dataDir, session.id)
+        ) {
+          return undefined;
+        }
+        throw error;
+      });
+      if (!reconciled) continue;
+      if (!readSession(this.config.dataDir, session.id)) continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
+        if (
+          !hasRetainedSessionError(reconciled.session) &&
+          !reconciled.runtime.probeUnresponsive &&
+          !reconciled.runtime.diagnostic &&
+          !workspace.diagnostic &&
+          (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
+        ) {
+          const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
+          const persisted = this.persistClassifiedTokenUsage(session, usage);
+          if (persisted.status === "missing") continue;
+        }
         drifted += 1;
         if (reconciled.session.status === "stopped") {
           driftedSessions.push({ id: session.id, project: session.project });
@@ -10114,6 +10576,11 @@ export class SessionService {
     }
   }
 
+  async createPreflightBatch(projectId: string): Promise<{ preflightBatchId: string }> {
+    this.getProject(projectId);
+    return { preflightBatchId: await this.preflightUsageStore.create(projectId) };
+  }
+
   async preflight(request: PreflightRequest): Promise<PreflightResponse> {
     if (typeof request.prompt !== "string" || !request.prompt.trim()) {
       throw new Error("prompt must be a non-empty string");
@@ -10123,18 +10590,68 @@ export class SessionService {
     const overrides = parseSpawnOverrides(request.overrides, "overrides");
     const worktree = resolveSpawnWorktree(project, overrides);
     const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+    const preflightBatchId = await this.preflightUsageStore.resolve(
+      request.project,
+      request.preflightBatchId,
+    );
     if (!worktree || !project.preflight) {
-      return { branch: null };
+      return {
+        branch: null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
     }
-    const result = await runSpawnPreflight({
-      agent,
-      projectId: request.project,
-      project,
-      baseBranch: defaultBranch,
-      worktree,
-      prompt: request.prompt,
-    });
-    return { branch: result.branch ?? null };
+    try {
+      let result: SpawnPreflightResult;
+      try {
+        result = await this.preflightUsageStore.runAttempt(
+          preflightBatchId,
+          request.project,
+          agent,
+          () =>
+            runSpawnPreflight({
+              agent,
+              projectId: request.project,
+              project,
+              baseBranch: defaultBranch,
+              worktree,
+              prompt: request.prompt,
+            }),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !message.startsWith("preflight branch ") &&
+          !message.startsWith("Spawn preflight must return exactly one branch name")
+        )
+          throw error;
+        return {
+          branch: null,
+          preflightBatchId,
+          preflightTokenUsageView: await this.preflightUsageStore.view(
+            preflightBatchId,
+            request.project,
+          ),
+        };
+      }
+      return {
+        branch: result.branch ?? null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
+    } catch (error) {
+      throw new PreflightPreviewError(
+        error,
+        preflightBatchId,
+        await this.preflightUsageStore.view(preflightBatchId, request.project),
+      );
+    }
   }
 
   // Shared by resolveSpawnTarget's three branches. "strict" (default) is the
@@ -10481,6 +10998,8 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let launchedRecord: SessionRecord | undefined;
+    let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
@@ -10493,6 +11012,8 @@ export class SessionService {
     let preflightBranch: string | undefined;
     let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
+    let preflightBatchId: string | undefined;
+    let preflightTokenUsage = aggregatePreflightAttempts([]);
     let allocatedNewWorktree = false;
     let reuseCtx: {
       workspaceId: string;
@@ -10522,11 +11043,22 @@ export class SessionService {
         agent,
         options?.validatedExplicitModel,
       );
+      if (
+        request.preflightBatchId ||
+        (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
+      ) {
+        preflightBatchId = await this.preflightUsageStore.resolve(
+          request.project,
+          request.preflightBatchId,
+        );
+      }
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
       if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
+        if (!preflightBatchId) throw new Error("missing pre-flight batch");
+        const activePreflightBatchId = preflightBatchId;
         const preflight = await runSpawnPreflightForSpawn({
           agent,
           projectId: request.project,
@@ -10534,6 +11066,13 @@ export class SessionService {
           baseBranch: defaultBranch,
           worktree,
           prompt,
+          runAttempt: (execute) =>
+            this.preflightUsageStore.runAttempt(
+              activePreflightBatchId,
+              request.project,
+              agent as AgentName,
+              execute,
+            ),
         });
         preflightOutcome = preflight.outcome;
         preflightAttempts = preflight.attempts;
@@ -10555,6 +11094,9 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      preflightTokenUsage = preflightBatchId
+        ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
+        : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
@@ -10660,6 +11202,7 @@ export class SessionService {
         tmuxSession,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -10776,6 +11319,14 @@ export class SessionService {
             selfDestruct,
             telegramAgentInstructions(project, options?.telegramOrigin !== undefined),
           );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...placeholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) return await this.enrich(budgetLimited);
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
         project,
@@ -10883,6 +11434,7 @@ export class SessionService {
 
         stage = "tmux.create";
         this.assertSpawnNotKilled(launchSessionId);
+        launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: tmuxSession,
           cwd: workspacePath,
@@ -10890,6 +11442,12 @@ export class SessionService {
           launchScriptDir: sessionToolDir,
           env: sessionEnv,
         });
+        const current = readSession(this.config.dataDir, runningRecord.id);
+        if (current && hasQueuedMessages(current)) {
+          runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
+        }
+        launchedRecord = runningRecord;
+        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -10968,6 +11526,10 @@ export class SessionService {
       }
 
       stage = "record.write";
+      const latestForeground = readSession(this.config.dataDir, runningRecord.id);
+      if (latestForeground && hasQueuedMessages(latestForeground)) {
+        runningRecord = withQueuedMessages(runningRecord, queuedMessages(latestForeground), true);
+      }
       let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
@@ -10997,6 +11559,19 @@ export class SessionService {
     } catch (error) {
       if (sessionId && options?.telegramOrigin) {
         deleteTelegramReplyTarget(this.config.dataDir, sessionId);
+      }
+      const killedBeforeRetention = sessionId ? this.spawnWasKilled(sessionId) : false;
+      if (
+        !killedBeforeRetention &&
+        !launchedRecord &&
+        launchCandidate &&
+        (await this.launchResourcesMayRemain(launchCandidate))
+      ) {
+        launchedRecord = launchCandidate;
+      }
+      if (launchedRecord && !(sessionId && this.spawnWasKilled(sessionId))) {
+        const retained = await this.retainLaunchedError(launchedRecord, error);
+        if (retained.status !== "killed") throw error;
       }
       if (sessionId && project && placeholderWritten && agent) {
         // This catch wraps every stage from tmux.create through record.write,
@@ -11065,6 +11640,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          preflightTokenUsage,
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -11309,18 +11885,45 @@ export class SessionService {
     return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status));
   }
 
-  // Another workspace member has an agent running right now, so the
-  // workspace's shared sidecars and their reserved ports are actually in
-  // use. Deliberately narrower than hasActiveWorkspaceMembers: pausing a
-  // session already tears its own sidecars down, and a stopped or errored
-  // member holding a shared pane would leak it forever — handoff parks its
-  // predecessor as `stopped` and keeps it in the desk, so the workspace
-  // would never release the pane or its pool ports. Restore re-runs
-  // autostart, so releasing early self-heals.
+  // Running or error-bearing siblings retain shared sidecars and ports.
   private hasRunningWorkspaceMembers(
     session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
   ): boolean {
-    return this.someDeskSibling(session, (s) => s.status === "running" || s.status === "spawning");
+    return this.someDeskSibling(
+      session,
+      (s) =>
+        s.status === "running" ||
+        s.status === "spawning" ||
+        hasRetainedSessionError(
+          s,
+          this.stateCache.get(s.id)?.state ?? this.lastClassifiedLogStates.get(s.id),
+        ) ||
+        (!isTerminalSessionStatus(s.status) && Boolean(s.serverErrorAt)),
+    );
+  }
+
+  private async memberRetainsResources(member: SessionRecord): Promise<boolean> {
+    if (hasRetainedSessionError(member)) return true;
+    if (isTerminalSessionStatus(member.status)) return false;
+    const classified = await this.classifySessionRecord(member, {
+      scanPane: false,
+      reconcileRuntime: false,
+    });
+    return hasRetainedSessionError(
+      readSession(this.config.dataDir, member.id) ?? member,
+      classified.state,
+    );
+  }
+
+  private async workspaceRetainsResources(
+    session: SessionRecord,
+    excludeId?: string,
+  ): Promise<boolean> {
+    for (const member of this.listDeskSessions(session, listSessions(this.config.dataDir))) {
+      if (member.id === excludeId) continue;
+      if (await this.memberRetainsResources(member)) return true;
+    }
+    return false;
   }
 
   // Resolves the record that owns a desk's shared state (slots, PR binding).
@@ -11446,6 +12049,15 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      const preflightBatchId = await this.preflightUsageStore.resolve(
+        request.project,
+        request.preflightBatchId,
+      );
+      const preflightTokenUsage = await this.preflightUsageStore.claim(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
       } else if (!worktree) {
@@ -11493,6 +12105,7 @@ export class SessionService {
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -11557,11 +12170,16 @@ export class SessionService {
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
+        preflightBatchId,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+        const claimedPreflightUsage = readSession(
+          this.config.dataDir,
+          sessionId,
+        )?.preflightTokenUsage;
         this.removeSessionArtifacts({
           id: sessionId,
           project: request.project,
@@ -11588,6 +12206,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -11632,6 +12251,8 @@ export class SessionService {
     let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
     let workspacePath = prepared.worktree ? "" : project.path;
     let initialPromptSent = false;
+    let launchedRecord: SessionRecord | undefined;
+    let launchCandidate: SessionRecord | undefined;
     try {
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
@@ -11650,6 +12271,37 @@ export class SessionService {
             baseBranch: prepared.defaultBranch,
             worktree: prepared.worktree,
             prompt,
+            assertActive: () => this.assertSpawnNotKilled(sessionId),
+            runAttempt: async (execute) => {
+              let result: SpawnPreflightResult | undefined;
+              let executionError: unknown;
+              try {
+                result = await this.preflightUsageStore.runAttempt(
+                  prepared.preflightBatchId,
+                  request.project,
+                  agent,
+                  execute,
+                  sessionId,
+                );
+              } catch (error) {
+                executionError = error;
+              }
+              const usage = await this.preflightUsageStore.claim(
+                prepared.preflightBatchId,
+                request.project,
+                sessionId,
+              );
+              this.assertSpawnNotKilled(sessionId);
+              prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
+              writeSession(this.config.dataDir, prepared.placeholder);
+              if (executionError) {
+                throw executionError instanceof Error
+                  ? executionError
+                  : new Error(String(executionError));
+              }
+              if (!result) throw new Error("Pre-flight attempt returned no result");
+              return result;
+            },
           });
           preflightOutcome = preflight.outcome;
           preflightAttempts = preflight.attempts;
@@ -11804,6 +12456,17 @@ export class SessionService {
         selfDestruct,
         telegramAgentInstructions(project, false),
       );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...spawnPlaceholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) {
+        prepared.placeholder = budgetLimited;
+        return "completed";
+      }
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
@@ -11883,6 +12546,7 @@ export class SessionService {
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
         this.assertSpawnNotKilled(sessionId);
+        launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: launchSessionId,
           cwd: workspacePath,
@@ -11890,6 +12554,12 @@ export class SessionService {
           launchScriptDir: prepared.sessionToolDir,
           env: sessionEnv,
         });
+        const current = readSession(this.config.dataDir, runningRecord.id);
+        if (current && hasQueuedMessages(current)) {
+          runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
+        }
+        launchedRecord = runningRecord;
+        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -11977,12 +12647,20 @@ export class SessionService {
       }
 
       stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
+      const latestBackground = readSession(this.config.dataDir, runningRecord.id);
+      if (latestBackground && hasQueuedMessages(latestBackground)) {
+        runningRecord = withQueuedMessages(runningRecord, queuedMessages(latestBackground), true);
+      }
       let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
       updatedRecord = await this.startAutoStartSidecars(updatedRecord, project);
 
+      const latestAttempt = readSession(this.config.dataDir, updatedRecord.id);
+      if (latestAttempt && hasQueuedMessages(latestAttempt)) {
+        updatedRecord = withQueuedMessages(updatedRecord, queuedMessages(latestAttempt), true);
+      }
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
       await this.refreshDashboardCacheEntry(updatedRecord);
@@ -12005,6 +12683,19 @@ export class SessionService {
       return "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const killedBeforeRetention = this.spawnWasKilled(sessionId);
+      if (
+        !killedBeforeRetention &&
+        !launchedRecord &&
+        launchCandidate &&
+        (await this.launchResourcesMayRemain(launchCandidate))
+      ) {
+        launchedRecord = launchCandidate;
+      }
+      if (launchedRecord && !this.spawnWasKilled(sessionId)) {
+        const retained = await this.retainLaunchedError(launchedRecord, error);
+        if (retained.status !== "killed") return "completed";
+      }
       const terminalPreflightFailure = error instanceof SpawnPreflightError;
       const finalAttempt =
         terminalPreflightFailure ||
@@ -12022,7 +12713,7 @@ export class SessionService {
           projectId: request.project,
           message: `Spawn preflight failed for ${request.project}: ${message}`,
           details: {
-            attempts: error.attempts,
+            ...(error instanceof SpawnPreflightError ? { attempts: error.attempts } : {}),
             requestedAgent: request.agent ?? null,
           },
         });
@@ -12731,7 +13422,8 @@ export class SessionService {
       !session ||
       session.status !== "running" ||
       submitPending(session) ||
-      !hasMessageContent(request)
+      !hasMessageContent(request) ||
+      this.tokenBudgetActivationError(session) !== undefined
     ) {
       return null;
     }
@@ -12752,6 +13444,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.assertTokenBudgetAllowsActivation(session);
     if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
@@ -13355,6 +14048,9 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
+      if (error instanceof TmuxProbeUnknownError && initialSession) {
+        this.retainDetectionError(initialSession, error.message);
+      }
       if (
         error instanceof SessionRateLimitedError ||
         error instanceof QueueDeliveryInFlightError ||
@@ -13655,6 +14351,7 @@ export class SessionService {
             { fresh: true },
           );
           if (!probe.alive) {
+            if (probe.diagnostic) throw new TmuxProbeUnknownError(probe.diagnostic);
             latchedNotAlive = probe;
             break;
           }
@@ -13674,6 +14371,8 @@ export class SessionService {
           },
           { fresh: true },
         ));
+      if (!finalProbe.alive && finalProbe.diagnostic)
+        throw new TmuxProbeUnknownError(finalProbe.diagnostic);
       const processAlive = finalProbe.alive;
       const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
       const elapsedMs = Date.now() - startedAt;
@@ -13763,7 +14462,12 @@ export class SessionService {
     // After the interrupt and its settle: the interrupted turn's own record
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
-    await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+    await sendMessageToTmux(session.tmuxSession, message, {
+      agent: session.agent,
+      ...(session.agent === "codex" && options?.interrupt === false
+        ? { interrupt: false as const }
+        : {}),
+    });
     this.recordPaneWrite(session, pastedAt);
     options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     if (!binding) {
@@ -13828,6 +14532,7 @@ export class SessionService {
             { fresh: true },
           );
           if (!probe.alive) {
+            if (probe.diagnostic) throw new TmuxProbeUnknownError(probe.diagnostic);
             latchedNotAlive = probe;
             break;
           }
@@ -13853,6 +14558,8 @@ export class SessionService {
         },
         { fresh: true },
       ));
+    if (!finalProbe.alive && finalProbe.diagnostic)
+      throw new TmuxProbeUnknownError(finalProbe.diagnostic);
     const processAlive = finalProbe.alive;
     const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
     const elapsedMs = Date.now() - startedAt;
@@ -14622,9 +15329,7 @@ export class SessionService {
   // would multiply teardown latency by sidecar count).
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
-    // Resolved once for the whole teardown: re-reading it per sidecar would
-    // both cost a listSessions each time and let a sibling transitioning
-    // mid-loop leave the desk's sidecars half torn down.
+    // Recheck sibling retention before each signal and identity removal.
     const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
     const pendingBySidecar: Array<{ ownerId: string; scName: string; pending: PendingReap }> = [];
     for (const scName of sessionSidecarNames(session, project)) {
@@ -14636,7 +15341,12 @@ export class SessionService {
       // own teardown too, where the owner id is its own id. MCP sidecars are
       // always per-session and tear down unconditionally.
       const isDeskSharedSidecar = sidecar !== undefined && !sidecar.mcp;
-      if (isDeskSharedSidecar && deskSiblingsRunning) {
+      if (
+        isDeskSharedSidecar &&
+        (deskSiblingsRunning ||
+          (await this.workspaceRetainsResources(session, session.id)) ||
+          this.hasRunningWorkspaceMembers(session))
+      ) {
         continue;
       }
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
@@ -14661,6 +15371,8 @@ export class SessionService {
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
     for (const [index, entry] of pendingBySidecar.entries()) {
       this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
+      if (!project?.sidecars[entry.scName]?.mcp && this.hasRunningWorkspaceMembers(session))
+        continue;
       this.clearSidecarProcEntry(entry.ownerId, entry.scName);
     }
   }
@@ -15300,13 +16012,10 @@ export class SessionService {
       return session;
     }
 
-    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
-    // one with newest-session discovery, which could bind a sibling session
-    // sharing the worktree. Legacy records without an id keep discovery below.
-    if (
-      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
-      session.agentSessionId
-    ) {
+    // Stored native session ids are pinned. Never overwrite one with newest-session
+    // discovery, which could bind a sibling session sharing the worktree. Legacy
+    // records without an id keep discovery below.
+    if (session.agentSessionId) {
       return session;
     }
 
@@ -15436,20 +16145,37 @@ export class SessionService {
     session: SessionRecord,
     options?: { paneAlreadyConfirmedGone?: boolean },
   ): Promise<SessionRecord> {
+    this.assertTokenBudgetAllowsActivation(session);
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
     const runtime = await this.readRuntimeSnapshot(session);
-    if (runtime.processAlive) {
+    if (runtime.processAlive && !runtime.probeUnresponsive) {
       return this.captureAgentSessionId(session, 0);
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
+      const diagnostic =
+        runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown";
+      this.retainDetectionError(session, diagnostic);
+      throw new TmuxProbeUnknownError(diagnostic);
+    }
+    const current = readSession(this.config.dataDir, session.id) ?? session;
+    if (
+      (hasRetainedSessionError(current, this.lastClassifiedLogStates.get(session.id)) ||
+        current.serverErrorAt) &&
+      options?.paneAlreadyConfirmedGone !== true
+    ) {
       throw new Error(
-        `Session ${session.id}'s runtime probe (tmux or ps) timed out; runtime state unknown, not attempting recovery`,
+        `Session ${session.id} has a retained error; automatic recovery refused: ${current.error ?? current.status}`,
       );
     }
 
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const workspace = probeWorkspace(session.worktreePath);
+    if (workspace.diagnostic) {
+      this.retainDetectionError(current, workspace.diagnostic);
+      throw new TmuxProbeUnknownError(workspace.diagnostic);
+    }
+    const workspacePresent = workspace.exists;
     this.logEvent("session.recover.check", {
       level: "info",
       sessionId: session.id,
@@ -15513,6 +16239,16 @@ export class SessionService {
     let recovered: SessionRecord;
     try {
       recovered = await this.relaunchSessionInPlace(session, project);
+    } catch (error) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (
+        latest &&
+        !hasRetainedSessionError(latest) &&
+        (await this.launchResourcesMayRemain(latest))
+      ) {
+        await this.retainLaunchedError(latest, error);
+      }
+      throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
     }
@@ -15653,6 +16389,7 @@ export class SessionService {
     // recovery alike), so the fix applies uniformly here rather than forking
     // behavior on why the pane died.
     let usedFreshLaunch = !recoveryPlan;
+    let launched = false;
     try {
       await createTmuxSession({
         sessionName: session.tmuxSession,
@@ -15661,6 +16398,18 @@ export class SessionService {
         launchScriptDir: sessionToolDir,
         env,
       });
+      launched = true;
+      writeSession(
+        this.config.dataDir,
+        this.applyReservedSidecars(
+          {
+            ...sessionWithAgentId,
+            status: "running",
+            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+          },
+          mcpSidecarUpdate,
+        ),
+      );
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
@@ -15684,6 +16433,15 @@ export class SessionService {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
       }
     } catch (error) {
+      const failedAttempt = this.applyReservedSidecars(
+        { ...sessionWithAgentId, launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand },
+        mcpSidecarUpdate,
+      );
+      if (!launched) launched = await this.launchResourcesMayRemain(failedAttempt);
+      if (launched) {
+        await this.retainLaunchedError(failedAttempt, error);
+        throw error;
+      }
       if (!recoveryPlan) {
         throw error;
       }
@@ -15724,6 +16482,19 @@ export class SessionService {
         launchScriptDir: sessionToolDir,
         env,
       });
+      writeSession(
+        this.config.dataDir,
+        this.applyReservedSidecars(
+          {
+            ...sessionWithAgentId,
+            status: "running",
+            launchCommand: freshLaunchCommand,
+            ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+            updatedAt: nowIso(),
+          },
+          mcpSidecarUpdate,
+        ),
+      );
       await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
@@ -15874,10 +16645,28 @@ export class SessionService {
     sessionId: string,
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
+    let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    if (request.overrideTokenBudget === true) {
+      if (
+        session.status !== "budget_limited" &&
+        !(session.status === "stopped" && session.stopReason === "token_budget") &&
+        !(
+          this.tokenBudgetActivationError(session) &&
+          isRestorableSession(await this.enrich(session))
+        )
+      ) {
+        throw new Error(`Session ${sessionId} is not budget-limited`);
+      }
+      session = {
+        ...(readSession(this.config.dataDir, sessionId) ?? session),
+        tokenBudgetOverride: true,
+      };
+      writeSession(this.config.dataDir, session);
+    }
+    this.assertTokenBudgetAllowsActivation(session);
     this.clearTargetGoneNudgeGate(sessionId);
     // A restore can replay every sidecar afresh (directly, or via
     // relaunchSessionInPlace on the fresh-launch fallback); a cached
@@ -15908,7 +16697,8 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    const current = await this.enrich(session);
+    const currentView = await this.enrich(session);
+    const current = { ...(readSession(this.config.dataDir, sessionId) ?? session), ...currentView };
     if (!isRestorableSession(current)) {
       this.logEvent("session.restore.unrestorable", {
         level: "warn",
@@ -15946,6 +16736,12 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    const cursorRestoreBoundary: CursorRestoreBoundary | null =
+      current.agent === "cursor"
+        ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
+        : null;
+    if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
+    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -15954,6 +16750,7 @@ export class SessionService {
     this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
+    let launched = false;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
@@ -16027,12 +16824,16 @@ export class SessionService {
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
-      const launchPlan = await waitForRestorePlan(
-        current.agent,
-        current.worktreePath,
-        restorePrompt,
-        launchPlanOptions,
-      );
+      const pinnedCodexId =
+        current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
+      const launchPlan = pinnedCodexId
+        ? null
+        : await waitForRestorePlan(
+            current.agent,
+            current.worktreePath,
+            restorePrompt,
+            launchPlanOptions,
+          );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
       await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
@@ -16043,7 +16844,9 @@ export class SessionService {
       const pinnedOpenCodeId =
         current.agent === "opencode" && current.agentSessionId ? current.agentSessionId : undefined;
       let restoredAgentSessionId =
-        current.agent === "cursor" ? current.agentSessionId : (pinnedClaudeId ?? pinnedOpenCodeId);
+        current.agent === "cursor"
+          ? current.agentSessionId
+          : (pinnedClaudeId ?? pinnedOpenCodeId ?? pinnedCodexId);
       if (launchPlan && !restoredAgentSessionId) {
         const codexSessionRootDir =
           current.agent === "codex"
@@ -16115,6 +16918,19 @@ export class SessionService {
         launchScriptDir: sessionToolDir,
         env,
       });
+      launched = true;
+      writeSession(
+        this.config.dataDir,
+        this.applyReservedSidecars(
+          {
+            ...current,
+            ...readSession(this.config.dataDir, sessionId),
+            status: "running",
+            launchCommand: restoredLaunchCommand,
+          },
+          mcpSidecarUpdate,
+        ),
+      );
       try {
         await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
           agent: current.agent,
@@ -16236,6 +17052,8 @@ export class SessionService {
             launchCommand: restoredLaunchCommand,
             status: "running",
             updatedAt: nowIso(),
+            ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+            ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
           },
           mcpSidecarUpdate,
         );
@@ -16274,22 +17092,21 @@ export class SessionService {
         }
         return this.enrich(persistedRecovered);
       }
-      // An unresponsive liveness read is not evidence of death: killing here
-      // would destroy a live agent whose tmux server was merely slow (#904).
-      if (isAmbiguousSubmitAckTimeout(error)) {
-        // The error describes the prior dead agent; the pane was just
-        // relaunched. Left in place it blocks reconcileStaleStoppedSession
-        // (hasSessionErrorEvidence) behind a live agent. Liveness is not
-        // proven, so no status is written.
-        // Fresh read: the sidecar start between the pre-launch snapshot and
-        // here already wrote sidecarPorts/Names/Procs; the stale snapshot
-        // would erase them.
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (latest?.error !== undefined) {
-          const { error: _staleError, ...withoutError } = latest;
-          writeSession(this.config.dataDir, withoutError);
-          this.stateCache.delete(sessionId);
-        }
+      if (!launched)
+        launched = await this.launchResourcesMayRemain(
+          this.applyReservedSidecars(
+            { ...current, launchCommand: restoredLaunchCommand },
+            mcpSidecarUpdate,
+          ),
+        );
+      if (launched) {
+        await this.retainLaunchedError(
+          this.applyReservedSidecars(
+            { ...current, launchCommand: restoredLaunchCommand },
+            mcpSidecarUpdate,
+          ),
+          error,
+        );
       } else {
         await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       }
@@ -16299,7 +17116,7 @@ export class SessionService {
         sessionId,
         projectId: current.project,
         message: `Failed to restore ${sessionId}: ${message}`,
-        ...(isAmbiguousSubmitAckTimeout(error)
+        ...(error instanceof SubmitAckTimeoutError && !error.processAlive && error.probeUnresponsive
           ? {
               details: {
                 reason: "submit_ack_timeout",
@@ -16323,6 +17140,8 @@ export class SessionService {
         launchCommand: restoredLaunchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+        ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
       },
       mcpSidecarUpdate,
     );
@@ -17286,6 +18105,9 @@ export class SessionService {
         // with no re-arm (defect C1's wedge, unqualified: ANY failure in this
         // attempt, not only the send itself). The message stays queued; the
         // loop's own sleep-and-continue retries it on the next poll.
+        if (error instanceof TmuxProbeUnknownError) {
+          this.retainDetectionError(session, error.message);
+        }
         const failure = error instanceof Error ? error.message : String(error);
         // Log-once-per-transition: a permanently broken session (e.g. a
         // wiped worktree) would otherwise log an error every
@@ -17782,6 +18604,9 @@ export class SessionService {
             `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
           );
         }
+        if (this.tokenBudgetActivationError(session)) {
+          return;
+        }
         await this.sendAgentMessage(
           session,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
@@ -18003,8 +18828,14 @@ export class SessionService {
   }
 
   private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
-    const runtimeAlive = await tmuxSessionExists(service.tmuxSession);
-    const paneDead = runtimeAlive ? await tmuxPaneDead(service.tmuxSession) : true;
+    const {
+      exists: runtimeAlive,
+      paneDead,
+      diagnostic,
+    } = await this.readReportingPaneState(
+      service.tmuxSession,
+      readSession(this.config.dataDir, service.sessionId) ?? undefined,
+    );
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(service.tmuxSession) : null;
     const updatedAt = new Date(service.updatedAt);
     const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
@@ -18016,7 +18847,7 @@ export class SessionService {
     );
 
     let state: ServiceInstanceView["state"];
-    if (service.status === "errored") {
+    if (diagnostic || service.status === "errored") {
       state = "error";
     } else if (problemRuleIds.length > 0) {
       state = "problem";
@@ -18028,6 +18859,7 @@ export class SessionService {
 
     return {
       ...service,
+      ...(diagnostic && !service.error ? { error: diagnostic } : {}),
       runtimeAlive,
       state,
       lastActivityAt,
@@ -18042,7 +18874,9 @@ export class SessionService {
     );
   }
 
-  private async classifyCodexState(sessionId: string): Promise<{
+  private async classifyCodexState(
+    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
+  ): Promise<{
     state: SessionState;
     source: StateSource;
     hookState: ReturnType<typeof readAgentHookState>;
@@ -18050,19 +18884,36 @@ export class SessionService {
     rateLimit: RateLimitDetection | null;
     activityMs: number;
     model?: string;
+    tokenUsage?: ProviderTokenUsageSample;
+    tokenUsages?: ProviderTokenUsageSample[];
   }> {
-    const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
-    this.codexRolloutReaders.set(sessionId, rolloutReader);
+    const hookState = readAgentHookState(this.config.dataDir, session.id);
+    const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
+    this.codexRolloutReaders.set(session.id, rolloutReader);
     const rolloutRead = await readCodexRolloutState(
-      this.codexSessionsDir(sessionId),
+      this.codexSessionsDir(session.id),
       rolloutReader,
+      session.agentSessionId,
     );
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
+    const restoreStartedAtMs = session.codexRestoreStartedAt
+      ? Date.parse(session.codexRestoreStartedAt)
+      : NaN;
+    const restoreMarkerReady =
+      rolloutState?.reason === "thread_settings_applied" &&
+      Number.isFinite(restoreStartedAtMs) &&
+      rolloutState.timestampMs >= restoreStartedAtMs &&
+      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      (!hookState ||
+        hookState.state === "waiting" ||
+        new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
+    if (restoreMarkerReady) {
+      state = "waiting";
+      source = "jsonl";
+    } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
     }
@@ -18093,6 +18944,8 @@ export class SessionService {
       rateLimit: rolloutRead.rateLimit,
       activityMs,
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
+      ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
+      ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
     };
   }
 
@@ -18151,13 +19004,22 @@ export class SessionService {
     // absent, panesUnresponsive only when the pane read came up dead.
     const sessionsUnresponsive = !runtimeAlive && sessionPresence.unresponsive;
     const panesUnresponsive = panePresence !== null && !paneUsable && panePresence.unresponsive;
+    const diagnostic =
+      sessionPresence.diagnostic ??
+      panePresence?.diagnostic ??
+      (!processProbe.alive ? processProbe.diagnostic : undefined);
     const processUnresponsive = !processProbe.alive && processProbe.unresponsive;
     return {
       runtimeAlive,
       paneUsable,
       processAlive: processProbe.alive,
       tmuxActivityAt,
-      probeUnresponsive: sessionsUnresponsive || panesUnresponsive || processUnresponsive,
+      probeUnresponsive:
+        sessionsUnresponsive ||
+        panesUnresponsive ||
+        processUnresponsive ||
+        diagnostic !== undefined,
+      ...(diagnostic ? { diagnostic } : {}),
     };
   }
 
@@ -18173,7 +19035,7 @@ export class SessionService {
   // short-circuit order matters: isInRestoreWarmup mutates (it clears an
   // expired warmup entry), so running/spawning sessions must never reach it,
   // exactly as the sidecar reaper already relies on.
-  private isLiveSessionRecord(session: Pick<SessionRecord, "id" | "status">): boolean {
+  private isLiveSessionRecord(session: Pick<SessionRecord, "id" | "status" | "error">): boolean {
     return (
       session.status === "running" ||
       session.status === "spawning" ||
@@ -18690,7 +19552,11 @@ export class SessionService {
       if (service.status !== "running") {
         return true;
       }
-      if (!(await tmuxSessionExists(service.tmuxSession))) {
+      const runtime = await this.readReportingPaneState(
+        service.tmuxSession,
+        readSession(this.config.dataDir, session.id) ?? undefined,
+      );
+      if (runtime.diagnostic || !runtime.exists) {
         return true;
       }
       if (
@@ -18736,6 +19602,20 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
+    if (runtime.probeUnresponsive) {
+      return {
+        session: this.retainDetectionError(
+          session,
+          runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
+        ),
+        runtime,
+      };
+    }
+    if (
+      hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) ||
+      session.serverErrorAt
+    )
+      return { session, runtime };
     if (session.status === "spawning") {
       // At boot we cannot tell an in-progress spawn from a stuck one and tmux
       // may not exist yet, so never reconcile a spawning session on boot.
@@ -18779,6 +19659,11 @@ export class SessionService {
       // sweep tick re-probes from scratch. workspaceGone is filesystem-derived
       // (never tmux-derived), so that verdict is unaffected and keeps writing.
       if (confirmedRuntime.probeUnresponsive) {
+        const retained = this.retainDetectionError(
+          session,
+          confirmedRuntime.diagnostic ??
+            "runtime probe (tmux or ps) timed out; runtime state unknown",
+        );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
           sessionId: session.id,
@@ -18786,7 +19671,10 @@ export class SessionService {
           message: `Skipped reconciling ${session.id}: runtime probe (tmux or ps) timed out, runtime state unknown`,
           details: { tmuxSession: session.tmuxSession, agent: session.agent, reason },
         });
-        return { session, runtime: confirmedRuntime };
+        return {
+          session: retained,
+          runtime: confirmedRuntime,
+        };
       }
     }
 
@@ -18797,17 +19685,15 @@ export class SessionService {
     if (latest.status !== session.status) {
       return { session: latest, runtime };
     }
+    if (hasRetainedSessionError(latest)) return { session: latest, runtime: confirmedRuntime };
 
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
-    // Neither "stopped" nor "errored" is a terminal status (isTerminalSessionStatus
-    // is completed|killed only), so any sidecarPorts left on the record would be
-    // treated as still owned by a live session forever — release them here the
-    // same way pause/kill already do, or the leak sweep can never reclaim the
-    // port and the pool eventually exhausts. Desk-shared entries are kept while
-    // another member is non-terminal: those ports really are still in use.
-    const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
+    // Clean stopped records release ports; inferred errors retain ownership.
+    const latestNoPorts = terminalUnavailable
+      ? this.sessionWithReleasedSidecarPorts(latest)
+      : latest;
     let updated: SessionRecord;
     if (terminalUnavailable) {
       const {
@@ -18830,7 +19716,7 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    await this.teardownSessionSidecars(updated).catch(() => {});
+    if (terminalUnavailable) await this.teardownSessionSidecars(updated).catch(() => {});
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
       {
@@ -18876,6 +19762,7 @@ export class SessionService {
     if (
       session.status !== "stopped" ||
       session.stopReason === "manual_pause" ||
+      session.stopReason === "token_budget" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
@@ -18893,6 +19780,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      latest.stopReason === "token_budget" ||
       isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {
@@ -18935,6 +19823,7 @@ export class SessionService {
     // reconcileStaleStoppedSession above.
     if (
       session.status !== "errored" ||
+      runtime.probeUnresponsive ||
       workspaceMissing ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
@@ -18948,7 +19837,7 @@ export class SessionService {
       return latest ?? session;
     }
 
-    const { error: _ignoredError, ...runningBase } = latest;
+    const runningBase = latest;
     const updated: SessionRecord = {
       ...runningBase,
       status: "running",
@@ -18975,15 +19864,151 @@ export class SessionService {
     return updated;
   }
 
+  private async readFinalTokenUsage(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): Promise<Pick<SessionStateResult, "tokenUsage" | "tokenUsages">> {
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+        session.agentSessionId,
+      ).catch(() => null);
+      if (result) this.claudeJsonlReaders.set(session.id, result.reader);
+      return result?.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    if (session.agent === "codex") {
+      const result = await this.classifyCodexState(session).catch(() => null);
+      if (!result) return {};
+      return {
+        ...(result.tokenUsage ? { tokenUsage: result.tokenUsage } : {}),
+        ...(result.tokenUsages ? { tokenUsages: result.tokenUsages } : {}),
+      };
+    }
+    if (session.agent === "opencode") {
+      const result = await readOpenCodeStructuredState(
+        session.agentSessionId,
+        runtime.tmuxActivityAt?.getTime() ?? null,
+        true,
+      ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
+      return result.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    const usage = await readCursorTokenUsage(
+      cursorConfigDirForSession(this.config.dataDir, session.id),
+      session.agentSessionId,
+    ).catch(() => undefined);
+    return usage && session.agentSessionId
+      ? { tokenUsage: { ...usage, provider: "cursor", generationId: session.agentSessionId } }
+      : {};
+  }
+
   private async classifySessionRecord(
     session: SessionRecord,
-    options?: { scanPane?: boolean },
+    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+  ): Promise<SessionStateResult> {
+    try {
+      return await this.classifySessionRecordKnown(session, options);
+    } catch (error) {
+      if (
+        error instanceof SessionResourceNotFoundError &&
+        !readSession(this.config.dataDir, session.id)
+      ) {
+        throw error;
+      }
+      const diagnostic = error instanceof Error ? error.message : String(error);
+      const retained = this.retainDetectionError(session, diagnostic);
+      return {
+        session: retained,
+        runtime: {
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+          probeUnresponsive: true,
+          diagnostic,
+        },
+        state: "error",
+        source: "status",
+        workspacePresent: false,
+        serverError: false,
+        agentActivityAt: null,
+      };
+    }
+  }
+
+  private retainDetectionError(session: SessionRecord, diagnostic: string): SessionRecord {
+    const latest = readSession(this.config.dataDir, session.id);
+    if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    if (isTerminalSessionStatus(latest.status)) return latest;
+    const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
+    if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
+    if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
+      return latest;
+    if (latest.error === message) return latest;
+    const retained = { ...latest, error: message, updatedAt: nowIso() };
+    writeSession(this.config.dataDir, retained);
+    this.stateCache.delete(session.id);
+    this.logEvent("session.runtime.probe_unresponsive", {
+      level: "error",
+      sessionId: session.id,
+      projectId: session.project,
+      message,
+    });
+    return retained;
+  }
+
+  private async retainLaunchedError(
+    session: SessionRecord,
+    error: unknown,
+  ): Promise<SessionRecord> {
+    const message = error instanceof Error ? error.message : String(error);
+    const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
+    const latest = readSession(this.config.dataDir, session.id);
+    if (latest?.status === "killed") return latest;
+    const retained: SessionRecord = {
+      ...withQueuedMessages(
+        { ...session, ...latest, launchCommand: session.launchCommand },
+        queuedMessages(latest ?? session),
+        true,
+      ),
+      status:
+        runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
+      error: message,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, retained);
+    this.stateCache.delete(session.id);
+    this.restoreWarmupUntil.delete(session.id);
+    this.logEvent("session.runtime.errored", {
+      level: "error",
+      sessionId: session.id,
+      projectId: session.project,
+      message,
+    });
+    return retained;
+  }
+
+  private async launchResourcesMayRemain(session: SessionRecord): Promise<boolean> {
+    if (Object.keys(session.sidecarProcs ?? {}).length > 0) return true;
+    try {
+      const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
+      return runtime.runtimeAlive || runtime.probeUnresponsive;
+    } catch {
+      return true;
+    }
+  }
+
+  private async classifySessionRecordKnown(
+    session: SessionRecord,
+    options?: { scanPane?: boolean; reconcileRuntime?: boolean },
   ): Promise<SessionStateResult> {
     const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
-      this.isInRestoreWarmup(session.id)
+      this.isInRestoreWarmup(session.id) &&
+      !hasRetainedSessionError(session)
     ) {
+      this.lastClassifiedLogStates.delete(session.id);
       return {
         session,
         runtime: {
@@ -19012,6 +20037,35 @@ export class SessionService {
       : await this.readRuntimeSnapshot(session);
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
+    if (runtime.probeUnresponsive || workspace.diagnostic) {
+      effectiveSession = this.retainDetectionError(
+        session,
+        runtime.diagnostic ??
+          workspace.diagnostic ??
+          "runtime probe (tmux or ps) timed out; runtime state unknown",
+      );
+    } else if (
+      workspace.exists &&
+      runtime.runtimeAlive &&
+      runtime.paneUsable &&
+      runtime.processAlive &&
+      session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
+      !session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+    ) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      effectiveSession = latest;
+      if (
+        !isTerminalSessionStatus(latest.status) &&
+        sameSessionRuntimeOwner(latest, session) &&
+        latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
+        !latest.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+      ) {
+        const { error: _ignoredError, ...recovered } = latest;
+        effectiveSession = { ...recovered, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, effectiveSession);
+      }
+    }
     let state: SessionState;
     // Holds the message for the single deduped session.state.classified emit
     // at the end of this function; undefined means never log (unchanged from
@@ -19032,7 +20086,12 @@ export class SessionService {
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
-    if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
+    let tokenUsage: ProviderTokenUsageSample | undefined;
+    let tokenUsages: ProviderTokenUsageSample[] | undefined;
+    if (
+      options?.reconcileRuntime !== false &&
+      (effectiveSession.status === "running" || effectiveSession.status === "spawning")
+    ) {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
         runtime,
@@ -19059,11 +20118,43 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
-    if (effectiveSession.status !== "running") {
-      state = statusFallbackState(effectiveSession);
-    } else if (!runtime.paneUsable || !runtime.processAlive) {
-      state = "stopped";
+    if (
+      runtime.probeUnresponsive ||
+      workspace.diagnostic ||
+      hasRetainedSessionError(effectiveSession)
+    ) {
+      state = "error";
+      classifiedDetail = effectiveSession.error ?? "State: error";
     } else {
+      if (session.agent === "cursor" && session.agentSessionId) {
+        const usage = await readCursorTokenUsage(
+          cursorConfigDirForSession(this.config.dataDir, session.id),
+          session.agentSessionId,
+        ).catch(() => undefined);
+        if (usage) {
+          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+        }
+      } else if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      }
+      if (effectiveSession.status !== "running") {
+        state = statusFallbackState(effectiveSession);
+      } else if (!runtime.paneUsable || !runtime.processAlive) {
+        state = effectiveSession.serverErrorAt ? "error" : "stopped";
+      } else {
+        state = "working";
+      }
+    }
+    if (
+      !runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      !hasRetainedSessionError(effectiveSession) &&
+      effectiveSession.status === "running" &&
+      runtime.paneUsable &&
+      runtime.processAlive
+    ) {
       const strategy = agentStateStrategy(session.agent);
       if (strategy === "claude_jsonl") {
         // Independent I/O (tmux exec vs. file read): fetch the pane pid
@@ -19090,6 +20181,7 @@ export class SessionService {
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
           liveModel = jsonlResult.liveModel;
+          tokenUsage = jsonlResult.tokenUsage;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -19113,12 +20205,14 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
-        const codexState = await this.classifyCodexState(session.id);
+        const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
+        tokenUsage = codexState.tokenUsage;
+        tokenUsages = codexState.tokenUsages;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
@@ -19140,6 +20234,7 @@ export class SessionService {
             minMtimeMs: session.agentSessionId
               ? undefined
               : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+            ...(session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {}),
           },
         );
         if (jsonlResult) {
@@ -19155,10 +20250,12 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       } else {
-        const structuredState = await readOpenCodeState(
+        const structured = await readOpenCodeStructuredState(
           session.agentSessionId,
           runtime.tmuxActivityAt?.getTime() ?? null,
         );
+        const structuredState = structured.state;
+        tokenUsage = structured.tokenUsage;
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
         agentActivityAt =
@@ -19459,7 +20556,7 @@ export class SessionService {
       }
     }
 
-    if (classifiedDetail === undefined) {
+    if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
       this.lastClassifiedLogStates.delete(session.id);
     } else {
       if (this.lastClassifiedLogStates.get(session.id) !== state) {
@@ -19487,39 +20584,22 @@ export class SessionService {
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
+      ...(tokenUsages ? { tokenUsages } : {}),
     };
   }
 
-  private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
+  private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView | undefined> {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
     const classified = await this.classifySessionRecord(session, { scanPane: false });
-    session = classified.session;
-    const {
-      queuedMessages: _queuedMessages,
-      pipeline: _pipeline,
-      sidecarNames: _sidecarNames,
-      sidecarPorts: _sidecarPorts,
-      launchCommand: _launchCommand,
-      stateSubscriptions: _stateSubscriptions,
-      allowedTriggers: _allowedTriggers,
-      agentSessionId: _agentSessionId,
-      branchSource: _branchSource,
-      ...dashboardSession
-    } = session;
+    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    if (persisted.status === "missing") return undefined;
+    session = persisted.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const state = this.stabilizeState(session.id, classified.state);
-    await this.updateStateHistory(
-      session,
-      state,
-      classified.source,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-    );
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
     // Same owner resolution as enrich's sidecars loop: without it, every
     // desk sibling would render the anchor-owned shared sidecar as offline
@@ -19531,18 +20611,50 @@ export class SessionService {
       workspaceIdOf(session) !== session.id && sidecarNames.length > 0
         ? this.resolveProjectForSession(session)
         : undefined;
-    const runningSidecarNames = (
-      await Promise.all(
-        sidecarNames.map(async (name) => {
-          const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
-          const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
-          return exists && !paneDead ? name : null;
-        }),
-      )
-    ).filter((name): name is string => name !== null);
+    const runningSidecars = await Promise.all(
+      sidecarNames.map(async (name) => {
+        const ownerId = this.sidecarOwnerIdForName(session, deskProject, name);
+        const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
+        return exists && !paneDead ? name : null;
+      }),
+    );
+    const runningSidecarNames = runningSidecars.filter((name): name is string => name !== null);
+
+    const hasServiceIssues = await this.hasServiceIssues(session);
+    session = this.withReportingError(session);
+    const {
+      queuedMessages: _queuedMessages,
+      pipeline: _pipeline,
+      sidecarNames: _sidecarNames,
+      sidecarPorts: _sidecarPorts,
+      tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
+      launchCommand: _launchCommand,
+      stateSubscriptions: _stateSubscriptions,
+      allowedTriggers: _allowedTriggers,
+      agentSessionId: _agentSessionId,
+      branchSource: _branchSource,
+      error: _error,
+      ...dashboardSession
+    } = session;
+    const state = this.stabilizeState(
+      session.id,
+      hasRetainedSessionError(session) ? "error" : classified.state,
+    );
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+      classified.serverError,
+      classified.serverErrorEvidence,
+    );
 
     return {
       ...dashboardSession,
+      ...(session.error ? { error: session.error } : {}),
       // Always resolved for consumers, whatever shape the stored record is in.
       // `deskId` rides along as a compat alias so a browser tab still running
       // the previous bundle keeps grouping desks; drop it a release from now.
@@ -19556,9 +20668,94 @@ export class SessionService {
       state,
       hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
       lastActivityAt,
-      ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+      ...(hasServiceIssues ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView: this.deriveTokenUsageView(session),
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
+    };
+  }
+
+  private persistClassifiedTokenUsage(
+    session: SessionRecord,
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+  ): { status: "present"; session: SessionRecord } | { status: "missing" } {
+    const current = readSession(this.config.dataDir, session.id);
+    if (!current) return { status: "missing" };
+    if (current.agent !== session.agent || current.agentSessionId !== session.agentSessionId) {
+      return { status: "present", session: current };
+    }
+    const tokenUsage = this.reconcileClassifiedTokenUsage(current.tokenUsage, classified);
+    if (!tokenUsage || JSON.stringify(tokenUsage) === JSON.stringify(current.tokenUsage)) {
+      return { status: "present", session: current };
+    }
+    const updated = { ...current, tokenUsage };
+    writeSession(this.config.dataDir, updated);
+    return { status: "present", session: updated };
+  }
+
+  private reconcileClassifiedTokenUsage(
+    previous: SessionRecord["tokenUsage"],
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+  ): SessionRecord["tokenUsage"] {
+    const samples =
+      classified.tokenUsages ?? (classified.tokenUsage ? [classified.tokenUsage] : []);
+    return samples.reduce((usage, sample) => reconcileTokenUsage(usage, sample), previous);
+  }
+
+  private deriveTokenUsageView(session: SessionRecord): SessionTokenUsageView {
+    const budget = this.resolveTokenBudget(session);
+    if (!session.tokenUsage) {
+      return {
+        status: "waiting",
+        provider: session.agent,
+        ...(budget !== undefined ? { budget } : {}),
+        exhausted: false,
+      };
+    }
+    const { generations: _generations, ...publicUsage } = session.tokenUsage;
+    return {
+      status: "available",
+      ...publicUsage,
+      ...(budget !== undefined ? { budget } : {}),
+      exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
+    };
+  }
+
+  private derivePreflightTokenUsageView(session: SessionRecord) {
+    return session.preflightTokenUsage
+      ? preflightUsageView(session.preflightTokenUsage)
+      : {
+          status: "legacy_unknown" as const,
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+        };
+  }
+
+  private deriveTokenBudgetView(session: SessionRecord) {
+    const project = this.resolveProjectForSession(session);
+    const budget = project?.tokenBudget;
+    const warnOnly = budget !== undefined && project?.tokenBudgetWarnOnly === true;
+    const overridden = session.tokenBudgetOverride === true;
+    const preflight = session.preflightTokenUsage;
+    const knownTotalTokens = (preflight?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
+    const reason = !preflight
+      ? ("legacy_unknown" as const)
+      : preflight.status !== "measured"
+        ? ("preflight_unknown" as const)
+        : !session.tokenUsage
+          ? ("main_usage_unavailable" as const)
+          : undefined;
+    return {
+      ...(budget !== undefined ? { budget } : {}),
+      warnOnly,
+      knownTotalTokens,
+      overridden,
+      exhausted: !overridden && budget !== undefined && knownTotalTokens >= budget,
+      enforced: !overridden && (budget === undefined || reason === undefined),
+      ...(reason ? { reason } : {}),
     };
   }
 
@@ -19572,10 +20769,52 @@ export class SessionService {
   private async sidecarPaneState(
     ownerId: string,
     sidecarName: string,
-  ): Promise<{ exists: boolean; paneDead: boolean }> {
-    const exists = await sidecarTmuxAlive(ownerId, sidecarName);
-    const paneDead = exists && (await tmuxPaneDead(sidecarTmuxSession(ownerId, sidecarName)));
-    return { exists, paneDead };
+    session: SessionRecord,
+  ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    return this.readReportingPaneState(sidecarTmuxSession(ownerId, sidecarName), session, () =>
+      sidecarTmuxAlive(ownerId, sidecarName),
+    );
+  }
+
+  private async readReportingPaneState(
+    tmuxSession: string,
+    session?: SessionRecord,
+    readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
+  ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    try {
+      const exists = await readExists();
+      if (session && !readSession(this.config.dataDir, session.id)) {
+        throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+      }
+      const paneDead = exists && (await tmuxPaneDead(tmuxSession));
+      if (session) {
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+        if (
+          exists &&
+          !paneDead &&
+          !isTerminalSessionStatus(latest.status) &&
+          sameSessionRuntimeOwner(latest, session) &&
+          latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
+        ) {
+          const { error: _error, ...recovered } = latest;
+          writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
+          this.stateCache.delete(session.id);
+        }
+      }
+      return { exists, paneDead };
+    } catch (error) {
+      if (!(error instanceof TmuxProbeUnknownError)) throw error;
+      if (session)
+        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`);
+      return { exists: false, paneDead: false, diagnostic: error.message };
+    }
+  }
+
+  private withReportingError(session: SessionRecord): SessionRecord {
+    const latest = readSession(this.config.dataDir, session.id);
+    if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    return latest;
   }
 
   // Snapshot of authenticated claude accounts for SessionView.claudeAccounts.
@@ -19647,25 +20886,29 @@ export class SessionService {
     claudeAccounts?: { id: string; label?: string; authenticated: boolean }[],
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
-  ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
+  ): Promise<{
+    view: SessionListItemView;
+    classified: SessionStateResult;
+    detectionOnlyError: boolean;
+  }> {
+    const hasIndependentError = (record: SessionRecord): boolean =>
+      record.status === "errored" ||
+      Boolean(record.serverErrorAt) ||
+      Boolean(record.error?.trim() && !record.error.startsWith(STATUS_DETECTION_ERROR_PREFIX));
+    const inputHasIndependentError = hasIndependentError(session);
     const classified = await this.classifySessionRecord(session);
-    session = classified.session;
+    const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
+    if (persisted.status === "missing") {
+      throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    }
+    session = persisted.session;
+    const preReportHasIndependentError =
+      hasIndependentError(session) ||
+      (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
+      Boolean(classified.serverError) ||
+      classified.serverErrorEvidence === "error";
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const state = this.stabilizeState(session.id, classified.state);
-    // Still runs on every enrich — it drives the state machine (the
-    // rateLimitedAt write, the serverErrorAt marker), not just a view field.
-    // The list projection drops the `stateHistory` VIEW FIELD only;
-    // `withSessionDetail` re-reads the same in-memory history for the
-    // single-session view.
-    await this.updateStateHistory(
-      session,
-      state,
-      classified.source,
-      classified.historySourcePath ?? null,
-      classified.serverError,
-      classified.serverErrorEvidence,
-    );
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -19673,6 +20916,7 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
+    const tokenUsageView = this.deriveTokenUsageView(session);
     // Fetched at most once per enrich (zero extra IO for a non-desk session,
     // where deskAnchorRecord returns `session` itself unchanged): reused for
     // the sidecars' owner state (ports, still per-record) below. Passed into
@@ -19702,7 +20946,7 @@ export class SessionService {
       // the backend event can never disagree.
       const ageWarn =
         ageSeconds !== undefined && ageSeconds >= this.config.sidecarGc.maxAgeWarnMinutes * 60;
-      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name);
+      const { exists, paneDead } = await this.sidecarPaneState(ownerId, name, session);
       sidecars.push({
         name,
         alive: exists && !paneDead,
@@ -19713,6 +20957,18 @@ export class SessionService {
         ...(paneDead ? { deadPane: true } : {}),
       });
     }
+    session = this.withReportingError(session);
+    classified.session = session;
+    if (hasRetainedSessionError(session)) classified.state = "error";
+    const state = this.stabilizeState(session.id, classified.state);
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+      classified.serverError,
+      classified.serverErrorEvidence,
+    );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(
@@ -19732,6 +20988,10 @@ export class SessionService {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
+      tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       ...sessionWithoutDetailFields
@@ -19759,8 +21019,17 @@ export class SessionService {
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView,
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
     };
-    return { view, classified };
+    const detectionOnlyError =
+      view.state === "error" &&
+      Boolean(view.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) &&
+      !inputHasIndependentError &&
+      !preReportHasIndependentError &&
+      !hasIndependentError(session);
+    return { view, classified, detectionOnlyError };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {

@@ -531,16 +531,26 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   return worktreePath;
 }
 
-export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  guard?: () => Promise<void> | void,
+): Promise<void> {
+  const guardState = { failed: false };
   try {
     await withWorkspaceGitLock(repoPath, async () => {
+      guardState.failed = true;
+      await guard?.();
+      guardState.failed = false;
       await git(repoPath, "worktree", "remove", "--force", worktreePath);
     });
     return;
-  } catch {
+  } catch (error) {
+    if (guardState.failed) throw error;
     // Fall back to direct removal below.
   }
 
+  await guard?.();
   try {
     rmSync(worktreePath, { recursive: true, force: true });
   } catch {
@@ -573,7 +583,11 @@ export function workspaceExists(worktreePath: string): boolean {
   }
 }
 
-export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+export function probeWorkspace(worktreePath: string): {
+  exists: boolean;
+  missing: boolean;
+  diagnostic?: string;
+} {
   if (!worktreePath) {
     return { exists: false, missing: false };
   }
@@ -581,7 +595,12 @@ export function probeWorkspace(worktreePath: string): { exists: boolean; missing
     return { exists: statSync(worktreePath).isDirectory(), missing: false };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return { exists: false, missing: code === "ENOENT" };
+    if (code === "ENOENT") return { exists: false, missing: true };
+    return {
+      exists: false,
+      missing: false,
+      diagnostic: `workspace stat failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 

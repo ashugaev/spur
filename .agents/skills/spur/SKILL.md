@@ -32,6 +32,7 @@ SAFETY
   Never run `disk-gc --execute` (or `--browser-revisions`) on a host running agents you do not own; a bare `disk-gc` is the dry run.
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
+  Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Read a sidecar's port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`, never by grepping `/proc` or session state.
 
@@ -40,7 +41,7 @@ DOCS
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Daemon HTTP routes: docs/daemon-api.md
+  Daemon HTTP routes and pre-flight batch allocation: docs/daemon-api.md
   Config fields: docs/configuration.md
 
 EDITING THIS FILE

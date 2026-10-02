@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planSessionGc } from "../../src/session-gc.js";
-import type { SessionRecord } from "../../src/types.js";
+import { hasRetainedSessionError, type SessionRecord } from "../../src/types.js";
 
 const WORKTREE_DIR = "/data/worktrees";
 const NOW = new Date("2026-08-01T00:00:00.000Z");
@@ -51,6 +51,34 @@ function plan(
 }
 
 describe("planSessionGc", () => {
+  it.each(["errored", "stopped", "running"] as const)(
+    "blocks a workspace with a retained %s error, including a completed sibling",
+    (status) => {
+      const result = plan([
+        session({ id: "api-1", workspaceId: "shared" }),
+        session({ id: "api-2", workspaceId: "shared", status, error: "probe failed" }),
+      ]);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]?.action).toBe("blocked");
+      expect(result.groups[0]?.blockReasons).toContain("retained_error");
+    },
+  );
+
+  it.each(["completed", "killed", "stopped"] as const)(
+    "keeps %s cleanup available without retained error evidence",
+    (status) => {
+      const result = plan([session({ id: "api-1", status })]);
+      expect(result.groups[0]?.action).toBe("reclaim");
+    },
+  );
+
+  it("blocks archive-only stopped sessions with errors", () => {
+    const result = plan([
+      session({ id: "api-1", status: "stopped", error: "probe failed", worktree: false }),
+    ]);
+    expect(result.groups[0]?.blockReasons).toEqual(["retained_error"]);
+  });
+
   it("groups sessions by project + workspaceId", () => {
     const result = plan([
       session({ id: "api-1", workspaceId: "api-1", updatedAt: "2026-01-01T00:00:00.000Z" }),
@@ -221,4 +249,22 @@ describe("planSessionGc", () => {
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0]?.sessionIds).toEqual(["api-2"]);
   });
+});
+
+describe("hasRetainedSessionError", () => {
+  it("retains errored status without text and derived error without persisted text", () => {
+    expect(hasRetainedSessionError({ status: "errored" })).toBe(true);
+    expect(hasRetainedSessionError({ status: "running" }, "error")).toBe(true);
+    expect(hasRetainedSessionError({ status: "stopped", error: "   " })).toBe(false);
+  });
+
+  it.each(["completed", "killed"] as const)(
+    "preserves explicit %s disposal authority even with error evidence",
+    (status) => {
+      expect(hasRetainedSessionError({ status, error: "probe failed" }, "error")).toBe(false);
+      expect(
+        plan([session({ id: "api-1", status, error: "probe failed" })]).groups[0]?.action,
+      ).toBe("reclaim");
+    },
+  );
 });

@@ -38,7 +38,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## init
 
-`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup.
+`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
 
 ## spawn
 
@@ -46,7 +46,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]
 ```
 
-Empty `[prompt...]` runs default `spawn.steps`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
+Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
 
 ## shepherd, wake
 
@@ -59,7 +59,7 @@ Empty `[prompt...]` runs default `spawn.steps`. `--subscribe-state`/`--subscribe
 `spur pause <sessionId> [--json]` — keeps the worktree.
 `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
-`spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal.
+`spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference).
 `spur respawn <sessionId> [--force] [--json]` (fresh id, no carryover).
 `spur handoff <sessionId> --agent <name> [--model <id>] [--notes <text>] [--json]` — hands off to another agent in the same workspace.
 
@@ -83,7 +83,7 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## send, queue
 
-`spur send <sessionId> <message>`. `spur queue <sessionId> list|remove|flush [index]`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events).
+`spur send <sessionId> <message>` refuses exhausted token budgets. `spur queue <sessionId> list|remove|flush [index]`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events).
 
 ## connect, disconnect
 

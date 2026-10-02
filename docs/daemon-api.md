@@ -28,6 +28,7 @@
 - `GET /projects/:id/slash-commands`
 - `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, worktree}`
 - `GET /projects/:id/branches/exists?name=<branch>`
+- `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight`
 
 ## Session routes
@@ -71,7 +72,7 @@
 - `POST /sessions/:id/subscriptions`
 - `POST /sessions/:id/subscriptions/:subId/remove`
 - `POST /sessions/:id/slots` — see [spur-slots](commands.md#spur-slots)
-- `POST /sessions/:id/sidecars/:name/start`
+- `POST /sessions/:id/sidecars/:name/start` — `409 sidecar_port_busy`, `503` on an unreadable tmux probe (retry)
 - `POST /sessions/:id/sidecars/:name/stop` — see [Sidecars](commands.md#sidecars)
 - `GET /sessions/:id/services`
 - `GET /sessions/:id/services/:name`

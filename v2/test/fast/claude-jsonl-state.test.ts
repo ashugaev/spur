@@ -353,6 +353,7 @@ describe("server-error recovery evidence", () => {
     const record = parseJsonlRecord(
       JSON.stringify({
         type: "assistant",
+        sessionId: "session-1",
         timestamp,
         message: {
           role: "assistant",
@@ -457,6 +458,175 @@ describe("parseJsonlRecord server_error detection", () => {
   it("does not flag assistant prose that merely mentions API Error: 500", () => {
     const record = parseJsonlRecord(CLAUDE_PROSE_MENTIONING_500_LINE, 0);
     expect(record?.serverError).toBeUndefined();
+  });
+});
+
+describe("parseJsonlRecord token usage", () => {
+  it("extracts every structured component from a sanitized real-format fixture", async () => {
+    const filePath = join(__dirname, "../fixtures/agent-history/claude/token-components.jsonl");
+    const result = await readClaudeJsonlState("/unused", {
+      filePath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    expect(result?.tokenUsage).toEqual({
+      provider: "claude",
+      generationId: "claude:session-sanitized:msg-first",
+      inputTokens: 69,
+      outputTokens: 50,
+      totalTokens: 119,
+      cacheReadInputTokens: 34,
+      cacheWriteInputTokens: 23,
+      reasoningOutputTokens: 16,
+      cacheWrite5mInputTokens: 5,
+      cacheWrite1hInputTokens: 18,
+    });
+  });
+
+  it("counts advisor calls once and gives nested cache TTL totals precedence", async () => {
+    const filePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/advisor-token-components.jsonl",
+    );
+    const result = await readClaudeJsonlState("/unused", {
+      filePath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    });
+
+    expect(result?.tokenUsage).toEqual({
+      provider: "claude",
+      generationId: "claude:session-advisor-sanitized:msg-advisor",
+      inputTokens: 77,
+      outputTokens: 13,
+      totalTokens: 90,
+      cacheReadInputTokens: 37,
+      cacheWriteInputTokens: 27,
+    });
+  });
+
+  it("counts cache input and exposes a message id for deduplication", () => {
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: {
+          id: "msg-1",
+          role: "assistant",
+          usage: {
+            input_tokens: 10,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+            output_tokens: 4,
+          },
+        },
+      }),
+      0,
+    );
+    expect(record).toMatchObject({
+      messageId: "msg-1",
+      tokenUsage: {
+        inputTokens: 10,
+        cacheCreationInputTokens: 20,
+        cacheReadInputTokens: 30,
+        outputTokens: 4,
+      },
+    });
+  });
+
+  it("rejects a present malformed token instead of coercing it to zero", () => {
+    const parsed = parseJsonlRecord(
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: {
+          id: "msg-bad",
+          role: "assistant",
+          usage: { input_tokens: "10", output_tokens: 2 },
+        },
+      }),
+      0,
+    );
+    expect(parsed?.tokenUsage).toBeUndefined();
+  });
+
+  it("takes component-wise maxima for duplicate message records", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-usage-components-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const record = (usage: Record<string, number>) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: { id: "msg-1", role: "assistant", usage },
+      });
+    try {
+      await writeFile(
+        filePath,
+        `${record({ input_tokens: 10, output_tokens: 2 })}\n${record({ cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 1 })}\n`,
+        "utf8",
+      );
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result?.tokenUsage).toMatchObject({
+        inputTokens: 60,
+        outputTokens: 2,
+        totalTokens: 62,
+      });
+
+      await writeFile(filePath, `${record({ input_tokens: 1 })}\n`, "utf8");
+      const afterTruncation = await readClaudeJsonlState(tempDir, result?.reader);
+      expect(afterTruncation?.tokenUsage).toMatchObject({
+        inputTokens: 1,
+        outputTokens: 0,
+        totalTokens: 1,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps nested cache totals authoritative across progressive duplicates", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-cache-precedence-"));
+    const filePath = join(tempDir, "session.jsonl");
+    const record = (usage: Record<string, unknown>) =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "session-1",
+        message: { id: "msg-1", role: "assistant", usage },
+      });
+    try {
+      await writeFile(
+        filePath,
+        `${record({ input_tokens: 1, cache_creation_input_tokens: 99, cache_creation: { ephemeral_5m_input_tokens: 3 }, output_tokens: 1 })}\n${record({ input_tokens: 1, cache_creation_input_tokens: 99, output_tokens: 1 })}\n`,
+        "utf8",
+      );
+
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+
+      expect(result?.tokenUsage).toMatchObject({
+        inputTokens: 4,
+        cacheWriteInputTokens: 3,
+        cacheWrite5mInputTokens: 3,
+        cacheWrite1hInputTokens: 0,
+        outputTokens: 1,
+        totalTokens: 5,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -718,18 +888,16 @@ describe("parseConversationBatch", () => {
     }
   });
 
-  it("caps a cold read to the transcript tail instead of allocating the whole file", async () => {
+  it("scans a cold transcript in bounded chunks", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "cold-read-cap-"));
     const tempFile = join(tempDir, "huge.jsonl");
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
 
     try {
-      // Layout: many small head records, then one record larger than the
-      // cold-read ceiling, then three tail records. The ceiling puts the
-      // window inside the oversized record, so only the three tail records
-      // can be reached. Without the cap the read reaches the head and the
-      // retained tail fills to TAIL_RECORD_LIMIT instead.
+      // Layout crosses the read chunk boundary inside one oversized record.
+      // The scanner must retain that partial record without allocating the
+      // whole transcript as one buffer.
       const headRecord = JSON.stringify({
         type: "user",
         timestamp: "2026-05-04T00:00:00.000Z",
@@ -765,9 +933,7 @@ describe("parseConversationBatch", () => {
 
       expect(result).not.toBeNull();
       if (!result) throw new Error("expected a result");
-      // Only the records after the oversized one are reachable through the
-      // capped window; the head is never allocated.
-      expect(result.reader.tailRecords).toHaveLength(3);
+      expect(result.reader.tailRecords).toHaveLength(50);
       expect(result.liveModel).toBe("claude-tail");
       // The reader still ends aligned with the file, so the next incremental
       // read continues from the right place.

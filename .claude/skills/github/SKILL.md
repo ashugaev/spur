@@ -29,11 +29,13 @@ ISSUE PRIORITY
 
 CLOSE-OUT GATE, mandatory after any code change
 
+  Keep close-out PRs OPEN and non-draft. Never create or convert to draft.
+
   1  Branch main/master/empty -> SKIPPED.
   2  Uncommitted files -> route to developer for commit. Never auto-commit here.
   3  Implementation diff from branch base empty -> SKIPPED.
   4  git push -u origin "$(git branch --show-current)"
-  5  gh pr view succeeds -> comment new HEAD SHA. Fails -> CREATE OPEN PR below.
+  5  gh pr view succeeds -> mark drafts ready; confirm OPEN, non-draft; comment HEAD SHA. Fails -> CREATE OPEN PR.
   6  Problem parked out of scope during the task -> file it per ISSUE REPORTING below.
   7  Return the PR url, plus any issue url filed at step 6.
 

@@ -22,6 +22,14 @@ describe("parseRestoreSessionRequest", () => {
   it("ignores an unrecognized field", () => {
     expect(parseRestoreSessionRequest({ other: "x" })).toEqual({});
   });
+
+  it("requires an explicit boolean token budget approval", () => {
+    expect(parseRestoreSessionRequest({ overrideTokenBudget: true })).toEqual({
+      overrideTokenBudget: true,
+    });
+    expect(parseRestoreSessionRequest({ overrideTokenBudget: "true" })).toEqual({});
+    expect(parseRestoreSessionRequest({ overrideTokenBudget: false })).toEqual({});
+  });
 });
 
 // A8: the override reaches the daemon over HTTP and is forwarded unchanged
@@ -69,10 +77,10 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
         const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ force: true }),
+          body: JSON.stringify({ force: true, overrideTokenBudget: true }),
         });
         expect(response.status).toBe(200);
-        expect(calls).toEqual([{ force: true }]);
+        expect(calls).toEqual([{ force: true, overrideTokenBudget: true }]);
       });
     } finally {
       SessionService.prototype.restore = originalRestore;

@@ -24,6 +24,7 @@ export function FileAttachmentTextarea({
   ariaLabel,
   clearLabel,
   textareaRef,
+  adaptiveHeight = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -37,15 +38,16 @@ export function FileAttachmentTextarea({
   ariaLabel?: string;
   clearLabel?: string;
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
+  adaptiveHeight?: boolean;
 }) {
   const hasVoice = Boolean(voice?.canUseVoice);
   const effectiveClearLabel = clearLabel ?? (ariaLabel ? `Clear ${ariaLabel}` : "Clear text");
 
   return (
-    <div className="relative">
+    <div className={`relative ${adaptiveHeight ? "min-h-[calc(6em+4rem+2px)] flex-1" : ""}`}>
       <textarea
         aria-label={ariaLabel}
-        className={`w-full resize-y ${minHeightClass} ${INPUT_CLASS} pb-14 ${hasVoice ? "pr-[6rem]" : "pr-[3.25rem]"}`}
+        className={`w-full ${adaptiveHeight ? "h-full min-h-[calc(6em+4rem+2px)] resize-none overflow-y-auto leading-[1.5]" : `resize-y ${minHeightClass}`} ${INPUT_CLASS} pb-14 ${hasVoice ? "pr-[6rem]" : "pr-[3.25rem]"}`}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         onPaste={(event) => {

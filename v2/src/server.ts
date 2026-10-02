@@ -51,6 +51,7 @@ import {
   ForeignAgentProcessError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
+  PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionEndedError,
@@ -61,6 +62,7 @@ import {
   SessionService,
   SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
@@ -507,7 +509,10 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
-  return raw["force"] === true ? { force: true } : {};
+  return {
+    ...(raw["force"] === true ? { force: true } : {}),
+    ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
+  };
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -1286,6 +1291,12 @@ export async function startServer(
         return;
       }
 
+      const preflightBatchProjectId = path.match(/^\/projects\/([^/]+)\/preflight-batches$/)?.[1];
+      if (method === "POST" && preflightBatchProjectId) {
+        sendJson(response, 200, await service.createPreflightBatch(preflightBatchProjectId));
+        return;
+      }
+
       const preflightProjectId = path.match(/^\/projects\/([^/]+)\/preflight$/)?.[1];
       if (method === "POST" && preflightProjectId) {
         const body = await readJsonBody<PreflightRequest>(request);
@@ -2003,6 +2014,18 @@ export async function startServer(
         });
         return;
       }
+      if (error instanceof PreflightPreviewError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            error: message,
+            preflightBatchId: error.preflightBatchId,
+            preflightTokenUsageView: error.preflightTokenUsageView,
+          },
+        });
+        return;
+      }
       if (
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
@@ -2022,7 +2045,8 @@ export async function startServer(
         error instanceof SessionStartingError ||
         error instanceof SessionEndedError ||
         error instanceof ForeignAgentProcessError ||
-        error instanceof LaunchPromptPendingError
+        error instanceof LaunchPromptPendingError ||
+        error instanceof SidecarProbeUnresponsiveError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;
