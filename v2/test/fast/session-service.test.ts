@@ -31835,6 +31835,86 @@ describe("SessionService", () => {
     );
   });
 
+  async function restoreStoppedWithErrorUnderUnresponsiveProbe() {
+    const sessions = createSessionStore();
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage: "restore prompt",
+      readyMarkers: ["❯"],
+    });
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      error: "agent exited 1",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    let restoredTmuxCreated = false;
+    createTmuxSessionMock.mockImplementation(async () => {
+      restoredTmuxCreated = true;
+    });
+    createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+    tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? { alive: false, matchedByName: false, unresponsive: true }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: false,
+      lastScannedFile: "/some/claude.jsonl",
+    });
+    await expect(service.restore("api-1")).rejects.toThrow("Failed to restore api-1");
+    return { sessions, service };
+  }
+
+  it("restore ambiguous branch clears the stale error and writes no status", async () => {
+    const { sessions } = await restoreStoppedWithErrorUnderUnresponsiveProbe();
+    const persisted = sessions.get("api-1");
+    expect(persisted?.status).toBe("stopped");
+    expect(persisted).not.toHaveProperty("error");
+  });
+
+  it("stopped record with error is promoted on live-pane evidence after the ambiguous restore", async () => {
+    const { sessions, service } = await restoreStoppedWithErrorUnderUnresponsiveProbe();
+    probeTmuxProcessMatchMock
+      .mockReset()
+      .mockResolvedValue({ alive: true, matchedByName: true, unresponsive: false });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const result = await service.get("api-1");
+
+    expect(result.status).toBe("running");
+    expect(sessions.get("api-1")?.status).toBe("running");
+  });
+
+  it("stopped reconcile promotion schedules the healed sidecar restart", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const service = await createDisposedSessionService();
+    const heal = vi
+      .spyOn(sessionServiceInternals(service), "scheduleHealedSidecarRestart")
+      .mockImplementation(() => undefined);
+
+    await service.get("api-1");
+
+    expect(heal).toHaveBeenCalledTimes(1);
+    expect(heal).toHaveBeenCalledWith(expect.objectContaining({ id: "api-1", status: "running" }));
+  });
+
   it("continues restore when prompt readiness times out but the agent process is live", async () => {
     const sessions = createSessionStore();
     buildAgentRestorePlanMock.mockResolvedValue({

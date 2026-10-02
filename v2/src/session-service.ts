@@ -16087,11 +16087,13 @@ export class SessionService {
         }
       }
     } catch (error) {
-      // Drop the warmup set before startMcpSidecars: every exit from here
-      // either killed the pane below or returns an already-live session, so
-      // leaving it would make classifySessionRecord report "working" with
-      // fabricated liveness for the rest of RESTORE_WARMUP_MS. The success
-      // path after this block intentionally keeps its own warmup.
+      // Drop the warmup set before startMcpSidecars: leaving it would make
+      // classifySessionRecord report "working" with fabricated liveness for
+      // the rest of RESTORE_WARMUP_MS. The success path after this block
+      // intentionally keeps its own warmup. Three exits follow: recovered
+      // (live process proven, returns a running session), kill-and-throw
+      // (pane killed), and ambiguous (probe unresponsive: pane left alive,
+      // status untouched, stale error cleared, throws).
       this.restoreWarmupUntil.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         const { error: _ignoredError, ...recoveredBase } = current;
@@ -16146,7 +16148,17 @@ export class SessionService {
       }
       // An unresponsive liveness read is not evidence of death: killing here
       // would destroy a live agent whose tmux server was merely slow (#904).
-      if (!isAmbiguousSubmitAckTimeout(error)) {
+      if (isAmbiguousSubmitAckTimeout(error)) {
+        // The error describes the prior dead agent; the pane was just
+        // relaunched. Left in place it blocks reconcileStaleStoppedSession
+        // (hasSessionErrorEvidence) behind a live agent. Liveness is not
+        // proven, so no status is written.
+        if (current.error !== undefined) {
+          const { error: _staleError, ...withoutError } = current;
+          writeSession(this.config.dataDir, withoutError);
+          this.stateCache.delete(sessionId);
+        }
+      } else {
         await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: false });
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -18776,6 +18788,7 @@ export class SessionService {
         processAlive: runtime.processAlive,
       },
     });
+    this.scheduleHealedSidecarRestart(updated);
     return updated;
   }
 
