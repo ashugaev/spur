@@ -137,7 +137,9 @@ export class SessionLifecycleConsumer {
     return this.acceptUpdate(row);
   }
 
-  acceptUpdate(row: SpurSessionView): SpurSessionView | null {
+  acceptUpdate(row: SpurSessionView, read?: LifecycleRead): SpurSessionView | null {
+    if (read && (read.generation !== this.generation || read.sequence < this.acceptedSequence))
+      return null;
     const snapshot = readLifecycleSnapshot(row.lifecycle);
     if (
       !snapshot ||
@@ -145,7 +147,7 @@ export class SessionLifecycleConsumer {
       (snapshot.operation && !snapshot.operation.targetIds.includes(row.id))
     )
       return null;
-    this.acceptedSequence = ++this.sequence;
+    this.acceptedSequence = read?.sequence ?? ++this.sequence;
     return this.acceptRow(row);
   }
 
