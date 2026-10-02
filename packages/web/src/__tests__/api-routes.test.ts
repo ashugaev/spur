@@ -323,6 +323,19 @@ describe("Spur web API routes", () => {
     await expect(response.json()).resolves.toEqual(payload);
   });
 
+  it.each([completeSession, restoreSession, reopenSession])(
+    "rejects malformed lifecycle request objects before forwarding",
+    async (route) => {
+      for (const body of ["{", "null", "[]"]) {
+        const response = await route(new NextRequest("http://localhost/api/sessions/api-a1/action", {
+          method: "POST", body,
+        }), { params: Promise.resolve({ id: "api-a1" }) });
+        expect(response.status).toBe(400);
+      }
+      expect(mockedSpurRequest).not.toHaveBeenCalled();
+    },
+  );
+
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
     mockedSpurRequest.mockResolvedValue(
       new Response(JSON.stringify(sessionFixture({ id: "my/session 1" })), {
