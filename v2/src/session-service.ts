@@ -3064,6 +3064,8 @@ export class SessionService {
   private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
   private hostDiskProbeInflight?: Promise<void>;
   private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  private dashboardRefreshSequence = 0;
+  private readonly dashboardRefreshVersions = new Map<string, number>();
   // Records the exact record object last handed to enrichDashboard for each
   // id. Since listSessions() now returns the SAME object for an unchanged
   // file (see metadata.ts), object-identity inequality against this map is an
@@ -6141,6 +6143,9 @@ export class SessionService {
       return;
     }
     this.dashboardLoopRunning = true;
+    const refreshSequence = this.dashboardRefreshSequence;
+    const refreshedDuringTick = (id: string) =>
+      (this.dashboardRefreshVersions.get(id) ?? 0) > refreshSequence;
     try {
       const sessions = listSessions(this.config.dataDir).filter((session) => {
         if (session.status === "completed") {
@@ -6226,7 +6231,7 @@ export class SessionService {
 
       const enriched = await Promise.all(due.map((session) => this.enrichDashboard(session)));
       for (const view of enriched) {
-        this.dashboardCache.set(view.id, view);
+        if (!refreshedDuringTick(view.id)) this.dashboardCache.set(view.id, view);
       }
       // Store the pre-enrich listSessions reference, NOT the classified
       // session enrichDashboard derived. This map is only ever compared by
@@ -6237,7 +6242,7 @@ export class SessionService {
       // the parse cache's inode check on the next listSessions, not from
       // anything stored here.
       for (const session of due) {
-        this.dashboardEnrichedRecords.set(session.id, session);
+        if (!refreshedDuringTick(session.id)) this.dashboardEnrichedRecords.set(session.id, session);
       }
       this.dashboardIdleCursor = nextDashboardIdleCursor;
 
@@ -6245,7 +6250,7 @@ export class SessionService {
       // subset, so an idle entry that was seeded once and then never due
       // again is not evicted just because this tick skipped it.
       for (const id of this.dashboardCache.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.dashboardCache.delete(id);
         }
       }
@@ -6258,14 +6263,17 @@ export class SessionService {
       // its entry the tick after it goes terminal, forcing a fresh
       // YAML parse (and a re-logged parse failure) on every idle revisit.
       for (const id of this.sessionProjectCache.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.sessionProjectCache.delete(id);
         }
       }
       for (const id of this.dashboardEnrichedRecords.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.dashboardEnrichedRecords.delete(id);
         }
+      }
+      for (const id of this.dashboardRefreshVersions.keys()) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) this.dashboardRefreshVersions.delete(id);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -6668,6 +6676,8 @@ export class SessionService {
   }
 
   private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {
+    const version = ++this.dashboardRefreshSequence;
+    this.dashboardRefreshVersions.set(record.id, version);
     try {
       const included =
         record.status === "completed"
@@ -6677,7 +6687,10 @@ export class SessionService {
         this.dashboardCache.delete(record.id);
         return;
       }
-      this.dashboardCache.set(record.id, await this.enrichDashboard(record));
+      const view = await this.enrichDashboard(record);
+      if (this.dashboardRefreshVersions.get(record.id) === version) {
+        this.dashboardCache.set(record.id, view);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.dashboard_cache.refresh_failed", {

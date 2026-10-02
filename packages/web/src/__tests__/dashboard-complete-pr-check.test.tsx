@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render as rtlRender,
   screen,
@@ -7,9 +8,9 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
-import type { SpurSessionLink } from "@/lib/types";
+import type { SpurSessionLink, SpurSessionsResponse, SpurSessionView } from "@/lib/types";
 
 const useSessionLinkPrInfoMock = vi.fn();
 
@@ -34,7 +35,7 @@ function render(ui: ReactElement, options?: RenderOptions) {
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
-  return rtlRender(ui, { wrapper: Wrapper, ...options });
+  return { ...rtlRender(ui, { wrapper: Wrapper, ...options }), client };
 }
 
 const sessionsResponse = {
@@ -73,6 +74,14 @@ const prCheckUnavailablePayload = {
   rateLimited: false,
   pr: { number: 3938, repo: "other/web", url: "https://github.com/other/web/pull/3938" },
 };
+
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 function mockFetch(completeBodies: unknown[], options?: { skipAlsoFails?: true }) {
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
@@ -157,6 +166,7 @@ async function clickDone() {
 }
 
 describe("Dashboard complete with an unavailable PR check", () => {
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     vi.restoreAllMocks();
     window.localStorage.clear();
@@ -281,5 +291,199 @@ describe("Dashboard complete with an unavailable PR check", () => {
       ).not.toBeInTheDocument(),
     );
     expect(screen.queryByRole("dialog", { name: "Open Pull Request" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Dashboard lifecycle reconciliation", () => {
+  const source: SpurSessionView = sessionsResponse.sessions[0];
+  let list: SpurSessionsResponse;
+  let current: Map<string, SpurSessionView>;
+  let nextList: ReturnType<typeof deferredResponse> | undefined;
+  let post: ReturnType<typeof deferredResponse>;
+  let posts: string[];
+  let detailFailure: boolean;
+  let otherPost: ReturnType<typeof deferredResponse>;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "merged", ciStatus: "success" });
+    list = { ...sessionsResponse, sessions: [source] };
+    current = new Map([[source.id, source]]);
+    nextList = undefined;
+    post = deferredResponse();
+    otherPost = deferredResponse();
+    posts = [];
+    detailFailure = false;
+    vi.spyOn(global, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }));
+      if (url === "/api/sessions") {
+        if (nextList) {
+          const held = nextList;
+          nextList = undefined;
+          return held.promise;
+        }
+        return json(list);
+      }
+      if (url === "/api/tags") return json({ tags: [] });
+      if (url.startsWith("/api/runtime/")) return json({ available: false });
+      if (url.endsWith("/complete") || url.endsWith("/restore")) {
+        posts.push(url);
+        return url.includes("api-other") ? otherPost.promise : post.promise;
+      }
+      const session = current.get(url.replace("/api/sessions/", ""));
+      if (session) return json(detailFailure ? { error: "detail failed" } : session, detailFailure ? 500 : 200);
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  async function refetch(client: QueryClient) {
+    await act(async () => { await client.refetchQueries({ queryKey: ["sessions"] }); });
+  }
+  const doneButton = () => screen.queryByRole("button", { name: `Mark ${source.id} as done` });
+  const restoreButton = () => screen.queryByRole("button", { name: `Restore session ${source.id}` });
+
+  it.each(["complete", "restore"] as const)("protects pending %s through three scheduled five-second polls", async (action) => {
+    if (action === "restore") useSessionLinkPrInfoMock.mockReturnValue({ state: null });
+    vi.useFakeTimers();
+    render(<Dashboard />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const button = screen.getByRole("button", { name: action === "complete" ? `Mark ${source.id} as done` : `Restore session ${source.id}` });
+    fireEvent.click(button);
+    for (let index = 0; index < 3; index += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(action === "complete" ? doneButton() : restoreButton()).not.toBeInTheDocument();
+    }
+    const fetchMock = vi.mocked(global.fetch);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/sessions").length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("holds complete intent across matching, absent and old polls until POST and fresh confirmation", async () => {
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    for (const sessions of [[{ ...source, status: "completed" as const }], [], [source], [source]]) {
+      list = { ...list, sessions };
+      await refetch(client);
+      expect(doneButton()).not.toBeInTheDocument();
+    }
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [source.id] }))); });
+    await refetch(client);
+    expect(doneButton()).not.toBeInTheDocument();
+    list = { ...list, sessions: [] };
+    await refetch(client);
+    list = { ...list, sessions: [source] };
+    await refetch(client);
+    expect(doneButton()).toBeInTheDocument();
+  });
+
+  it("retains omitted restores and uses returned Waiting before accepting a current stop", async () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: null });
+    const { client } = render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: `Restore session ${source.id}` }));
+    for (const sessions of [[source], [source], [], [source]]) {
+      list = { ...list, sessions };
+      await refetch(client);
+      expect(restoreButton()).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: `Open web terminal for ${source.id}` })).toBeInTheDocument();
+    }
+    const waiting: SpurSessionView = { ...source, status: "running", state: "waiting", runtimeAlive: true };
+    current.set(source.id, waiting);
+    const held = deferredResponse();
+    nextList = held;
+    await act(async () => { post.resolve(new Response(JSON.stringify(waiting))); });
+    await waitFor(() => expect(screen.getByText("Waiting")).toBeInTheDocument());
+    held.resolve(new Response(JSON.stringify(list)));
+    await waitFor(() => expect(restoreButton()).not.toBeInTheDocument());
+    current.set(source.id, source);
+    await refetch(client);
+    expect(restoreButton()).toBeInTheDocument();
+  });
+
+  it.each(["complete", "restore"] as const)("fences a GET begun before %s settlement", async (action) => {
+    if (action === "restore") useSessionLinkPrInfoMock.mockReturnValue({ state: null });
+    const { client } = render(<Dashboard />);
+    const button = await screen.findByRole("button", { name: action === "complete" ? `Mark ${source.id} as done` : `Restore session ${source.id}` });
+    fireEvent.click(button);
+    const stale = deferredResponse();
+    nextList = stale;
+    let pending!: Promise<void>;
+    act(() => { pending = client.refetchQueries({ queryKey: ["sessions"] }); });
+    const outcome: SpurSessionView = { ...source, status: action === "complete" ? "completed" : "running", state: action === "complete" ? "stopped" : "waiting", runtimeAlive: action === "restore" };
+    list = { ...list, sessions: [outcome] };
+    current.set(source.id, outcome);
+    await act(async () => { post.resolve(new Response(JSON.stringify(action === "complete" ? { completedIds: [source.id] } : outcome))); });
+    await refetch(client);
+    await act(async () => { stale.resolve(new Response(JSON.stringify(sessionsResponse))); await pending; });
+    expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions[0]?.status).toBe(outcome.status);
+  });
+
+  it("releases empty completion results and reconciles partial desk failures without reverting other rows", async () => {
+    const child: SpurSessionView = { ...source, id: "api-child", parentSessionId: source.id };
+    list = { ...list, sessions: [source, child] };
+    current.set(child.id, child);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    const addition: SpurSessionView = { ...source, id: "api-new", worktreePath: "/tmp/new", slots: { ...source.slots, title: "New row" } };
+    list = { ...list, sessions: [source, child, addition] };
+    await refetch(client);
+    current.set(source.id, { ...source, status: "completed" });
+    await act(async () => { post.resolve(new Response(JSON.stringify({ error: "partial failure" }), { status: 500 })); });
+    await waitFor(() => expect(screen.getByText("partial failure")).toBeInTheDocument());
+    expect(doneButton()).not.toBeInTheDocument();
+    expect(screen.getByText("New row")).toBeInTheDocument();
+    expect(client.getQueryData<SpurSessionsResponse>(["sessions"])?.sessions.find((row) => row.id === child.id)?.status).toBe("stopped");
+    post = deferredResponse();
+    fireEvent.click(await screen.findByRole("button", { name: `Mark ${child.id} as done` }));
+    await act(async () => { post.resolve(new Response(JSON.stringify({ completedIds: [] }))); });
+    await waitFor(() => expect(screen.getByRole("button", { name: `Mark ${child.id} as done` })).toBeInTheDocument());
+  });
+
+  it("rejects repeated attempts and releases failed reconciliation for retry", async () => {
+    const { client } = render(<Dashboard />);
+    const button = await screen.findByRole("button", { name: `Mark ${source.id} as done` });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    detailFailure = true;
+    await act(async () => { post.resolve(new Response(JSON.stringify({ error: "failed" }), { status: 500 })); });
+    await waitFor(() => expect(doneButton()).toBeInTheDocument());
+    expect(screen.getByText("detail failed")).toBeInTheDocument();
+    detailFailure = false;
+    post = deferredResponse();
+    await clickDone();
+    await waitFor(() => expect(posts).toHaveLength(2));
+    await refetch(client);
+    expect(doneButton()).not.toBeInTheDocument();
+  });
+
+  it("preserves a disjoint pending operation when another fails after unrelated polling updates", async () => {
+    const other: SpurSessionView = { ...source, id: "api-other", worktreePath: "/tmp/other", slots: { ...source.slots, title: "Other desk" } };
+    list = { ...list, sessions: [source, other] };
+    current.set(other.id, other);
+    const { client } = render(<Dashboard />);
+    await clickDone();
+    fireEvent.click(screen.getByRole("button", { name: `Mark ${other.id} as done` }));
+    const added: SpurSessionView = { ...source, id: "api-added", worktreePath: "/tmp/added", slots: { ...source.slots, title: "Added desk" } };
+    list = { ...list, sessions: [source, other, added] };
+    await refetch(client);
+    await act(async () => { post.resolve(new Response(JSON.stringify({ error: "first failed" }), { status: 500 })); });
+    await waitFor(() => expect(doneButton()).toBeInTheDocument());
+    expect(screen.getByText("Added desk")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Mark ${other.id} as done` })).not.toBeInTheDocument();
+    await refetch(client);
+    expect(screen.queryByRole("button", { name: `Mark ${other.id} as done` })).not.toBeInTheDocument();
+  });
+
+  it("accepts a current stopped detail immediately after a successful restore", async () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: null });
+    render(<Dashboard />);
+    fireEvent.click(await screen.findByRole("button", { name: `Restore session ${source.id}` }));
+    const waiting: SpurSessionView = { ...source, status: "running", state: "waiting", runtimeAlive: true };
+    await act(async () => { post.resolve(new Response(JSON.stringify(waiting))); });
+    await waitFor(() => expect(restoreButton()).toBeInTheDocument());
   });
 });

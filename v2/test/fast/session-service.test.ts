@@ -40342,6 +40342,42 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("keeps mutation refreshes and new entries when an older tick finishes", async () => {
+      const sessions = seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.list({ view: "dashboard" });
+      const internals = service as unknown as SessionServiceInternals & {
+        runDashboardCacheTick(): Promise<void>;
+        refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+      };
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const enrich = vi.spyOn(internals, "enrichDashboard");
+      enrich.mockImplementationOnce(async (record) => {
+        await blocked;
+        return { id: record.id, model: "old" };
+      });
+      const tick = internals.runDashboardCacheTick();
+      const original = sessions.get("api-1")!;
+      const completed: SessionRecord = { ...original, status: "completed" };
+      const added: SessionRecord = { ...original, id: "api-new", status: "completed" };
+      sessions.set(completed.id, completed);
+      sessions.set(added.id, added);
+      enrich.mockImplementation(async (record) => ({ id: record.id, model: "current" }));
+      await internals.refreshDashboardCacheEntry(completed);
+      await internals.refreshDashboardCacheEntry(added);
+      release();
+      await tick;
+      const listed = await service.list({ view: "dashboard", includeCompleted: true });
+      expect(listed.map((view) => [view.id, view.model])).toEqual([
+        ["api-1", "current"], ["api-new", "current"],
+      ]);
+      await internals.runDashboardCacheTick();
+      expect((await service.list({ view: "dashboard", includeCompleted: true })).map((view) => view.model)).toEqual(["current", "current"]);
+      service.dispose();
+    });
+
     it("re-entrancy guard prevents overlapping ticks", async () => {
       seedDashboardSessions(1);
       const { SessionService } = await loadSessionServiceModule();

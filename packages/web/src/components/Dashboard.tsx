@@ -246,6 +246,68 @@ function completedIdsFromResponse(value: unknown): string[] {
   return completedIds.filter((id): id is string => typeof id === "string");
 }
 
+type DashboardLifecycleTransition = {
+  owner: symbol;
+  phase: "pending" | "settled";
+  action: "complete" | "restore";
+  session: SpurSessionView;
+};
+
+function applyDashboardLifecycleTransitions(
+  sessions: readonly SpurSessionView[],
+  transitions: ReadonlyMap<string, DashboardLifecycleTransition>,
+): SpurSessionView[] {
+  if (transitions.size === 0) return [...sessions];
+  const rows = [...sessions];
+  for (const [id, transition] of transitions) {
+    if (transition.action === "restore" && !rows.some((session) => session.id === id)) {
+      rows.push(transition.session);
+    }
+  }
+  return rows.map((session) => {
+    const transition = transitions.get(session.id);
+    if (!transition) return session;
+    if (transition.action === "complete") {
+      return {
+        ...session,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+      };
+    }
+    return {
+      ...session,
+      status: transition.session.status,
+      state: transition.session.state,
+      runtimeAlive: transition.session.runtimeAlive,
+      tmuxSession: transition.session.tmuxSession,
+    };
+  });
+}
+
+function hasConfirmedTransition(
+  session: SpurSessionView | undefined,
+  transition: DashboardLifecycleTransition,
+): boolean {
+  if (transition.action === "complete") {
+    return !session || session.status === "completed" || session.status === "killed";
+  }
+  if (!session) return false;
+  return (
+    session.status === "running" ||
+    session.status === "spawning" ||
+    session.status === "errored" ||
+    session.runtimeAlive ||
+    session.state === "working" ||
+    session.state === "waiting" ||
+    session.state === "needs_input" ||
+    session.state === "rate_limited" ||
+    session.state === "stale" ||
+    session.state === "error"
+  );
+}
+
 function BacklogZone({
   items,
   projectNameMap,
@@ -1231,6 +1293,16 @@ export function Dashboard() {
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
+  const transitionsRef = useRef(new Map<string, DashboardLifecycleTransition>());
+  const [lifecycleTransitions, setLifecycleTransitions] = useState<
+    ReadonlyMap<string, DashboardLifecycleTransition>
+  >(() => new Map());
+  const publishTransitions = () => setLifecycleTransitions(new Map(transitionsRef.current));
+  const readCurrentSession = async (id: string): Promise<SpurSessionView> => {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+    if (!response.ok) throw new Error(await readApiErrorMessage(response, "Failed to reconcile Spur session"));
+    return (await response.json()) as SpurSessionView;
+  };
   const {
     data,
     isPending,
@@ -1240,13 +1312,38 @@ export function Dashboard() {
     queryFn: async ({ signal }) => {
       const response = await fetch("/api/sessions", { signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
-      return (await response.json()) as SpurSessionsResponse;
+      const result = (await response.json()) as SpurSessionsResponse;
+      for (const [id, transition] of transitionsRef.current) {
+        if (signal.aborted) break;
+        if (transition.phase === "pending") continue;
+        const current = result.sessions.find((session) => session.id === id);
+        if (!hasConfirmedTransition(current, transition)) {
+          if (transition.action === "complete") continue;
+          try {
+            const resolved = await readCurrentSession(id);
+            if (signal.aborted || transitionsRef.current.get(id) !== transition) continue;
+            result.sessions = [...result.sessions.filter((session) => session.id !== id), resolved];
+          } catch (error) {
+            if (signal.aborted) continue;
+            showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+          }
+        }
+        if (!signal.aborted && transitionsRef.current.get(id) === transition) {
+          transitionsRef.current.delete(id);
+        }
+      }
+      if (!signal.aborted) publishTransitions();
+      return result;
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
     refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
+  const effectiveRawSessions = useMemo(
+    () => applyDashboardLifecycleTransitions(rawSessions, lifecycleTransitions),
+    [lifecycleTransitions, rawSessions],
+  );
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
   // Single shared catalog source (react-query key ["tag-catalog"]) so the
@@ -1307,16 +1404,16 @@ export function Dashboard() {
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const projectNameMap = useMemo(
-    () => buildSessionProjectLabelMap(projects, rawSessions),
-    [projects, rawSessions],
+    () => buildSessionProjectLabelMap(projects, effectiveRawSessions),
+    [effectiveRawSessions, projects],
   );
 
   const allSessions = useMemo(
     () =>
-      rawSessions.map((session) =>
+      effectiveRawSessions.map((session) =>
         toDashboardSession(session, projectNameMap.get(session.project)),
       ),
-    [projectNameMap, rawSessions],
+    [effectiveRawSessions, projectNameMap],
   );
 
   const projectSessions = useMemo(
@@ -2122,26 +2219,56 @@ export function Dashboard() {
     [tagCatalog, handleApplyTags],
   );
 
-  const handleRestoreSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+  const reserveTransitions = (sessions: readonly SpurSessionView[], action: "complete" | "restore") => {
+    if (sessions.some((session) => transitionsRef.current.has(session.id))) return null;
+    const owner = Symbol(action);
+    for (const session of sessions) {
+      transitionsRef.current.set(session.id, {
+        owner, action, phase: "pending",
+        session: action === "restore"
+          ? { ...session, status: "running", state: "working", runtimeAlive: true }
+          : session,
+      });
+    }
+    publishTransitions();
+    return owner;
+  };
 
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "running",
-                state: "working",
-                runtimeAlive: true,
-              }
-            : currentSession,
-        ),
-      };
-    });
+  const reconcileAttempt = async (owner: symbol, ids: Iterable<string>) => {
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+    await Promise.all([...ids].map(async (id) => {
+      const transition = transitionsRef.current.get(id);
+      if (transition?.owner !== owner) return;
+      let reconciled: SpurSessionView | undefined;
+      try {
+        const current = await readCurrentSession(id);
+        if (transitionsRef.current.get(id)?.owner !== owner) return;
+        reconciled = current;
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (data) => data && ({
+          ...data,
+          sessions: [...data.sessions.filter((session) => session.id !== id), current],
+        }));
+      } catch (error) {
+        showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+      } finally {
+        if (transitionsRef.current.get(id)?.owner === owner) {
+          if (reconciled && (reconciled.status === "completed" || reconciled.status === "killed")) {
+            transitionsRef.current.set(id, { ...transition, action: "complete", phase: "settled", session: reconciled });
+          } else {
+            transitionsRef.current.delete(id);
+          }
+        }
+      }
+    }));
+    publishTransitions();
+  };
+
+  const handleRestoreSession = async (session: DashboardSession) => {
+    const source = rawSessions.find((candidate) => candidate.id === session.id);
+    if (!source) return;
+    const owner = reserveTransitions([source], "restore");
+    if (!owner) return;
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
 
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
@@ -2150,10 +2277,15 @@ export function Dashboard() {
       if (!response.ok) {
         throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
       }
-    } catch (restoreError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
+      const restored = (await response.json()) as SpurSessionView;
+      await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+      const transition = transitionsRef.current.get(session.id);
+      if (transition?.owner === owner) {
+        transitionsRef.current.set(session.id, { ...transition, phase: "settled", session: restored });
+        publishTransitions();
       }
+    } catch (restoreError) {
+      await reconcileAttempt(owner, [session.id]);
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
@@ -2170,7 +2302,10 @@ export function Dashboard() {
     },
   ): Promise<boolean> => {
     const prAction = options?.prAction;
-    const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
+    const activeDeskSessions = sameDeskActiveSessions(
+      rawSessions.map((row) => toDashboardSession(row, projectNameMap.get(row.project))), session,
+    );
+    if (transitionsRef.current.has(session.id) || activeDeskSessions.some((candidate) => transitionsRef.current.has(candidate.id))) return false;
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
     ).length;
@@ -2184,26 +2319,9 @@ export function Dashboard() {
       if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
+    const owner = reserveTransitions(rawSessions.filter((row) => activeDeskIds.has(row.id)), "complete");
+    if (!owner) return false;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          activeDeskIds.has(currentSession.id)
-            ? {
-                ...currentSession,
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              }
-            : currentSession,
-        ),
-      };
-    });
 
     try {
       const body = {
@@ -2219,18 +2337,14 @@ export function Dashboard() {
       const payload = await readResponsePayload(response);
       if (!response.ok) {
         if (isOpenPrActionRequiredPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner, activeDeskIds);
           // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
           return false;
         }
         if (isGithubPrCheckUnavailablePayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner, activeDeskIds);
           // The two PR dialogs are alternatives for one complete attempt. Leaving
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
@@ -2241,31 +2355,16 @@ export function Dashboard() {
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
       const completedIds = completedIdsFromResponse(payload);
-      if (completedIds.length > 0) {
-        const completedIdSet = new Set(completedIds);
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-          if (!current) return current;
-          return {
-            ...current,
-            sessions: current.sessions.map((currentSession) =>
-              completedIdSet.has(currentSession.id)
-                ? {
-                    ...currentSession,
-                    status: "completed",
-                    state: "stopped",
-                    runtimeAlive: false,
-                    tmuxSession: null,
-                  }
-                : currentSession,
-            ),
-          };
-        });
+      await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+      for (const id of completedIds) {
+        const transition = transitionsRef.current.get(id);
+        if (transition?.owner === owner) transitionsRef.current.set(id, { ...transition, phase: "settled" });
       }
+      publishTransitions();
+      await reconcileAttempt(owner, [...activeDeskIds].filter((id) => !completedIds.includes(id)));
       return true;
     } catch (completeError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
+      await reconcileAttempt(owner, activeDeskIds);
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {

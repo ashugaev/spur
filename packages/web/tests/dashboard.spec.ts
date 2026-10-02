@@ -27,6 +27,105 @@ import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
 
+test.describe("Lifecycle reconciliation", () => {
+  test("complete stays hidden across three polls and stale settlement data", async ({ page }, testInfo) => {
+    const session = makeSessionWithPR({ id: "lifecycle-complete", prompt: "Lifecycle complete", slots: { title: "Lifecycle complete", links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }] } });
+    let rows = [session];
+    let polls = 0;
+    await mockSessions(page, () => { polls += 1; return rows; });
+    await mockPrState(page, "merged");
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      await held;
+      await route.fulfill({ json: { completedIds: [session.id] } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${session.id} as done` });
+    await done.click();
+    const before = polls;
+    for (let index = 0; index < 3; index += 1) {
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(done).toHaveCount(0);
+    }
+    expect(polls).toBeGreaterThanOrEqual(before + 3);
+    await page.screenshot({ path: testInfo.outputPath("complete-pending.png") });
+    release();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false }];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("complete-success.png") });
+  });
+
+  test("restore stays Working through omitted polls then follows returned Waiting and a later stop", async ({ page }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-restore", prompt: "Lifecycle restore" });
+    const waiting = makeWaitingSession({ ...stopped, status: "running", state: "waiting", runtimeAlive: true });
+    let rows = [stopped];
+    let current = waiting;
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: current }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      await held;
+      await route.fulfill({ json: waiting });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    for (let index = 0; index < 3; index += 1) {
+      rows = index === 1 ? [] : [stopped];
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(restore).toHaveCount(0);
+      await expect(page.getByRole("button", { name: `Open web terminal for ${stopped.id}` })).toBeVisible();
+    }
+    await page.screenshot({ path: testInfo.outputPath("restore-pending.png") });
+    release();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    rows = [waiting];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await page.screenshot({ path: testInfo.outputPath("restore-waiting.png") });
+    rows = [stopped];
+    current = stopped;
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toBeVisible();
+  });
+
+  test("failure preserves a row added by polling and permits retry", async ({ page }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-failure", prompt: "Lifecycle failure" });
+    const added = makeWorkingSession({ id: "lifecycle-added", prompt: "Added during restore", worktreePath: "/tmp/added" });
+    let rows = [stopped];
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: stopped }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      calls += 1;
+      if (calls === 1) await held;
+      await route.fulfill({ status: 500, json: { error: "Restore failed" } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    rows = [stopped, added];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    release();
+    await expect(restore).toBeVisible();
+    await expect(page.getByText("Restore failed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("restore-failure.png") });
+    await restore.click();
+    await expect.poll(() => calls).toBe(2);
+  });
+});
+
 test("loads local JetBrains Mono faces in both dashboard themes", async ({ page }, testInfo) => {
   const fontResponses: Array<{ url: string; status: number }> = [];
   const failedFonts: string[] = [];
@@ -1277,7 +1376,7 @@ test.describe("D4: Terminal button state", () => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "{}",
+        body: JSON.stringify(restored),
       });
     });
     await page.goto("/");
