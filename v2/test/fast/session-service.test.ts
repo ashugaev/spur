@@ -35,6 +35,7 @@ import type * as claudeModule from "../../src/agents/claude.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
+import type * as sessionPrModule from "../../src/session-pr.js";
 import type * as releasesCacheModule from "../../src/releases-cache.js";
 import type * as sessionMemoryModule from "../../src/session-memory.js";
 import type * as sharedMemoryModule from "../../src/shared-memory.js";
@@ -530,11 +531,15 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
 });
 
 const PINNED_CLAUDE_SESSION_ID = "00000000-0000-4000-8000-000000000000";
+let nextUuid = 1;
+function fixtureUuid(): ReturnType<typeof randomUUID> {
+  return `00000000-0000-4000-8000-${String(nextUuid++).padStart(12, "0")}`;
+}
 vi.mock("node:crypto", async (importOriginal) => {
   const actual = await importOriginal<typeof cryptoModule>();
   return {
     ...actual,
-    randomUUID: vi.fn(() => PINNED_CLAUDE_SESSION_ID),
+    randomUUID: vi.fn(fixtureUuid),
   };
 });
 
@@ -1051,10 +1056,11 @@ function sessionRecord(
   };
 }
 
-function createSessionStore(initial?: SessionRecord) {
-  const previousList = initial ? listSessionsMock.getMockImplementation() : undefined;
+let normalizeSessionPrBinding: typeof sessionPrModule.normalizeSessionPrBinding;
+
+function createSessionStore(...initial: SessionRecord[]) {
   const sessions = new Map<string, SessionRecord>();
-  if (initial) sessions.set(initial.id, clone(initial));
+  for (const record of initial) sessions.set(record.id, normalizeSessionPrBinding(clone(record)));
   // listSessionsMock mirrors metadata.ts' real stat-gated parse cache: an
   // unchanged record returns the SAME object on every call, a changed one
   // gets a fresh clone. Without this, every session would look changed on
@@ -1070,24 +1076,23 @@ function createSessionStore(initial?: SessionRecord) {
     // ownerExists: owner !== null in collectSidecarReapCandidates
     // untestable: undefined !== null is true, so a missing owner would
     // always read as "exists".
-    return session ? clone(session) : null;
+    return session ? normalizeSessionPrBinding(clone(session)) : null;
   });
   writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
-    sessions.set(session.id, clone(session));
+    sessions.set(session.id, normalizeSessionPrBinding(clone(session)));
   });
   listSessionsMock.mockImplementation(() =>
     [...sessions.values()].map((session) => {
-      const json = JSON.stringify(session);
+      const record = normalizeSessionPrBinding(clone(session));
+      const json = JSON.stringify(record);
       const existing = published.get(session.id);
       if (existing && existing.json === json) {
         return existing.record;
       }
-      const record = clone(session);
       published.set(session.id, { json, record });
       return record;
     }),
   );
-  if (previousList) listSessionsMock.mockImplementation(previousList);
   return sessions;
 }
 
@@ -1448,10 +1453,6 @@ async function useRealTodoLedger(): Promise<void> {
   const mocked = await import("../../src/todo.js");
   const actual = await vi.importActual<typeof todoModule>("../../src/todo.js");
   vi.mocked(mocked.ensureTodoLedger).mockImplementation(actual.ensureTodoLedger);
-  let nextUuid = 1;
-  vi.mocked(randomUUID).mockImplementation(
-    () => `00000000-0000-4000-8000-${String(nextUuid++).padStart(12, "0")}`,
-  );
 }
 
 describe("SessionService", () => {
@@ -1462,7 +1463,9 @@ describe("SessionService", () => {
     // launch-command assertions. Same reason agents-claude.test.ts clears it.
     delete process.env["SPUR_CLAUDE_BIN"];
     TEST_DATA_DIR = mkdtempSync(join(tmpdir(), "spur-session-service-"));
-    vi.mocked(randomUUID).mockReset().mockReturnValue(PINNED_CLAUDE_SESSION_ID);
+    nextUuid = 1;
+    vi.mocked(randomUUID).mockReset().mockImplementation(fixtureUuid);
+    ({ normalizeSessionPrBinding } = await import("../../src/session-pr.js"));
     const todo = await import("../../src/todo.js");
     vi.mocked(todo.ensureTodoLedger)
       .mockReset()
@@ -2163,6 +2166,7 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
     const result = await service.spawn({
       project: "api",
@@ -6212,6 +6216,7 @@ describe("SessionService", () => {
   it("passes planMode to launch planning and persists it on the session", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
     const result = await service.spawn({
       project: "api",
@@ -6252,6 +6257,7 @@ describe("SessionService", () => {
   it("passes restrictWrites to launch planning, persists it, and keeps steps", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
     const result = await service.spawn({
       project: "api",
@@ -6709,6 +6715,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     createSessionStore();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
     const result = await service.spawn({
       project: "api",
@@ -15997,6 +16004,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(32_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "please continue", {
         agent: "codex",
+        interrupt: false,
       });
       expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
@@ -17378,7 +17386,7 @@ describe("SessionService", () => {
 
     it("restore() over cap throws and does not set restoreWarmupUntil or start MCP sidecars", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
-      readSessionMock.mockReturnValue({
+      const sessions = createSessionStore({
         id: "api-1",
         project: "api",
         agent: "claude",
@@ -17397,7 +17405,7 @@ describe("SessionService", () => {
       // gate: not-alive, so isRestorableSession passes and the denial below
       // is provably the admission gate, not "not restorable".
       tmuxSessionExistsMock.mockResolvedValueOnce(false);
-      listSessionsMock.mockReturnValue([sessionRecord({ id: "api-existing" })]);
+      sessions.set("api-existing", sessionRecord({ id: "api-existing" }));
 
       const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
       const service = new SessionService(
@@ -17424,7 +17432,7 @@ describe("SessionService", () => {
         swapTotalBytes: 0,
         swapFreeBytes: 0,
       });
-      readSessionMock.mockReturnValue(
+      createSessionStore(
         sessionRecord({ id: "api-1", status: "stopped", stopReason: "manual_pause" }),
       );
       tmuxSessionExistsMock.mockResolvedValueOnce(false);
@@ -17574,7 +17582,7 @@ describe("SessionService", () => {
         SessionAdmissionDeniedError,
       );
 
-      readSessionMock.mockReturnValue({
+      createSessionStore({
         id: "api-1",
         project: "api",
         agent: "claude",
@@ -23713,7 +23721,9 @@ describe("SessionService", () => {
     workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
 
     const result = await service.complete("api-1");
 
@@ -23746,7 +23756,7 @@ describe("SessionService", () => {
   });
 
   it("clears startupAttachmentIds after completing a solo session whose artifacts dir was deleted", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -23826,7 +23836,7 @@ describe("SessionService", () => {
       messageThreadId: 22,
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -23876,7 +23886,7 @@ describe("SessionService", () => {
       messageThreadId: 22,
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -23960,8 +23970,9 @@ describe("SessionService", () => {
       messageThreadId: 22,
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "shp-1",
+      branch: "shp-1",
       project: "spur-shepherd",
       agent: "opencode",
       prompt: "hello",
@@ -24005,8 +24016,9 @@ describe("SessionService", () => {
       messageThreadId: 22,
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "shp-2",
+      branch: "shp-2",
       project: "spur-shepherd",
       agent: "opencode",
       prompt: "hello",
@@ -24043,8 +24055,9 @@ describe("SessionService", () => {
       messageThreadId: 22,
       updatedAt: "2026-03-18T10:02:00.000Z",
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
+      branch: "api-1",
       project: "api",
       agent: "claude",
       prompt: "hello",
@@ -24114,7 +24127,7 @@ describe("SessionService", () => {
 
     const listed = await service.list();
 
-    expect(listSessionsMock).toHaveBeenCalledOnce();
+    expect(listSessionsMock).toHaveBeenCalledTimes(3);
     expect(listed).toHaveLength(1_000);
     expect(listed.map((session) => session.id)).toEqual(expectedIds);
     expect(listed.find((session) => session.id === "api-1")?.deskGroupMembers).toEqual([
@@ -24340,8 +24353,7 @@ describe("SessionService", () => {
       tmuxSession: "api-2",
       status: "running" as const,
     };
-    createSessionStore(closing);
-    listSessionsMock.mockReturnValue([closing, sibling]);
+    createSessionStore(closing, sibling);
     tmuxSessionExistsMock.mockResolvedValue(false);
     workspaceExistsMock.mockReturnValue(true);
 
@@ -24412,8 +24424,7 @@ describe("SessionService", () => {
       tmuxSession: "api-3",
       status: "killed" as const,
     };
-    createSessionStore(closing);
-    listSessionsMock.mockReturnValue([closing, completedSibling, killedSibling]);
+    createSessionStore(closing, completedSibling, killedSibling);
     tmuxSessionExistsMock.mockResolvedValue(false);
     workspaceExistsMock.mockReturnValue(true);
 
@@ -25111,7 +25122,7 @@ describe("SessionService", () => {
           },
         },
       });
-      readSessionMock.mockReturnValue({
+      createSessionStore({
         id: "api-1",
         project: "api",
         agent: "claude",
@@ -26143,7 +26154,9 @@ describe("SessionService", () => {
     workspaceExistsMock.mockReturnValueOnce(true).mockReturnValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
 
     const result = await service.complete("api-1");
 
@@ -26870,7 +26883,6 @@ describe("SessionService", () => {
 
   it("mints a fresh claude session id when native resume fails during send recovery", async () => {
     const FRESH_CLAUDE_SESSION_ID = "11111111-1111-4111-8111-111111111111";
-    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     buildAgentLaunchPlanMock.mockImplementation(
       (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
         agent,
@@ -26909,6 +26921,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     await service.send("api-1", { message: "resume work" });
 
     // Resume was attempted first...
@@ -26944,7 +26957,6 @@ describe("SessionService", () => {
 
   it("drops the cached claude jsonl reader when fallback recovery mints a fresh id", async () => {
     const FRESH_CLAUDE_SESSION_ID = "22222222-2222-4222-8222-222222222222";
-    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     buildAgentLaunchPlanMock.mockImplementation(
       (agent: string, initialMessage: string, options?: { agentSessionId?: string }) => ({
         agent,
@@ -26992,6 +27004,7 @@ describe("SessionService", () => {
       tailRecords: [],
     });
 
+    vi.mocked(randomUUID).mockReturnValueOnce(FRESH_CLAUDE_SESSION_ID);
     await service.send("api-1", { message: "resume work" });
 
     // The stale reader must not survive the id change: readClaudeJsonlState's
@@ -28224,7 +28237,7 @@ describe("SessionService", () => {
         api: { ...baseConfig().projects.api, sidecars: { playwright: playwrightSidecarEntry } },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -28288,7 +28301,7 @@ describe("SessionService", () => {
         api: { ...baseConfig().projects.api, sidecars: { playwright: playwrightSidecarEntry } },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "cursor",
@@ -32394,7 +32407,7 @@ describe("SessionService", () => {
   it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -32491,7 +32504,11 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false);
 
-    const service = await createDisposedSessionService();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
+    service.dispose();
 
     await expect(service.restore("api-1")).rejects.toThrow(
       "Failed to restore api-1: Agent claude exited before restore became ready",
@@ -32573,7 +32590,7 @@ describe("SessionService", () => {
   });
 
   it("rejects restore when the session is not restorable", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -32605,7 +32622,7 @@ describe("SessionService", () => {
   });
 
   it("offers respawn when restoring an errored session that is not restorable", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -32638,7 +32655,7 @@ describe("SessionService", () => {
   });
 
   it("offers only respawn when restoring a completed session that is not restorable", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -32670,7 +32687,7 @@ describe("SessionService", () => {
   });
 
   it("offers only respawn when restoring a killed session that is not restorable", async () => {
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -33439,7 +33456,7 @@ describe("SessionService", () => {
       initialMessage: "restore prompt",
       readyMarkers: ["❯"],
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -33488,7 +33505,7 @@ describe("SessionService", () => {
       initialMessage: "restore prompt",
       readyMarkers: ["❯"],
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -33746,7 +33763,7 @@ describe("SessionService", () => {
       initialMessage: "restore prompt",
       readyMarkers: ["❯"],
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -38649,7 +38666,7 @@ describe("SessionService", () => {
         },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -39049,6 +39066,7 @@ describe("SessionService", () => {
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
       const result = await service.respawn("api-1");
 
@@ -39476,6 +39494,7 @@ describe("SessionService", () => {
 
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.mocked(randomUUID).mockReturnValueOnce(PINNED_CLAUDE_SESSION_ID);
 
       await service.respawn("api-1", {
         prompt: "edited prompt",
@@ -41575,6 +41594,40 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("Shared memory:");
       expect(initialMessage).toContain("spur memory set|get|list|rm");
       expect((String(initialMessage).match(/Shared memory:/g) ?? []).length).toBe(1);
+    });
+  });
+
+  describe("service fixture contracts", () => {
+    it("publishes normalized seeded rows with stable identity and independent raw reads", () => {
+      const first = runningSession({ slots: { links: [] } });
+      const second = runningSession({ id: "api-2" });
+      const records = createSessionStore(first, second);
+      const initial: SessionRecord[] = listSessionsMock(TEST_DATA_DIR);
+      expect(initial.map((row) => row.id)).toEqual([first.id, second.id]);
+      expect(initial[0]?.slots).toBeUndefined();
+      expect(listSessionsMock(TEST_DATA_DIR)[0]).toBe(initial[0]);
+      const raw = readSessionMock(TEST_DATA_DIR, first.id);
+      expect(raw).toEqual(initial[0]);
+      expect(raw).not.toBe(initial[0]);
+      records.set(first.id, { ...first, prompt: "changed" });
+      const changed = listSessionsMock(TEST_DATA_DIR)[0];
+      expect(changed).not.toBe(initial[0]);
+      expect(changed?.prompt).toBe("changed");
+      expect(initial[0]?.prompt).toBe(first.prompt);
+      writeSessionMock(TEST_DATA_DIR, { ...first, prompt: "written" });
+      expect(readSessionMock(TEST_DATA_DIR, first.id)?.prompt).toBe("written");
+      expect(listSessionsMock(TEST_DATA_DIR)[0]?.prompt).toBe("written");
+      records.delete(first.id);
+      expect(readSessionMock(TEST_DATA_DIR, first.id)).toBeNull();
+      expect(listSessionsMock(TEST_DATA_DIR).map((row: SessionRecord) => row.id)).toEqual([
+        second.id,
+      ]);
+    });
+
+    it("keeps UUID allocations distinct across real ToDo fixture installation", async () => {
+      const before = randomUUID();
+      await useRealTodoLedger();
+      expect(randomUUID()).not.toBe(before);
     });
   });
 
