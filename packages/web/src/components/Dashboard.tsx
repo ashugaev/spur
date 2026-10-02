@@ -1249,6 +1249,7 @@ export function Dashboard() {
     queryFn: async ({ signal }) => {
       const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/sessions", { signal });
+      if (signal.aborted) throw new Error("Session read aborted");
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       const result = (await response.json()) as SpurSessionsResponse;
       if (signal.aborted) throw new Error("Session read aborted");
@@ -2307,6 +2308,7 @@ export function Dashboard() {
         body: JSON.stringify({ operationId: owner.operationId }),
       });
       const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       if (!response.ok) {
         if (
           response.status === 503 &&
@@ -2340,7 +2342,9 @@ export function Dashboard() {
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
@@ -2433,7 +2437,9 @@ export function Dashboard() {
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
