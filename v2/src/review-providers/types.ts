@@ -1,5 +1,18 @@
 import type { ReviewEventData, ReviewProviderId, ReviewSignal, SessionRecord } from "../types.js";
 
+export interface RefreshReviewSignalsInput {
+  hostname: string;
+  repo: string;
+  prNumber: number;
+  signals: ReviewSignal[];
+  cwd: string;
+}
+
+export type ReviewSignalRefreshResult =
+  | { status: "live"; key: string; signal: ReviewSignal }
+  | { status: "deleted"; key: string }
+  | { status: "failed"; key: string; error: string };
+
 export interface ReviewProvider {
   id: ReviewProviderId;
   displayName: string;
@@ -22,4 +35,5 @@ export interface ReviewProvider {
     // cycles must not count this session as a "clean" observation when true.
     ciCheckFetchFailed?: boolean;
   } | null>;
+  refreshSignals?(input: RefreshReviewSignalsInput): Promise<ReviewSignalRefreshResult[]>;
 }

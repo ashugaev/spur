@@ -208,6 +208,23 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const admissionCapRetryAt = value["admissionCapRetryAt"];
+  if (
+    admissionCapRetryAt !== undefined &&
+    (typeof admissionCapRetryAt !== "number" ||
+      !Number.isFinite(admissionCapRetryAt) ||
+      admissionCapRetryAt <= 0)
+  )
+    return false;
+  const admissionCapDenials = value["admissionCapDenials"];
+  if (
+    admissionCapDenials !== undefined &&
+    (typeof admissionCapDenials !== "number" ||
+      !Number.isInteger(admissionCapDenials) ||
+      admissionCapDenials < 1 ||
+      admissionCapDenials >= DELIVERY_MAX_ATTEMPTS)
+  )
+    return false;
   const accounting = value["retryAccounting"];
   if (
     accounting !== undefined &&
@@ -640,6 +657,9 @@ function readPendingSendBatchesFile(path: string): Map<string, PersistedPendingB
     const result = new Map<string, PersistedPendingBatch>();
     for (const record of records) {
       if (!isPersistedPendingBatch(record)) continue;
+      if (record.admissionCapRetryAt !== undefined && record.admissionCapDenials === undefined) {
+        record.admissionCapDenials = 1;
+      }
       result.set(record.queueKey, record);
     }
     return result;

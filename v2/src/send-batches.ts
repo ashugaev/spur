@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { isAutoPingTarget } from "./auto-ping.js";
 import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
 import { reviewProvider } from "./review-providers/index.js";
+import { githubFeedbackIdentity } from "./review-providers/github.js";
+import type { ReviewSignalRefreshResult } from "./review-providers/types.js";
 import type {
   AutoPingDestination,
   AutoPingScope,
@@ -12,6 +14,7 @@ import type {
   ReviewEventData,
   ReviewProviderId,
   ReviewSignal,
+  SessionPrBinding,
   ServiceProblemEventData,
   SourceType,
   TelegramMessageEventData,
@@ -21,8 +24,9 @@ export interface SendBatch {
   readonly sessionId: string;
   /** A person is waiting on this batch: it uses the short send window. */
   readonly interactive: boolean;
-  merge(incoming: SendBatch): void;
+  merge(incoming: SendBatch): { retiredItemPrefix: string } | undefined;
   prune(dataDir: string): void;
+  refresh?(cwd: string, pr?: SessionPrBinding): Promise<ReviewSignalRefreshResult[]>;
   isEmpty(): boolean;
   format(): string;
   formatAutoPingControls(): string;
@@ -41,6 +45,7 @@ export interface SendBatchItem {
   itemKey: string;
   fingerprint: string;
   ciReminder: boolean;
+  refreshComment?: boolean;
   mergeConflict?: { prNumber: number; clearId?: string };
 }
 
@@ -164,6 +169,8 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
   }
 
   readonly sessionId: string;
+  private repo: string | undefined;
+  private prUrl: string | undefined;
   private prNumber: number;
   private prTitle: string;
   private mergeConflictClearId: string | undefined;
@@ -178,6 +185,8 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
   ) {
     super();
     this.sessionId = data.sessionId;
+    this.repo = data.repo;
+    this.prUrl = data.prUrl;
     this.prNumber = data.prNumber;
     this.prTitle = data.prTitle;
     this.mergeConflictClearId = data.mergeConflictClearId;
@@ -201,9 +210,32 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     }
   }
 
-  merge(incoming: SendBatch): void {
+  merge(incoming: SendBatch): { retiredItemPrefix: string } | undefined {
     const next = incoming as ReviewSendBatch;
-    if (this.prNumber !== next.prNumber) this.signals.clear();
+    const currentIdentity = this.knownIdentity();
+    const nextIdentity = next.knownIdentity();
+    const changed =
+      this.prNumber !== next.prNumber ||
+      (currentIdentity.repo !== undefined &&
+        nextIdentity.repo !== undefined &&
+        currentIdentity.repo !== nextIdentity.repo) ||
+      (currentIdentity.hostname !== undefined &&
+        nextIdentity.hostname !== undefined &&
+        currentIdentity.hostname !== nextIdentity.hostname) ||
+      (this.prUrl !== undefined &&
+        next.prUrl !== undefined &&
+        (!currentIdentity.hostname || !nextIdentity.hostname) &&
+        this.prUrl !== next.prUrl);
+    const retiredItemPrefix = changed
+      ? JSON.stringify([this.providerId, this.prNumber]).slice(0, -1) + ","
+      : undefined;
+    if (changed) {
+      this.filterItems(() => false);
+      this.prUrl = next.prUrl;
+      this.repo = next.repo;
+    }
+    this.repo = next.repo ?? this.repo;
+    this.prUrl = next.prUrl ?? this.prUrl;
     this.prNumber = next.prNumber;
     this.prTitle = next.prTitle;
     this.mergeConflictClearId = next.mergeConflictClearId;
@@ -211,6 +243,18 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       this.signals.set(signal.key, signal);
     }
     this.autoPing = mergeAutoPingState(this.autoPing, next.autoPing);
+    if (retiredItemPrefix) return { retiredItemPrefix };
+  }
+
+  private knownIdentity(): { hostname?: string; repo?: string } {
+    if (this.prUrl) {
+      try {
+        return githubFeedbackIdentity(this.prUrl, this.prNumber, this.repo);
+      } catch {
+        // Invalid URLs remain queued for fail-closed resolution, not host inference.
+      }
+    }
+    return this.repo === undefined ? {} : { repo: this.repo.toLowerCase() };
   }
 
   prune(dataDir: string): void {
@@ -228,6 +272,37 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
     this.filterItems((item) => snapshot?.signals.has(item.key) ?? false);
   }
 
+  async refresh(cwd: string, pr?: SessionPrBinding): Promise<ReviewSignalRefreshResult[]> {
+    const signals = [...this.signals.values()].filter((signal) => signal.kind === "comment");
+    const refreshSignals = reviewProvider(this.providerId).refreshSignals;
+    if (!signals.length || !refreshSignals) return [];
+    let results: ReviewSignalRefreshResult[];
+    try {
+      const prUrl = this.prUrl ?? pr?.url;
+      if (!prUrl) throw new Error("Cannot resolve GitHub feedback without its PR URL");
+      if (this.prUrl === undefined && (!pr || pr.number !== this.prNumber)) {
+        throw new Error("GitHub feedback binding does not match its PR");
+      }
+      const identity = githubFeedbackIdentity(prUrl, this.prNumber, this.repo);
+      if (this.prUrl === undefined && pr) githubFeedbackIdentity(prUrl, pr.number, pr.repo);
+      results = await refreshSignals({ ...identity, prNumber: this.prNumber, signals, cwd });
+      this.prUrl = prUrl;
+      this.repo = identity.repo;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      results = signals.map((signal) => ({ status: "failed", key: signal.key, error: message }));
+    }
+    const outcomes = new Map(results.map((result) => [result.key, result]));
+    this.filterItems((item) => {
+      const outcome = outcomes.get(item.key);
+      return !outcome || outcome.status === "live";
+    });
+    for (const result of results) {
+      if (result.status === "live") this.signals.set(result.key, result.signal);
+    }
+    return results;
+  }
+
   isEmpty(): boolean {
     return this.signals.size === 0;
   }
@@ -240,6 +315,8 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       sourceId: this.sourceId,
       ...(this.prompt !== undefined ? { prompt: this.prompt } : {}),
       sessionId: this.sessionId,
+      ...(this.repo !== undefined ? { repo: this.repo } : {}),
+      ...(this.prUrl !== undefined ? { prUrl: this.prUrl } : {}),
       prNumber: this.prNumber,
       prTitle: this.prTitle,
       signals: [...this.signals.values()],
@@ -263,6 +340,9 @@ class ReviewSendBatch extends AutoPingAwareBatch implements SendBatch {
       itemKey: JSON.stringify([this.providerId, this.prNumber, signal.key]),
       fingerprint: semanticFingerprint([signal.kind, signal.text]),
       ciReminder: signal.kind === "ci_failed",
+      ...(this.providerId === "github" && signal.kind === "comment"
+        ? { refreshComment: true }
+        : {}),
       ...(this.providerId === "github" && signal.kind === "merge_conflict"
         ? {
             mergeConflict: {
@@ -374,7 +454,7 @@ class ServiceSendBatch extends AutoPingAwareBatch implements SendBatch {
     this.ruleIds.add(data.ruleId);
   }
 
-  merge(incoming: SendBatch): void {
+  merge(incoming: SendBatch): undefined {
     const next = incoming as ServiceSendBatch;
     for (const ruleId of next.ruleIds) {
       this.ruleIds.add(ruleId);
@@ -464,7 +544,7 @@ class TelegramSendBatch extends AutoPingAwareBatch implements SendBatch {
     this.messages = [data];
   }
 
-  merge(incoming: SendBatch): void {
+  merge(incoming: SendBatch): undefined {
     const next = incoming as TelegramSendBatch;
     for (const message of next.messages) {
       const index = this.messages.findIndex(
@@ -554,6 +634,8 @@ function isReviewEventData(value: unknown): value is ReviewEventData {
   const data = value as Record<string, unknown>;
   return (
     typeof data["sessionId"] === "string" &&
+    (data["repo"] === undefined || typeof data["repo"] === "string") &&
+    (data["prUrl"] === undefined || typeof data["prUrl"] === "string") &&
     typeof data["prNumber"] === "number" &&
     typeof data["prTitle"] === "string" &&
     Array.isArray(data["signals"])
@@ -677,6 +759,8 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
       typeof record["sourceId"] !== "string" ||
       (record["prompt"] !== undefined && typeof record["prompt"] !== "string") ||
       typeof record["sessionId"] !== "string" ||
+      (record["repo"] !== undefined && typeof record["repo"] !== "string") ||
+      (record["prUrl"] !== undefined && typeof record["prUrl"] !== "string") ||
       typeof record["prNumber"] !== "number" ||
       typeof record["prTitle"] !== "string" ||
       !isPersistedReviewSignals(record["signals"])
@@ -690,6 +774,8 @@ export function restoreSendBatch(data: unknown): SendBatch | null {
       record["prompt"],
       {
         sessionId: record["sessionId"],
+        ...(record["repo"] !== undefined ? { repo: record["repo"] } : {}),
+        ...(record["prUrl"] !== undefined ? { prUrl: record["prUrl"] } : {}),
         prNumber: record["prNumber"],
         prTitle: record["prTitle"],
         signals: record["signals"],

@@ -77,7 +77,7 @@ DO NOT
 
 VALIDATION
 
-`packages/web` has two mandatory test layers, both green before completion: Vitest unit/component (`pnpm --dir packages/web test`), Playwright E2E (`pnpm --dir packages/web exec playwright test` on the isolated-ui sidecar).
+Require Vitest unit/component and Playwright E2E coverage in GitHub CI. Follow `AGENTS.md` for local validation.
 
   Playwright E2E covers 100% of UI surfaces. Each new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
   Build must pass: `pnpm --dir packages/web build`.

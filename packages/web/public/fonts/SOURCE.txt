@@ -1,0 +1,11 @@
+JetBrains Mono 2.304, unmodified normal WOFF2 faces.
+Upstream: https://github.com/JetBrains/JetBrainsMono
+Commit: cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9
+License: OFL.txt (SIL Open Font License 1.1).
+
+Upstream path and Git blob:
+fonts/webfonts/JetBrainsMono-Light.woff2 (300): 65384987368389e57b7d1fef5ebbed55fc6fdd17
+fonts/webfonts/JetBrainsMono-Regular.woff2 (400): 40da427651937ac3b65ea6842f9448a810f719c6
+fonts/webfonts/JetBrainsMono-Medium.woff2 (500): 669d04cdf2d841e79bbf13d46d90e280ecbfe82d
+fonts/webfonts/JetBrainsMono-Bold.woff2 (700): 4917f43410757b48e4ad1eca81b868dfe405d25b
+OFL.txt: 8bee4148c1d54dbf5dae6d6c117fc80414266abb
