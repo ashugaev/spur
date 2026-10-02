@@ -46,6 +46,8 @@ import {
   isRespawnableStatus,
   type AgentName,
   type AppConfig,
+  type DashboardSessionView,
+  type SessionListItemView,
   type ScheduleSessionWakeRequest,
   type SendMessageRequest,
   type ServiceInstanceRecord,
@@ -59,6 +61,7 @@ import {
 } from "../../src/types.js";
 // Type-only, so it never bypasses the mocked module registry below.
 import type { AgentSendOutcome } from "../../src/session-service.js";
+import type { SessionLifecycleRegister } from "../../src/session-lifecycle.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -32068,13 +32071,12 @@ describe("SessionService", () => {
     // `listSessions()` at its `[]` default so only `reopen()` touches these
     // mocks, while still letting `restore()`'s internal re-read see the flip.
     function seedReopenableSession(overrides: Partial<SessionRecord> = {}) {
-      let session: SessionRecord = runningSession({ status: "completed", ...overrides });
-      readSessionMock.mockImplementation(() => clone(session));
-      writeSessionMock.mockImplementation((_dataDir: string, updated: SessionRecord) => {
-        session = clone(updated);
-      });
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ status: "completed", ...overrides }));
       return {
         get current() {
+          const session = sessions.get("api-1");
+          if (!session) throw new Error("Missing reopen fixture");
           return session;
         },
       };
@@ -32093,8 +32095,12 @@ describe("SessionService", () => {
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      await expect(service.reopen("api-1", { operationId: "first" })).rejects.toThrow(
+        SessionNotReopenableError,
+      );
+      const error = await service
+        .reopen("api-1", { operationId: "second" })
+        .catch((caught: unknown) => caught);
       expect((error as Error).message).toContain("spur restore api-1");
       expect((error as Error).message).toContain("conversation");
       expect((error as Error).message).not.toContain("spur respawn api-1");
@@ -32106,8 +32112,12 @@ describe("SessionService", () => {
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      await expect(service.reopen("api-1", { operationId: "first" })).rejects.toThrow(
+        SessionNotReopenableError,
+      );
+      const error = await service
+        .reopen("api-1", { operationId: "second" })
+        .catch((caught: unknown) => caught);
       expect((error as Error).message).toContain("spur respawn api-1");
       expect((error as Error).message).not.toContain("spur restore api-1");
     });
@@ -32120,8 +32130,12 @@ describe("SessionService", () => {
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      await expect(service.reopen("api-1", { operationId: "first" })).rejects.toThrow(
+        SessionNotReopenableError,
+      );
+      const error = await service
+        .reopen("api-1", { operationId: "second" })
+        .catch((caught: unknown) => caught);
       expect((error as Error).message).toContain("spur kill api-1 --force");
       expect((error as Error).message).toContain("spur respawn api-1");
       expect((error as Error).message).not.toContain("spur restore api-1");
@@ -32177,8 +32191,12 @@ describe("SessionService", () => {
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      await expect(service.reopen("api-1", { operationId: "first" })).rejects.toThrow(
+        SessionNotReopenableError,
+      );
+      const error = await service
+        .reopen("api-1", { operationId: "second" })
+        .catch((caught: unknown) => caught);
       expect((error as Error).message).toMatch(/shared workspace/);
       expect(branchRefsExistMock).not.toHaveBeenCalled();
       expect(createWorktreeMock).not.toHaveBeenCalled();
@@ -32197,8 +32215,12 @@ describe("SessionService", () => {
       const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.reopen("api-1")).rejects.toThrow(SessionNotReopenableError);
-      const error = await service.reopen("api-1").catch((caught: unknown) => caught);
+      await expect(service.reopen("api-1", { operationId: "first" })).rejects.toThrow(
+        SessionNotReopenableError,
+      );
+      const error = await service
+        .reopen("api-1", { operationId: "second" })
+        .catch((caught: unknown) => caught);
       expect((error as Error).message).toMatch(/already checked out/);
       expect((error as Error).message).toMatch(/respawn/);
       expect(writeSessionMock).not.toHaveBeenCalled();
@@ -32249,7 +32271,7 @@ describe("SessionService", () => {
     it.each(["running", "stopped", "killed", "errored"] as const)(
       "rejects a %s session",
       async (status) => {
-        readSessionMock.mockReturnValue(runningSession({ status }));
+        seedReopenableSession({ status });
 
         const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -32271,7 +32293,7 @@ describe("SessionService", () => {
     it.each(["running", "killed"] as const)(
       "writes nothing when refusing a %s session",
       async (status) => {
-        readSessionMock.mockReturnValue(runningSession({ status }));
+        seedReopenableSession({ status });
 
         const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -32471,7 +32493,7 @@ describe("SessionService", () => {
       });
       createWorktreeMock.mockReset().mockImplementation(() => createWorktreeGate);
 
-      const { SessionService, SessionNotReopenableError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       service.dispose();
       mockTimerPromisesSleepWithFakeTimers();
@@ -32496,12 +32518,14 @@ describe("SessionService", () => {
       const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
       expect(fulfilled).toHaveLength(1);
       expect(rejected).toHaveLength(1);
-      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
-        SessionNotReopenableError,
-      );
-      expect(((rejected[0] as PromiseRejectedResult).reason as Error).message).toMatch(
-        /already being reopened/,
-      );
+      expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+        statusCode: 409,
+        payload: {
+          code: "session_lifecycle_conflict",
+          sessionIds: ["api-1"],
+          lifecycle: { operation: { action: "reopen", phase: "pending" } },
+        },
+      });
       expect(createWorktreeMock).toHaveBeenCalledTimes(1);
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
     });
@@ -40863,6 +40887,407 @@ describe("SessionService", () => {
       expect(initialMessage).toContain("Shared memory:");
       expect(initialMessage).toContain("spur memory set|get|list|rm");
       expect((String(initialMessage).match(/Shared memory:/g) ?? []).length).toBe(1);
+    });
+  });
+
+  describe("lifecycle ownership", () => {
+    function seed() {
+      const records = createSessionStore();
+      for (const id of ["api-1", "api-2"]) {
+        records.set(id, {
+          id,
+          workspaceId: "api-1",
+          project: "api",
+          agent: "claude",
+          prompt: id,
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      return records;
+    }
+
+    type LifecycleInternals = {
+      withWorkspaceLifecycleLocks<T>(id: string, work: () => Promise<T>): Promise<T>;
+      applyManualStatusLocked(id: string): Promise<SessionView>;
+      restoreLocked(id: string): Promise<SessionView>;
+      reopenLocked(id: string): Promise<SessionView>;
+      handoffLocked(id: string): Promise<SessionView>;
+      lifecycle: SessionLifecycleRegister;
+      assembleDashboard(record: SessionRecord): Promise<{
+        view: Omit<DashboardSessionView, "lifecycle">;
+        source: SessionRecord;
+      }>;
+      enrichWithClassified(record: SessionRecord): Promise<{
+        view: Omit<SessionListItemView, "lifecycle">;
+        source: SessionRecord;
+      }>;
+    };
+
+    it.each(["complete", "restore", "reopen"] as const)(
+      "registers %s before a queued lock and exposes raw coherent pending views",
+      async (action) => {
+        const records = seed();
+        const record = records.get("api-1");
+        if (!record) throw new Error("Missing fixture");
+        records.set(record.id, {
+          ...record,
+          status: action === "reopen" ? "completed" : action === "restore" ? "stopped" : "running",
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = service as unknown as LifecycleInternals;
+        let release = () => {};
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let entered = () => {};
+        const ready = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const predecessor = internals.withWorkspaceLifecycleLocks(record.id, () => {
+          entered();
+          return hold;
+        });
+        await ready;
+        const mutate = async (id: string) => {
+          const current = records.get(id);
+          if (!current) throw new Error("Missing fixture");
+          records.set(id, { ...current, status: action === "complete" ? "completed" : "running" });
+          return service.get(id);
+        };
+        vi.spyOn(
+          internals,
+          action === "complete"
+            ? "applyManualStatusLocked"
+            : action === "restore"
+              ? "restoreLocked"
+              : "reopenLocked",
+        ).mockImplementation(mutate);
+        const operation = service[action](record.id, { operationId: "queued" });
+        try {
+          const detail = await service.get(record.id);
+          const full = await service.list();
+          const dashboard = await service.list({ view: "dashboard" });
+          for (const row of [
+            detail,
+            full.find((row) => row.id === record.id),
+            dashboard.find((row) => row.id === record.id),
+          ]) {
+            expect(row?.lifecycle.operation).toMatchObject({
+              operationId: "queued",
+              action,
+              phase: "pending",
+              targetIds: [record.id],
+              outcomes: [],
+            });
+          }
+          await expect(
+            service.restore(record.id, { operationId: "overlap" }),
+          ).rejects.toMatchObject({ statusCode: 409 });
+          release();
+          await predecessor;
+          const result = await operation;
+          expect(result.lifecycle.operation?.phase).toBe("succeeded");
+          expect(result.lifecycle.revision).toBeGreaterThan(detail.lifecycle.revision);
+          expect(result.status).toBe(action === "complete" ? "completed" : "running");
+        } finally {
+          release();
+          service.dispose();
+        }
+      },
+    );
+
+    it("settles partial desk outcomes from current records without replacing an intersecting owner", async () => {
+      const records = seed();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as LifecycleInternals;
+      vi.spyOn(internals, "applyManualStatusLocked").mockImplementation(async (id) => {
+        if (id === "api-2") throw new Error("cleanup failed");
+        const current = records.get(id);
+        if (!current) throw new Error("Missing fixture");
+        records.set(id, { ...current, status: "completed" });
+        return service.get(id);
+      });
+      try {
+        const operation = service.completeDesk("api-1", { operationId: "desk" });
+        await expect(service.restore("api-2", { operationId: "other" })).rejects.toMatchObject({
+          statusCode: 409,
+        });
+        await expect(operation).rejects.toThrow("cleanup failed");
+        const row = await service.get("api-1");
+        expect(row.lifecycle.operation).toMatchObject({
+          phase: "failed",
+          outcomes: [
+            { sessionId: "api-1", phase: "succeeded" },
+            { sessionId: "api-2", phase: "failed" },
+          ],
+        });
+        expect(row.status).toBe("completed");
+        expect((await service.get("api-2")).status).toBe("running");
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("does not resurrect a deleted queued desk member or expand the captured target set", async () => {
+      const records = seed();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as LifecycleInternals;
+      let release = () => {};
+      let entered = () => {};
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const predecessor = internals.withWorkspaceLifecycleLocks("api-1", () => {
+        entered();
+        return hold;
+      });
+      await ready;
+      const operation = service.completeDesk("api-1", { operationId: "captured" });
+      const rejection = expect(operation).rejects.toThrow("Session not found: api-2");
+      const original = records.get("api-1");
+      if (!original) throw new Error("Missing fixture");
+      records.delete("api-2");
+      records.set("api-3", { ...original, id: "api-3" });
+      release();
+      try {
+        await predecessor;
+        await rejection;
+        expect(records.has("api-2")).toBe(false);
+        expect((await service.get("api-3")).lifecycle.operation).toBeNull();
+        expect((await service.get("api-1")).lifecycle.operation?.targetIds).toEqual([
+          "api-1",
+          "api-2",
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("rebuilds stale cached lifecycle and workspace metadata once, then preserves current later state", async () => {
+      const records = seed();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as LifecycleInternals;
+      try {
+        await service.list({ view: "dashboard" });
+        const current = records.get("api-1");
+        if (!current) throw new Error("Missing fixture");
+        const owner = internals.lifecycle.begin("complete", [current.id], "settled");
+        records.set(current.id, {
+          ...current,
+          status: "completed",
+          slots: { title: "fresh title", links: [] },
+        });
+        internals.lifecycle.settle(
+          owner,
+          true,
+          () => "succeeded",
+          () => true,
+        );
+        const rebuild = vi.spyOn(internals, "assembleDashboard");
+        const first = await service.list({ view: "dashboard", includeCompleted: true });
+        expect(first.find((row) => row.id === current.id)).toMatchObject({
+          status: "completed",
+          slots: { title: "fresh title" },
+          lifecycle: { operation: { phase: "succeeded" } },
+        });
+        expect(rebuild).toHaveBeenCalledTimes(1);
+        records.set(current.id, { ...current, status: "running" });
+        const later = await service.list({ view: "dashboard", includeCompleted: true });
+        expect(later.find((row) => row.id === current.id)?.status).toBe("running");
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it.each(["selfDestruct", "handoff"] as const)(
+      "reserves original completion before %s waits without owning the spawned session",
+      async (action) => {
+        const records = seed();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = service as unknown as LifecycleInternals;
+        let release = () => {};
+        let entered = () => {};
+        const ready = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const predecessor = internals.withWorkspaceLifecycleLocks("api-1", () => {
+          entered();
+          return hold;
+        });
+        await ready;
+        vi.spyOn(
+          internals,
+          action === "handoff" ? "handoffLocked" : "applyManualStatusLocked",
+        ).mockImplementation(async (id) => {
+          const current = records.get(id);
+          if (!current) throw new Error("Missing fixture");
+          records.set(id, { ...current, status: "completed" });
+          return service.get(action === "handoff" ? "api-2" : id);
+        });
+        const operation =
+          action === "handoff"
+            ? service.handoff("api-1", { agent: "claude", notes: "next" })
+            : service.selfDestruct("api-1");
+        try {
+          expect((await service.get("api-1")).lifecycle.operation).toMatchObject({
+            action: "complete",
+            phase: "pending",
+          });
+          expect((await service.get("api-2")).lifecycle.operation).toBeNull();
+          release();
+          await predecessor;
+          const result = await operation;
+          expect((await service.get("api-1")).lifecycle.operation?.phase).toBe("succeeded");
+          if (action === "handoff") expect(result.lifecycle.operation).toBeNull();
+        } finally {
+          release();
+          service.dispose();
+        }
+      },
+    );
+
+    it("preserves terminal skips and empty completedIds with succeeded per-target outcomes", async () => {
+      const records = seed();
+      for (const [id, record] of records) records.set(id, { ...record, status: "completed" });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      try {
+        const result = await service.completeDesk("api-1", { operationId: "terminal" });
+        expect(result.completedIds).toEqual([]);
+        expect(result.lifecycle.operation?.outcomes).toEqual([
+          { sessionId: "api-1", phase: "succeeded" },
+          { sessionId: "api-2", phase: "succeeded" },
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it.each(["complete", "reopen"] as const)(
+      "keeps committed current state when %s tail fails",
+      async (action) => {
+        const records = seed();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = service as unknown as LifecycleInternals;
+        vi.spyOn(
+          internals,
+          action === "complete" ? "applyManualStatusLocked" : "reopenLocked",
+        ).mockImplementation(async (id) => {
+          const current = records.get(id);
+          if (!current) throw new Error("Missing fixture");
+          records.set(id, { ...current, status: action === "complete" ? "completed" : "running" });
+          throw new Error("tail failed");
+        });
+        try {
+          await expect(service[action]("api-1", { operationId: "tail" })).rejects.toThrow(
+            "tail failed",
+          );
+          const current = await service.get("api-1");
+          expect(current.status).toBe(action === "complete" ? "completed" : "running");
+          expect(current.lifecycle.operation?.phase).toBe("failed");
+          expect(current.lifecycle.operation?.outcomes).toEqual([
+            { sessionId: "api-1", phase: action === "complete" ? "succeeded" : "failed" },
+          ]);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("returns retryable 503 after one rebuild instead of decorating a second changed source", async () => {
+      const records = seed();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as LifecycleInternals;
+      const owner = internals.lifecycle.begin("complete", ["api-1"], "coherent");
+      internals.lifecycle.settle(
+        owner,
+        true,
+        () => "succeeded",
+        () => true,
+      );
+      const original = internals.enrichWithClassified.bind(internals);
+      let changes = 0;
+      const rebuild = vi
+        .spyOn(internals, "enrichWithClassified")
+        .mockImplementation(async (record) => {
+          const row = await original(record);
+          if (record.id === "api-1") {
+            const current = records.get(record.id);
+            if (!current) throw new Error("Missing fixture");
+            records.set(record.id, { ...current, prompt: `changed ${++changes}` });
+          }
+          return row;
+        });
+      try {
+        await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
+          statusCode: 503,
+          payload: { code: "session_lifecycle_snapshot_changed" },
+        });
+        expect(rebuild.mock.calls.filter(([record]) => record.id === "api-1")).toHaveLength(2);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it("settles execution once and preserves its receipt when a newer owner interrupts response delivery", async () => {
+      const records = seed();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as LifecycleInternals;
+      const response = await service.get("api-1");
+      const { lifecycleErrorReceipt, SessionLifecycleError } =
+        await import("../../src/session-lifecycle.js");
+      vi.spyOn(internals, "applyManualStatusLocked").mockImplementation(async (id) => {
+        const current = records.get(id);
+        if (!current) throw new Error("Missing fixture");
+        records.set(id, { ...current, status: "completed" });
+        return response;
+      });
+      const settle = vi.spyOn(internals.lifecycle, "settle");
+      vi.spyOn(service, "get").mockImplementation(async (id) => {
+        const newer = internals.lifecycle.begin("reopen", [id], "newer");
+        throw new SessionLifecycleError("Delivery changed", 503, {
+          code: "session_lifecycle_snapshot_changed",
+          lifecycle: newer,
+        });
+      });
+      try {
+        const error = await service
+          .complete("api-1", { operationId: "executed" })
+          .catch((error: unknown) => error);
+        expect(lifecycleErrorReceipt(error)?.operation).toMatchObject({
+          operationId: "executed",
+          phase: "succeeded",
+        });
+        expect(settle).toHaveBeenCalledTimes(1);
+        expect(records.get("api-1")?.status).toBe("completed");
+        expect(internals.lifecycle.snapshot("api-1").operation).toMatchObject({
+          operationId: "newer",
+          phase: "pending",
+        });
+      } finally {
+        service.dispose();
+      }
     });
   });
 
