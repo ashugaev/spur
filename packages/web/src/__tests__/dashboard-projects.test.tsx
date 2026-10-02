@@ -49,6 +49,7 @@ vi.mock("@/components/DirectTerminal", () => ({
 function ghostSession() {
   return {
     id: "ghost-1",
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     project: "ghost-id",
     agent: "claude",
     prompt: "Continuing work",
@@ -85,7 +86,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const entry = {
@@ -104,6 +108,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo",
             agent: "claude",
             prompt: "",
@@ -162,7 +167,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const parsed = JSON.parse(String(init.body)) as unknown;
@@ -182,6 +190,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo",
             agent: "claude",
             prompt: "",
@@ -234,7 +243,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const parsed = JSON.parse(String(init.body)) as { createMissing?: boolean };
@@ -263,6 +275,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo-app",
             agent: "claude",
             prompt: "",
@@ -352,6 +365,7 @@ describe("Dashboard project create/delete", () => {
                 path: "/tmp/stub",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -434,6 +448,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -489,6 +504,7 @@ describe("Dashboard project create/delete", () => {
                     path: "/tmp/stub",
                   },
                 ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -539,9 +555,16 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [ghostSession()] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({
+            lifecycleInstanceId: "test-instance",
+            projects: [],
+            sessions: [ghostSession()],
+          }),
+          {
+            status: 200,
+          },
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -583,6 +606,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -606,6 +630,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -684,6 +709,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -742,6 +768,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -758,6 +785,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -856,6 +884,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -937,6 +966,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
         );
@@ -1004,6 +1034,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1020,6 +1051,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -1116,6 +1148,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1130,6 +1163,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -1220,6 +1254,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1307,6 +1342,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1326,6 +1362,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1441,6 +1478,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1460,6 +1498,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1541,6 +1580,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1627,6 +1667,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1646,6 +1687,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1729,6 +1771,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1748,6 +1791,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",

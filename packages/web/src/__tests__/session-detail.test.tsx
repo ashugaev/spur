@@ -5966,7 +5966,7 @@ describe("SessionDetail load state", () => {
   });
 
   it("shows a page load error instead of stale content when the current session fails", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
@@ -5977,6 +5977,12 @@ describe("SessionDetail load state", () => {
         return new Response(JSON.stringify({ error: "missing current session" }), {
           headers: { "content-type": "application/json" },
           status: 404,
+        });
+      }
+
+      if (url === "/api/runtime/info") {
+        return new Response(JSON.stringify({ lifecycleInstanceId: "test-instance" }), {
+          status: 200,
         });
       }
 
@@ -6002,6 +6008,10 @@ describe("SessionDetail load state", () => {
       expect(screen.getByText("Unable to load this session.")).toBeInTheDocument();
     });
     expect(screen.getByText("missing current session")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runtime/info",
+      expect.objectContaining({ cache: "no-store" }),
+    );
     expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
   });
 
