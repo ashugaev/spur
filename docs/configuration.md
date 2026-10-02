@@ -102,6 +102,8 @@ Prunes `agent-history-*.jsonl` per [desk group](#desk-groups) workspace (never w
 
 `sidecarGc` kills idle/unowned non-MCP project sidecars (never a built-in MCP one). Shared per [desk group](#desk-groups). Reap/keep rule order: `v2/src/sidecars/policy.ts`, `v2/src/sidecars/reap.ts`. Events: `session.sidecar.reaped`, `session.sidecar.age_warning`.
 
+The same pass also runs a detect-only step over one shared process-table snapshot: an orphaned process tree under a worktree (an unclaimed pgid the sweep predicate would call leaked) logs `session.sidecar.orphan_detected` with `rootPid`, `pgid`, `treeRssKb`, `ageSeconds`, `worktreePath`, `sidecarName`, and `reapable`. This step never signals or kills anything, and runs even when `sidecarGc.enabled` is `false` — that flag governs killing only, not detection.
+
 ## Disk budget
 
 `diskBudget` gates a daemon warn sweep over Spur disk usage from `<dataDir>/disk-budget.json`, written only by [`spur disk`](commands.md#disk) — cron it for fresh data. `spur disk`/`spur disk-gc` are daemon-free, work regardless of `enabled`. Emits `host.disk.budget_exceeded` at most once per `intervalMinutes` while over `warnAttributableGb`.
