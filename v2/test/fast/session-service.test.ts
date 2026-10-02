@@ -15775,7 +15775,6 @@ describe("SessionService", () => {
       expect((await service.get("api-1")).state).toBe("waiting");
       await vi.advanceTimersByTimeAsync(32_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "please continue", {
-        interrupt: false,
         agent: "codex",
       });
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
