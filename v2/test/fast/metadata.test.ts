@@ -1708,7 +1708,7 @@ describe("session metadata PR migration", () => {
     ]);
   });
 
-  it("preserves model and originalTaskPrompt when writing and reading a session record", async () => {
+  it("preserves model, explicit reasoning and originalTaskPrompt across later writes", async () => {
     // normalizeSessionRecord rebuilds the record field by field, so an
     // optional SessionRecord field missing from its whitelist is silently
     // dropped on the very next write — spawn persists both of these and every
@@ -1719,6 +1719,7 @@ describe("session metadata PR migration", () => {
       project: "api",
       agent: "claude",
       model: "opus",
+      reasoningEffort: "high",
       prompt: "ship it (with orchestrator preamble)",
       originalTaskPrompt: "ship it",
       branch: "api-1",
@@ -1734,11 +1735,27 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).toEqual(
-      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+      expect.objectContaining({
+        model: "opus",
+        reasoningEffort: "high",
+        originalTaskPrompt: "ship it",
+      }),
     );
     expect(listSessions(dataDir)).toEqual([
-      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+      expect.objectContaining({
+        model: "opus",
+        reasoningEffort: "high",
+        originalTaskPrompt: "ship it",
+      }),
     ]);
+    const stored = readSession(dataDir, "api-1");
+    expect(stored).toBeDefined();
+    if (!stored) throw new Error("Missing persisted session");
+    writeSession(dataDir, { ...stored, status: "stopped" });
+    expect(readSession(dataDir, "api-1")?.reasoningEffort).toBe("high");
+    const { reasoningEffort: _effort, ...legacy } = session;
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("reasoningEffort");
   });
 
   it("keeps submitUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {

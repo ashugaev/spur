@@ -77,14 +77,31 @@ describe("handoff", () => {
       "composer-2.5",
       "--notes",
       "focus on tests",
+      "--reasoning-effort",
+      "high",
       "--json",
     ]);
 
     expect(postJsonMock).toHaveBeenCalledWith(
       "/tmp/dist/cli.js",
       "/sessions/api-1/handoff",
-      { agent: "cursor", model: "composer-2.5", notes: "focus on tests" },
+      { agent: "cursor", model: "composer-2.5", notes: "focus on tests", reasoningEffort: "high" },
       "/tmp/spur.yaml",
     );
+  });
+
+  it("posts respawn effort while preserving force", async () => {
+    await parseCli(["respawn", "api-1", "--reasoning-effort", "max", "--force", "--json"]);
+    expect(postJsonMock).toHaveBeenCalledWith(
+      "/tmp/dist/cli.js",
+      "/sessions/api-1/respawn",
+      expect.objectContaining({ reasoningEffort: "max", forceKillSource: true }),
+      "/tmp/spur.yaml",
+    );
+  });
+
+  it("omits respawn effort when not selected", async () => {
+    await parseCli(["respawn", "api-1", "--json"]);
+    expect(postJsonMock.mock.calls[0]?.[2]).not.toHaveProperty("reasoningEffort");
   });
 });

@@ -43,6 +43,7 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes and pre-flight batch allocation: docs/daemon-api.md
   Config fields: docs/configuration.md
+  Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
 
 EDITING THIS FILE
 

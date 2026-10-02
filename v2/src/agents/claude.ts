@@ -14,7 +14,7 @@ export function claudeCommand(): string {
 
 // Spur's default model for the Claude agent, applied when a spawn resolves to
 // claude without an explicit or configured model.
-export const DEFAULT_CLAUDE_MODEL = "opus";
+export const DEFAULT_CLAUDE_MODEL = "sonnet";
 
 // Claude's selectable models. This catalog and its default live with the agent,
 // not in the generic models registry. listClaudeModels flags DEFAULT_CLAUDE_MODEL

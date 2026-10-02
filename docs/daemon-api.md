@@ -34,7 +34,7 @@
 ## Session routes
 
 - `GET /sessions`
-- `POST /sessions`
+- `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background`
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
@@ -57,8 +57,8 @@
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore`
 - `POST /sessions/:id/reopen`
-- `POST /sessions/:id/handoff`
-- `POST /sessions/:id/respawn`
+- `POST /sessions/:id/handoff` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
+- `POST /sessions/:id/respawn` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
 - `POST /sessions/:id/switch-auth`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)

@@ -24,7 +24,7 @@ import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
-import { Command, type Help } from "commander";
+import { Command, Option, type Help } from "commander";
 import {
   connectProjectConfig,
   deleteJson,
@@ -138,6 +138,7 @@ import {
   type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
+  type ProviderReasoningEffort,
   type RespawnSessionRequest,
   type RuntimeInfo,
   type RunServiceRequest,
@@ -820,6 +821,13 @@ type SubscribeCommandOptions = {
   remove?: string;
   json?: boolean;
 };
+
+function reasoningEffortOption(): Option {
+  return new Option(
+    "--reasoning-effort <level>",
+    "Reasoning effort for the resolved agent and model",
+  ).choices(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+}
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
@@ -3149,6 +3157,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
+    .addOption(reasoningEffortOption())
     .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
@@ -3244,6 +3253,9 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
@@ -3827,6 +3839,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("respawn")
     .description("Spawn a new session with the same config as a terminal session.")
     .argument("<sessionId>", "Session id")
+    .addOption(reasoningEffortOption())
     .option("--force", "Replace respawn source even with dirty worktree or unpushed commits")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
@@ -3838,7 +3851,12 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            respawnRequestBody({ forceKillSource: options.force === true }),
+            {
+              ...respawnRequestBody({ forceKillSource: options.force === true }),
+              ...(options.reasoningEffort !== undefined
+                ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+                : {}),
+            },
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
@@ -3901,12 +3919,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<sessionId>", "Session id")
     .requiredOption("--agent <name>", "Target agent: claude, codex, cursor, or opencode")
     .option("--model <id>", "Model id for the target agent")
+    .addOption(reasoningEffortOption())
     .option("--notes <text>", "Optional handoff notes for the next agent")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: HandoffSessionRequest = {
         agent: options.agent,
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(typeof options.model === "string" && options.model.trim()
           ? { model: options.model.trim() }
           : {}),
