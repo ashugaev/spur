@@ -1657,8 +1657,7 @@ async function probeAgentProcess(
 }
 
 function withProjectAgentOptions(
-  agent: AgentName,
-  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
+  project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -1680,11 +1679,9 @@ function withProjectAgentOptions(
   reasoningVariantNames?: string[];
   model?: string;
 } {
-  const reasoningEffort = options.reasoningEffort ?? project.reasoningEffort?.[agent];
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -10743,7 +10740,7 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
           ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
@@ -11783,7 +11780,7 @@ export class SessionService {
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
-          withProjectAgentOptions(agent, project, { ...hookSetup, ...prepared.launchSelection }),
+          withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
           { planMode, restrictWrites },
         ),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
@@ -15535,7 +15532,7 @@ export class SessionService {
     );
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(session.agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
           ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
@@ -15962,7 +15959,7 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(current.agent, restoreProjectConfig, {
+          withProjectAgentOptions(restoreProjectConfig, {
             ...hookSetup,
             ...launchSelection,
             ...(sessionAgentConfig.planOptions ?? {}),
