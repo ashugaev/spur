@@ -1108,11 +1108,13 @@ export function Dashboard() {
   const spawnAttachmentsRef = useRef<FileAttachment[]>([]);
   const spawnAttachmentReadsRef = useRef({ pending: 0 });
   const [spawnAttachmentsPending, setSpawnAttachmentsPending] = useState(false);
+  const [spawnError, setSpawnError] = useState<string | null>(null);
   const resetSpawnAttachments = useCallback(() => {
     spawnAttachmentReadsRef.current = { pending: 0 };
     spawnAttachmentsRef.current = [];
     setSpawnAttachments([]);
     setSpawnAttachmentsPending(false);
+    setSpawnError(null);
   }, []);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
@@ -1859,6 +1861,7 @@ export function Dashboard() {
 
     spawningRef.current = true;
     setSpawning(true);
+    setSpawnError(null);
     try {
       const payload = buildSpawnSessionPayload({
         projectId: nextProjectId,
@@ -1916,7 +1919,7 @@ export function Dashboard() {
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
     } catch (spawnError) {
-      showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
+      setSpawnError(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
       spawningRef.current = false;
       setSpawning(false);
@@ -2340,33 +2343,31 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback(
-    (files: FileList | File[] | null) => {
-      if (!files?.length) return;
-      const reads = spawnAttachmentReadsRef.current;
-      reads.pending += 1;
-      setSpawnAttachmentsPending(true);
-      void fileAttachmentsFromFiles(files)
-        .then((attachments) => {
-          if (reads !== spawnAttachmentReadsRef.current || attachments.length === 0) return;
-          const result = mergeAttachmentsWithinLimit(spawnAttachmentsRef.current, attachments);
-          spawnAttachmentsRef.current = result.attachments;
-          setSpawnAttachments(result.attachments);
-          if (result.rejectedMessage) showErrorToast(result.rejectedMessage);
-        })
-        .catch((error: unknown) => {
-          if (reads === spawnAttachmentReadsRef.current) {
-            showErrorToast(errorMessage(error, "Failed to read attachment"));
-          }
-        })
-        .finally(() => {
-          if (reads !== spawnAttachmentReadsRef.current) return;
-          reads.pending -= 1;
-          setSpawnAttachmentsPending(reads.pending > 0);
-        });
-    },
-    [showErrorToast],
-  );
+  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files?.length) return;
+    const reads = spawnAttachmentReadsRef.current;
+    reads.pending += 1;
+    setSpawnAttachmentsPending(true);
+    setSpawnError(null);
+    void fileAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (reads !== spawnAttachmentReadsRef.current || attachments.length === 0) return;
+        const result = mergeAttachmentsWithinLimit(spawnAttachmentsRef.current, attachments);
+        spawnAttachmentsRef.current = result.attachments;
+        setSpawnAttachments(result.attachments);
+        if (result.rejectedMessage) setSpawnError(result.rejectedMessage);
+      })
+      .catch((error: unknown) => {
+        if (reads === spawnAttachmentReadsRef.current) {
+          setSpawnError(errorMessage(error, "Failed to read attachment"));
+        }
+      })
+      .finally(() => {
+        if (reads !== spawnAttachmentReadsRef.current) return;
+        reads.pending -= 1;
+        setSpawnAttachmentsPending(reads.pending > 0);
+      });
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -2863,7 +2864,13 @@ export function Dashboard() {
                 );
                 spawnAttachmentsRef.current = attachments;
                 setSpawnAttachments(attachments);
+                setSpawnError(null);
               }}
+              error={
+                spawnError
+                  ? { message: spawnError, onDismiss: () => setSpawnError(null) }
+                  : undefined
+              }
               onSubmit={() => void handleSpawn()}
               prompt={spawnPrompt}
               promptAriaLabel="Prompt..."

@@ -22,6 +22,7 @@ import {
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
+import { MAX_ATTACHMENT_COUNT } from "../src/lib/file-attachments";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
@@ -2725,7 +2726,7 @@ test.describe("D7: Spawn modal", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await expect(textarea).toHaveValue("Keep me");
-    await expect(page.getByText(/Daemon down/i)).toBeVisible();
+    await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Daemon down/i);
   });
 
   test("spawn prompt accepts image attachments and forwards them in the request body", async ({
@@ -2910,10 +2911,12 @@ test.describe("D7: Spawn modal", () => {
       await addPhoto(page, "paste", "broken.png");
       await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
       await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
-      await expect(page.getByText(/Failed to read/)).toBeVisible();
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Failed to read/);
       await expect(page.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
       await page.getByRole("button", { name: /^spawn$/i }).click();
-      await expect(page.getByText("Injected spawn failure")).toBeVisible();
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
+        "Injected spawn failure",
+      );
       await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
       await page.getByRole("button", { name: /^spawn$/i }).click();
       await expect.poll(() => requests.length).toBe(2);
@@ -2959,6 +2962,52 @@ test.describe("D7: Spawn modal", () => {
         attachments: [{ name: "picker.png" }, { name: "second.png" }],
       });
     });
+
+    for (const viewport of [
+      { width: 780, height: 493 },
+      { width: 390, height: 844 },
+    ]) {
+      test(`photo read and limit errors receive pointer events inside dialog at ${viewport.width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize(viewport);
+        await prepare(page);
+        await gateReads(page);
+        await addPhoto(page, "paste");
+        await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+        await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
+        const dialog = page.getByRole("dialog");
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText(/Failed to read attachment/);
+        const textReceivesPointer = () =>
+          alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          });
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        const data = await page.evaluate(() => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 16;
+          return canvas.toDataURL("image/png").split(",")[1];
+        });
+        await dialog.locator('input[type="file"]').setInputFiles(
+          Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, index) => ({
+            name: `limit-${index}.png`,
+            mimeType: "image/png",
+            buffer: Buffer.from(data, "base64"),
+          })),
+        );
+        await expect(alert).toHaveText(/Too many attachments/);
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+      });
+    }
   });
 });
 

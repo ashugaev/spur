@@ -108,6 +108,7 @@ interface SpawnModalProps {
   submitBusyAriaLabel: string;
   submitDisabled: boolean;
   showCancel: boolean;
+  error?: { message: string; onDismiss: () => void };
   // Agent
   agent: AgentName;
   onAgentChange: (next: AgentName) => void;
@@ -341,6 +342,7 @@ export function SpawnModal({
   submitBusyAriaLabel,
   submitDisabled,
   showCancel,
+  error,
   agent,
   onAgentChange,
   agentAriaLabel,
@@ -422,6 +424,15 @@ export function SpawnModal({
           ) : null}
           {artifactSlot}
         </div>
+        {error ? (
+          <div
+            className="mt-3 flex shrink-0 items-center gap-2 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]"
+            role="alert"
+          >
+            <span className="min-w-0 flex-1 break-words">{error.message}</span>
+            <IconCloseButton label="Dismiss spawn error" onClick={error.onDismiss} />
+          </div>
+        ) : null}
         <div className="mt-3 flex shrink-0 items-center justify-between">
           <span className="text-[10px] text-[var(--color-text-tertiary)]">
             <VoiceStatusHint voice={voice} />

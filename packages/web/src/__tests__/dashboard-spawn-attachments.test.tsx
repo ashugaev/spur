@@ -164,17 +164,26 @@ describe("Dashboard spawn photo preparation", () => {
     const broken = pendingRead();
     attach();
     await act(async () => broken.reject(new Error("Cannot read photo")));
-    expect(screen.getByText("Cannot read photo")).toBeVisible();
+    expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent(
+      "Cannot read photo",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss spawn error" }));
+    expect(within(screen.getByRole("dialog")).queryByRole("alert")).toBeNull();
     expect(submit()).not.toBeDisabled();
     const excess = pendingRead();
     attach();
     await act(async () =>
       excess.resolve(Array.from({ length: 20 }, (_, i) => photo(`extra-${i}.png`))),
     );
-    expect(screen.getByText(/Too many attachments/)).toBeVisible();
+    expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent(
+      /Too many attachments/,
+    );
     expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
     expect(screen.getByLabelText("Prompt...")).toHaveValue("Retain me");
     expect(submit()).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
+    await open();
+    expect(within(screen.getByRole("dialog")).queryByRole("alert")).toBeNull();
   });
 
   it("retains photo after spawn failure and permits removal and same-file reselection", async () => {
@@ -184,9 +193,14 @@ describe("Dashboard spawn photo preparation", () => {
     await act(async () => first.resolve([photo()]));
     spawnFails = true;
     fireEvent.click(submit());
-    await screen.findByText("Spawn failed");
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent(
+        "Spawn failed",
+      ),
+    );
     expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Remove photo.png" }));
+    expect(within(screen.getByRole("dialog")).queryByRole("alert")).toBeNull();
     const again = pendingRead();
     attach();
     await act(async () => again.resolve([photo()]));
