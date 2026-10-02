@@ -420,12 +420,22 @@ async function runSmoke(
     const models = options?.selectedEffort
       ? await listAgentModels(agent, { codexHomePath: join(homedir(), ".codex") })
       : [];
-    const selected = agent === "cursor"
-      ? models.find((model) => /-(low|medium|high|xhigh|extra-high|max|ultra)(-fast)?$/.test(model.id))
-      : models.find((model) => model.isDefault || model.reasoningEfforts?.length) ?? models[0];
-    const aliasEffort = selected?.id.match(/-(low|medium|high|xhigh|extra-high|max|ultra)(-fast)?$/)?.[1];
-    const reasoningEffort = aliasEffort === "extra-high" ? "xhigh" : aliasEffort ??
-      selected?.reasoningEfforts?.find((effort) => effort === "medium") ?? selected?.reasoningEfforts?.[0] ?? "medium";
+    const selected =
+      agent === "cursor"
+        ? models.find((model) =>
+            /-(low|medium|high|xhigh|extra-high|max|ultra)(-fast)?$/.test(model.id),
+          )
+        : (models.find((model) => model.isDefault || model.reasoningEfforts?.length) ?? models[0]);
+    const aliasEffort = selected?.id.match(
+      /-(low|medium|high|xhigh|extra-high|max|ultra)(-fast)?$/,
+    )?.[1];
+    const reasoningEffort =
+      aliasEffort === "extra-high"
+        ? "xhigh"
+        : (aliasEffort ??
+          selected?.reasoningEfforts?.find((effort) => effort === "medium") ??
+          selected?.reasoningEfforts?.[0] ??
+          "medium");
     if (options?.selectedEffort && !selected) {
       throw new Error(`${agent}: no advertised model available for reasoning smoke; A4 unproved`);
     }
@@ -441,10 +451,12 @@ async function runSmoke(
       const session = await service.spawn({
         project: "api",
         agent,
-        ...(options?.selectedEffort && selected ? {
-          model: selected.id,
-          reasoningEffort: reasoningEffort as ProviderReasoningEffort,
-        } : {}),
+        ...(options?.selectedEffort && selected
+          ? {
+              model: selected.id,
+              reasoningEffort: reasoningEffort as ProviderReasoningEffort,
+            }
+          : {}),
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
@@ -529,19 +541,31 @@ function parseNativeJson(text: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-async function expectCodexNativeEffort(dataDir: string, sessionId: string, effort: string): Promise<void> {
-  const sessionRootDir = join(codexHookHomePath(join(dataDir, "session-tools", sessionId)), "sessions");
+async function expectCodexNativeEffort(
+  dataDir: string,
+  sessionId: string,
+  effort: string,
+): Promise<void> {
+  const sessionRootDir = join(
+    codexHookHomePath(join(dataDir, "session-tools", sessionId)),
+    "sessions",
+  );
   const path = await findLatestCodexSessionFile({ sessionRootDir });
   expect(path?.startsWith(`${sessionRootDir}/`)).toBe(true);
   if (!path) throw new Error("Codex native rollout missing; A4 unproved");
-  const turns = (await readFile(path, "utf8")).trim().split("\n").map(parseNativeJson)
+  const turns = (await readFile(path, "utf8"))
+    .trim()
+    .split("\n")
+    .map(parseNativeJson)
     .filter((line) => line["type"] === "turn_context");
   expect(turns.length).toBeGreaterThan(0);
   expect(turns.at(-1)?.["payload"]).toMatchObject({ effort });
 }
 
 async function nativeOpenCodeUsers(sessionId: string): Promise<Record<string, unknown>[]> {
-  const exported = parseNativeJson(await readOpenCodeJson(["export", sessionId], { timeoutMs: 30_000 }));
+  const exported = parseNativeJson(
+    await readOpenCodeJson(["export", sessionId], { timeoutMs: 30_000 }),
+  );
   expect(Array.isArray(exported["messages"])).toBe(true);
   return (exported["messages"] as unknown[]).flatMap((message) => {
     if (!message || typeof message !== "object" || !("info" in message)) return [];
@@ -563,13 +587,26 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix, socketName: tmuxSocketName };
   cleanupItems.push(cleanupItem);
 
-  const environmentKeys = ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG_DIR"] as const;
+  const environmentKeys = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "OPENCODE_CONFIG_DIR",
+  ] as const;
   const savedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
   const nativeData = join(rootDir, "native-data", "opencode");
   const nativeConfig = join(rootDir, "native-config", "opencode");
   const nativeState = join(rootDir, "native-state", "opencode");
-  await Promise.all([nativeData, nativeConfig, nativeState].map((directory) => mkdir(directory, { recursive: true })));
-  const sourceData = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode");
+  await Promise.all(
+    [nativeData, nativeConfig, nativeState].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
+  );
+  const sourceData = join(
+    process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"),
+    "opencode",
+  );
   const protectedFiles: { path: string; bytes: Buffer }[] = [];
   if (existsSync(join(sourceData, "auth.json"))) {
     const path = join(nativeData, "auth.json");
@@ -586,107 +623,144 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
   process.env.OPENCODE_CONFIG_DIR = nativeConfig;
 
   try {
-  const authFile = protectedFiles.find((file) => file.path === join(nativeData, "auth.json"));
-  const providers = authFile ? Object.keys(parseNativeJson(authFile.bytes.toString("utf8"))) : [];
-  const models = parseOpenCodeVerboseModelsOutput(await readOpenCodeJson(["models", "--verbose"], { timeoutMs: 30_000 }));
-  const efforts: ProviderReasoningEffort[] = ["low", "medium", "high", "xhigh", "max", "ultra", "minimal", "none"];
-  const available = models.filter((model) =>
-    (model.id.endsWith("-free") || providers.includes(model.id.split("/")[0] ?? "")) &&
-    efforts.filter((effort) => model.variantNames?.includes(effort)).length >= 2,
-  );
-  const selected = available.find((model) => model.id.endsWith("-free")) ?? available[0];
-  if (!selected) throw new Error("OpenCode: no authenticated advertised model with two variants; A4 unproved");
-  const [effortA, effortB] = efforts.filter((effort) => selected.variantNames?.includes(effort));
-  if (!effortA || !effortB) throw new Error("OpenCode smoke requires two advertised variants");
-  const [providerID, ...modelParts] = selected.id.split("/");
-  const modelID = modelParts.join("/");
-  const cachePath = join(nativeState, "model.json");
-  const seedCache = async (variant: ProviderReasoningEffort): Promise<void> => {
-    await writeFile(cachePath, JSON.stringify({ recent: [{ providerID, modelID }], favorite: [], variant: { [selected.id]: variant } }));
-  };
-  await seedCache(effortA);
+    const authFile = protectedFiles.find((file) => file.path === join(nativeData, "auth.json"));
+    const providers = authFile ? Object.keys(parseNativeJson(authFile.bytes.toString("utf8"))) : [];
+    const models = parseOpenCodeVerboseModelsOutput(
+      await readOpenCodeJson(["models", "--verbose"], { timeoutMs: 30_000 }),
+    );
+    const efforts: ProviderReasoningEffort[] = [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+      "minimal",
+      "none",
+    ];
+    const available = models.filter(
+      (model) =>
+        (model.id.endsWith("-free") || providers.includes(model.id.split("/")[0] ?? "")) &&
+        efforts.filter((effort) => model.variantNames?.includes(effort)).length >= 2,
+    );
+    const selected = available.find((model) => model.id.endsWith("-free")) ?? available[0];
+    if (!selected)
+      throw new Error("OpenCode: no authenticated advertised model with two variants; A4 unproved");
+    const [effortA, effortB] = efforts.filter((effort) => selected.variantNames?.includes(effort));
+    if (!effortA || !effortB) throw new Error("OpenCode smoke requires two advertised variants");
+    const [providerID, ...modelParts] = selected.id.split("/");
+    const modelID = modelParts.join("/");
+    const cachePath = join(nativeState, "model.json");
+    const seedCache = async (variant: ProviderReasoningEffort): Promise<void> => {
+      await writeFile(
+        cachePath,
+        JSON.stringify({
+          recent: [{ providerID, modelID }],
+          favorite: [],
+          variant: { [selected.id]: variant },
+        }),
+      );
+    };
+    await seedCache(effortA);
 
-  setActiveTmuxSocketName(tmuxSocketName);
-  await syncTmuxEnvironment({});
-  const configPath = join(rootDir, "spur.yaml");
-  await writeFile(
-    configPath,
-    smokeConfig({
-      port,
-      dataDir,
-      worktreeDir,
-      repoDir: SMOKE_REPO_DIR,
-      baseRef: SMOKE_BASE_REF,
-      sessionPrefix,
-      agent,
-      extraProjectYaml: `    reasoningEffort:\n      opencode: ${effortB}\n`,
-    }),
-    "utf8",
-  );
-
-  await withPinnedAgentBinaries(async () => {
-    const service = await startServer(configPath, {});
-    try {
-      const session = await service.spawn({
-        project: "api",
+    setActiveTmuxSocketName(tmuxSocketName);
+    await syncTmuxEnvironment({});
+    const configPath = join(rootDir, "spur.yaml");
+    await writeFile(
+      configPath,
+      smokeConfig({
+        port,
+        dataDir,
+        worktreeDir,
+        repoDir: SMOKE_REPO_DIR,
+        baseRef: SMOKE_BASE_REF,
+        sessionPrefix,
         agent,
-        model: selected.id,
-        ...(explicitOverride ? { reasoningEffort: effortB } : {}),
-        prompt: "Reply with exactly SPUR_OPENCODE_SMOKE_ONE",
-      });
-      cleanupItem.branch = session.branch;
-      cleanupItem.worktreePath = session.worktreePath;
-      expect(session.agentSessionId).toMatch(/^ses_/);
-      const nativeSessionId = session.agentSessionId;
-      if (!nativeSessionId) throw new Error("OpenCode native session id missing");
+        extraProjectYaml: `    reasoningEffort:\n      opencode: ${effortB}\n`,
+      }),
+      "utf8",
+    );
 
-      await pollUntil(() => service.getConversation(session.id), {
-        timeoutMs: 120_000,
-        accept: (conversation) =>
-          conversation.messages.some(
-            (message) =>
-              message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_ONE",
-          ),
-      });
-      const initialUsers = await nativeOpenCodeUsers(nativeSessionId);
-      expect(initialUsers.length).toBeGreaterThan(0);
-      expect(initialUsers.at(-1)?.["model"]).toMatchObject({ providerID, modelID, variant: effortB });
-      expect((await service.get(session.id)).reasoningEffort).toBe(explicitOverride ? effortB : undefined);
-      for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
+    await withPinnedAgentBinaries(async () => {
+      const service = await startServer(configPath, {});
+      try {
+        const session = await service.spawn({
+          project: "api",
+          agent,
+          model: selected.id,
+          ...(explicitOverride ? { reasoningEffort: effortB } : {}),
+          prompt: "Reply with exactly SPUR_OPENCODE_SMOKE_ONE",
+        });
+        cleanupItem.branch = session.branch;
+        cleanupItem.worktreePath = session.worktreePath;
+        expect(session.agentSessionId).toMatch(/^ses_/);
+        const nativeSessionId = session.agentSessionId;
+        if (!nativeSessionId) throw new Error("OpenCode native session id missing");
 
-      await service.pause(session.id);
-      await waitForRestorableSession(service, session.id);
-      const project = service.config.projects["api"];
-      if (!project) throw new Error("OpenCode smoke project missing");
-      const nextConfig = { ...service.config, projects: { ...service.config.projects, api: {
-        ...project, reasoningEffort: { ...project.reasoningEffort, opencode: effortA },
-      } } };
-      service.applyConfig(nextConfig, [configPath]);
-      await seedCache(explicitOverride ? effortA : effortB);
-      const restored = await service.restore(session.id);
-      expect(restored.agentSessionId).toBe(nativeSessionId);
-      await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });
-      await pollUntil(() => service.getConversation(session.id), {
-        timeoutMs: 120_000,
-        accept: (conversation) =>
-          conversation.messages.some(
-            (message) =>
-              message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_TWO",
-          ),
-      });
-      const restoredUsers = await nativeOpenCodeUsers(nativeSessionId);
-      expect(restoredUsers.length).toBeGreaterThan(initialUsers.length);
-      expect(restoredUsers.slice(0, initialUsers.length)).toEqual(initialUsers);
-      expect(restoredUsers.at(-1)?.["model"]).toMatchObject({ providerID, modelID, variant: explicitOverride ? effortB : effortA });
-      for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
+        await pollUntil(() => service.getConversation(session.id), {
+          timeoutMs: 120_000,
+          accept: (conversation) =>
+            conversation.messages.some(
+              (message) =>
+                message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_ONE",
+            ),
+        });
+        const initialUsers = await nativeOpenCodeUsers(nativeSessionId);
+        expect(initialUsers.length).toBeGreaterThan(0);
+        expect(initialUsers.at(-1)?.["model"]).toMatchObject({
+          providerID,
+          modelID,
+          variant: effortB,
+        });
+        expect((await service.get(session.id)).reasoningEffort).toBe(
+          explicitOverride ? effortB : undefined,
+        );
+        for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
 
-      const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
-      expect(killed.status).toBe("killed");
-      expect(existsSync(session.worktreePath)).toBe(false);
-    } finally {
-      await service.stop();
-    }
-  });
+        await service.pause(session.id);
+        await waitForRestorableSession(service, session.id);
+        const project = service.config.projects["api"];
+        if (!project) throw new Error("OpenCode smoke project missing");
+        const nextConfig = {
+          ...service.config,
+          projects: {
+            ...service.config.projects,
+            api: {
+              ...project,
+              reasoningEffort: { ...project.reasoningEffort, opencode: effortA },
+            },
+          },
+        };
+        service.applyConfig(nextConfig, [configPath]);
+        await seedCache(explicitOverride ? effortA : effortB);
+        const restored = await service.restore(session.id);
+        expect(restored.agentSessionId).toBe(nativeSessionId);
+        await service.send(session.id, { message: "Reply with exactly SPUR_OPENCODE_SMOKE_TWO" });
+        await pollUntil(() => service.getConversation(session.id), {
+          timeoutMs: 120_000,
+          accept: (conversation) =>
+            conversation.messages.some(
+              (message) =>
+                message.role === "assistant" && message.text.trim() === "SPUR_OPENCODE_SMOKE_TWO",
+            ),
+        });
+        const restoredUsers = await nativeOpenCodeUsers(nativeSessionId);
+        expect(restoredUsers.length).toBeGreaterThan(initialUsers.length);
+        expect(restoredUsers.slice(0, initialUsers.length)).toEqual(initialUsers);
+        expect(restoredUsers.at(-1)?.["model"]).toMatchObject({
+          providerID,
+          modelID,
+          variant: explicitOverride ? effortB : effortA,
+        });
+        for (const file of protectedFiles) expect(await readFile(file.path)).toEqual(file.bytes);
+
+        const killed = await service.kill(session.id, { force: true, skipPrCheck: true });
+        expect(killed.status).toBe("killed");
+        expect(existsSync(session.worktreePath)).toBe(false);
+      } finally {
+        await service.stop();
+      }
+    });
   } finally {
     for (const key of environmentKeys) {
       const value = savedEnvironment.get(key);
