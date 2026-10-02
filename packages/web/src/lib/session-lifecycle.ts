@@ -39,6 +39,14 @@ export function readLifecycleSnapshot(value: unknown): SessionLifecycleSnapshot 
   )
     return null;
   if (operation.phase === "pending" && operation.outcomes.length > 0) return null;
+  const targets = new Set(operation.targetIds);
+  const outcomes = new Set(operation.outcomes.map((outcome) => outcome.sessionId));
+  if (
+    targets.size !== operation.targetIds.length ||
+    outcomes.size !== operation.outcomes.length ||
+    (operation.phase !== "pending" && outcomes.size !== targets.size)
+  )
+    return null;
   return value as unknown as SessionLifecycleSnapshot;
 }
 
@@ -83,7 +91,11 @@ export class SessionLifecycleConsumer {
       return null;
     for (const row of rows) {
       const snapshot = readLifecycleSnapshot(row.lifecycle);
-      if (!snapshot || snapshot.instanceId !== instanceId)
+      if (
+        !snapshot ||
+        snapshot.instanceId !== instanceId ||
+        (snapshot.operation && !snapshot.operation.targetIds.includes(row.id))
+      )
         throw new Error("Invalid session lifecycle snapshot");
     }
     if (this.instanceId !== instanceId) {
@@ -128,13 +140,26 @@ export class SessionLifecycleConsumer {
 
   acceptUpdate(row: SpurSessionView): SpurSessionView | null {
     const snapshot = readLifecycleSnapshot(row.lifecycle);
-    if (!snapshot || snapshot.instanceId !== this.instanceId) return null;
+    if (
+      !snapshot ||
+      snapshot.instanceId !== this.instanceId ||
+      (snapshot.operation && !snapshot.operation.targetIds.includes(row.id))
+    )
+      return null;
     this.acceptedSequence = ++this.sequence;
     return this.acceptRow(row);
   }
 
   reserve(rows: readonly SpurSessionView[], action: LifecycleAction): LifecycleIntent | null {
-    if (!this.instanceId || rows.length === 0 || rows.some((row) => this.pending(row.id)))
+    if (
+      !this.instanceId ||
+      rows.length === 0 ||
+      rows.some(
+        (row) =>
+          readLifecycleSnapshot(row.lifecycle)?.instanceId !== this.instanceId ||
+          this.pending(row.id),
+      )
+    )
       return null;
     const owner = {
       operationId: crypto.randomUUID(),
