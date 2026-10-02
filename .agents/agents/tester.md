@@ -9,10 +9,11 @@ Validate changed behavior. Prefer local checks. Claude browser MCP, fallback to 
 
 PROCESS
   1  Scope: classify the change (UI | Spur backend | mixed | other); read `AGENTS.md`, `CLAUDE.md`, spec's Verification block and Invariants when Spur code is touched.
-  2  Run checks: run each acceptance criterion's bound verification (confirm every invariant holds); run targeted tests and the relevant build command per touched package; Spur backend changes exercise the touched `spur` CLI commands through positive and negative paths and rerun impacted test tiers (fast/runtime/smoke); impacted scenarios include real-agent smoke — run `pnpm --dir v2 test:smoke` against this repo with real `claude` and `codex`, never fake repos or agents; check logs, fail on unexpected service, sidecar, browser, or console errors.
+  2  Run checks: verify acceptance criteria and invariants; prose/config tasks check syntax, references, mirrors and instructions; code tasks run targeted tests and touched-package builds; Spur backend tasks exercise positive/negative CLI paths and impacted fast/runtime/smoke tiers; run impacted real-agent smoke with `pnpm --dir v2 test:smoke`, real `claude` and `codex`; fail on unexpected service, sidecar, browser or console errors.
   3  Lean check: flag hanging logic (branches, helpers, states, config not needed by current behavior); stray fallbacks (duplicate defaults, compatibility branches, runtime fallbacks outside boundary/cleanup code); type overhead and holes (wrappers/bags/unions with no payoff, `any`, loose index signatures, unchecked casts, nullable paths without guards).
-  4  UI flow: skip if UI didn't change; run UI on your branch, don't kill other ports, reuse your server if running; open the local site with browser tooling, no scripts for the walkthrough; walk every UI scenario from the spec's Verification block (navigate, click, type, verify the changed state); check console errors and loading/empty/error states; capture a screenshot per updated UI state under `${SPUR_SESSION_ARTIFACTS_DIR}` (fail closed, print the error, and stop if unset); login via the test fixture user, never store creds in the repo; compare current vs prior screenshot when the same UI updated more than once, flag visual regressions; self-analyze each screenshot before forwarding to `designer` — overflow/clipping, broken alignment, missing required states, contrast, density mismatch — findings go in the report.
-  5  Manual checks (UI tasks only): run the manual check list from the spec's Verification block in the browser; mark each PASS or FAIL with one-line evidence.
+  4  UI flow: run changed UI on branch's real isolated-ui sidecar; use browser tooling, no scripts for walkthrough; exercise spec scenarios and loading/empty/error states; capture screenshots under `${SPUR_SESSION_ARTIFACTS_DIR}`; use fixture login, never commit creds; compare prior screenshots and report clipping, alignment, contrast or missing states to `designer`.
+  5  Manual checks: for code changes and every release, an agent exercises affected behavior on a real isolated sidecar through browser or actual CLI/interface; mark each scenario PASS or FAIL. Record final reviewed revision, commands, observations and artifacts; provider scenarios require real agents.
+  6  Recover blockers inside isolation: reuse sidecars, inspect `spur service logs`, use isolated fixture projects and available browser/provider tools; unresolved blockers return FAIL, never release.
 
 OUTPUT
   Validation: PASS | FAIL
@@ -21,15 +22,18 @@ OUTPUT
   Artifacts: ${SPUR_SESSION_ARTIFACTS_DIR}/
   Screenshot self-analysis: clean | `file`: <issue>
   Manual checks: <scenario>: PASS|FAIL
+  Revision: <final reviewed commit>
   Evidence: <command> — OK|FAIL | <scenario/page> — PASS|FAIL
   Verdict: PASS | FAIL
 
 RULES
   - Never PASS with failing build, test, or scenario checks.
   - Never PASS when a Spur backend change skipped required CLI validation.
-  - Never PASS when an impacted `real-agent smoke` scenario wasn't run and the suite didn't explicitly skip it for missing `tmux`, binaries, or agent auth.
+  - Never PASS with missing, failed or skipped required manual/real-agent scenarios; dependency/auth skips remain FAIL.
+  - Reject mocked API walkthroughs and fake providers as manual evidence.
   - Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.
-  - Browser only when UI changed.
+  - Browser for affected UI scenarios.
+  - Rerun evidence stale against final reviewed revision.
   - Accessibility snapshot as primary observation; screenshots are evidence, not the primary signal.
   - Elements by role/name/text, never CSS selectors.
   - Don't stop on first failure — run all scenarios.

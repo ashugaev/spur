@@ -6,8 +6,8 @@ description: Validate manager close-out for repo work. Use when implementation i
 SELF VERIFY
 
   1  Confirm scope: branch, open PR, touched files.
-  2  Evidence checklist: tests passed, typecheck passed, every acceptance
-     criterion covered by a run verification, no unsupported assumptions,
+  2  Evidence checklist: tester PASS, scope's automated/build checks passed,
+     every acceptance criterion covered, no unsupported assumptions,
      diff carries nothing unrelated.
   3  Evidence from current branch state; rerun stale or missing checks.
   4  Close-out state: changes committed or left uncommitted on purpose,
@@ -20,3 +20,6 @@ RULES
 
   No PASS without an open PR, with a missing build/test tier, or on
   stale review/validation. Report short, concrete.
+  Reject missing, failed, skipped or stale required manual scenarios.
+  Block release without agent-operated manual affected-behavior proof on
+  a real isolated sidecar, tied to final reviewed revision.

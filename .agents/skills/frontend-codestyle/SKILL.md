@@ -81,5 +81,5 @@ VALIDATION
 
   Playwright E2E covers 100% of UI surfaces. Each new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
   Build must pass: `pnpm --dir packages/web build`.
-  Manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually. Use the official Playwright MCP agent (`playwright-test-generator`) for new E2E tests.
+  Manual browser check: use available browser tooling on branch's real isolated-ui sidecar; verify touched scenarios and secure-context behavior through its HTTPS URL when required.
   Capture screenshots for each touched state (idle, active, error, loading) and review them.
