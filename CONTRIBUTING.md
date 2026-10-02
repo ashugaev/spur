@@ -28,23 +28,9 @@ Specs import `test`, `expect`, and `devices` from `./fixtures.js`, never `playwr
 
 ## PR Checks
 
-Before opening or updating a PR:
+Before opening or updating a PR, build touched packages and run targeted quick local checks when needed.
 
-```bash
-pnpm build
-pnpm test
-pnpm test:integration
-pnpm lint
-pnpm typecheck
-```
-
-When agent launch or prompt delivery changes:
-
-```bash
-pnpm --dir v2 test:smoke
-```
-
-`pnpm --dir v2 test` runs fast (mocked, in-process); `pnpm --dir v2 test:runtime` runs runtime integration (CLI, tmux, worktree, process boundaries); `pnpm --dir v2 test:smoke` runs a real-agent smoke test against this repo (skips if tmux/binaries/auth are missing). Run `test:runtime` when touching CLI, daemon, transport, session lifecycle, worktree, or tmux; run `test:smoke` when touching agent launch or prompt delivery.
+[GitHub CI](.github/workflows/ci.yml) runs full quality, Playwright E2E, runtime integration and real-agent smoke suites. Consume automatic result notifications; never rerun full suites locally.
 
 Tests allocate temp dirs under `TMPDIR` only, never under `~/.spur`. If an
 older revision left fixture dirs behind, list/remove them with

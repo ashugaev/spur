@@ -7,6 +7,12 @@ import {
   restoreSendBatch,
 } from "../../src/send-batches.js";
 import type { GitHubSignal, ReviewSnapshot } from "../../src/types.js";
+import type * as ghModule from "../../src/gh.js";
+const { ghMock } = vi.hoisted(() => ({ ghMock: vi.fn() }));
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
+  gh: ghMock,
+}));
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: vi.fn(),
@@ -56,6 +62,189 @@ function requireBatch<T>(value: T | null, message: string): T {
   }
   return value;
 }
+
+describe("live submission identity", () => {
+  const parse = createSendBatchParser("github", "api", "pr-watch");
+  const url = "https://git.example.com/acme/api/pull/42";
+  const binding = { number: 42, repo: "acme/api", url };
+  it("round-trips authoritative URL and overlays only the submission with stable daemon cwd", async () => {
+    ghMock.mockReset().mockResolvedValue(JSON.stringify({ body: "current" }));
+    const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+    const original = queue.retryItems();
+    const submission = requireBatch(
+      restoreSendBatch(structuredClone(queue.serialize())),
+      "submission",
+    );
+    expect(
+      await submission.refresh?.("/tmp/daemon-data", {
+        ...binding,
+        url: "https://other.example/acme/api/pull/42",
+      }),
+    ).toMatchObject([{ status: "live" }]);
+    expect(queue.retryItems()).toEqual(original);
+    expect(queue.format()).toContain("New comment from user");
+    expect(submission.format()).toContain("current");
+    expect(submission.serialize()).toMatchObject({ prUrl: url });
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/daemon-data",
+      "api",
+      "repos/acme/api/issues/comments/1",
+      "--hostname",
+      "git.example.com",
+      "--cache",
+      "0s",
+    );
+  });
+
+  it.each(["host", "repo", "number"])(
+    "retires the outgoing namespace on %s replacement",
+    (change) => {
+      const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+      const incoming = requireBatch(
+        parse(
+          githubEventData({
+            prUrl:
+              change === "host"
+                ? "https://new.example/acme/api/pull/42"
+                : change === "repo"
+                  ? "https://git.example.com/other/api/pull/42"
+                  : "https://git.example.com/acme/api/pull/43",
+            repo: change === "repo" ? "other/api" : "acme/api",
+            prNumber: change === "number" ? 43 : 42,
+            signals: [{ key: "comment:2", kind: "comment", text: "incoming" }],
+          }),
+        ),
+        "incoming",
+      );
+      expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
+      expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
+    },
+  );
+
+  it("preserves known identity and same-context descriptors when incoming metadata is absent", () => {
+    const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+    expect(queue.merge(requireBatch(parse(githubEventData()), "incoming"))).toBeUndefined();
+    expect(queue.serialize()).toMatchObject({ prUrl: url, repo: "acme/api" });
+  });
+
+  it.each(["URL to repo", "repo to URL"])(
+    "replaces conflicting partial identity: %s",
+    async (shape) => {
+      ghMock.mockReset().mockResolvedValue(JSON.stringify({ body: "current new context" }));
+      const queue = requireBatch(
+        parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "acme/api" })),
+        "queue",
+      );
+      queue.attachAutoPing({
+        occurrenceId: "old",
+        routeFingerprint: "route",
+        destination: { kind: "session", sessionId: "api-1" },
+        createGrant: () => "old-handle",
+      });
+      const newUrl = "https://new.example/other/api/pull/42";
+      const incoming = requireBatch(
+        parse(
+          githubEventData({
+            ...(shape === "URL to repo" ? { repo: "other/api" } : { prUrl: newUrl }),
+            signals: [{ key: "comment:2", kind: "comment", text: "new context" }],
+          }),
+        ),
+        "incoming",
+      );
+      expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
+      expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
+      expect(queue.serialize().autoPing?.items["comment:1"]).toBeUndefined();
+      if (shape === "URL to repo") {
+        expect(queue.serialize()).not.toHaveProperty("prUrl");
+        const unresolved = requireBatch(parse(queue.serialize()), "unresolved");
+        expect(await unresolved.refresh?.("/tmp/daemon-data")).toMatchObject([
+          { status: "failed" },
+        ]);
+        expect(ghMock).not.toHaveBeenCalled();
+      }
+      expect(
+        await queue.refresh?.("/tmp/daemon-data", { number: 42, repo: "other/api", url: newUrl }),
+      ).toMatchObject([{ status: "live" }]);
+      expect(queue.serialize()).toMatchObject({ repo: "other/api", prUrl: newUrl });
+      expect(ghMock).toHaveBeenCalledWith(
+        "/tmp/daemon-data",
+        "api",
+        "repos/other/api/issues/comments/2",
+        "--hostname",
+        "new.example",
+        "--cache",
+        "0s",
+      );
+    },
+  );
+
+  it.each(["URL to repo", "repo to URL"])("preserves compatible partial identity: %s", (shape) => {
+    const queue = requireBatch(
+      parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "ACME/api" })),
+      "queue",
+    );
+    const original = queue.retryItems();
+    const incoming = requireBatch(
+      parse(
+        githubEventData({
+          ...(shape === "URL to repo" ? { repo: "ACME/api" } : { prUrl: url }),
+          signals: [{ key: "comment:2", kind: "comment", text: "compatible" }],
+        }),
+      ),
+      "incoming",
+    );
+    expect(queue.merge(incoming)).toBeUndefined();
+    expect(queue.serialize()).toMatchObject({ prUrl: url });
+    expect(queue.retryItems().slice(0, 1)).toEqual(original);
+    expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:1", "comment:2"]);
+  });
+
+  it.each(["missing", "number", "repo", "credentials", "malformed"])(
+    "fails %s identity with zero requests",
+    async (problem) => {
+      ghMock.mockReset();
+      const queue = requireBatch(
+        parse(
+          githubEventData({
+            repo: "acme/api",
+            ...(problem === "credentials"
+              ? { prUrl: "https://user:pass@git.example.com/acme/api/pull/42" }
+              : problem === "malformed"
+                ? { prUrl: "not-url" }
+                : {}),
+          }),
+        ),
+        "queue",
+      );
+      const pr =
+        problem === "missing"
+          ? undefined
+          : {
+              ...binding,
+              number: problem === "number" ? 43 : 42,
+              repo: problem === "repo" ? "other/api" : "acme/api",
+            };
+      expect(await queue.refresh?.("/tmp/daemon-data", pr)).toMatchObject([{ status: "failed" }]);
+      expect(queue.isEmpty()).toBe(true);
+      expect(ghMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("recovers a matching legacy binding and removes failed/deleted controls through filterItems", async () => {
+    ghMock.mockReset().mockRejectedValue(new Error("HTTP 404"));
+    const queue = requireBatch(parse(githubEventData({ repo: "acme/api" })), "queue");
+    queue.attachAutoPing({
+      occurrenceId: "occurrence",
+      routeFingerprint: "route",
+      destination: { kind: "session", sessionId: "api-1" },
+      createGrant: () => "handle",
+    });
+    expect(await queue.refresh?.("/tmp/daemon-data", binding)).toEqual([
+      { status: "deleted", key: "comment:1" },
+    ]);
+    expect(queue.serialize()).toMatchObject({ prUrl: url, autoPing: { items: {} } });
+  });
+});
 
 describe("isGitHubEventData", () => {
   it("restores proven legacy GitLab discussion targets without inventing individual threads", () => {

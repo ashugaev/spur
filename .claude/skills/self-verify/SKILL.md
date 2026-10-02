@@ -22,3 +22,4 @@ RULES
   stale review/validation. Report short, concrete.
   Reject missing, failed, skipped or stale required manual scenarios.
   Enforce manager's manual-proof and required-CI release gate.
+  Report pending CI separately; never claim an unrun check passed.

@@ -27,11 +27,12 @@ RULES
   Never PASS when a Spur backend change skipped required CLI validation.
   Never PASS with missing, failed or skipped required manual/real-agent scenarios; dependency/auth skips remain FAIL.
   Reject mocked API walkthroughs and fake providers as manual evidence.
+  Report pending CI evidence separately; never claim an unrun check passed.
   Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths.
   Browser for affected UI scenarios.
   Rerun evidence stale against final reviewed revision.
   Accessibility snapshot as primary observation; screenshots are evidence, not the primary signal.
   Elements by role/name/text, never CSS selectors.
-  Don't stop on first failure — run all scenarios.
+  Limit local automated checks to needed targeted checks; complete required manual scenarios.
   Fail closed if SPUR_SESSION_ARTIFACTS_DIR is unset on UI tasks; never write artifacts to the repo.
 """

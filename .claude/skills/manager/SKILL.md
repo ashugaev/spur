@@ -62,6 +62,7 @@ RULES
   - Assign smoke and full automated suites to CI.
   - Require agent-operated manual affected-behavior proof on a real isolated sidecar; run targeted local automated checks only when needed to verify changed boundary.
   - Block release without successful manual proof and required CI checks, tied to final reviewed revision. CI query permission stays in `AGENTS.md`/`CLAUDE.md`.
+  - Never poll or wait for remote CI.
 
 CONTEXT HANDOFF
 
