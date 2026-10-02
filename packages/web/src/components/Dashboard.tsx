@@ -1105,6 +1105,15 @@ export function Dashboard() {
   const spawnWorkspaceModeAuto = spawnWorkspaceModeConfirmedFor !== spawnProjectId;
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
+  const spawnAttachmentsRef = useRef<FileAttachment[]>([]);
+  const spawnAttachmentReadsRef = useRef({ pending: 0 });
+  const [spawnAttachmentsPending, setSpawnAttachmentsPending] = useState(false);
+  const resetSpawnAttachments = useCallback(() => {
+    spawnAttachmentReadsRef.current = { pending: 0 };
+    spawnAttachmentsRef.current = [];
+    setSpawnAttachments([]);
+    setSpawnAttachmentsPending(false);
+  }, []);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnTrackerUrl, setSpawnTrackerUrl] = useState<string | null>(null);
@@ -1587,7 +1596,7 @@ export function Dashboard() {
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
-    setSpawnAttachments([]);
+    resetSpawnAttachments();
   };
 
   useEffect(() => {
@@ -1686,8 +1695,9 @@ export function Dashboard() {
 
   const closeSpawnModal = useCallback(() => {
     writeSpawnDraft(spawnDraftRef.current);
+    resetSpawnAttachments();
     setSpawnOpen(false);
-  }, []);
+  }, [resetSpawnAttachments]);
 
   useEffect(() => {
     if (!spawnOpen) return;
@@ -1844,7 +1854,8 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || spawningRef.current) return;
+    if (!nextProjectId || spawningRef.current || spawnAttachmentReadsRef.current.pending > 0)
+      return;
 
     spawningRef.current = true;
     setSpawning(true);
@@ -1855,7 +1866,7 @@ export function Dashboard() {
         agent: spawnAgent,
         model: spawnModel,
         mode: effectiveSessionMode,
-        attachments: spawnAttachments,
+        attachments: spawnAttachmentsRef.current,
         branch: spawnBranch,
         planMode: spawnPlanMode,
         selfDestruct: spawnSelfDestruct,
@@ -1899,7 +1910,7 @@ export function Dashboard() {
       setSpawnWorkspaceModeConfirmedFor(null);
       setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
-      setSpawnAttachments([]);
+      resetSpawnAttachments();
       setSpawnPinnedProjectId(null);
       setSpawnTrackerUrl(null);
       setSpawnOpen(false);
@@ -2331,18 +2342,28 @@ export function Dashboard() {
 
   const addSpawnFiles = useCallback(
     (files: FileList | File[] | null) => {
+      if (!files?.length) return;
+      const reads = spawnAttachmentReadsRef.current;
+      reads.pending += 1;
+      setSpawnAttachmentsPending(true);
       void fileAttachmentsFromFiles(files)
         .then((attachments) => {
-          if (attachments.length === 0) return;
-          let rejectedMessage: string | null = null;
-          setSpawnAttachments((current) => {
-            const result = mergeAttachmentsWithinLimit(current, attachments);
-            rejectedMessage = result.rejectedMessage;
-            return result.attachments;
-          });
-          if (rejectedMessage) showErrorToast(rejectedMessage);
+          if (reads !== spawnAttachmentReadsRef.current || attachments.length === 0) return;
+          const result = mergeAttachmentsWithinLimit(spawnAttachmentsRef.current, attachments);
+          spawnAttachmentsRef.current = result.attachments;
+          setSpawnAttachments(result.attachments);
+          if (result.rejectedMessage) showErrorToast(result.rejectedMessage);
         })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          if (reads === spawnAttachmentReadsRef.current) {
+            showErrorToast(errorMessage(error, "Failed to read attachment"));
+          }
+        })
+        .finally(() => {
+          if (reads !== spawnAttachmentReadsRef.current) return;
+          reads.pending -= 1;
+          setSpawnAttachmentsPending(reads.pending > 0);
+        });
     },
     [showErrorToast],
   );
@@ -2837,9 +2858,11 @@ export function Dashboard() {
                 setSpawnPrompt(next);
               }}
               onRemoveAttachment={(index) => {
-                setSpawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
+                const attachments = spawnAttachmentsRef.current.filter(
+                  (_, currentIndex) => currentIndex !== index,
                 );
+                spawnAttachmentsRef.current = attachments;
+                setSpawnAttachments(attachments);
               }}
               onSubmit={() => void handleSpawn()}
               prompt={spawnPrompt}
@@ -2856,6 +2879,7 @@ export function Dashboard() {
               submitBusyAriaLabel="Spawning session"
               submitDisabled={
                 spawning ||
+                spawnAttachmentsPending ||
                 !spawnProjectId.trim() ||
                 !spawnModelResolved ||
                 spawnWorkspaceModeUnresolved
