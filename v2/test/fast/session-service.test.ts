@@ -48876,10 +48876,13 @@ describe("SessionService", () => {
       });
       await vi.advanceTimersByTimeAsync(60_000);
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
-      expect(tmuxTexts().findIndex((text) => text.includes("hello"))).toBeLessThan(
-        tmuxTexts().indexOf("follow up"),
-      );
-      expect(tmuxTexts().filter((text) => text === "follow up")).toHaveLength(1);
+      expect(eventsNamed("session.spawn.completed")).toHaveLength(1);
+      const messages = tmuxTexts();
+      const initialIndex = messages.findIndex((text) => text.includes("hello"));
+      const followUpIndex = messages.indexOf("follow up");
+      expect(initialIndex).toBe(0);
+      expect(followUpIndex).toBeGreaterThan(initialIndex);
+      expect(messages.filter((text) => text === "follow up")).toHaveLength(1);
       expect(sessions.get("api-1")?.status).toBe("running");
       expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
       service.dispose();
