@@ -10924,11 +10924,7 @@ describe("SessionService", () => {
       let dead = false;
       isProcessRunningInTmuxMock.mockImplementation(async () => !dead);
       const releaseAck = gateSubmitAck(service, { found: false });
-      let releaseRecoveryCreate: () => void = () => {};
-      const recoveryCreate = new Promise<void>((resolve) => {
-        releaseRecoveryCreate = resolve;
-      });
-      createTmuxSessionMock.mockImplementationOnce(() => recoveryCreate);
+      const releaseRecoveryCreate = holdNextCreateTmuxSession();
 
       const view = await service.send("api-1", { message: "retry me" });
       expect(view.queuedMessages?.messages ?? []).toEqual([]);
@@ -11429,6 +11425,17 @@ describe("SessionService", () => {
         .map(([, message]) => String(message));
     }
 
+    function holdNextCreateTmuxSession(): () => void {
+      let release: () => void = () => {};
+      createTmuxSessionMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      return () => release();
+    }
+
     async function timedSend(
       service: { send(id: string, request: { message: string }): Promise<SessionView> },
       message: string,
@@ -11506,11 +11513,7 @@ describe("SessionService", () => {
       let dead = false;
       isProcessRunningInTmuxMock.mockImplementation(async () => !dead);
       const releaseAck = gateSubmitAck(service, { found: false });
-      let releaseRecoveryCreate: () => void = () => {};
-      const recoveryCreate = new Promise<void>((resolve) => {
-        releaseRecoveryCreate = resolve;
-      });
-      createTmuxSessionMock.mockImplementationOnce(() => recoveryCreate);
+      const releaseRecoveryCreate = holdNextCreateTmuxSession();
 
       await service.send("api-1", { message: "first" });
       await service.send("api-1", { message: "second" });
