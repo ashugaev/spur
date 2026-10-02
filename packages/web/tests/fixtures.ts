@@ -453,7 +453,10 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
     pattern: /\/api\/projects\/[^/]+\/preflight-batches$/,
     body: { preflightBatchId: "10000000-0000-4000-8000-000000000001" },
   },
-  { pattern: "**/api/runtime/info", body: { version: "0.0.0-test", lifecycleInstanceId: "test-instance" } },
+  {
+    pattern: "**/api/runtime/info",
+    body: { version: "0.0.0-test", lifecycleInstanceId: "test-instance" },
+  },
   {
     pattern: "**/api/runtime/versions",
     body: { current: "0.0.0-test", autoUpdate: false, available: [] },

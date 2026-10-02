@@ -10,7 +10,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
-import type { LifecycleAction, SessionLifecycleSnapshot, SpurSessionLink, SpurSessionsResponse, SpurSessionView } from "@/lib/types";
+import type {
+  LifecycleAction,
+  SessionLifecycleSnapshot,
+  SpurSessionLink,
+  SpurSessionsResponse,
+  SpurSessionView,
+} from "@/lib/types";
 
 const useSessionLinkPrInfoMock = vi.fn();
 
@@ -85,13 +91,20 @@ function deferredResponse() {
   return { promise, resolve };
 }
 
-function completeReceipt(body: Record<string, unknown>, revision: number, succeeded: boolean): SessionLifecycleSnapshot {
+function completeReceipt(
+  body: Record<string, unknown>,
+  revision: number,
+  succeeded: boolean,
+): SessionLifecycleSnapshot {
   expect(body.operationId).toMatch(/^[\da-f-]{36}$/i);
   return {
-    instanceId: "test-instance", revision,
+    instanceId: "test-instance",
+    revision,
     operation: {
-      operationId: body.operationId as string, action: "complete",
-      phase: succeeded ? "succeeded" : "failed", targetIds: ["api-c9e9"],
+      operationId: body.operationId as string,
+      action: "complete",
+      phase: succeeded ? "succeeded" : "failed",
+      targetIds: ["api-c9e9"],
       outcomes: [{ sessionId: "api-c9e9", phase: succeeded ? "succeeded" : "failed" }],
     },
   };
@@ -104,7 +117,8 @@ function mockFetch(completeBodies: unknown[], options?: { skipAlsoFails?: true }
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
+    if (url === "/api/sessions")
+      return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
@@ -112,11 +126,15 @@ function mockFetch(completeBodies: unknown[], options?: { skipAlsoFails?: true }
       const record = body as Record<string, unknown>;
       const succeeds = record["skipPrCheck"] === true && !options?.skipAlsoFails;
       const lifecycle = completeReceipt(record, completeBodies.length * 2, succeeds);
-      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
+      rows = [
+        { ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" },
+      ];
       if (record["skipPrCheck"] === true && !options?.skipAlsoFails) {
         return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
-      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), { status: 409 });
+      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), {
+        status: 409,
+      });
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -137,7 +155,8 @@ function mockFetchOpenPrThenUnavailable(completeBodies: unknown[]) {
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
+    if (url === "/api/sessions")
+      return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
@@ -145,12 +164,16 @@ function mockFetchOpenPrThenUnavailable(completeBodies: unknown[]) {
       const record = body as Record<string, unknown>;
       const succeeds = record["skipPrCheck"] === true;
       const lifecycle = completeReceipt(record, completeBodies.length * 2, succeeds);
-      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
+      rows = [
+        { ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" },
+      ];
       if (record["skipPrCheck"] === true) {
         return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
       if (record["prAction"] === "close") {
-        return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), { status: 409 });
+        return new Response(JSON.stringify({ ...prCheckUnavailablePayload, lifecycle }), {
+          status: 409,
+        });
       }
       return new Response(JSON.stringify({ ...openPrActionPayload, lifecycle }), { status: 409 });
     }
@@ -167,20 +190,30 @@ function mockFetchRateLimitedThenRetryOk(completeBodies: unknown[]) {
     if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
     if (url === "/api/runtime/voice")
       return new Response(JSON.stringify({ available: false, language: "" }));
-    if (url === "/api/sessions") return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
+    if (url === "/api/sessions")
+      return new Response(JSON.stringify({ ...sessionsResponse, sessions: rows }));
     if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
     if (url === "/api/sessions/api-c9e9/complete") {
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : {};
       completeBodies.push(body);
       const succeeds = completeBodies.length > 1;
-      const lifecycle = completeReceipt(body as Record<string, unknown>, completeBodies.length * 2, succeeds);
-      rows = [{ ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" }];
+      const lifecycle = completeReceipt(
+        body as Record<string, unknown>,
+        completeBodies.length * 2,
+        succeeds,
+      );
+      rows = [
+        { ...sessionsResponse.sessions[0], lifecycle, status: succeeds ? "completed" : "stopped" },
+      ];
       if (completeBodies.length > 1) {
         return new Response(JSON.stringify({ completedIds: ["api-c9e9"], lifecycle }));
       }
-      return new Response(JSON.stringify({ ...prCheckUnavailablePayload, rateLimited: true, lifecycle }), {
-        status: 409,
-      });
+      return new Response(
+        JSON.stringify({ ...prCheckUnavailablePayload, rateLimited: true, lifecycle }),
+        {
+          status: 409,
+        },
+      );
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -374,7 +407,10 @@ describe("Dashboard lifecycle reconciliation", () => {
       }
       if (url === "/api/tags") return json({ tags: [] });
       if (url.startsWith("/api/runtime/")) return json({ available: false });
-      if (url.startsWith("/api/sessions/") && (url.endsWith("/complete") || url.endsWith("/restore"))) {
+      if (
+        url.startsWith("/api/sessions/") &&
+        (url.endsWith("/complete") || url.endsWith("/restore"))
+      ) {
         posts.push(url);
         const body: unknown = JSON.parse(String(init?.body));
         expect(body).toMatchObject({ operationId: expect.any(String) });
@@ -383,43 +419,77 @@ describe("Dashboard lifecycle reconciliation", () => {
         const action: LifecycleAction = url.endsWith("/complete") ? "complete" : "restore";
         const anchor = list.sessions.find((row) => row.id === id)!;
         const key = anchor.workspaceId ?? anchor.deskId ?? anchor.id;
-        const targets = action === "complete"
-          ? list.sessions.filter((row) => (row.workspaceId ?? row.deskId ?? row.id) === key).map((row) => row.id)
-          : [id];
+        const targets =
+          action === "complete"
+            ? list.sessions
+                .filter((row) => (row.workspaceId ?? row.deskId ?? row.id) === key)
+                .map((row) => row.id)
+            : [id];
         const snapshot = (phase: "pending" | "succeeded" | "failed"): SessionLifecycleSnapshot => ({
-          instanceId: "test-instance", revision: ++revision,
-          operation: { operationId, action, phase, targetIds: targets,
-            outcomes: phase === "pending" ? [] : targets.map((sessionId) => ({ sessionId,
-              phase: action === "complete"
-                ? current.get(sessionId)?.status === "completed" ? "succeeded" : "failed"
-                : phase === "succeeded" ? "succeeded" : "failed" })) },
+          instanceId: "test-instance",
+          revision: ++revision,
+          operation: {
+            operationId,
+            action,
+            phase,
+            targetIds: targets,
+            outcomes:
+              phase === "pending"
+                ? []
+                : targets.map((sessionId) => ({
+                    sessionId,
+                    phase:
+                      action === "complete"
+                        ? current.get(sessionId)?.status === "completed"
+                          ? "succeeded"
+                          : "failed"
+                        : phase === "succeeded"
+                          ? "succeeded"
+                          : "failed",
+                  })),
+          },
         });
         const pendingLifecycle = snapshot("pending");
         for (const target of targets) {
           const row = current.get(target);
           if (row) current.set(target, { ...row, lifecycle: pendingLifecycle });
         }
-        list = { ...list, sessions: list.sessions.map((row) => targets.includes(row.id)
-          ? { ...row, lifecycle: pendingLifecycle } : row) };
-        return (url.includes("api-other") ? otherPost.promise : post.promise).then(async (response) => {
-          const payload = await response.json() as Record<string, unknown>;
-          if (Array.isArray(payload.completedIds)) {
-            for (const completedId of payload.completedIds) {
-              if (typeof completedId === "string" && !targets.includes(completedId)) targets.push(completedId);
+        list = {
+          ...list,
+          sessions: list.sessions.map((row) =>
+            targets.includes(row.id) ? { ...row, lifecycle: pendingLifecycle } : row,
+          ),
+        };
+        return (url.includes("api-other") ? otherPost.promise : post.promise).then(
+          async (response) => {
+            const payload = (await response.json()) as Record<string, unknown>;
+            if (Array.isArray(payload.completedIds)) {
+              for (const completedId of payload.completedIds) {
+                if (typeof completedId === "string" && !targets.includes(completedId))
+                  targets.push(completedId);
+              }
             }
-          }
-          const lifecycle = snapshot(response.ok ? "succeeded" : "failed");
-          list = { ...list, sessions: list.sessions.map((row) => {
-            if (!targets.includes(row.id)) return row;
-            const actual = current.get(row.id) ?? row;
-            if (actual.lifecycle?.operation?.phase === "pending" &&
-              actual.lifecycle.operation.operationId !== operationId) return row;
-            const next = { ...actual, lifecycle };
-            current.set(row.id, next);
-            return next;
-          }) };
-          return new Response(JSON.stringify({ ...payload, lifecycle }), { status: response.status });
-        });
+            const lifecycle = snapshot(response.ok ? "succeeded" : "failed");
+            list = {
+              ...list,
+              sessions: list.sessions.map((row) => {
+                if (!targets.includes(row.id)) return row;
+                const actual = current.get(row.id) ?? row;
+                if (
+                  actual.lifecycle?.operation?.phase === "pending" &&
+                  actual.lifecycle.operation.operationId !== operationId
+                )
+                  return row;
+                const next = { ...actual, lifecycle };
+                current.set(row.id, next);
+                return next;
+              }),
+            };
+            return new Response(JSON.stringify({ ...payload, lifecycle }), {
+              status: response.status,
+            });
+          },
+        );
       }
       const session = current.get(url.replace("/api/sessions/", ""));
       if (nextDetail) {
@@ -526,7 +596,12 @@ describe("Dashboard lifecycle reconciliation", () => {
     held.resolve(new Response(JSON.stringify(list)));
     await waitFor(() => expect(restoreButton()).not.toBeInTheDocument());
     current.set(source.id, source);
-    list = { ...list, sessions: [{ ...source, lifecycle: list.sessions[0]?.lifecycle ?? current.get(source.id)!.lifecycle }] };
+    list = {
+      ...list,
+      sessions: [
+        { ...source, lifecycle: list.sessions[0]?.lifecycle ?? current.get(source.id)!.lifecycle },
+      ],
+    };
     await refetch(client);
     expect(restoreButton()).toBeInTheDocument();
   });
@@ -646,10 +721,13 @@ describe("Dashboard lifecycle reconciliation", () => {
       ],
     };
     await refetch(client);
-    list = { ...list, sessions: [
-      { ...anchor, lifecycle: current.get(anchor.id)!.lifecycle },
-      { ...added, lifecycle: current.get(added.id)!.lifecycle },
-    ] };
+    list = {
+      ...list,
+      sessions: [
+        { ...anchor, lifecycle: current.get(anchor.id)!.lifecycle },
+        { ...added, lifecycle: current.get(added.id)!.lifecycle },
+      ],
+    };
     await refetch(client);
     expect(doneButton()).toBeInTheDocument();
   });
@@ -876,8 +954,7 @@ describe("Dashboard lifecycle reconciliation", () => {
     await refetch(client);
     expect(doneButton()).not.toBeInTheDocument();
     expect(
-      vi.mocked(global.fetch).mock.calls.filter(([url]) => url === "/api/sessions")
-        .length,
+      vi.mocked(global.fetch).mock.calls.filter(([url]) => url === "/api/sessions").length,
     ).toBeGreaterThanOrEqual(2);
     const reopened: SpurSessionView = {
       ...source,

@@ -37,10 +37,17 @@ function lifecycleReceipt(
   revision = phase === "pending" ? 1 : 2,
 ): SessionLifecycleSnapshot {
   expect(operationId).toMatch(/^[\da-f-]{36}$/i);
-  return { instanceId: "test-instance", revision, operation: {
-    operationId, targetIds, action, phase,
-    outcomes: phase === "pending" ? [] : targetIds.map((sessionId) => ({ sessionId, phase })),
-  } };
+  return {
+    instanceId: "test-instance",
+    revision,
+    operation: {
+      operationId,
+      targetIds,
+      action,
+      phase,
+      outcomes: phase === "pending" ? [] : targetIds.map((sessionId) => ({ sessionId, phase })),
+    },
+  };
 }
 
 test.describe("Lifecycle reconciliation", () => {
@@ -73,10 +80,17 @@ test.describe("Lifecycle reconciliation", () => {
     });
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
       const { operationId } = route.request().postDataJSON() as { operationId: string };
-      rows = [{ ...session, lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "pending") }];
+      rows = [
+        {
+          ...session,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "pending"),
+        },
+      ];
       await held;
       const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
-      rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }];
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
       await route.fulfill({ json: { completedIds: [session.id], lifecycle } });
     });
     await page.clock.install();
@@ -121,7 +135,10 @@ test.describe("Lifecycle reconciliation", () => {
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       const { operationId } = route.request().postDataJSON() as { operationId: string };
       await held;
-      waiting = { ...waiting, lifecycle: lifecycleReceipt(operationId, [stopped.id], "restore", "succeeded") };
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [stopped.id], "restore", "succeeded"),
+      };
       rows = [waiting];
       await route.fulfill({ json: waiting });
     });
@@ -169,7 +186,7 @@ test.describe("Lifecycle reconciliation", () => {
       const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (calls === 1) await held;
       const lifecycle = lifecycleReceipt(operationId, [stopped.id], "restore", "failed", calls * 2);
-      rows = rows.map((row) => row.id === stopped.id ? { ...stopped, lifecycle } : row);
+      rows = rows.map((row) => (row.id === stopped.id ? { ...stopped, lifecycle } : row));
       await route.fulfill({ status: 500, json: { error: "Restore failed", lifecycle } });
     });
     await page.clock.install();
@@ -203,7 +220,10 @@ test.describe("Lifecycle reconciliation", () => {
     await page.route(`**/api/sessions/${old.id}/restore`, async (route) => {
       restoreCalls += 1;
       const { operationId } = route.request().postDataJSON() as { operationId: string };
-      waiting = { ...waiting, lifecycle: lifecycleReceipt(operationId, [old.id], "restore", "succeeded") };
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [old.id], "restore", "succeeded"),
+      };
       await route.fulfill({ json: waiting });
     });
     await page.clock.install();
@@ -238,7 +258,10 @@ test.describe("Lifecycle reconciliation", () => {
     };
     let rows = [old];
     let polls = 0;
-    await mockSessions(page, () => { polls += 1; return rows; });
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
     await mockPrState(page, "merged");
     await page.route(`**/api/sessions/${old.id}`, (route) => {
       return route.fulfill({ json: current });
@@ -258,7 +281,13 @@ test.describe("Lifecycle reconciliation", () => {
     await expect(done).toHaveCount(0);
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toHaveCount(0);
-    current = { ...old, status: "running", state: "waiting", runtimeAlive: true, lifecycle: current.lifecycle };
+    current = {
+      ...old,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+      lifecycle: current.lifecycle,
+    };
     rows = [current];
     await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
     await expect(done).toBeVisible();
@@ -1707,7 +1736,10 @@ test.describe("D4: Terminal button state", () => {
       restoreCalls += 1;
       const body = route.request().postDataJSON() as { operationId: string };
       expect(body).toEqual({ operationId: expect.any(String) });
-      restored = { ...restored, lifecycle: lifecycleReceipt(body.operationId, [stopped.id], "restore", "succeeded") };
+      restored = {
+        ...restored,
+        lifecycle: lifecycleReceipt(body.operationId, [stopped.id], "restore", "succeeded"),
+      };
       restoredState = true;
       await route.fulfill({
         status: 200,
@@ -1837,7 +1869,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       const { operationId } = route.request().postDataJSON() as { operationId: string };
       await completeHold;
       const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
-      rows = [{ ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }];
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1897,7 +1931,10 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       completeBodies.push(route.request().postDataJSON());
       const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (completeAttempts === 1) {
-        current = { ...current, lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "failed") };
+        current = {
+          ...current,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "failed"),
+        };
         await route.fulfill({
           status: 409,
           contentType: "application/json",
@@ -1990,8 +2027,19 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeBody = route.request().postDataJSON();
       const { operationId } = completeBody as { operationId: string };
-      const lifecycle = lifecycleReceipt(operationId, [session.id, subagent.id], "complete", "succeeded");
-      rows = rows.map((row) => ({ ...row, status: "completed", state: "stopped", runtimeAlive: false, lifecycle }));
+      const lifecycle = lifecycleReceipt(
+        operationId,
+        [session.id, subagent.id],
+        "complete",
+        "succeeded",
+      );
+      rows = rows.map((row) => ({
+        ...row,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        lifecycle,
+      }));
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -2008,7 +2056,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.goto("/");
     await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
 
-    await expect.poll(() => completeBody).toEqual({ scope: "desk", operationId: expect.any(String) });
+    await expect
+      .poll(() => completeBody)
+      .toEqual({ scope: "desk", operationId: expect.any(String) });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
