@@ -31835,7 +31835,9 @@ describe("SessionService", () => {
     );
   });
 
-  async function restoreStoppedWithErrorUnderUnresponsiveProbe() {
+  async function restoreStoppedWithErrorUnderUnresponsiveProbe(options?: {
+    writeAfterSnapshot?: (sessions: ReturnType<typeof createSessionStore>) => void;
+  }) {
     const sessions = createSessionStore();
     buildAgentRestorePlanMock.mockResolvedValue({
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
@@ -31860,6 +31862,7 @@ describe("SessionService", () => {
     let restoredTmuxCreated = false;
     createTmuxSessionMock.mockImplementation(async () => {
       restoredTmuxCreated = true;
+      options?.writeAfterSnapshot?.(sessions);
     });
     createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
     tmuxSessionExistsMock.mockImplementation(async () => restoredTmuxCreated);
@@ -31884,6 +31887,20 @@ describe("SessionService", () => {
     const persisted = sessions.get("api-1");
     expect(persisted?.status).toBe("stopped");
     expect(persisted).not.toHaveProperty("error");
+  });
+
+  it("restore ambiguous branch error-clear keeps fields written after the pre-launch snapshot", async () => {
+    const { sessions } = await restoreStoppedWithErrorUnderUnresponsiveProbe({
+      writeAfterSnapshot: (store) => {
+        const onDisk = store.get("api-1");
+        if (onDisk) {
+          store.set("api-1", { ...onDisk, sidecarPorts: { spur: { PORT: 4321 } } });
+        }
+      },
+    });
+    const persisted = sessions.get("api-1");
+    expect(persisted).not.toHaveProperty("error");
+    expect(persisted?.sidecarPorts).toEqual({ spur: { PORT: 4321 } });
   });
 
   it("stopped record with error is promoted on live-pane evidence after the ambiguous restore", async () => {

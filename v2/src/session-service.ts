@@ -16153,8 +16153,12 @@ export class SessionService {
         // relaunched. Left in place it blocks reconcileStaleStoppedSession
         // (hasSessionErrorEvidence) behind a live agent. Liveness is not
         // proven, so no status is written.
-        if (current.error !== undefined) {
-          const { error: _staleError, ...withoutError } = current;
+        // Fresh read: the sidecar start between the pre-launch snapshot and
+        // here already wrote sidecarPorts/Names/Procs; the stale snapshot
+        // would erase them.
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (latest?.error !== undefined) {
+          const { error: _staleError, ...withoutError } = latest;
           writeSession(this.config.dataDir, withoutError);
           this.stateCache.delete(sessionId);
         }
