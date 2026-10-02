@@ -4,6 +4,7 @@ import type { SessionView } from "../../src/types.js";
 
 function session(overrides: Partial<SessionView>): SessionView {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-1",
     project: "api",
     workspaceId: "api-1",

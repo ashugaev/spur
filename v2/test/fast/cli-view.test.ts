@@ -9,6 +9,7 @@ import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SessionView } from "../
 
 function session(overrides: Partial<SessionView>): SessionView {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-1",
     project: "api",
     workspaceId: "api-1",
@@ -35,6 +36,7 @@ function session(overrides: Partial<SessionView>): SessionView {
 
 function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
   return {
+    lifecycleInstanceId: "test-instance",
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: "0.1.0",
