@@ -33,6 +33,17 @@ let activeTmuxSocketName: string | null = null;
 const SENSITIVE_TMUX_CLOSE_WAIT_MS = 1_000;
 const SENSITIVE_TMUX_CLEANUP_ATTEMPTS = 3;
 
+export class TmuxProbeUnknownError extends Error {
+  constructor(diagnostic: string) {
+    super(diagnostic);
+    this.name = "TmuxProbeUnknownError";
+  }
+}
+
+function probeDiagnostic(probe: string, error: unknown): string {
+  return `${probe} failed: ${error instanceof Error ? error.message : String(error)}`;
+}
+
 // ── Shared short-TTL runtime-probe cache ──
 // With ~183 sessions, the dashboard-cache tick (every 2s in session-service.ts,
 // DASHBOARD_CACHE_INTERVAL_MS) and the attention monitor (every 5s) each fork
@@ -94,20 +105,36 @@ function memoizedProbe<T>(
 }
 
 interface FleetSessionSnapshot {
+  diagnostic?: string;
   names: Set<string>;
   activity: Map<string, Date | null>;
   readable: boolean;
-  // True only when `readable` is false AND the fork that failed was killed by
-  // its own `TMUX_COMMAND_TIMEOUT_MS` timeout (see isProbeTimeoutKill) rather
-  // than genuinely failing (e.g. no tmux server running). Ambiguous — the
-  // fleet could not be read, not "the fleet is empty" — so callers reasoning
-  // about a session's ABSENCE must treat this apart from an ordinary
-  // `readable: false`.
+  // Timeout detail; every unreadable snapshot carries a diagnostic.
   unresponsive: boolean;
 }
 
 const fleetSessionCache = new Map<string, ProbeCacheEntry<FleetSessionSnapshot>>();
 const FLEET_SESSION_CACHE_KEY = "sessions";
+
+function isKnownAbsentTmuxServer(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if (
+    !("code" in error) ||
+    error.code !== 1 ||
+    !("killed" in error) ||
+    error.killed !== false ||
+    !("signal" in error) ||
+    error.signal !== null ||
+    !("stdout" in error) ||
+    error.stdout !== "" ||
+    !("stderr" in error) ||
+    typeof error.stderr !== "string"
+  )
+    return false;
+  return /^(?:no server running on \S+|error connecting to \S+ \(No such file or directory\))$/.test(
+    error.stderr.trim(),
+  );
+}
 
 // Fleet-wide session existence AND activity in ONE fork instead of one
 // `has-session` plus one `display-message` per session.
@@ -138,12 +165,16 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
     const activity = new Map<string, Date | null>();
     let readable = true;
     let unresponsive = false;
+    let diagnostic: string | undefined;
     try {
       const out = await tmux("list-windows", "-a", "-F", "#{session_name} #{window_activity}");
       for (const line of out.trim().split("\n")) {
-        const [sessionName, activitySeconds] = line.trim().split(/\s+/);
+        const [sessionName, activitySeconds, extra] = line.trim().split(/\s+/);
         if (!sessionName) {
           continue;
+        }
+        if (!/^\d+$/.test(activitySeconds ?? "") || extra !== undefined) {
+          throw new Error("malformed list-windows output");
         }
         names.add(sessionName);
         const seconds = Number.parseInt(activitySeconds ?? "", 10);
@@ -157,12 +188,13 @@ function getFleetSessionSnapshot(): Promise<FleetSessionSnapshot> {
         );
       }
     } catch (error) {
-      // No tmux server running (or another list-windows failure) — an empty
-      // fleet, never a thrown error.
-      readable = false;
-      unresponsive = isProbeTimeoutKill(error);
+      if (!isKnownAbsentTmuxServer(error)) {
+        readable = false;
+        unresponsive = isProbeTimeoutKill(error);
+        diagnostic = probeDiagnostic("tmux list-windows", error);
+      }
     }
-    return { names, activity, readable, unresponsive };
+    return { names, activity, readable, unresponsive, ...(diagnostic ? { diagnostic } : {}) };
   });
 }
 
@@ -192,7 +224,9 @@ export async function tmuxSessionExists(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
-  return (await getTmuxSessionPresence(sessionName, options)).present;
+  const result = await getTmuxSessionPresence(sessionName, options);
+  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  return result.present;
 }
 
 // Combined presence+unresponsiveness read off ONE fleet-snapshot fetch.
@@ -206,7 +240,7 @@ export async function tmuxSessionExists(
 export async function getTmuxSessionPresence(
   sessionName: string,
   options?: { fresh?: boolean },
-): Promise<{ present: boolean; unresponsive: boolean }> {
+): Promise<{ present: boolean; unresponsive: boolean; diagnostic?: string }> {
   if (options?.fresh) {
     fleetSessionCache.delete(FLEET_SESSION_CACHE_KEY);
   }
@@ -217,6 +251,7 @@ export async function getTmuxSessionPresence(
     // snapshot's own catch block, never otherwise — no `!snapshot.readable`
     // guard needed here.
     unresponsive: snapshot.unresponsive,
+    ...(snapshot.diagnostic ? { diagnostic: snapshot.diagnostic } : {}),
   };
 }
 
@@ -247,6 +282,7 @@ interface FleetPaneEntry {
 // deciding something about a pane's ABSENCE must check `readable` first (see
 // lookupTmuxPanePid).
 interface FleetPaneSnapshot {
+  diagnostic?: string;
   readable: boolean;
   // Same meaning as FleetSessionSnapshot.unresponsive: only true when
   // `readable` is false because the `list-panes` fork was killed by its own
@@ -267,6 +303,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
     const panes = new Map<string, FleetPaneEntry>();
     let readable = true;
     let unresponsive = false;
+    let diagnostic: string | undefined;
     try {
       const out = await tmux(
         "list-panes",
@@ -275,11 +312,19 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
         "#{session_name} #{window_active} #{pane_active} #{pane_dead} #{pane_pid} #{pane_tty}",
       );
       for (const line of out.trim().split("\n")) {
-        const [sessionName, windowActive, paneActive, paneDead, panePid, paneTty] = line
+        const [sessionName, windowActive, paneActive, paneDead, panePid, paneTty, extra] = line
           .trim()
           .split(/\s+/);
         if (!sessionName) {
           continue;
+        }
+        if (
+          ![windowActive, paneActive, paneDead].every((value) => value === "0" || value === "1") ||
+          !/^[1-9]\d*$/.test(panePid ?? "") ||
+          !paneTty ||
+          extra !== undefined
+        ) {
+          throw new Error("malformed list-panes output");
         }
         const entry = panes.get(sessionName) ?? {
           activePaneDead: true,
@@ -305,13 +350,13 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
         panes.set(sessionName, entry);
       }
     } catch (error) {
-      // No tmux server running (or another list-panes failure) — an empty
-      // fleet, never a thrown error. `readable: false` keeps that
-      // distinguishable from a server that answered with no panes.
-      readable = false;
-      unresponsive = isProbeTimeoutKill(error);
+      if (!isKnownAbsentTmuxServer(error)) {
+        readable = false;
+        unresponsive = isProbeTimeoutKill(error);
+        diagnostic = probeDiagnostic("tmux list-panes", error);
+      }
     }
-    return { readable, unresponsive, panes };
+    return { readable, unresponsive, panes, ...(diagnostic ? { diagnostic } : {}) };
   });
 }
 
@@ -321,7 +366,9 @@ export async function tmuxPaneDead(
   sessionName: string,
   options?: { fresh?: boolean },
 ): Promise<boolean> {
-  return (await getTmuxPanePresence(sessionName, options)).dead;
+  const result = await getTmuxPanePresence(sessionName, options);
+  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  return result.dead;
 }
 
 // Combined pane-dead+unresponsiveness read off ONE fleet-pane-snapshot fetch —
@@ -329,7 +376,7 @@ export async function tmuxPaneDead(
 export async function getTmuxPanePresence(
   sessionName: string,
   options?: { fresh?: boolean },
-): Promise<{ dead: boolean; unresponsive: boolean }> {
+): Promise<{ dead: boolean; unresponsive: boolean; diagnostic?: string }> {
   if (options?.fresh) {
     fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
   }
@@ -340,6 +387,7 @@ export async function getTmuxPanePresence(
     // snapshot's own catch block, never otherwise — no `!snapshot.readable`
     // guard needed here.
     unresponsive: snapshot.unresponsive,
+    ...(snapshot.diagnostic ? { diagnostic: snapshot.diagnostic } : {}),
   };
 }
 
@@ -680,6 +728,7 @@ interface PsRow {
 
 interface PsSnapshot {
   rows: PsRow[];
+  diagnostic?: string;
   // True only when the `ps` fork was killed by its own timeout, never for a
   // nonzero exit, a maxBuffer overrun, or an empty-but-healthy table. `rows`
   // is empty whenever this is true.
@@ -700,15 +749,6 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
-// RESIDUAL (#857 P1, scoped): isProcessRunningInTmux's pane-child fallback
-// fails CLOSED, per row, when a candidate row's tty has no resolvable
-// foreground process group — see the fgPgid check there. This residual is
-// about a DIFFERENT failure mode: `ps` rejecting the `-eo` column spec
-// outright. That exits nonzero, the catch below returns [], and pass 1 above
-// reads the WHOLE fleet DEAD, not just the pane-child fallback. `pgid`/`tpgid`
-// are Linux procps/BSD ps fields, not POSIX; this repo already assumes a
-// Linux `ps` at runtime (see also process-tree.ts), so this is an existing
-// exposure shape, not a new one — documented here, not solved.
 function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
@@ -724,8 +764,14 @@ function getPsSnapshot(): Promise<PsSnapshot> {
         .split("\n")
         .map((line) => {
           const cols = line.trimStart().split(/\s+/);
-          if (cols.length < 7) {
+          if (
+            !line.trim() ||
+            /^\s*PID\s+PPID\s+PGID\s+TPGID\s+(?:TTY|TT)\s+RSS\s+(?:COMMAND|ARGS)\s*$/.test(line)
+          ) {
             return null;
+          }
+          if (cols.length < 7 || !cols.slice(0, 4).every((col) => /^-?\d+$/.test(col))) {
+            throw new Error("malformed process table output");
           }
           const pid = Number.parseInt(cols[0] ?? "", 10);
           const ppid = Number.parseInt(cols[1] ?? "", 10);
@@ -747,7 +793,11 @@ function getPsSnapshot(): Promise<PsSnapshot> {
         .filter((row): row is PsRow => row !== null);
       return { rows, unresponsive: false };
     } catch (error) {
-      return { rows: [], unresponsive: isProbeTimeoutKill(error) };
+      return {
+        rows: [],
+        unresponsive: isProbeTimeoutKill(error),
+        diagnostic: probeDiagnostic("ps", error),
+      };
     }
   });
 }
@@ -803,6 +853,7 @@ export async function getFleetSessionRssBytes(
 export interface TmuxProcessMatch {
   alive: boolean;
   matchedByName: boolean;
+  diagnostic?: string;
   // True when a probe fork (`list-panes -a` or `ps`) was killed by its own
   // timeout: alive:false is then not evidence of death. Callers must not kill
   // on it.
@@ -842,6 +893,9 @@ export async function probeTmuxProcessMatch(
     const snapshot = await getFleetPaneSnapshot();
     unresponsive = snapshot.unresponsive;
     const { panes } = snapshot;
+    if (snapshot.diagnostic) {
+      return { alive: false, matchedByName: false, unresponsive, diagnostic: snapshot.diagnostic };
+    }
     const entry = panes.get(sessionName);
     const ttys = entry?.allTtys ?? [];
     if (ttys.length === 0) {
@@ -859,8 +913,11 @@ export async function probeTmuxProcessMatch(
     if (processRes.length === 0) {
       return { alive: false, matchedByName: false, unresponsive };
     }
-    const { rows, unresponsive: psUnresponsive } = await getPsSnapshot();
+    const { rows, unresponsive: psUnresponsive, diagnostic } = await getPsSnapshot();
     unresponsive = unresponsive || psUnresponsive;
+    if (diagnostic) {
+      return { alive: false, matchedByName: false, unresponsive, diagnostic };
+    }
     // tpgid on the row whose pid IS a pane pid is that tty's foreground
     // process group, shared by every process attached to the tty.
     const allPanePids = entry?.allPanePids ?? [];
@@ -937,19 +994,25 @@ export async function probeTmuxProcessMatch(
       }
     }
     return { alive: false, matchedByName: false, unresponsive };
-  } catch {
-    return { alive: false, matchedByName: false, unresponsive };
+  } catch (error) {
+    return {
+      alive: false,
+      matchedByName: false,
+      unresponsive,
+      diagnostic: probeDiagnostic("tmux process", error),
+    };
   }
 }
 
-// Thin boolean wrapper, kept byte-identical in signature and return type:
-// 169 boolean mock occurrences in session-service.test.ts depend on it.
+// Boolean compatibility reader; unknown cannot become confirmed absence.
 export async function isProcessRunningInTmux(
   sessionName: string,
   processMatchers: string[],
   options?: { fresh?: boolean; paneChildFallback?: boolean },
 ): Promise<boolean> {
-  return (await probeTmuxProcessMatch(sessionName, processMatchers, options)).alive;
+  const result = await probeTmuxProcessMatch(sessionName, processMatchers, options);
+  if (result.diagnostic) throw new TmuxProbeUnknownError(result.diagnostic);
+  return result.alive;
 }
 
 // Fleet snapshots (existence+activity, panes, ps) are TTL-cached for periodic
@@ -1447,7 +1510,12 @@ export async function waitForTmuxReady(
     // Cursor trust-confirm retries. Back off to reduce pressure on the shared
     // tmux server when several agents start concurrently, with per-session
     // jitter so batch spawns don't stay phase-aligned.
-    const capture = await captureTmuxPaneOrEmpty(sessionName, 200, { fresh: true });
+    const capture = await captureTmuxPane(sessionName, 200, { fresh: true });
+    if (capture === null) {
+      throw new TmuxProbeUnknownError(
+        `tmux capture-pane failed while waiting for session "${sessionName}" readiness`,
+      );
+    }
     const paneChanged = capture !== lastCapture;
     lastCapture = capture;
     if (paneChanged) {
@@ -1542,10 +1610,11 @@ export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): 
 
 // Presence + unresponsiveness for a sidecar's tmux name off ONE read, for
 // callers that must tell "confirmed absent" from "could not read" before
-// acting destructively. Same non-`fresh` behavior as sidecarTmuxAlive.
+// acting destructively. Imperative starts can request an independent read.
 export async function getSidecarTmuxPresence(
   sessionId: string,
   sidecarName: string,
-): Promise<{ present: boolean; unresponsive: boolean }> {
-  return getTmuxSessionPresence(sidecarTmuxSession(sessionId, sidecarName));
+  options?: { fresh?: boolean },
+): Promise<{ present: boolean; unresponsive: boolean; diagnostic?: string }> {
+  return getTmuxSessionPresence(sidecarTmuxSession(sessionId, sidecarName), options);
 }
