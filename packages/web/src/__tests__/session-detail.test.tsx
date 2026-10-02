@@ -7512,31 +7512,30 @@ describe("SessionDetail lifecycle operation", () => {
     });
   }
 
-  it.each([
-    undefined,
-    null,
-    { instanceId: "test-instance", revision: -1, operation: null },
-  ])("rejects an invalid initial lifecycle receipt %# and recovers from a current read", async (lifecycle) => {
-    let current = { ...sessionFixture(), lifecycle };
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(current));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, modelPath: "" }));
-      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
-      if (url === "/api/sessions/api-a1/conversation")
-        return new Response(JSON.stringify(conversationFixture()));
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    render(<SessionDetail sessionId="api-a1" />);
-    await advance();
-    expect(screen.getByText("Invalid session lifecycle snapshot")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
-    current = sessionFixture();
-    await advance(4_000);
-    expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
-  });
+  it.each([undefined, null, { instanceId: "test-instance", revision: -1, operation: null }])(
+    "rejects an invalid initial lifecycle receipt %# and recovers from a current read",
+    async (lifecycle) => {
+      let current = { ...sessionFixture(), lifecycle };
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(current));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+        if (url === "/api/sessions/api-a1/conversation")
+          return new Response(JSON.stringify(conversationFixture()));
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      await advance();
+      expect(screen.getByText("Invalid session lifecycle snapshot")).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+      current = sessionFixture();
+      await advance(4_000);
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    },
+  );
 
   it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
     const delivery = deferred<Response>();
