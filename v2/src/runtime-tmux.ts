@@ -1349,7 +1349,7 @@ export async function sendInterruptKeysToTmux(
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { agent?: AgentName },
+  options?: { agent?: AgentName; interrupt?: false },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const useBracketedPaste =

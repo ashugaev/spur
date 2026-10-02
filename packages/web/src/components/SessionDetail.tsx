@@ -3519,48 +3519,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (
-                    artifactViewMode === "list" ? (
-                      <ArtifactList
-                        artifacts={visibleArtifacts}
-                        hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
-                        onPreview={setSelectedArtifactId}
-                        onSortChange={setArtifactListSort}
-                        sort={artifactListSort}
-                      />
-                    ) : (
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                        {visibleArtifacts.map((artifact) => {
-                          const artifactHref = artifactUrl(session.id, artifact.id);
-                          const previewState = artifactPreviewStates[artifact.id] ?? "loading";
-                          return (
-                            <ArtifactCard
-                              key={`${session.id}-${artifact.id}`}
-                              artifact={artifact}
-                              artifactHref={artifactHref}
-                              onPreview={setSelectedArtifactId}
-                              onPreviewError={(artifactId) =>
-                                setArtifactPreviewStates((current) => ({
-                                  ...current,
-                                  [artifactId]: "error",
-                                }))
-                              }
-                              onPreviewReady={(artifactId) =>
-                                setArtifactPreviewStates((current) => ({
-                                  ...current,
-                                  [artifactId]: "ready",
-                                }))
-                              }
-                              previewState={previewState}
-                              variant={
-                                artifactCategory === "attached" && artifact.kind === "image"
-                                  ? "attachedImage"
-                                  : "compact"
-                              }
-                            />
-                          );
-                        })}
-                      </div>
-                    )
+                    <div
+                      className="max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-y-auto pr-1"
+                      data-artifact-collection
+                    >
+                      {artifactViewMode === "list" ? (
+                        <ArtifactList
+                          artifacts={visibleArtifacts}
+                          hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
+                          onPreview={setSelectedArtifactId}
+                          onSortChange={setArtifactListSort}
+                          sort={artifactListSort}
+                        />
+                      ) : (
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                          {visibleArtifacts.map((artifact) => {
+                            const artifactHref = artifactUrl(session.id, artifact.id);
+                            const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                            return (
+                              <ArtifactCard
+                                key={`${session.id}-${artifact.id}`}
+                                artifact={artifact}
+                                artifactHref={artifactHref}
+                                onPreview={setSelectedArtifactId}
+                                onPreviewError={(artifactId) =>
+                                  setArtifactPreviewStates((current) => ({
+                                    ...current,
+                                    [artifactId]: "error",
+                                  }))
+                                }
+                                onPreviewReady={(artifactId) =>
+                                  setArtifactPreviewStates((current) => ({
+                                    ...current,
+                                    [artifactId]: "ready",
+                                  }))
+                                }
+                                previewState={previewState}
+                                variant={
+                                  artifactCategory === "attached" && artifact.kind === "image"
+                                    ? "attachedImage"
+                                    : "compact"
+                                }
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   ) : (
                     <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}
@@ -4219,7 +4224,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -4280,7 +4284,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel

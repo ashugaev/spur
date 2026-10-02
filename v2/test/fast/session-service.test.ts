@@ -7683,6 +7683,7 @@ describe("SessionService", () => {
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
+      interrupt: false,
     });
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
@@ -7718,6 +7719,7 @@ describe("SessionService", () => {
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
+      interrupt: false,
     });
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
@@ -15742,6 +15744,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith("spur-hung", "please continue", {
         agent: "codex",
+        interrupt: false,
       });
       expect(sessions.get("spur-hung")?.queuedMessages?.messages ?? []).toEqual([]);
     } finally {

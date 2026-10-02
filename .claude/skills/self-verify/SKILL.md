@@ -17,5 +17,5 @@ SELF VERIFY
 
 RULES
 
-  No PASS without an open PR or on stale review/validation.
+  Reject PASS with stale review/validation or PR state violating github close-out rules.
   Report pending CI separately; never claim an unrun check passed.
