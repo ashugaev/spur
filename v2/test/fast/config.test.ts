@@ -1750,12 +1750,88 @@ projects:
     reasoningEffort:
       claude: low
       codex: high
+      cursor: xhigh
+      opencode: minimal
 `);
 
     expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({
       claude: "low",
       codex: "high",
+      cursor: "xhigh",
+      opencode: "minimal",
     });
+  });
+
+  it.each(["none", "minimal", "ultra", "invalid", "42"])(
+    "rejects Claude effort %s",
+    async (effort) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+      expect(() => loadConfig(configPath)).toThrow("reasoningEffort.claude");
+    },
+  );
+
+  it.each(["xhigh", "max"])("accepts Claude effort %s", async (effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+    expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({ claude: effort });
+  });
+
+  it("parses trigger effort without an explicit agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          reasoningEffort: ultra
+`);
+    expect(loadConfig(configPath).projects["backend"]?.triggers?.["kickoff"]).toMatchObject({
+      spawn: { blocks: [{ prompt: "ship it", reasoningEffort: "ultra" }] },
+    });
+  });
+
+  it.each([
+    ["codex", "invalid"],
+    ["claude", "ultra"],
+    ["claude", "none"],
+  ])("rejects trigger effort %s/%s", async (agent, effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          agent: ${agent}
+          reasoningEffort: ${effort}
+`);
+    expect(() => loadConfig(configPath)).toThrow("spawn.reasoningEffort");
   });
 
   it("rejects non-string project codex args", async () => {

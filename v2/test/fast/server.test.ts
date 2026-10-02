@@ -10,6 +10,7 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
+import { AgentReasoningEffortError } from "../../src/agents/models.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
   buildForeignAgentProcessMessage,
@@ -35,6 +36,65 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it.each(["spawn", "respawn", "handoff"] as const)(
+    "returns a client error for rejected %s reasoning effort",
+    async (operation) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-effort-"));
+      const repoDir = join(root, "repo");
+      await mkdir(repoDir);
+      const port = await findFreePort();
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+      );
+      const serviceSpy = vi
+        .spyOn(SessionService.prototype, operation)
+        .mockRejectedValue(
+          new AgentReasoningEffortError("reasoningEffort unsupported for selected model"),
+        );
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const path = operation === "spawn" ? "/sessions" : `/sessions/demo-1/${operation}`;
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: "demo",
+            prompt: "hi",
+            agent: "codex",
+            reasoningEffort: "ultra",
+          }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: "reasoningEffort unsupported for selected model",
+        });
+        expect(serviceSpy).toHaveBeenCalledWith(
+          ...(operation === "spawn" ? [] : ["demo-1"]),
+          expect.objectContaining({ reasoningEffort: "ultra" }),
+          ...(operation === "handoff" ? [undefined] : []),
+        );
+      } finally {
+        serviceSpy.mockRestore();
+        await server.stop();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const configPath = join(root, "does-not-exist", "spur.yaml");

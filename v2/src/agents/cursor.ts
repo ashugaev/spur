@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { ProviderReasoningEffort } from "../types.js";
 import { agentExecutableCommand } from "./executable.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
@@ -417,11 +418,26 @@ async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string)
   await rename(tmpPath, hooksPath);
 }
 
-export function buildCursorPlan(
-  prompt: string,
-  options?: { planMode?: boolean; model?: string },
-): AgentLaunchPlan {
-  const model = options?.model ?? DEFAULT_CURSOR_MODEL;
+interface CursorPlanOptions {
+  planMode?: boolean;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  cursorConfigDir?: string;
+}
+
+function cursorModel(model: string, effort?: ProviderReasoningEffort): string {
+  if (!effort) return model;
+  const parameters = model.match(/^(.*)\[([^\]]*)\]$/);
+  if (!parameters) return model;
+  const kept = (parameters[2] ?? "")
+    .split(",")
+    .map((parameter) => parameter.trim())
+    .filter((parameter) => parameter && !/^effort\s*=/.test(parameter));
+  return `${parameters[1]}[${[...kept, `effort=${effort}`].join(",")}]`;
+}
+
+export function buildCursorPlan(prompt: string, options?: CursorPlanOptions): AgentLaunchPlan {
+  const model = cursorModel(options?.model ?? DEFAULT_CURSOR_MODEL, options?.reasoningEffort);
   const modelArg = ` --model ${shellEscape(model)}`;
   const planArg = options?.planMode ? " --plan" : "";
   return {
@@ -434,11 +450,14 @@ export function buildCursorPlan(
 export function buildCursorResumePlan(
   chatId: string,
   binary = cursorCommand(),
-  options?: { planMode?: boolean },
+  options?: CursorPlanOptions,
 ): AgentResumePlan {
   const planArg = options?.planMode ? " --plan" : "";
+  const modelArg = options?.model
+    ? ` --model ${shellEscape(cursorModel(options.model, options.reasoningEffort))}`
+    : "";
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}${modelArg}`,
     readyMarkers: [CURSOR_RESUME_READY_MARKER],
   };
 }
@@ -446,7 +465,7 @@ export function buildCursorResumePlan(
 export async function buildCursorRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { planMode?: boolean; cursorConfigDir?: string },
+  options?: CursorPlanOptions,
 ): Promise<AgentLaunchPlan | null> {
   const chatId = await findCursorSessionId(
     worktreePath,

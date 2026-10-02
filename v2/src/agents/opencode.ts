@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import type { ProviderReasoningEffort, SidecarMcpBinding, TranscriptEntry } from "../types.js";
 import {
   agentExecutableCommand,
   missingAgentExecutableMessage,
@@ -81,6 +81,7 @@ export const OPENCODE_RESTRICT_WRITES_CONFIG = JSON.stringify({
 export function buildOpenCodeConfig(
   mcpBindings: SidecarMcpBinding[] | undefined,
   restrictWrites: boolean | undefined,
+  reasoning?: { model: string; reasoningEffort: ProviderReasoningEffort; variantNames: string[] },
 ): string | undefined {
   const config: Record<string, unknown> = {};
   if (mcpBindings?.length) {
@@ -93,6 +94,26 @@ export function buildOpenCodeConfig(
   }
   if (restrictWrites) {
     config["permission"] = OPENCODE_RESTRICT_WRITES_PERMISSION;
+  }
+  if (reasoning) {
+    const separator = reasoning.model.indexOf("/");
+    const providerId = reasoning.model.slice(0, separator);
+    const modelId = reasoning.model.slice(separator + 1);
+    const selection = { model: reasoning.model, variant: reasoning.reasoningEffort };
+    config["agent"] = { build: selection, plan: selection };
+    config["provider"] = {
+      [providerId]: {
+        models: {
+          [modelId]: {
+            variants: Object.fromEntries(
+              reasoning.variantNames
+                .filter((name) => name !== reasoning.reasoningEffort)
+                .map((name) => [name, { disabled: true }]),
+            ),
+          },
+        },
+      },
+    };
   }
   return Object.keys(config).length > 0 ? JSON.stringify(config) : undefined;
 }

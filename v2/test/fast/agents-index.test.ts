@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
+import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
 
 const {
@@ -41,6 +42,11 @@ vi.mock("../../src/agents/claude.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof OpenCodeModule>()),
+  assertOpenCodeCompatibility: vi.fn(),
+}));
+
 vi.mock("../../src/agents/codex.js", () => ({
   buildCodexPlan: vi.fn(),
   buildCodexRestorePlan: vi.fn(),
@@ -72,6 +78,7 @@ import {
   agentHasLaunchSubmitAck,
   agentSubmitAckPacing,
   buildAgentLaunchPlan,
+  buildAgentResumePlan,
   createAgentSubmitAckBinding,
   resumeAgentSubmitAckBinding,
   setupAgentHooks,
@@ -93,6 +100,31 @@ beforeEach(() => {
 });
 
 describe("setupAgentHooks", () => {
+  it("builds OpenCode reasoning config together with MCP and write restrictions", async () => {
+    const result = await setupAgentHooks({
+      agent: "opencode",
+      worktreePath: "/repo",
+      sessionToolDir: "/tmp/tools",
+      model: "provider/model",
+      reasoningEffort: "high",
+      reasoningVariantNames: ["low", "high", "custom"],
+      restrictWrites: true,
+      mcpBindings: [{ server: "tools", url: "http://localhost/mcp" }],
+    });
+    expect(JSON.parse(result.opencodeConfigContent ?? "{}")).toMatchObject({
+      agent: {
+        build: { model: "provider/model", variant: "high" },
+        plan: { model: "provider/model", variant: "high" },
+      },
+      provider: {
+        provider: {
+          models: { model: { variants: { low: { disabled: true }, custom: { disabled: true } } } },
+        },
+      },
+      permission: { edit: "deny" },
+      mcp: { tools: { enabled: true } },
+    });
+  });
   it("does not configure hooks for claude", async () => {
     const result = await setupAgentHooks({
       agent: "claude",
@@ -425,6 +457,15 @@ describe("setupAgentHooks", () => {
 });
 
 describe("buildAgentLaunchPlan", () => {
+  it("passes Cursor effort through launch and resume dispatch", () => {
+    const options = { model: "model[fast=true,effort=low]", reasoningEffort: "high" as const };
+    expect(buildAgentLaunchPlan("cursor", "work", options).launchCommand).toContain(
+      "--model 'model[fast=true,effort=high]'",
+    );
+    expect(buildAgentResumePlan("cursor", "chat", "agent", options).launchCommand).toContain(
+      "--model 'model[fast=true,effort=high]'",
+    );
+  });
   it("keeps --force for cursor when restrictWrites is enabled", () => {
     const plan = buildAgentLaunchPlan("cursor", "review only", { restrictWrites: true });
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");

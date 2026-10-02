@@ -13,6 +13,7 @@ import {
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
+  buildOpenCodeRestorePlan,
   captureOpenCodeSubmitBaseline,
   diffOpenCodeSessionIds,
   hasOpenCodeUserMessageAfter,
@@ -33,6 +34,70 @@ import {
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
+  it("combines selected variant with MCP and permissions without replacing native selected options", () => {
+    const config = JSON.parse(
+      buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {
+        model: "provider/model/nested",
+        reasoningEffort: "high",
+        variantNames: ["low", "high", "custom"],
+      }) ?? "{}",
+    );
+    expect(config.agent).toEqual({
+      build: { model: "provider/model/nested", variant: "high" },
+      plan: { model: "provider/model/nested", variant: "high" },
+    });
+    expect(config.provider).toEqual({
+      provider: {
+        models: {
+          "model/nested": {
+            variants: { low: { disabled: true }, custom: { disabled: true } },
+          },
+        },
+      },
+    });
+    expect(config.mcp.tools).toEqual({
+      type: "remote",
+      url: "http://localhost/mcp",
+      enabled: true,
+    });
+    expect(config.permission.edit).toBe("deny");
+    const configContent = JSON.stringify(config);
+    for (const command of [
+      buildOpenCodePlan("work's task", { model: "provider/model/nested", configContent })
+        .launchCommand,
+      buildOpenCodeResumePlan("session's id", "opencode", {
+        model: "provider/model/nested",
+        configContent,
+      }).launchCommand,
+    ]) {
+      expect(command).toContain(`OPENCODE_CONFIG_CONTENT='${configContent}'`);
+      expect(command).toContain("--model 'provider/model/nested'");
+      expect(command).not.toContain("--variant");
+    }
+  });
+
+  it("omits config when no session settings exist", () => {
+    expect(buildOpenCodeConfig(undefined, false)).toBeUndefined();
+  });
+
+  it("retains reasoning config and escaped variant keys on restore", async () => {
+    const configContent =
+      buildOpenCodeConfig(undefined, false, {
+        model: "provider/model",
+        reasoningEffort: "high",
+        variantNames: ["high", "custom's"],
+      }) ?? "";
+    const plan = await buildOpenCodeRestorePlan("/repo", "restore", {
+      model: "provider/model",
+      sessionId: "ses_selected",
+      configContent,
+    });
+    expect(plan?.launchCommand).toContain("OPENCODE_CONFIG_CONTENT=");
+    expect(plan?.launchCommand).toContain('"custom\'\\\'\'s":{"disabled":true}');
+    expect(plan?.launchCommand).toContain("--session 'ses_selected' --model 'provider/model'");
+    expect(plan?.initialMessage).toBe("restore");
+    expect(plan?.launchCommand).not.toMatch(/XDG_|--variant/);
+  });
   it("launches with permission auto-approval and a selected model", () => {
     vi.stubEnv("SPUR_OPENCODE_BIN", "/opt/Open Code/opencode");
     expect(buildOpenCodePlan("work", { model: "openai/gpt-5" })).toEqual({

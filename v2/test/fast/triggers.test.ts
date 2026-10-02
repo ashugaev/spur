@@ -170,6 +170,7 @@ function spawnModelConfig() {
                   prompt: "ship the task",
                   agent: "codex",
                   model: "gpt-5.5",
+                  reasoningEffort: "xhigh",
                 },
               ],
             },
@@ -2719,6 +2720,7 @@ describe("startConfiguredTriggers", () => {
           prompt: "ship the task",
           agent: "codex",
           model: "gpt-5.5",
+          reasoningEffort: "xhigh",
         });
       });
     } finally {

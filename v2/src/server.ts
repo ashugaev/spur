@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { basename } from "node:path";
 import { URL } from "node:url";
 import { parseAgentName } from "./agents/index.js";
-import { listAgentModels } from "./agents/models.js";
+import { AgentReasoningEffortError, listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
@@ -2004,6 +2004,7 @@ export async function startServer(
         return;
       }
       if (
+        error instanceof AgentReasoningEffortError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||

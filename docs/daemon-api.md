@@ -33,7 +33,7 @@
 ## Session routes
 
 - `GET /sessions`
-- `POST /sessions`
+- `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background`
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep`
@@ -56,8 +56,8 @@
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore`
 - `POST /sessions/:id/reopen`
-- `POST /sessions/:id/handoff`
-- `POST /sessions/:id/respawn`
+- `POST /sessions/:id/handoff` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
+- `POST /sessions/:id/respawn` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
 - `POST /sessions/:id/switch-auth`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
