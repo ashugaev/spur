@@ -11858,6 +11858,7 @@ export class SessionService {
                 request.project,
                 sessionId,
               );
+              this.assertSpawnNotKilled(sessionId);
               prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
               writeSession(this.config.dataDir, prepared.placeholder);
               if (executionError) {

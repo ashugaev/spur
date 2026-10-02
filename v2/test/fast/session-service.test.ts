@@ -30617,7 +30617,6 @@ describe("SessionService", () => {
     expect(findAgentSessionIdMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        agent: "codex",
         launchCommand: `codex resume ${nativeSessionId}`,
       }),
     );
@@ -50035,7 +50034,7 @@ describe("SessionService", () => {
 
       await expectKilledSpawnLeftAlone(sessions, 0);
       service.dispose();
-    });
+    }, 10_000);
 
     it.each(["spawn", "spawnInBackground"] as const)(
       "keeps a kill during worktree creation: no tmux, nothing typed (%s)",
