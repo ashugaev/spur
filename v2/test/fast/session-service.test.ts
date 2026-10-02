@@ -1666,7 +1666,14 @@ describe("SessionService", () => {
       .mockImplementation(async (model: string | undefined) => model);
     validateOpenCodeModelMock.mockReset().mockImplementation(async (model: string) => model);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
-    createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
+    // A resolved create means `new-session` landed, which is exactly when the
+    // real createTmuxSidecarSession fires onCreated. Cases where nothing was
+    // created reject instead.
+    createTmuxSidecarSessionMock
+      .mockReset()
+      .mockImplementation(async (input: { onCreated?: () => void }) => {
+        input.onCreated?.();
+      });
     sweepLeakedPlaywrightMock.mockReset().mockResolvedValue(0);
     waitForPlaywrightReadyMock.mockReset().mockResolvedValue(true);
     resolvePlaywrightSidecarCommandMock.mockReset().mockReturnValue(undefined);
