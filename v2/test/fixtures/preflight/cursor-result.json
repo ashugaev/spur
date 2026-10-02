@@ -1,0 +1,11 @@
+{
+  "result": "feature/cursor-ledger",
+  "usage": {
+    "inputTokens": 70,
+    "outputTokens": 20,
+    "cacheReadTokens": 15,
+    "cacheWriteTokens": 5,
+    "reasoningTokens": 4,
+    "totalTokens": 110
+  }
+}

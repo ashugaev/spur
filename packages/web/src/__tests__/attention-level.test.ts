@@ -29,6 +29,13 @@ function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
 }
 
 describe("getAttentionLevel", () => {
+  it("puts a budget-limited session in the approval lane and allows restore", () => {
+    const session = toDashboardSession(
+      baseView({ status: "budget_limited", state: "budget_limited", runtimeAlive: false }),
+    );
+    expect(getAttentionLevel(session)).toBe("respond");
+    expect(isRestorable(session)).toBe(true);
+  });
   it("puts errored sessions in the error lane", () => {
     const session = toDashboardSession(
       baseView({

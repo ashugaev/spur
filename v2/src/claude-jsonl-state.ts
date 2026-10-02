@@ -1,5 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import type { SessionState, TranscriptEntry } from "./types.js";
+import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
 import {
   CLAUDE_BOOKKEEPING_RECORD_TYPES,
@@ -7,6 +8,22 @@ import {
   parseRateLimitResetAtMs,
   type RateLimitDetection,
 } from "./rate-limit-detect.js";
+
+interface ClaudeMessageTokenUsage {
+  inputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  outputTokens: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
+  reasoningOutputTokens?: number;
+  cacheCreationSource: "flat" | "nested";
+}
+
+interface ClaudeTokenUsageEntry {
+  messageId: string;
+  usage: ClaudeMessageTokenUsage;
+}
 
 /** Minimal shape extracted from a JSONL record for state classification. */
 export interface ParsedRecord {
@@ -31,6 +48,10 @@ export interface ParsedRecord {
   serverError?: boolean;
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
+  messageId?: string;
+  sessionId?: string;
+  tokenUsage?: ClaudeMessageTokenUsage;
+  advisorTokenUsages?: ClaudeTokenUsageEntry[];
   timestampMs: number;
   ownTimestampMs?: number;
 }
@@ -40,6 +61,9 @@ export interface ClaudeJsonlReaderState {
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: ParsedRecord[];
+  usageByMessage?: Map<string, ClaudeMessageTokenUsage>;
+  generationId?: string;
+  fileIno?: number;
 }
 
 /**
@@ -285,6 +309,76 @@ function hasInterruptMarker(message: Record<string, unknown>, blocks: unknown[])
   return blocks.some((block) => isInterruptText(blockInterruptText(block)));
 }
 
+function extractClaudeTokenUsage(usage: Record<string, unknown>): ClaudeMessageTokenUsage | null {
+  const isToken = (value: unknown): value is number =>
+    Number.isSafeInteger(value) && (value as number) >= 0;
+  const topLevelKeys = [
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+  ] as const;
+  if (topLevelKeys.some((key) => usage[key] !== undefined && !isToken(usage[key]))) return null;
+  const token = (key: string): number => {
+    const value = usage[key];
+    return isToken(value) ? value : 0;
+  };
+  const optionalToken = (
+    record: Record<string, unknown> | undefined,
+    key: string,
+  ): number | undefined => {
+    const value = record?.[key];
+    return isToken(value) ? value : undefined;
+  };
+  const cacheCreation =
+    typeof usage["cache_creation"] === "object" && usage["cache_creation"] !== null
+      ? (usage["cache_creation"] as Record<string, unknown>)
+      : undefined;
+  const outputDetails =
+    typeof usage["output_tokens_details"] === "object" && usage["output_tokens_details"] !== null
+      ? (usage["output_tokens_details"] as Record<string, unknown>)
+      : undefined;
+  if (
+    cacheCreation &&
+    ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"].some(
+      (key) => cacheCreation[key] !== undefined && !isToken(cacheCreation[key]),
+    )
+  )
+    return null;
+  if (
+    outputDetails?.["thinking_tokens"] !== undefined &&
+    !isToken(outputDetails["thinking_tokens"])
+  )
+    return null;
+  const cacheWrite5mInputTokens = cacheCreation
+    ? (optionalToken(cacheCreation, "ephemeral_5m_input_tokens") ?? 0)
+    : undefined;
+  const cacheWrite1hInputTokens = cacheCreation
+    ? (optionalToken(cacheCreation, "ephemeral_1h_input_tokens") ?? 0)
+    : undefined;
+  const reasoningOutputTokens = optionalToken(outputDetails, "thinking_tokens");
+  const cacheCreationInputTokens = cacheCreation
+    ? (cacheWrite5mInputTokens ?? 0) + (cacheWrite1hInputTokens ?? 0)
+    : token("cache_creation_input_tokens");
+  const result: ClaudeMessageTokenUsage = {
+    inputTokens: token("input_tokens"),
+    cacheCreationInputTokens,
+    cacheReadInputTokens: token("cache_read_input_tokens"),
+    outputTokens: token("output_tokens"),
+    cacheCreationSource: cacheCreation ? "nested" : "flat",
+    ...(cacheWrite5mInputTokens !== undefined ? { cacheWrite5mInputTokens } : {}),
+    ...(cacheWrite1hInputTokens !== undefined ? { cacheWrite1hInputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
+  };
+  return result.inputTokens +
+    result.cacheCreationInputTokens +
+    result.cacheReadInputTokens +
+    result.outputTokens >
+    0
+    ? result
+    : null;
+}
+
 /** Detect tool_use blocks and whether any explicitly asks the human a question. */
 function extractToolUseHints(blocks: unknown[]): {
   hasToolUse: boolean;
@@ -370,6 +464,31 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       isRateLimit && ownTimestampMs !== undefined
         ? parseRateLimitResetAtMs(extractTextContent(message), ownTimestampMs)
         : undefined;
+    const usage =
+      typeof message["usage"] === "object" && message["usage"] !== null
+        ? (message["usage"] as Record<string, unknown>)
+        : undefined;
+    const messageId = typeof message["id"] === "string" ? message["id"] : undefined;
+    const sessionId = typeof parsed["sessionId"] === "string" ? parsed["sessionId"] : undefined;
+    const tokenUsage = usage ? extractClaudeTokenUsage(usage) : null;
+    const advisorTokenUsages =
+      messageId && Array.isArray(usage?.["iterations"])
+        ? usage["iterations"]
+            .filter(
+              (iteration): iteration is Record<string, unknown> =>
+                typeof iteration === "object" &&
+                iteration !== null &&
+                (iteration as Record<string, unknown>)["type"] === "advisor_message" &&
+                typeof (iteration as Record<string, unknown>)["model"] === "string" &&
+                Boolean((iteration as Record<string, unknown>)["model"]),
+            )
+            .flatMap((record, index): ClaudeTokenUsageEntry[] => {
+              const advisorUsage = extractClaudeTokenUsage(record);
+              return advisorUsage
+                ? [{ messageId: `${messageId}:advisor:${index}`, usage: advisorUsage }]
+                : [];
+            })
+        : [];
     return {
       type: "assistant",
       role: "assistant",
@@ -382,6 +501,10 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
         ? { model: message["model"] }
         : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(messageId && tokenUsage ? { tokenUsage } : {}),
+      ...(advisorTokenUsages.length > 0 ? { advisorTokenUsages } : {}),
       ...timestamps,
     };
   }
@@ -442,6 +565,60 @@ async function readNewJsonlBytes(
   }
 }
 
+async function scanJsonlRecords(
+  filePath: string,
+  size: number,
+  offset: number,
+  timestampMs: number,
+): Promise<{ records: ParsedRecord[]; consumedBytes: number } | null> {
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    fd = await open(filePath, "r");
+    const records: ParsedRecord[] = [];
+    let position = offset;
+    let pending = Buffer.alloc(0);
+    while (position < size) {
+      const length = Math.min(MAX_COLD_READ_BYTES, size - position);
+      const chunk = Buffer.alloc(length);
+      const { bytesRead } = await fd.read(chunk, 0, length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      const combined =
+        pending.length === 0
+          ? chunk.subarray(0, bytesRead)
+          : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+      const lastNewline = combined.lastIndexOf(0x0a);
+      if (lastNewline < 0) {
+        pending = combined;
+        continue;
+      }
+      for (const line of combined
+        .subarray(0, lastNewline + 1)
+        .toString("utf8")
+        .split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const record = parseJsonlRecord(trimmed, timestampMs);
+        if (record) records.push(record);
+      }
+      pending = combined.subarray(lastNewline + 1);
+    }
+    const trailing = pending.toString("utf8").trim();
+    if (trailing) {
+      const record = parseJsonlRecord(trailing, timestampMs);
+      if (record) {
+        records.push(record);
+        pending = Buffer.alloc(0);
+      }
+    }
+    return { records, consumedBytes: position - offset - pending.length };
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
+}
+
 export async function readClaudeJsonlState(
   worktreePath: string,
   reader?: ClaudeJsonlReaderState,
@@ -452,6 +629,7 @@ export async function readClaudeJsonlState(
   rateLimit: RateLimitDetection | null;
   serverError: boolean;
   liveModel?: string;
+  tokenUsage?: ProviderTokenUsageSample;
 } | null> {
   // With a pinned id, resolve the transcript by id and never fall back to the
   // newest-mtime scan (which could cross-bind to a sibling session sharing the
@@ -465,18 +643,69 @@ export async function readClaudeJsonlState(
     return null;
   }
 
-  let fileStat: { size: number; mtimeMs: number };
+  let fileStat: { size: number; mtimeMs: number; ino: number };
   try {
     fileStat = await stat(filePath);
   } catch {
     return null;
   }
 
-  const currentReader: ClaudeJsonlReaderState = reader ?? {
-    filePath,
-    lastOffset: 0,
-    lastMtimeMs: 0,
-    tailRecords: [],
+  const reuse =
+    reader !== undefined &&
+    reader.filePath === filePath &&
+    reader.fileIno === fileStat.ino &&
+    fileStat.size >= reader.lastOffset &&
+    fileStat.mtimeMs >= reader.lastMtimeMs;
+  const currentReader: ClaudeJsonlReaderState = reuse
+    ? reader
+    : {
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+        usageByMessage: new Map(),
+        fileIno: fileStat.ino,
+      };
+  const usageByMessage = currentReader.usageByMessage ?? new Map();
+
+  const usageSample = (): ProviderTokenUsageSample | undefined => {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadInputTokens = 0;
+    let cacheWriteInputTokens = 0;
+    let reasoningOutputTokens = 0;
+    let cacheWrite5mInputTokens = 0;
+    let cacheWrite1hInputTokens = 0;
+    let reasoningComplete = true;
+    let cache5mComplete = true;
+    let cache1hComplete = true;
+    for (const usage of usageByMessage.values()) {
+      inputTokens +=
+        usage.inputTokens + usage.cacheCreationInputTokens + usage.cacheReadInputTokens;
+      outputTokens += usage.outputTokens;
+      cacheReadInputTokens += usage.cacheReadInputTokens;
+      cacheWriteInputTokens += usage.cacheCreationInputTokens;
+      reasoningComplete &&= usage.reasoningOutputTokens !== undefined;
+      cache5mComplete &&= usage.cacheWrite5mInputTokens !== undefined;
+      cache1hComplete &&= usage.cacheWrite1hInputTokens !== undefined;
+      reasoningOutputTokens += usage.reasoningOutputTokens ?? 0;
+      cacheWrite5mInputTokens += usage.cacheWrite5mInputTokens ?? 0;
+      cacheWrite1hInputTokens += usage.cacheWrite1hInputTokens ?? 0;
+    }
+    return inputTokens + outputTokens > 0 && currentReader.generationId
+      ? {
+          provider: "claude",
+          generationId: currentReader.generationId,
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens,
+          cacheReadInputTokens,
+          cacheWriteInputTokens,
+          ...(reasoningComplete ? { reasoningOutputTokens } : {}),
+          ...(cache5mComplete ? { cacheWrite5mInputTokens } : {}),
+          ...(cache1hComplete ? { cacheWrite1hInputTokens } : {}),
+        }
+      : undefined;
   };
 
   // Nothing appended (same mtime and size) and we already have records → skip
@@ -488,12 +717,14 @@ export async function readClaudeJsonlState(
     currentReader.tailRecords.length > 0
   ) {
     const cachedLiveModel = deriveClaudeLiveModel(currentReader.tailRecords);
+    const tokenUsage = usageSample();
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
       rateLimit: detectClaudeRateLimit(currentReader.tailRecords),
       serverError: hasTrailingClaudeServerError(currentReader.tailRecords),
       ...(cachedLiveModel ? { liveModel: cachedLiveModel } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
     };
   }
 
@@ -502,13 +733,10 @@ export async function readClaudeJsonlState(
   // prior offset would otherwise Buffer.alloc the whole transcript. The window
   // may start mid-file; the partial line that opens it is handled below.
   const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
-  const readOffset =
-    unreadFrom === 0 && fileStat.size > MAX_COLD_READ_BYTES
-      ? fileStat.size - MAX_COLD_READ_BYTES
-      : unreadFrom;
+  const readOffset = unreadFrom;
   const nowMs = Date.now();
 
-  const chunk = await readNewJsonlBytes(filePath, fileStat.size, readOffset);
+  const chunk = await scanJsonlRecords(filePath, fileStat.size, readOffset, nowMs);
   if (!chunk) {
     // If we can't read, return null to fall back to other classification
     return null;
@@ -518,12 +746,69 @@ export async function readClaudeJsonlState(
   // A truncated window can open mid-record; that fragment is not valid JSON,
   // so parseJsonlRecord drops it. Discarding the first line unconditionally
   // would instead lose a whole record whenever the cut lands on a boundary.
-  for (const line of chunk.consumedText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const record = parseJsonlRecord(trimmed, nowMs);
-    if (record) {
-      newRecords.push(record);
+  for (const record of chunk.records) {
+    newRecords.push(record);
+    if (record.messageId && record.sessionId && (record.tokenUsage || record.advisorTokenUsages)) {
+      const generationId = `claude:${record.sessionId}:${record.messageId}`;
+      if (!currentReader.generationId) currentReader.generationId = generationId;
+      if (currentReader.generationId.startsWith(`claude:${record.sessionId}:`)) {
+        const entries: ClaudeTokenUsageEntry[] = [
+          ...(record.tokenUsage ? [{ messageId: record.messageId, usage: record.tokenUsage }] : []),
+          ...(record.advisorTokenUsages ?? []),
+        ];
+        for (const entry of entries) {
+          const prior = usageByMessage.get(entry.messageId);
+          usageByMessage.set(entry.messageId, {
+            ...prior,
+            inputTokens: Math.max(prior?.inputTokens ?? 0, entry.usage.inputTokens),
+            cacheCreationInputTokens:
+              entry.usage.cacheCreationSource === "nested"
+                ? prior?.cacheCreationSource === "nested"
+                  ? Math.max(prior.cacheCreationInputTokens, entry.usage.cacheCreationInputTokens)
+                  : entry.usage.cacheCreationInputTokens
+                : prior?.cacheCreationSource === "nested"
+                  ? prior.cacheCreationInputTokens
+                  : Math.max(
+                      prior?.cacheCreationInputTokens ?? 0,
+                      entry.usage.cacheCreationInputTokens,
+                    ),
+            cacheCreationSource:
+              prior?.cacheCreationSource === "nested" ||
+              entry.usage.cacheCreationSource === "nested"
+                ? "nested"
+                : "flat",
+            cacheReadInputTokens: Math.max(
+              prior?.cacheReadInputTokens ?? 0,
+              entry.usage.cacheReadInputTokens,
+            ),
+            outputTokens: Math.max(prior?.outputTokens ?? 0, entry.usage.outputTokens),
+            ...(entry.usage.reasoningOutputTokens !== undefined
+              ? {
+                  reasoningOutputTokens: Math.max(
+                    prior?.reasoningOutputTokens ?? 0,
+                    entry.usage.reasoningOutputTokens,
+                  ),
+                }
+              : {}),
+            ...(entry.usage.cacheWrite5mInputTokens !== undefined
+              ? {
+                  cacheWrite5mInputTokens: Math.max(
+                    prior?.cacheWrite5mInputTokens ?? 0,
+                    entry.usage.cacheWrite5mInputTokens,
+                  ),
+                }
+              : {}),
+            ...(entry.usage.cacheWrite1hInputTokens !== undefined
+              ? {
+                  cacheWrite1hInputTokens: Math.max(
+                    prior?.cacheWrite1hInputTokens ?? 0,
+                    entry.usage.cacheWrite1hInputTokens,
+                  ),
+                }
+              : {}),
+          });
+        }
+      }
     }
   }
 
@@ -533,6 +818,9 @@ export async function readClaudeJsonlState(
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailRecords: combined,
+    usageByMessage,
+    ...(currentReader.generationId ? { generationId: currentReader.generationId } : {}),
+    fileIno: fileStat.ino,
   };
 
   if (combined.length === 0) {
@@ -540,12 +828,14 @@ export async function readClaudeJsonlState(
   }
 
   const liveModel = deriveClaudeLiveModel(combined);
+  const tokenUsage = usageSample();
   return {
     state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectClaudeRateLimit(combined),
     serverError: hasTrailingClaudeServerError(combined),
     ...(liveModel ? { liveModel } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
   };
 }
 

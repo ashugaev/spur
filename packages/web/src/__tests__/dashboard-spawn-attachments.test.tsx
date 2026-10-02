@@ -32,6 +32,25 @@ function pendingRead() {
   return { resolve, reject };
 }
 
+const spawnedSession: SpurSessionView = {
+  id: "spawned",
+  project: "demo",
+  agent: "claude",
+  prompt: "Clear photo",
+  branch: "",
+  worktree: false,
+  tmuxSession: null,
+  status: "spawning",
+  state: "working",
+  createdAt: "2026-10-02T00:00:00.000Z",
+  updatedAt: "2026-10-02T00:00:00.000Z",
+  lastActivityAt: "2026-10-02T00:00:00.000Z",
+  runtimeAlive: false,
+  workspaceExists: false,
+  worktreePath: "",
+  slots: { links: [] },
+};
+
 describe("Dashboard spawn photo preparation", () => {
   let requests: RequestInit[];
   let spawnFails: boolean;
@@ -58,7 +77,9 @@ describe("Dashboard spawn photo preparation", () => {
       if (url === "/api/spawn") {
         requests.push(init ?? {});
         if (spawnResponse) return spawnResponse;
-        return Response.json({ error: "Spawn failed" }, { status: spawnFails ? 502 : 201 });
+        return spawnFails
+          ? Response.json({ error: "Spawn failed" }, { status: 502 })
+          : Response.json(spawnedSession, { status: 201 });
       }
       return Response.json({ available: false, sessions: [], commands: [] });
     });
@@ -117,7 +138,7 @@ describe("Dashboard spawn photo preparation", () => {
       expect(screen.getByRole("dialog")).toBe(dialog);
       expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep photo");
       expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
-      expect(requests).toHaveLength(1);
+      await waitFor(() => expect(requests).toHaveLength(1));
       await act(async () => {
         if (failure === "HTTP")
           resolve(Response.json({ error: "Late HTTP failure" }, { status: 502 }));
@@ -156,25 +177,7 @@ describe("Dashboard spawn photo preparation", () => {
     fireEvent.click(submit());
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByRole("dialog")).toBeVisible();
-    const session: SpurSessionView = {
-      id: "spawned",
-      project: "demo",
-      agent: "claude",
-      prompt: "Clear photo",
-      branch: "",
-      worktree: false,
-      tmuxSession: null,
-      status: "spawning",
-      state: "working",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      lastActivityAt: new Date().toISOString(),
-      runtimeAlive: false,
-      workspaceExists: false,
-      worktreePath: "",
-      slots: { links: [] },
-    };
-    await act(async () => resolve(Response.json(session, { status: 201 })));
+    await act(async () => resolve(Response.json(spawnedSession, { status: 201 })));
     expect(screen.queryByRole("dialog")).toBeNull();
     await open();
     expect(screen.getByLabelText("Prompt...")).toHaveValue("");

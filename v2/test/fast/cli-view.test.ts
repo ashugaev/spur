@@ -102,6 +102,25 @@ describe("cli-view.describeSession", () => {
     expect(output).not.toContain("stopped by user");
   });
 
+  it("labels a token-budget stop", () => {
+    expect(
+      describeSession(session({ status: "stopped", stopReason: "token_budget", state: "stopped" })),
+    ).toContain("stopped by token budget");
+  });
+
+  it("labels a memory-shed session as paused by memory guard, not stopped by user", () => {
+    const output = describeSession(
+      session({
+        status: "stopped",
+        stopReason: "memory_shed",
+        state: "stopped",
+      }),
+    );
+
+    expect(output).toContain("paused by memory guard");
+    expect(output).not.toContain("stopped by user");
+  });
+
   it("shows compact persisted link ids instead of full URLs", () => {
     const output = describeSession(
       session({
