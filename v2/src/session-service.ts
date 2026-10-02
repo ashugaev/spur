@@ -13663,7 +13663,12 @@ export class SessionService {
     // After the interrupt and its settle: the interrupted turn's own record
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
-    await sendMessageToTmux(session.tmuxSession, message, { agent: session.agent });
+    await sendMessageToTmux(session.tmuxSession, message, {
+      agent: session.agent,
+      ...(session.agent === "codex" && options?.interrupt === false
+        ? { interrupt: false as const }
+        : {}),
+    });
     this.recordPaneWrite(session, pastedAt);
     options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     if (!binding) {

@@ -7462,6 +7462,7 @@ describe("SessionService", () => {
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
+      interrupt: false,
     });
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
