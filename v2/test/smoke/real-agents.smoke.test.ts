@@ -14,7 +14,6 @@ import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helper
 import {
   isTmuxAvailable,
   killTmuxServer,
-  killTmuxSession,
   killTmuxSessionsByPrefix,
   readTmuxStatus,
   setActiveTmuxSocketName,
@@ -491,7 +490,7 @@ After the file and the session metadata are set, wait for more instructions.`,
         await expectCodexNativeEffort(dataDir, session.id, reasoningEffort);
       }
       const nativeSessionId = (await service.get(session.id)).agentSessionId;
-      await killTmuxSession(session.id);
+      await service.pause(session.id);
       await waitForRestorableSession(service, session.id);
 
       const restored = await service.restore(session.id);
