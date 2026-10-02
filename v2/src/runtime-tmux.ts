@@ -1053,6 +1053,13 @@ export async function createTmuxCommandSession(input: {
   cwd: string;
   launchCommand: string;
   env?: Record<string, string>;
+  // Fires once `new-session` has created the detached session, before the
+  // pane-option and respawn steps that can still throw (both carry tmux()'s
+  // timeout, `new-session` does not). Lets a caller tell "nothing was ever
+  // created" from "created, then a later step failed" on one rejected
+  // promise — the ownership question a cleanup path must answer before it
+  // kills by tmux name.
+  onCreated?: () => void;
 }): Promise<void> {
   const paneTarget = exactPaneTarget(input.sessionName);
   const shellCommand = buildCommandSessionShellCommand(input.launchCommand);
@@ -1078,6 +1085,9 @@ export async function createTmuxCommandSession(input: {
   // The detached session now exists; bust the fleet caches so a just-created
   // session is immediately visible to tmuxSessionExists/pane probes.
   invalidateFleetProbeCaches();
+  // After the cache bust, so a throwing callback can never leave the fleet
+  // caches holding a snapshot taken before this session existed.
+  input.onCreated?.();
   await tmux("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
   await tmux("respawn-pane", "-k", "-t", paneTarget, shellCommand);
 }
@@ -1513,15 +1523,29 @@ export async function createTmuxSidecarSession(input: {
   cwd: string;
   command: string;
   env?: Record<string, string>;
+  // Required, not optional: every sidecar start must be able to tell an
+  // uncreated launch from a half-created one before it reaps by name.
+  onCreated: () => void;
 }): Promise<void> {
   await createTmuxCommandSession({
     sessionName: sidecarTmuxSession(input.sessionId, input.sidecarName),
     cwd: input.cwd,
     launchCommand: input.command,
+    onCreated: input.onCreated,
     ...(input.env ? { env: input.env } : {}),
   });
 }
 
 export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
   return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
+}
+
+// Presence + unresponsiveness for a sidecar's tmux name off ONE read, for
+// callers that must tell "confirmed absent" from "could not read" before
+// acting destructively. Same non-`fresh` behavior as sidecarTmuxAlive.
+export async function getSidecarTmuxPresence(
+  sessionId: string,
+  sidecarName: string,
+): Promise<{ present: boolean; unresponsive: boolean }> {
+  return getTmuxSessionPresence(sidecarTmuxSession(sessionId, sidecarName));
 }
