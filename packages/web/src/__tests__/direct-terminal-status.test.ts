@@ -27,6 +27,11 @@ describe("resolveTerminalStatus", () => {
   });
 
   it("maps connected activity states", () => {
+    expect(resolveTerminalStatus("connected", "budget_limited", null)).toMatchObject({
+      colorVar: "var(--color-status-error)",
+      pulse: false,
+      title: "budget limited",
+    });
     expect(resolveTerminalStatus("connected", "working", null)).toMatchObject({
       colorVar: "var(--color-status-working)",
       pulse: true,

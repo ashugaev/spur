@@ -73,3 +73,15 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+const compactTokenFormat = new Intl.NumberFormat("en-US", { notation: "compact" });
+const detailedTokenFormat = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+// Compact token counts shared by TokenCount's badge (default) and its card
+// / footer (detail): 980, 4.1K, 184K, 1.2M default; 22.4K, 184.2K, 500K detail.
+export function formatTokenCount(tokens: number, detail = false): string {
+  return (detail ? detailedTokenFormat : compactTokenFormat).format(tokens);
+}

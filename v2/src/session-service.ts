@@ -40,7 +40,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
-  readOpenCodeState,
+  readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
   withOpenCodeLaunchIdentityLock,
@@ -392,6 +392,12 @@ import {
   type UnconfiguredProjectEntry,
 } from "./registry.js";
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
+import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
+import {
+  PreflightUsageStore,
+  aggregatePreflightAttempts,
+  preflightUsageView,
+} from "./preflight-usage-store.js";
 import {
   SPUR_DAEMON_API_VERSION,
   SESSION_STATES,
@@ -425,6 +431,7 @@ import {
   type SpawnDefaultsResponse,
   type PreflightRequest,
   type PreflightResponse,
+  type PreflightTokenUsageView,
   type ProjectBranchNamingConfig,
   type ProjectConfig,
   type HandoffSessionRequest,
@@ -468,10 +475,12 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
   type SessionQueuedMessagesView,
   type SessionState,
+  type SessionTokenUsageView,
   type SessionStateSubscription,
   type SessionStateSubscriptionListResponse,
   type SessionStateSubscriptionRecordResponse,
@@ -508,7 +517,9 @@ import {
   unfinishedTodo,
 } from "./todo.js";
 import { cursorShowsReadyPrompt } from "./cursor-state.js";
+import { readCursorTokenUsage } from "./cursor-token-usage.js";
 import {
+  captureCursorRestoreBoundary,
   configureCursorTurnEndedStore,
   readCursorJsonlState,
   resolveCursorBuild,
@@ -1106,6 +1117,20 @@ export class SpawnPreflightError extends Error {
   }
 }
 
+export class PreflightPreviewError extends Error {
+  readonly statusCode: number;
+
+  constructor(
+    error: unknown,
+    readonly preflightBatchId: string,
+    readonly preflightTokenUsageView: PreflightTokenUsageView,
+  ) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "PreflightPreviewError";
+    this.statusCode = 500;
+  }
+}
+
 interface SessionRuntimeSnapshot {
   runtimeAlive: boolean;
   paneUsable: boolean;
@@ -1133,6 +1158,8 @@ interface SessionStateResult {
   // reads classification already performed, so it costs no extra I/O.
   agentActivityAt: Date | null;
   liveModel?: string;
+  tokenUsage?: ProviderTokenUsageSample;
+  tokenUsages?: ProviderTokenUsageSample[];
   // Epoch ms of the parsed claude rate-limit reset instant, set on every
   // classify call for as long as the expired detection stays in the tail
   // (see the expired arm below) — level-triggered, not edge-triggered. Safe
@@ -1197,6 +1224,7 @@ function assertSendableStatus(session: Pick<SessionRecord, "id" | "status">): vo
   switch (status) {
     case "running":
     case "stopped":
+    case "budget_limited":
     case "paused":
       return;
     case "spawning":
@@ -1252,7 +1280,13 @@ function statusFallbackState(
   if (status === "errored") return "error";
   if (status === "stopped" && hasSessionErrorEvidence(session)) return "error";
   if (isStaleParked(session)) return "stale";
-  if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
+  if (
+    status === "stopped" ||
+    status === "budget_limited" ||
+    status === "paused" ||
+    status === "completed"
+  )
+    return "stopped";
   return "working"; // running, spawning
 }
 
@@ -2022,7 +2056,7 @@ export function isRestorableSession(
   // so that combination is not a case to guard against here.
   return (
     ((session.status === "running" && session.state === "stopped") ||
-      (session.status === "stopped" &&
+      ((session.status === "stopped" || session.status === "budget_limited") &&
         (session.state === "stopped" || session.state === "error" || session.state === "stale")) ||
       (session.status === "paused" && (session.state === "stopped" || session.state === "error")) ||
       (session.status === "errored" && session.state === "error")) &&
@@ -2642,6 +2676,7 @@ interface PreparedSpawn {
   placeholder: SessionRecord;
   sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
+  preflightBatchId: string;
 }
 
 function resolveCarriedSpawnModel(
@@ -2813,6 +2848,8 @@ async function runSpawnPreflightForSpawn(args: {
   baseBranch: string;
   worktree: boolean;
   prompt: string;
+  runAttempt?: (execute: () => Promise<SpawnPreflightResult>) => Promise<SpawnPreflightResult>;
+  assertActive?: () => void;
 }): Promise<SpawnPreflightSelection> {
   let feedback: string | undefined;
   let lastError: Error | undefined;
@@ -2823,18 +2860,22 @@ async function runSpawnPreflightForSpawn(args: {
     : "";
 
   for (let attempt = 1; attempt <= SPAWN_PREFLIGHT_MAX_ATTEMPTS; attempt += 1) {
+    args.assertActive?.();
     let preflight: SpawnPreflightResult;
     try {
-      preflight = await runSpawnPreflight({
-        agent: args.agent,
-        projectId: args.projectId,
-        project: args.project,
-        baseBranch: args.baseBranch,
-        worktree: args.worktree,
-        prompt: args.prompt,
-        ...(feedback ? { feedback } : {}),
-      });
+      const execute = () =>
+        runSpawnPreflight({
+          agent: args.agent,
+          projectId: args.projectId,
+          project: args.project,
+          baseBranch: args.baseBranch,
+          worktree: args.worktree,
+          prompt: args.prompt,
+          ...(feedback ? { feedback } : {}),
+        });
+      preflight = args.runAttempt ? await args.runAttempt(execute) : await execute();
     } catch (error) {
+      args.assertActive?.();
       const message = error instanceof Error ? error.message : String(error);
       lastError = error instanceof Error ? error : new Error(message);
       feedback = `${message}.${ruleHint} Return a corrected preflight result.`;
@@ -2914,6 +2955,7 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
 }
 
 export class SessionService {
+  private readonly preflightUsageStore: PreflightUsageStore;
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
   config: AppConfig;
@@ -3040,6 +3082,7 @@ export class SessionService {
   // back to deliverable. In-memory only, no persisted field. Swept alongside the
   // other wake/discovery-scoped maps in pruneSessionScopedState.
   private readonly wakeSuppressionNotified = new Set<string>();
+  private readonly tokenBudgetUnsupportedWarnings = new Set<string>();
   // Tracks sessions currently reading ALIVE via the pane-child fallback (not
   // matched by pass 1), so session.runtime.pane_child_fallback fires once on
   // the transition into that state instead of every readRuntimeSnapshot call
@@ -3304,6 +3347,8 @@ export class SessionService {
     });
     this.emitRegistryScan(bootstrap.config.dataDir, scan);
     this.config = bootstrap.config;
+    this.preflightUsageStore = new PreflightUsageStore(this.config.dataDir);
+    void this.preflightUsageStore.prune();
     // Before any classification: a restart mid-command must already know
     // whether this cursor build closes turns with turn_ended.
     configureCursorTurnEndedStore(
@@ -4462,6 +4507,16 @@ export class SessionService {
     try {
       const now = Date.now();
       for (const session of listSessions(this.config.dataDir)) {
+        const tokenBudgetError = this.tokenBudgetActivationError(session);
+        if (tokenBudgetError) {
+          this.logEvent("session.wake.token_budget_blocked", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: session.project,
+            message: tokenBudgetError,
+          });
+          continue;
+        }
         const scheduledWake = session.scheduledWake;
         if (
           scheduledWake &&
@@ -5691,6 +5746,129 @@ export class SessionService {
     return minutes * 60_000;
   }
 
+  private resolveTokenBudget(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath" | "tokenBudgetOverride">,
+  ): number | undefined {
+    if (session.tokenBudgetOverride) return undefined;
+    const project = this.resolveProjectForSession(session);
+    if (project?.tokenBudgetWarnOnly === true) return undefined;
+    return project?.tokenBudget;
+  }
+
+  private tokenBudgetActivationError(session: SessionRecord): string | undefined {
+    const budget = this.resolveTokenBudget(session);
+    if (budget === undefined) return undefined;
+    const total =
+      (session.preflightTokenUsage?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
+    if (total >= budget) {
+      return `Session ${session.id} exhausted its token budget (${total} / ${budget})`;
+    }
+    return undefined;
+  }
+
+  private assertTokenBudgetAllowsActivation(session: SessionRecord): void {
+    const error = this.tokenBudgetActivationError(session);
+    if (error) throw new Error(error);
+  }
+
+  private warnIfTokenBudgetUnenforced(session: SessionRecord): void {
+    const budget = this.resolveTokenBudget(session);
+    const reason = !session.preflightTokenUsage
+      ? "legacy pre-flight usage is unknown"
+      : session.preflightTokenUsage.status !== "measured"
+        ? "pre-flight usage is unknown"
+        : !session.tokenUsage
+          ? "main-session usage is unknown"
+          : undefined;
+    if (budget === undefined || session.status !== "running" || !reason) {
+      this.tokenBudgetUnsupportedWarnings.delete(session.id);
+      return;
+    }
+    if (this.tokenBudgetUnsupportedWarnings.has(session.id)) return;
+    this.tokenBudgetUnsupportedWarnings.add(session.id);
+    this.logEvent("session.token_budget.unenforced", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Token budget is not enforced for ${session.id}: ${reason}`,
+      details: { budget, agent: session.agent, reason },
+    });
+  }
+
+  private async stopForTokenBudget(view: Pick<SessionRecord, "id">): Promise<void> {
+    await this.withWorkspaceLifecycleLocks(view.id, async () => {
+      const candidate = readSession(this.config.dataDir, view.id);
+      if (!candidate || candidate.status !== "running") return;
+      await this.withPaneWriteLock(candidate.tmuxSession, async () => {
+        const latest = readSession(this.config.dataDir, candidate.id);
+        if (!latest || latest.status !== "running") return;
+        const classified = await this.classifySessionRecord(latest);
+        const fresh = readSession(this.config.dataDir, latest.id) ?? classified.session;
+        if (fresh.status !== "running") return;
+        const usage = this.reconcileClassifiedTokenUsage(fresh.tokenUsage, classified);
+        const budget = this.resolveTokenBudget(fresh);
+        const preflight = fresh.preflightTokenUsage;
+        const combined = (preflight?.totalTokens ?? 0) + (usage?.totalTokens ?? 0);
+        if (budget === undefined || combined < budget) return;
+        await this.killAgentPaneAndConfirmExit(fresh, { failOnSurvivors: false });
+        try {
+          await this.teardownSessionSidecars(fresh);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.token_budget.teardown_failed", {
+            level: "error",
+            sessionId: latest.id,
+            projectId: latest.project,
+            message: `Sidecar teardown failed after token budget exhaustion for ${latest.id}: ${message}`,
+          });
+        }
+        const cleaned = readSession(this.config.dataDir, fresh.id) ?? fresh;
+        const finalUsage =
+          cleaned.tokenUsage && (!usage || cleaned.tokenUsage.totalTokens >= usage.totalTokens)
+            ? cleaned.tokenUsage
+            : usage;
+        const stopped: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(cleaned),
+          ...(finalUsage ? { tokenUsage: finalUsage } : {}),
+          status: "budget_limited",
+          stopReason: "token_budget",
+          updatedAt: nowIso(),
+        };
+        delete stopped.error;
+        writeSession(this.config.dataDir, stopped);
+        this.stateCache.delete(stopped.id);
+        await this.refreshDashboardCacheEntry(stopped);
+        this.logEvent("session.token_budget.exhausted", {
+          level: "warn",
+          sessionId: stopped.id,
+          projectId: stopped.project,
+          message: `Stopped ${stopped.id} after observing ${(preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0)} / ${budget} tokens`,
+          details: { used: (preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0), budget },
+        });
+      });
+    });
+  }
+
+  private holdBudgetLimitedLaunch(session: SessionRecord): SessionRecord | undefined {
+    if (!this.tokenBudgetActivationError(session)) return undefined;
+    const limited: SessionRecord = {
+      ...session,
+      status: "budget_limited",
+      stopReason: "token_budget",
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, limited);
+    this.stateCache.delete(limited.id);
+    this.dashboardCache.delete(limited.id);
+    this.logEvent("session.token_budget.exhausted", {
+      level: "warn",
+      sessionId: limited.id,
+      projectId: limited.project,
+      message: `Held ${limited.id} after pre-flight exhausted its token budget`,
+    });
+    return limited;
+  }
+
   // Parks a running/waiting session that has been idle past staleAfterMinutes:
   // kills the agent pane, tears down its sidecars (not cleanupSessionServices —
   // service instances are out of scope here, matching reconcileUnexpectedStop),
@@ -5900,12 +6078,21 @@ export class SessionService {
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
         try {
+          this.warnIfTokenBudgetUnenforced(session);
           const { view, classified } = await this.enrichWithClassified(
             session,
             claudeAccounts,
             allSessions,
             sidecarProcSnapshot,
           );
+          if (
+            view.status === "running" &&
+            view.tokenBudgetView?.exhausted &&
+            view.tokenBudgetView.warnOnly !== true
+          ) {
+            await this.stopForTokenBudget(view);
+            continue;
+          }
           await this.checkPrForSession(session, view.state);
           const prevRunState = this.lastObservedRunStates.get(view.id);
           nextRunStates.set(view.id, view.state);
@@ -6070,6 +6257,11 @@ export class SessionService {
     for (const sessionId of this.wakeSuppressionNotified) {
       if (!liveIds.has(sessionId)) {
         this.wakeSuppressionNotified.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.tokenBudgetUnsupportedWarnings) {
+      if (!liveIds.has(sessionId)) {
+        this.tokenBudgetUnsupportedWarnings.delete(sessionId);
       }
     }
     for (const sessionId of this.paneChildFallbackNotified) {
@@ -9888,6 +10080,15 @@ export class SessionService {
         probeWorkspace(session.worktreePath).missing,
       );
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
+        const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
+        const latest = readSession(this.config.dataDir, session.id);
+        if (
+          latest?.status === reconciled.session.status &&
+          latest.agent === session.agent &&
+          latest.agentSessionId === session.agentSessionId
+        ) {
+          this.persistClassifiedTokenUsage(latest, usage);
+        }
         drifted += 1;
         if (reconciled.session.status === "stopped") {
           driftedSessions.push({ id: session.id, project: session.project });
@@ -10107,6 +10308,11 @@ export class SessionService {
     }
   }
 
+  async createPreflightBatch(projectId: string): Promise<{ preflightBatchId: string }> {
+    this.getProject(projectId);
+    return { preflightBatchId: await this.preflightUsageStore.create(projectId) };
+  }
+
   async preflight(request: PreflightRequest): Promise<PreflightResponse> {
     if (typeof request.prompt !== "string" || !request.prompt.trim()) {
       throw new Error("prompt must be a non-empty string");
@@ -10116,18 +10322,68 @@ export class SessionService {
     const overrides = parseSpawnOverrides(request.overrides, "overrides");
     const worktree = resolveSpawnWorktree(project, overrides);
     const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+    const preflightBatchId = await this.preflightUsageStore.resolve(
+      request.project,
+      request.preflightBatchId,
+    );
     if (!worktree || !project.preflight) {
-      return { branch: null };
+      return {
+        branch: null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
     }
-    const result = await runSpawnPreflight({
-      agent,
-      projectId: request.project,
-      project,
-      baseBranch: defaultBranch,
-      worktree,
-      prompt: request.prompt,
-    });
-    return { branch: result.branch ?? null };
+    try {
+      let result: SpawnPreflightResult;
+      try {
+        result = await this.preflightUsageStore.runAttempt(
+          preflightBatchId,
+          request.project,
+          agent,
+          () =>
+            runSpawnPreflight({
+              agent,
+              projectId: request.project,
+              project,
+              baseBranch: defaultBranch,
+              worktree,
+              prompt: request.prompt,
+            }),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          !message.startsWith("preflight branch ") &&
+          !message.startsWith("Spawn preflight must return exactly one branch name")
+        )
+          throw error;
+        return {
+          branch: null,
+          preflightBatchId,
+          preflightTokenUsageView: await this.preflightUsageStore.view(
+            preflightBatchId,
+            request.project,
+          ),
+        };
+      }
+      return {
+        branch: result.branch ?? null,
+        preflightBatchId,
+        preflightTokenUsageView: await this.preflightUsageStore.view(
+          preflightBatchId,
+          request.project,
+        ),
+      };
+    } catch (error) {
+      throw new PreflightPreviewError(
+        error,
+        preflightBatchId,
+        await this.preflightUsageStore.view(preflightBatchId, request.project),
+      );
+    }
   }
 
   // Shared by resolveSpawnTarget's three branches. "strict" (default) is the
@@ -10486,6 +10742,8 @@ export class SessionService {
     let preflightBranch: string | undefined;
     let preflightNoProjectBranchRequirements = false;
     let preflightAttempts: number | undefined;
+    let preflightBatchId: string | undefined;
+    let preflightTokenUsage = aggregatePreflightAttempts([]);
     let allocatedNewWorktree = false;
     let reuseCtx: {
       workspaceId: string;
@@ -10515,11 +10773,22 @@ export class SessionService {
         agent,
         options?.validatedExplicitModel,
       );
+      if (
+        request.preflightBatchId ||
+        (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
+      ) {
+        preflightBatchId = await this.preflightUsageStore.resolve(
+          request.project,
+          request.preflightBatchId,
+        );
+      }
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
       if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
+        if (!preflightBatchId) throw new Error("missing pre-flight batch");
+        const activePreflightBatchId = preflightBatchId;
         const preflight = await runSpawnPreflightForSpawn({
           agent,
           projectId: request.project,
@@ -10527,6 +10796,13 @@ export class SessionService {
           baseBranch: defaultBranch,
           worktree,
           prompt,
+          runAttempt: (execute) =>
+            this.preflightUsageStore.runAttempt(
+              activePreflightBatchId,
+              request.project,
+              agent as AgentName,
+              execute,
+            ),
         });
         preflightOutcome = preflight.outcome;
         preflightAttempts = preflight.attempts;
@@ -10548,6 +10824,9 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      preflightTokenUsage = preflightBatchId
+        ? await this.preflightUsageStore.claim(preflightBatchId, request.project, sessionId)
+        : aggregatePreflightAttempts([]);
       this.spawnsInFlight.add(sessionId);
       if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
@@ -10653,6 +10932,7 @@ export class SessionService {
         tmuxSession,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -10769,6 +11049,14 @@ export class SessionService {
             selfDestruct,
             telegramAgentInstructions(project),
           );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...placeholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) return await this.enrich(budgetLimited);
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...placeholder, worktreePath: workspacePath },
         project,
@@ -11058,6 +11346,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          preflightTokenUsage,
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -11439,6 +11728,15 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      const preflightBatchId = await this.preflightUsageStore.resolve(
+        request.project,
+        request.preflightBatchId,
+      );
+      const preflightTokenUsage = await this.preflightUsageStore.claim(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
       } else if (!worktree) {
@@ -11486,6 +11784,7 @@ export class SessionService {
         tmuxSession: sessionId,
         launchCommand: "",
         status: "spawning",
+        preflightTokenUsage,
         createdAt,
         updatedAt: createdAt,
         ...(Object.keys(resolveSessionSidecars({ agent }, project)).length > 0
@@ -11550,11 +11849,16 @@ export class SessionService {
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
+        preflightBatchId,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
+        const claimedPreflightUsage = readSession(
+          this.config.dataDir,
+          sessionId,
+        )?.preflightTokenUsage;
         this.removeSessionArtifacts({
           id: sessionId,
           project: request.project,
@@ -11581,6 +11885,7 @@ export class SessionService {
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
+          ...(claimedPreflightUsage ? { preflightTokenUsage: claimedPreflightUsage } : {}),
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -11643,6 +11948,37 @@ export class SessionService {
             baseBranch: prepared.defaultBranch,
             worktree: prepared.worktree,
             prompt,
+            assertActive: () => this.assertSpawnNotKilled(sessionId),
+            runAttempt: async (execute) => {
+              let result: SpawnPreflightResult | undefined;
+              let executionError: unknown;
+              try {
+                result = await this.preflightUsageStore.runAttempt(
+                  prepared.preflightBatchId,
+                  request.project,
+                  agent,
+                  execute,
+                  sessionId,
+                );
+              } catch (error) {
+                executionError = error;
+              }
+              const usage = await this.preflightUsageStore.claim(
+                prepared.preflightBatchId,
+                request.project,
+                sessionId,
+              );
+              this.assertSpawnNotKilled(sessionId);
+              prepared.placeholder = { ...prepared.placeholder, preflightTokenUsage: usage };
+              writeSession(this.config.dataDir, prepared.placeholder);
+              if (executionError) {
+                throw executionError instanceof Error
+                  ? executionError
+                  : new Error(String(executionError));
+              }
+              if (!result) throw new Error("Pre-flight attempt returned no result");
+              return result;
+            },
           });
           preflightOutcome = preflight.outcome;
           preflightAttempts = preflight.attempts;
@@ -11797,6 +12133,17 @@ export class SessionService {
         selfDestruct,
         telegramAgentInstructions(project),
       );
+      const budgetLimited = this.holdBudgetLimitedLaunch({
+        ...spawnPlaceholder,
+        worktreePath: workspacePath,
+        status: "running",
+        updatedAt: nowIso(),
+      });
+      if (budgetLimited) {
+        prepared.placeholder = budgetLimited;
+        return "completed";
+      }
+
       const { session: sessionForMcp, mcpBindings } = await this.startMcpSidecars(
         { ...spawnPlaceholder, worktreePath: workspacePath },
         project,
@@ -12015,7 +12362,7 @@ export class SessionService {
           projectId: request.project,
           message: `Spawn preflight failed for ${request.project}: ${message}`,
           details: {
-            attempts: error.attempts,
+            ...(error instanceof SpawnPreflightError ? { attempts: error.attempts } : {}),
             requestedAgent: request.agent ?? null,
           },
         });
@@ -12724,7 +13071,8 @@ export class SessionService {
       !session ||
       session.status !== "running" ||
       submitPending(session) ||
-      !hasMessageContent(request)
+      !hasMessageContent(request) ||
+      this.tokenBudgetActivationError(session) !== undefined
     ) {
       return null;
     }
@@ -12745,6 +13093,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    this.assertTokenBudgetAllowsActivation(session);
     if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
@@ -15293,13 +15642,10 @@ export class SessionService {
       return session;
     }
 
-    // Claude, OpenCode, and Cursor sessions pin their native session id. Never overwrite
-    // one with newest-session discovery, which could bind a sibling session
-    // sharing the worktree. Legacy records without an id keep discovery below.
-    if (
-      (session.agent === "claude" || session.agent === "opencode" || session.agent === "cursor") &&
-      session.agentSessionId
-    ) {
+    // Stored native session ids are pinned. Never overwrite one with newest-session
+    // discovery, which could bind a sibling session sharing the worktree. Legacy
+    // records without an id keep discovery below.
+    if (session.agentSessionId) {
       return session;
     }
 
@@ -15429,6 +15775,7 @@ export class SessionService {
     session: SessionRecord,
     options?: { paneAlreadyConfirmedGone?: boolean },
   ): Promise<SessionRecord> {
+    this.assertTokenBudgetAllowsActivation(session);
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
@@ -15864,10 +16211,28 @@ export class SessionService {
     sessionId: string,
     request: RestoreSessionRequest,
   ): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
+    let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    if (request.overrideTokenBudget === true) {
+      if (
+        session.status !== "budget_limited" &&
+        !(session.status === "stopped" && session.stopReason === "token_budget") &&
+        !(
+          this.tokenBudgetActivationError(session) &&
+          isRestorableSession(await this.enrich(session))
+        )
+      ) {
+        throw new Error(`Session ${sessionId} is not budget-limited`);
+      }
+      session = {
+        ...(readSession(this.config.dataDir, sessionId) ?? session),
+        tokenBudgetOverride: true,
+      };
+      writeSession(this.config.dataDir, session);
+    }
+    this.assertTokenBudgetAllowsActivation(session);
     this.clearTargetGoneNudgeGate(sessionId);
     // A restore can replay every sidecar afresh (directly, or via
     // relaunchSessionInPlace on the fresh-launch fallback); a cached
@@ -15898,7 +16263,8 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    const current = await this.enrich(session);
+    const currentView = await this.enrich(session);
+    const current = { ...(readSession(this.config.dataDir, sessionId) ?? session), ...currentView };
     if (!isRestorableSession(current)) {
       this.logEvent("session.restore.unrestorable", {
         level: "warn",
@@ -15936,6 +16302,12 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    const cursorRestoreBoundary: CursorRestoreBoundary | null =
+      current.agent === "cursor"
+        ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
+        : null;
+    if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
+    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -16017,12 +16389,16 @@ export class SessionService {
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
-      const launchPlan = await waitForRestorePlan(
-        current.agent,
-        current.worktreePath,
-        restorePrompt,
-        launchPlanOptions,
-      );
+      const pinnedCodexId =
+        current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
+      const launchPlan = pinnedCodexId
+        ? null
+        : await waitForRestorePlan(
+            current.agent,
+            current.worktreePath,
+            restorePrompt,
+            launchPlanOptions,
+          );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
       await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
@@ -16033,7 +16409,9 @@ export class SessionService {
       const pinnedOpenCodeId =
         current.agent === "opencode" && current.agentSessionId ? current.agentSessionId : undefined;
       let restoredAgentSessionId =
-        current.agent === "cursor" ? current.agentSessionId : (pinnedClaudeId ?? pinnedOpenCodeId);
+        current.agent === "cursor"
+          ? current.agentSessionId
+          : (pinnedClaudeId ?? pinnedOpenCodeId ?? pinnedCodexId);
       if (launchPlan && !restoredAgentSessionId) {
         const codexSessionRootDir =
           current.agent === "codex"
@@ -16223,6 +16601,8 @@ export class SessionService {
             launchCommand: restoredLaunchCommand,
             status: "running",
             updatedAt: nowIso(),
+            ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+            ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
           },
           mcpSidecarUpdate,
         );
@@ -16310,6 +16690,8 @@ export class SessionService {
         launchCommand: restoredLaunchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
+        ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
       },
       mcpSidecarUpdate,
     );
@@ -17769,6 +18151,9 @@ export class SessionService {
             `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
           );
         }
+        if (this.tokenBudgetActivationError(session)) {
+          return;
+        }
         await this.sendAgentMessage(
           session,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
@@ -18029,7 +18414,9 @@ export class SessionService {
     );
   }
 
-  private async classifyCodexState(sessionId: string): Promise<{
+  private async classifyCodexState(
+    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
+  ): Promise<{
     state: SessionState;
     source: StateSource;
     hookState: ReturnType<typeof readAgentHookState>;
@@ -18037,19 +18424,39 @@ export class SessionService {
     rateLimit: RateLimitDetection | null;
     activityMs: number;
     model?: string;
+    tokenUsage?: ProviderTokenUsageSample;
+    tokenUsages?: ProviderTokenUsageSample[];
   }> {
-    const hookState = readAgentHookState(this.config.dataDir, sessionId);
-    const rolloutReader = this.codexRolloutReaders.get(sessionId) ?? { files: new Map() };
-    this.codexRolloutReaders.set(sessionId, rolloutReader);
+    const hookState = readAgentHookState(this.config.dataDir, session.id);
+    const rolloutReader = this.codexRolloutReaders.get(session.id) ?? { files: new Map() };
+    this.codexRolloutReaders.set(session.id, rolloutReader);
     const rolloutRead = await readCodexRolloutState(
-      this.codexSessionsDir(sessionId),
+      this.codexSessionsDir(session.id),
       rolloutReader,
-    );
+      session.agentSessionId,
+    ).catch<Awaited<ReturnType<typeof readCodexRolloutState>>>(() => ({
+      rollout: null,
+      rateLimit: null,
+    }));
     const rolloutState = rolloutRead.rollout;
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
+    const restoreStartedAtMs = session.codexRestoreStartedAt
+      ? Date.parse(session.codexRestoreStartedAt)
+      : NaN;
+    const restoreMarkerReady =
+      rolloutState?.reason === "thread_settings_applied" &&
+      Number.isFinite(restoreStartedAtMs) &&
+      rolloutState.timestampMs >= restoreStartedAtMs &&
+      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      (!hookState ||
+        hookState.state === "waiting" ||
+        new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
+    if (restoreMarkerReady) {
+      state = "waiting";
+      source = "jsonl";
+    } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
     }
@@ -18080,6 +18487,8 @@ export class SessionService {
       rateLimit: rolloutRead.rateLimit,
       activityMs,
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
+      ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
+      ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
     };
   }
 
@@ -18863,6 +19272,7 @@ export class SessionService {
     if (
       session.status !== "stopped" ||
       session.stopReason === "manual_pause" ||
+      session.stopReason === "token_budget" ||
       isStaleParked(session) ||
       hasSessionErrorEvidence(session) ||
       workspaceMissing ||
@@ -18880,6 +19290,7 @@ export class SessionService {
     if (
       latest.status !== "stopped" ||
       latest.stopReason === "manual_pause" ||
+      latest.stopReason === "token_budget" ||
       isStaleParked(latest) ||
       hasSessionErrorEvidence(latest)
     ) {
@@ -18962,6 +19373,44 @@ export class SessionService {
     return updated;
   }
 
+  private async readFinalTokenUsage(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+  ): Promise<Pick<SessionStateResult, "tokenUsage" | "tokenUsages">> {
+    if (session.agent === "claude") {
+      const result = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+        session.agentSessionId,
+      ).catch(() => null);
+      if (result) this.claudeJsonlReaders.set(session.id, result.reader);
+      return result?.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    if (session.agent === "codex") {
+      const result = await this.classifyCodexState(session).catch(() => null);
+      if (!result) return {};
+      return {
+        ...(result.tokenUsage ? { tokenUsage: result.tokenUsage } : {}),
+        ...(result.tokenUsages ? { tokenUsages: result.tokenUsages } : {}),
+      };
+    }
+    if (session.agent === "opencode") {
+      const result = await readOpenCodeStructuredState(
+        session.agentSessionId,
+        runtime.tmuxActivityAt?.getTime() ?? null,
+        true,
+      ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
+      return result.tokenUsage ? { tokenUsage: result.tokenUsage } : {};
+    }
+    const usage = await readCursorTokenUsage(
+      cursorConfigDirForSession(this.config.dataDir, session.id),
+      session.agentSessionId,
+    ).catch(() => undefined);
+    return usage && session.agentSessionId
+      ? { tokenUsage: { ...usage, provider: "cursor", generationId: session.agentSessionId } }
+      : {};
+  }
+
   private async classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
@@ -19019,6 +19468,17 @@ export class SessionService {
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     let liveModel: string | undefined;
+    let tokenUsage: ProviderTokenUsageSample | undefined;
+    let tokenUsages: ProviderTokenUsageSample[] | undefined;
+    if (session.agent === "cursor" && session.agentSessionId) {
+      const usage = await readCursorTokenUsage(
+        cursorConfigDirForSession(this.config.dataDir, session.id),
+        session.agentSessionId,
+      ).catch(() => undefined);
+      if (usage) {
+        tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+      }
+    }
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
       const reconciled = await this.reconcileUnexpectedStop(
         effectiveSession,
@@ -19046,6 +19506,16 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // The provider can flush one final structured sample immediately before
+    // exit. Read it once after death is confirmed; terminal text is never an
+    // accounting source. Cursor's hook snapshot is read above for every state.
+    if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+      if (session.agent !== "cursor") {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      }
+    }
     if (effectiveSession.status !== "running") {
       state = statusFallbackState(effectiveSession);
     } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -19060,7 +19530,7 @@ export class SessionService {
           session.worktreePath,
           this.claudeJsonlReaders.get(session.id),
           session.agentSessionId,
-        );
+        ).catch(() => null);
         if (jsonlResult) {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
@@ -19077,6 +19547,7 @@ export class SessionService {
           // The reader already stat()ed the pinned transcript; reuse its mtime.
           agentActivityAt = activityAtFromMs(jsonlResult.reader.lastMtimeMs);
           liveModel = jsonlResult.liveModel;
+          tokenUsage = jsonlResult.tokenUsage;
         }
         const panePid = await panePidPromise;
         const statusResult = await readClaudeSessionStatus(
@@ -19100,12 +19571,14 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no claude status/jsonl)`;
         }
       } else if (strategy === "hook") {
-        const codexState = await this.classifyCodexState(session.id);
+        const codexState = await this.classifyCodexState(session);
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
+        tokenUsage = codexState.tokenUsage;
+        tokenUsages = codexState.tokenUsages;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
@@ -19127,8 +19600,9 @@ export class SessionService {
             minMtimeMs: session.agentSessionId
               ? undefined
               : Math.max(0, new Date(session.createdAt).getTime() - 60_000),
+            ...(session.cursorRestoreBoundary ? { after: session.cursorRestoreBoundary } : {}),
           },
-        );
+        ).catch(() => null);
         if (jsonlResult) {
           this.cursorJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
@@ -19142,10 +19616,12 @@ export class SessionService {
           classifiedDetail = `State: ${state} (no cursor jsonl)`;
         }
       } else {
-        const structuredState = await readOpenCodeState(
+        const structured = await readOpenCodeStructuredState(
           session.agentSessionId,
           runtime.tmuxActivityAt?.getTime() ?? null,
-        );
+        ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
+        const structuredState = structured.state;
+        tokenUsage = structured.tokenUsage;
         state = structuredState?.state ?? "working";
         stateSource = "jsonl";
         agentActivityAt =
@@ -19474,6 +19950,8 @@ export class SessionService {
       agentActivityAt,
       ...(rateLimitExpiredAtMs !== undefined ? { rateLimitExpiredAtMs } : {}),
       ...(liveModel ? { liveModel } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
+      ...(tokenUsages ? { tokenUsages } : {}),
     };
   }
 
@@ -19483,12 +19961,16 @@ export class SessionService {
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
     // viewed-session enrich still run the tmux-banner/usage-menu scan.
     const classified = await this.classifySessionRecord(session, { scanPane: false });
-    session = classified.session;
+    session = this.persistClassifiedTokenUsage(classified.session, classified);
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
       sidecarNames: _sidecarNames,
       sidecarPorts: _sidecarPorts,
+      tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -19546,6 +20028,85 @@ export class SessionService {
       ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
       ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView: this.deriveTokenUsageView(session),
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
+    };
+  }
+
+  private persistClassifiedTokenUsage(
+    session: SessionRecord,
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+  ): SessionRecord {
+    const tokenUsage = this.reconcileClassifiedTokenUsage(session.tokenUsage, classified);
+    if (!tokenUsage) return session;
+    if (JSON.stringify(tokenUsage) === JSON.stringify(session.tokenUsage)) return session;
+    const updated = { ...session, tokenUsage };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  private reconcileClassifiedTokenUsage(
+    previous: SessionRecord["tokenUsage"],
+    classified: Pick<SessionStateResult, "tokenUsage" | "tokenUsages">,
+  ): SessionRecord["tokenUsage"] {
+    const samples =
+      classified.tokenUsages ?? (classified.tokenUsage ? [classified.tokenUsage] : []);
+    return samples.reduce((usage, sample) => reconcileTokenUsage(usage, sample), previous);
+  }
+
+  private deriveTokenUsageView(session: SessionRecord): SessionTokenUsageView {
+    const budget = this.resolveTokenBudget(session);
+    if (!session.tokenUsage) {
+      return {
+        status: "waiting",
+        provider: session.agent,
+        ...(budget !== undefined ? { budget } : {}),
+        exhausted: false,
+      };
+    }
+    const { generations: _generations, ...publicUsage } = session.tokenUsage;
+    return {
+      status: "available",
+      ...publicUsage,
+      ...(budget !== undefined ? { budget } : {}),
+      exhausted: budget !== undefined && session.tokenUsage.totalTokens >= budget,
+    };
+  }
+
+  private derivePreflightTokenUsageView(session: SessionRecord) {
+    return session.preflightTokenUsage
+      ? preflightUsageView(session.preflightTokenUsage)
+      : {
+          status: "legacy_unknown" as const,
+          attemptCount: 0,
+          unknownAttemptCount: 0,
+          providerIterationCount: 0,
+        };
+  }
+
+  private deriveTokenBudgetView(session: SessionRecord) {
+    const project = this.resolveProjectForSession(session);
+    const budget = project?.tokenBudget;
+    const warnOnly = budget !== undefined && project?.tokenBudgetWarnOnly === true;
+    const overridden = session.tokenBudgetOverride === true;
+    const preflight = session.preflightTokenUsage;
+    const knownTotalTokens = (preflight?.totalTokens ?? 0) + (session.tokenUsage?.totalTokens ?? 0);
+    const reason = !preflight
+      ? ("legacy_unknown" as const)
+      : preflight.status !== "measured"
+        ? ("preflight_unknown" as const)
+        : !session.tokenUsage
+          ? ("main_usage_unavailable" as const)
+          : undefined;
+    return {
+      ...(budget !== undefined ? { budget } : {}),
+      warnOnly,
+      knownTotalTokens,
+      overridden,
+      exhausted: !overridden && budget !== undefined && knownTotalTokens >= budget,
+      enforced: !overridden && (budget === undefined || reason === undefined),
+      ...(reason ? { reason } : {}),
     };
   }
 
@@ -19636,7 +20197,7 @@ export class SessionService {
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<{ view: SessionListItemView; classified: SessionStateResult }> {
     const classified = await this.classifySessionRecord(session);
-    session = classified.session;
+    session = this.persistClassifiedTokenUsage(classified.session, classified);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const state = this.stabilizeState(session.id, classified.state);
@@ -19660,6 +20221,7 @@ export class SessionService {
     }
 
     const project = this.resolveProjectForSession(session);
+    const tokenUsageView = this.deriveTokenUsageView(session);
     // Fetched at most once per enrich (zero extra IO for a non-desk session,
     // where deskAnchorRecord returns `session` itself unchanged): reused for
     // the sidecars' owner state (ports, still per-record) below. Passed into
@@ -19719,6 +20281,10 @@ export class SessionService {
       launchCommand: _launchCommand,
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
+      tokenUsage: _tokenUsage,
+      preflightTokenUsage: _preflightTokenUsage,
+      cursorRestoreBoundary: _cursorRestoreBoundary,
+      codexRestoreStartedAt: _codexRestoreStartedAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       ...sessionWithoutDetailFields
@@ -19746,6 +20312,9 @@ export class SessionService {
       ...(resolvedClaudeAccounts.length > 0 ? { claudeAccounts: resolvedClaudeAccounts } : {}),
       ...(session.claudeAccountId ? { activeClaudeAccountId: session.claudeAccountId } : {}),
       ...(classified.liveModel ? { model: classified.liveModel } : {}),
+      tokenUsageView,
+      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+      tokenBudgetView: this.deriveTokenBudgetView(session),
     };
     return { view, classified };
   }
