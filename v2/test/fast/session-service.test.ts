@@ -4879,12 +4879,28 @@ describe("SessionService", () => {
         sessionRecord({
           id: "api-1",
           prompt: "hello",
-          status: "running",
+          status: "stopped",
           worktree: true,
           worktreePath: "/tmp/spur-worktrees/api/api-1",
         }),
       );
-      mockExitedThenRestoredProcess();
+      let restoredTmuxCreated = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        restoredTmuxCreated = true;
+      });
+      getTmuxSessionPresenceMock.mockImplementation(async () => ({
+        present: restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      getTmuxPanePresenceMock.mockImplementation(async () => ({
+        dead: !restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      probeTmuxProcessMatchMock.mockImplementation(async () => ({
+        alive: restoredTmuxCreated,
+        matchedByName: restoredTmuxCreated,
+        unresponsive: false,
+      }));
       const service = await createDisposedSessionService();
       await service.restore("api-1");
       const prompt = sendMessageToTmuxMock.mock.calls.at(-1)?.[1];
@@ -16103,6 +16119,7 @@ describe("SessionService", () => {
       await vi.advanceTimersByTimeAsync(32_000);
       expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "please continue", {
         agent: "codex",
+        interrupt: false,
       });
       expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
