@@ -395,7 +395,7 @@ export function SpawnModal({
           <IconCloseButton label="Close" onClick={onClose} disabled={!canClose} />
         </div>
         {noteSlot ? <div className="mb-3">{noteSlot}</div> : null}
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
           <ModeFields
             agent={agent}
             agentAriaLabel={agentAriaLabel}
@@ -406,12 +406,14 @@ export function SpawnModal({
             ariaLabel={promptAriaLabel}
             attachments={attachments}
             clearLabel={clearLabel}
+            containerClassName="min-h-24 flex-1"
             minHeightClass={promptMinHeightClass}
             onAddFiles={onAddFiles}
             onChange={onPromptChange}
             onRemoveAttachment={onRemoveAttachment}
             placeholder={voicePlaceholder(promptPlaceholder, voice)}
             textareaRef={promptRef}
+            textareaClassName="h-full max-h-full"
             value={prompt}
             voice={voice}
           />
