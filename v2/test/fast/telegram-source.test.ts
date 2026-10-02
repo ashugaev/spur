@@ -2975,6 +2975,55 @@ describe("telegramSourceModule voice notes", () => {
     ]);
   });
 
+  it.each([
+    { name: "denied user", userId: 999, chatId: -1001 },
+    { name: "disallowed chat", userId: 123, chatId: -1002 },
+  ])("rejects a recorded group-main voice reply from $name before transcription", async ({ userId, chatId }) => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      config: {
+        allowedChats: [-1001],
+        autoSpawn: { enabled: true, project: "api", agent: "claude" },
+      },
+    });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1", message_thread_id: undefined }));
+    recordTelegramMessages(dataDir, "api", "telegram", { sessionId: "api-2", chatId }, [500]);
+    const bindings = readTelegramBindings(dataDir, "api", "telegram");
+    const boundTarget = readTelegramReplyTarget(dataDir, "api-1");
+    const ownerTarget = readTelegramReplyTarget(dataDir, "api-2");
+    const writes = [
+      vi.spyOn(metadataModule, "writeTelegramBindings"),
+      vi.spyOn(metadataModule, "writeTelegramReplyTarget"),
+      vi.spyOn(metadataModule, "recordTelegramMessages"),
+    ];
+    for (const write of writes) write.mockClear();
+    try {
+      const fetchMock = mockTranscribeFetch("fix the sidecar");
+      vi.stubGlobal("fetch", fetchMock);
+      const voiceCtx = telegramVoiceContext({
+        chat: { id: chatId },
+        from: { id: userId },
+        message_thread_id: undefined,
+        reply_to_message: { message_id: 500 },
+      });
+      await bot.emitVoice(voiceCtx);
+      expect(voiceCtx.reply).not.toHaveBeenCalled();
+      expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();
+      expect(voiceCtx.getFile).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(readTelegramBindings(dataDir, "api", "telegram")).toEqual(bindings);
+      expect(readTelegramReplyTarget(dataDir, "api-1")).toEqual(boundTarget);
+      expect(readTelegramReplyTarget(dataDir, "api-2")).toEqual(ownerTarget);
+    } finally {
+      for (const write of writes) write.mockRestore();
+    }
+  });
+
   it("A2: spawns via wrapTelegramSpawnPrompt when no binding exists", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
