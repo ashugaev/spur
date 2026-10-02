@@ -1696,6 +1696,7 @@ export function Dashboard() {
   }, [spawnDraft, spawnOpen]);
 
   const closeSpawnModal = useCallback(() => {
+    if (spawningRef.current) return;
     writeSpawnDraft(spawnDraftRef.current);
     resetSpawnAttachments();
     setSpawnOpen(false);
@@ -2688,7 +2689,7 @@ export function Dashboard() {
               agent={spawnAgent}
               agentAriaLabel="Spawn agent"
               attachments={spawnAttachments}
-              canClose
+              canClose={!spawning}
               clearLabel="Clear spawn prompt"
               history={{
                 entries: spawnHistory.entries,

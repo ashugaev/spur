@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { fileAttachmentsFromFiles, type FileAttachment } from "@/lib/file-attachments";
 import type * as FileAttachmentsModule from "@/lib/file-attachments";
+import type { SpurSessionView } from "@/lib/types";
 
 vi.mock("@/lib/file-attachments", async (importOriginal) => ({
   ...(await importOriginal<typeof FileAttachmentsModule>()),
@@ -34,12 +35,14 @@ function pendingRead() {
 describe("Dashboard spawn photo preparation", () => {
   let requests: RequestInit[];
   let spawnFails: boolean;
+  let spawnResponse: Promise<Response> | undefined;
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
     requests = [];
     spawnFails = false;
+    spawnResponse = undefined;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions")
@@ -54,6 +57,7 @@ describe("Dashboard spawn photo preparation", () => {
       if (url.includes("spawn-defaults")) return Response.json({ model: null, worktree: false });
       if (url === "/api/spawn") {
         requests.push(init ?? {});
+        if (spawnResponse) return spawnResponse;
         return Response.json({ error: "Spawn failed" }, { status: spawnFails ? 502 : 201 });
       }
       return Response.json({ available: false, sessions: [], commands: [] });
@@ -86,6 +90,96 @@ describe("Dashboard spawn photo preparation", () => {
     );
     await open();
   }
+
+  for (const failure of ["HTTP", "network"] as const) {
+    it(`retains prompt and photo through in-flight spawn close attempts and late ${failure} failure`, async () => {
+      await mount();
+      fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Keep photo" } });
+      const read = pendingRead();
+      attach();
+      await act(async () => read.resolve([photo()]));
+      let resolve!: (response: Response) => void;
+      let reject!: (error: Error) => void;
+      spawnResponse = new Promise<Response>((accept, fail) => {
+        resolve = accept;
+        reject = fail;
+      });
+      const button = submit();
+      act(() => {
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      const dialog = screen.getByRole("dialog");
+      expect(within(dialog).getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Close", exact: true }));
+      fireEvent.click(dialog);
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.getByRole("dialog")).toBe(dialog);
+      expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep photo");
+      expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+      expect(requests).toHaveLength(1);
+      await act(async () => {
+        if (failure === "HTTP")
+          resolve(Response.json({ error: "Late HTTP failure" }, { status: 502 }));
+        else reject(new Error("Late network failure"));
+      });
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(`Late ${failure} failure`);
+      expect(submit()).not.toBeDisabled();
+      expect(within(dialog).getByRole("button", { name: "Close", exact: true })).not.toBeDisabled();
+      expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep photo");
+      expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+      spawnResponse = undefined;
+      spawnFails = true;
+      fireEvent.click(submit());
+      await waitFor(() =>
+        expect(within(dialog).getByRole("alert")).toHaveTextContent("Spawn failed"),
+      );
+      expect(JSON.parse(String(requests[1].body))).toMatchObject({
+        prompt: "Keep photo",
+        attachments: [{ name: "photo.png" }],
+      });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Close", exact: true }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  }
+
+  it("closes and resets after an in-flight spawn succeeds", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Clear photo" } });
+    const read = pendingRead();
+    attach();
+    await act(async () => read.resolve([photo()]));
+    let resolve!: (response: Response) => void;
+    spawnResponse = new Promise<Response>((accept) => {
+      resolve = accept;
+    });
+    fireEvent.click(submit());
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeVisible();
+    const session: SpurSessionView = {
+      id: "spawned",
+      project: "demo",
+      agent: "claude",
+      prompt: "Clear photo",
+      branch: "",
+      worktree: false,
+      tmuxSession: null,
+      status: "spawning",
+      state: "working",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      runtimeAlive: false,
+      workspaceExists: false,
+      worktreePath: "",
+      slots: { links: [] },
+    };
+    await act(async () => resolve(Response.json(session, { status: 201 })));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await open();
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Remove photo.png" })).toBeNull();
+  });
 
   it("blocks spawn while a photo is pending and includes it after preparation", async () => {
     await mount();

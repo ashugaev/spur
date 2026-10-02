@@ -2944,6 +2944,92 @@ test.describe("D7: Spawn modal", () => {
       });
     }
 
+    for (const width of [780, 390]) {
+      test(`in-flight spawn ignores close attempts and retains late failure at ${width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 844 });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const requests: Record<string, unknown>[] = [];
+        await page.route("**/api/spawn", async (route) => {
+          requests.push(route.request().postDataJSON() as Record<string, unknown>);
+          if (requests.length === 1) await gate;
+          await route.fulfill({ status: 502, json: { error: "Late spawn failure" } });
+        });
+        await prepare(page);
+        await page.getByPlaceholder("Prompt...").fill("Keep photo");
+        await addPhoto(page, "drop", "ready.png");
+        const dialog = page.getByRole("dialog");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect.poll(() => requests.length).toBe(1);
+        const close = dialog.getByRole("button", { name: "Close", exact: true });
+        await expect(close).toBeDisabled();
+        await close.dispatchEvent("click");
+        await dialog.dispatchEvent("click");
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        release();
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(
+          await alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          }),
+        ).toBe(true);
+        await expect(close).toBeEnabled();
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(requests[1]).toMatchObject({
+          prompt: "Keep photo",
+          attachments: [{ name: "ready.png" }],
+        });
+        await close.click();
+        await expect(dialog).toHaveCount(0);
+      });
+    }
+
+    test("in-flight spawn success still closes and resets the modal", async ({ page }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/spawn", async (route) => {
+        await gate;
+        await route.fulfill({
+          status: 201,
+          json: makeSpawningSession({ id: "photo-success", project: "my-project" }),
+        });
+      });
+      await prepare(page);
+      await page.getByPlaceholder("Prompt...").fill("Clear photo");
+      await addPhoto(page, "paste", "ready.png");
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await dialog.getByRole("button", { name: /^spawn$/i }).click();
+      await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+      release();
+      await expect(dialog).toHaveCount(0);
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toHaveCount(0);
+    });
+
     test("closed modal ignores stale photo reads", async ({ page }) => {
       await prepare(page);
       await gateReads(page);
