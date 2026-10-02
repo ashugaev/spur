@@ -290,6 +290,11 @@ function smokeConfig(args: {
 dataDir: ${args.dataDir}
 worktreeDir: ${args.worktreeDir}
 defaultAgent: ${args.agent}
+admission:
+  maxLiveSessions: 1
+  memoryGuard:
+    admissionFloorBytes: 2147483648
+    shedCriticalFloorBytes: 1073741824
 projects:
   api:
     path: ${args.repoDir}
