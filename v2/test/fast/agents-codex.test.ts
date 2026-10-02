@@ -163,10 +163,45 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("describe this", {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
     });
-    expect(plan.launchCommand).toContain("--image '/tmp/one.png'");
-    expect(plan.launchCommand).toContain("--image '/tmp/two.webp'");
-    expect(plan.launchCommand).toContain("'describe this'");
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'",
+    );
     expect(plan.initialMessage).toBe("");
+  });
+
+  it("keeps a leading-dash prompt with commas, newline and quotes as one positional argument", () => {
+    const prompt = "--describe, this\nimage's content";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it("separates mode metadata even when the user's prompt is blank", () => {
+    const prompt = "\n\nMode: manager. Load the manager skill.";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it.each(["", " \n\t "])("leaves genuinely empty planner input %j image-only", (prompt) => {
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it("preserves tmux prompt delivery when startup image paths are empty", () => {
+    const prompt = "--describe, this\nimage's content";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: [] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+    );
+    expect(plan.initialMessage).toBe(prompt);
   });
 
   it("appends --model when provided", () => {
