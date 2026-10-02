@@ -291,6 +291,9 @@ projects:
     path: ${args.repoDir}
     defaultBranch: ${args.baseRef}
     sessionPrefix: ${args.sessionPrefix}
+    modes:
+      smoke:
+        skill: spur
 ${args.extraProjectYaml ?? ""}
 `;
 }
@@ -420,6 +423,7 @@ async function runSmoke(
       const session = await service.spawn({
         project: "api",
         agent,
+        mode: "smoke",
         prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
