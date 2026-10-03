@@ -11,6 +11,23 @@ export async function readRequestRecord(request: Request): Promise<Record<string
   return raw as Record<string, unknown>;
 }
 
+export async function readOptionalRequestRecord(
+  request: Request,
+): Promise<Record<string, unknown> | undefined> {
+  const text = await request.text();
+  if (!text) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Expected an object body");
+  }
+  return value as Record<string, unknown>;
+}
+
 function isLikelyHtml(text: string, contentType: string): boolean {
   if (/text\/html/i.test(contentType)) return true;
   const trimmed = text.trimStart().toLowerCase();

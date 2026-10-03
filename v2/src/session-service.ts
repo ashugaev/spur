@@ -7,6 +7,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import {
+  annotateLifecycleError,
+  SessionLifecycleError,
+  SessionLifecycleRegister,
+} from "./session-lifecycle.js";
 import { userInfo } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -407,6 +413,8 @@ import {
   isTerminalSessionStatus,
   hasRetainedSessionError,
   type AdmissionCapSource,
+  type LifecycleAction,
+  type SessionLifecycleSnapshot,
   type AgentName,
   type ProviderReasoningEffort,
   type AgentSuggestionsResponse,
@@ -1743,8 +1751,13 @@ function withProjectAgentOptions(
   };
 }
 
-function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
+function createRuntimeInfo(
+  config: AppConfig,
+  startedAt: string,
+  lifecycleInstanceId: string,
+): RuntimeInfo {
   return {
+    lifecycleInstanceId,
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: getVersion(),
@@ -3127,7 +3140,10 @@ export class SessionService {
   // cached 60s in-memory so a burst of spawns costs at most one `df`.
   private hostDiskProbe?: { checkedAtMs: number; freeKb: number | undefined };
   private hostDiskProbeInflight?: Promise<void>;
-  private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  private readonly lifecycle = new SessionLifecycleRegister();
+  private dashboardCache: Map<string, Omit<DashboardSessionView, "lifecycle">> = new Map();
+  private dashboardRefreshSequence = 0;
+  private readonly dashboardRefreshVersions = new Map<string, number>();
   // Records the exact record object last handed to enrichDashboard for each
   // id. Since listSessions() now returns the SAME object for an unchanged
   // file (see metadata.ts), object-identity inequality against this map is an
@@ -3205,10 +3221,6 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
-  // Session ids this process is actively reopening. Guards against two
-  // overlapping reopen() calls both passing the completed-status check and
-  // racing into restore() for the same tmux session and worktree.
-  private readonly reopensInFlight = new Set<string>();
   // Session ids with a scheduleHealedSidecarRestart task currently queued or
   // running, mapped to that task. Claimed synchronously (`has`, before any
   // await) so two classify passes that both observe the same
@@ -5542,7 +5554,171 @@ export class SessionService {
   }
 
   info(): RuntimeInfo {
-    return createRuntimeInfo(this.config, this.startedAt);
+    return createRuntimeInfo(this.config, this.startedAt, this.lifecycle.instanceId);
+  }
+
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<SessionView>,
+  ): Promise<SessionView>;
+  private runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<{ completedIds: string[] }>,
+  ): Promise<CompleteDeskResponse>;
+  private async runLifecycle(
+    action: LifecycleAction,
+    targetIds: string[],
+    operationId: string | undefined,
+    work: () => Promise<SessionView | { completedIds: string[] }>,
+  ): Promise<SessionView | CompleteDeskResponse> {
+    for (const id of targetIds) {
+      if (!readSession(this.config.dataDir, id)) {
+        throw new SessionResourceNotFoundError(`Session not found: ${id}`);
+      }
+    }
+    const owner = this.lifecycle.begin(action, targetIds, operationId);
+    let settled: SessionLifecycleSnapshot;
+    let result: SessionView | { completedIds: string[] };
+    try {
+      result = await work();
+    } catch (error) {
+      settled = this.settleLifecycle(owner, false);
+      annotateLifecycleError(error, settled);
+      throw error;
+    }
+    settled = this.settleLifecycle(owner, true);
+    if ("completedIds" in result) return { ...result, lifecycle: settled };
+    // Handoff returns the spawned session, while its owner belongs to the original.
+    if (!targetIds.includes(result.id)) return result;
+    try {
+      const current = await this.get(result.id);
+      if (
+        current.lifecycle.revision !== settled.revision ||
+        this.lifecycle.snapshot(result.id).revision !== settled.revision
+      ) {
+        throw this.lifecycleSnapshotChanged(settled);
+      }
+      return { ...current, lifecycle: settled };
+    } catch (error) {
+      annotateLifecycleError(error, settled);
+      throw error;
+    }
+  }
+
+  private settleLifecycle(owner: SessionLifecycleSnapshot, succeeded: boolean) {
+    return this.lifecycle.settle(
+      owner,
+      succeeded,
+      (id) => {
+        const current = readSession(this.config.dataDir, id);
+        if (!current) return "failed";
+        if (owner.operation?.action === "complete") {
+          return isTerminalSessionStatus(current.status) ? "succeeded" : "failed";
+        }
+        return succeeded ? "succeeded" : "failed";
+      },
+      (id) => readSession(this.config.dataDir, id) !== null,
+    );
+  }
+
+  private lifecycleSnapshotChanged(lifecycle: SessionLifecycleSnapshot) {
+    return new SessionLifecycleError(
+      "Session changed while assembling its lifecycle snapshot",
+      503,
+      {
+        code: "session_lifecycle_snapshot_changed",
+        lifecycle,
+      },
+    );
+  }
+
+  private lifecycleSource(record: SessionRecord): SessionRecord {
+    if (this.lifecycle.snapshot(record.id).revision === 0) return record;
+    const current = listSessions(this.config.dataDir).find((session) => session.id === record.id);
+    return current && isDeepStrictEqual(current, record) ? current : record;
+  }
+
+  private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
+    rows: { view: T; source: SessionRecord | null; revision: number }[],
+    rebuild: (record: SessionRecord) => Promise<{ view: T; source: SessionRecord } | undefined>,
+    includePending = false,
+  ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
+    const rebuildExisting = async (record: SessionRecord) => {
+      try {
+        const rebuilt = await rebuild(record);
+        if (!rebuilt && readSession(this.config.dataDir, record.id))
+          throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
+        return rebuilt;
+      } catch (error) {
+        if (
+          error instanceof SessionResourceNotFoundError &&
+          !readSession(this.config.dataDir, record.id)
+        )
+          return undefined;
+        throw error;
+      }
+    };
+    const missingPending = () =>
+      listSessions(this.config.dataDir).filter((record) => {
+        const operation = this.lifecycle.snapshot(record.id).operation;
+        return (
+          operation?.phase === "pending" &&
+          operation.action !== "complete" &&
+          !rows.some((row) => row.view.id === record.id)
+        );
+      });
+    if (includePending) {
+      for (const record of missingPending()) {
+        const revision = this.lifecycle.snapshot(record.id).revision;
+        const rebuilt = await rebuildExisting(record);
+        if (rebuilt) rows.push({ ...rebuilt, revision });
+      }
+    }
+    const changed = (row: (typeof rows)[number]) => {
+      const receipt = this.lifecycle.snapshot(row.view.id);
+      if (!readSession(this.config.dataDir, row.view.id)) return true;
+      if (receipt.revision === 0 && row.revision === 0) return false;
+      const current = listSessions(this.config.dataDir).find(
+        (session) => session.id === row.view.id,
+      );
+      if (!current) return true;
+      return (
+        current !== row.source ||
+        receipt.revision !== row.revision ||
+        !isDeepStrictEqual(
+          row.view.slots,
+          deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, current)),
+        )
+      );
+    };
+    const rebuiltRows = await Promise.all(
+      rows.map(async (row) => {
+        if (!changed(row)) return row;
+        const current = readSession(this.config.dataDir, row.view.id);
+        if (!current) return undefined;
+        const revision = this.lifecycle.snapshot(current.id).revision;
+        const rebuilt = await rebuildExisting(current);
+        if (!rebuilt) return undefined;
+        row.view = rebuilt.view;
+        row.source = rebuilt.source;
+        row.revision = revision;
+        return row;
+      }),
+    );
+    if (includePending) {
+      const missing = missingPending()[0];
+      if (missing) throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(missing.id));
+    }
+    return rebuiltRows.flatMap((row) => {
+      if (!row || !readSession(this.config.dataDir, row.view.id)) return [];
+      const lifecycle = this.lifecycle.snapshot(row.view.id);
+      if (changed(row)) throw this.lifecycleSnapshotChanged(lifecycle);
+      return [{ ...row.view, lifecycle }];
+    });
   }
 
   private logEvent(
@@ -6463,6 +6639,9 @@ export class SessionService {
       return;
     }
     this.dashboardLoopRunning = true;
+    const refreshSequence = this.dashboardRefreshSequence;
+    const refreshedDuringTick = (id: string) =>
+      (this.dashboardRefreshVersions.get(id) ?? 0) > refreshSequence;
     try {
       const sessions = listSessions(this.config.dataDir).filter((session) => {
         if (session.status === "completed") {
@@ -6560,6 +6739,7 @@ export class SessionService {
         ),
       );
       for (const [index, session] of due.entries()) {
+        if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
         if (!view) {
           this.dashboardCache.delete(session.id);
@@ -6584,7 +6764,7 @@ export class SessionService {
       // subset, so an idle entry that was seeded once and then never due
       // again is not evicted just because this tick skipped it.
       for (const id of this.dashboardCache.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.dashboardCache.delete(id);
         }
       }
@@ -6597,14 +6777,18 @@ export class SessionService {
       // its entry the tick after it goes terminal, forcing a fresh
       // YAML parse (and a re-logged parse failure) on every idle revisit.
       for (const id of this.sessionProjectCache.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.sessionProjectCache.delete(id);
         }
       }
       for (const id of this.dashboardEnrichedRecords.keys()) {
-        if (!includedIds.has(id)) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id)) {
           this.dashboardEnrichedRecords.delete(id);
         }
+      }
+      for (const id of this.dashboardRefreshVersions.keys()) {
+        if (!includedIds.has(id) && !refreshedDuringTick(id))
+          this.dashboardRefreshVersions.delete(id);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -7019,6 +7203,8 @@ export class SessionService {
   }
 
   private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {
+    const version = ++this.dashboardRefreshSequence;
+    this.dashboardRefreshVersions.set(record.id, version);
     try {
       const included =
         record.status === "completed"
@@ -7029,6 +7215,7 @@ export class SessionService {
         return;
       }
       const enriched = await this.enrichDashboard(record);
+      if (this.dashboardRefreshVersions.get(record.id) !== version) return;
       if (!enriched) {
         this.dashboardCache.delete(record.id);
         this.dashboardEnrichedRecords.delete(record.id);
@@ -7040,6 +7227,7 @@ export class SessionService {
         error instanceof SessionResourceNotFoundError &&
         !readSession(this.config.dataDir, record.id)
       ) {
+        if (this.dashboardRefreshVersions.get(record.id) !== version) return;
         this.dashboardCache.delete(record.id);
         this.dashboardEnrichedRecords.delete(record.id);
         return;
@@ -9577,24 +9765,53 @@ export class SessionService {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
   }): Promise<SessionListView[]> {
+    const allSessions = listSessions(this.config.dataDir);
+    this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
+    const included = (view: { id: string; status: SessionStatus; retainInList?: boolean }) => {
+      const operation = this.lifecycle.snapshot(view.id).operation;
+      if (operation?.phase === "pending" && operation.action !== "complete") return true;
+      if (view.status === "completed")
+        return options?.includeCompleted === true || view.retainInList === true;
+      return view.status !== "killed" || view.retainInList === true;
+    };
     if (options?.view === "dashboard") {
       if (this.dashboardCacheReady) {
         await this.dashboardCacheReady;
       }
-      return Array.from(this.dashboardCache.values()).filter((view) => {
-        if (view.status === "completed") {
-          return options.includeCompleted === true || view.retainInList === true;
+      const existingIds = new Set(listSessions(this.config.dataDir).map((record) => record.id));
+      const rows = Array.from(this.dashboardCache.values())
+        .filter((view) => existingIds.has(view.id))
+        .map((view) => ({
+          view,
+          source: this.dashboardEnrichedRecords.get(view.id) ?? null,
+          revision: this.lifecycle.snapshot(view.id).revision,
+        }));
+      for (const record of allSessions) {
+        if (this.dashboardCache.has(record.id) || this.lifecycle.snapshot(record.id).revision === 0)
+          continue;
+        const revision = this.lifecycle.snapshot(record.id).revision;
+        try {
+          const assembled = await this.assembleDashboard(record);
+          if (assembled) rows.push({ ...assembled, revision });
+          else if (readSession(this.config.dataDir, record.id))
+            throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
+        } catch (error) {
+          if (
+            error instanceof SessionResourceNotFoundError &&
+            !readSession(this.config.dataDir, record.id)
+          )
+            continue;
+          throw error;
         }
-        return view.status !== "killed" || view.retainInList === true;
-      });
-    }
-    const allSessions = listSessions(this.config.dataDir);
-    const sessions = allSessions.filter((session) => {
-      if (session.status === "completed") {
-        return options?.includeCompleted === true || session.retainInList === true;
       }
-      return session.status !== "killed" || session.retainInList === true;
-    });
+      const views = await this.finalizeLifecycleRows(
+        rows,
+        (record) => this.assembleDashboard(record),
+        true,
+      );
+      return views.filter(included);
+    }
+    const sessions = allSessions.filter(included);
     // Compute the claude accounts snapshot once for the whole batch instead of
     // per-session inside enrich (N listAccounts reads + N×M existsSync).
     const claudeAccounts = this.computeClaudeAccountsView();
@@ -9606,17 +9823,17 @@ export class SessionService {
     const sidecarProcSnapshot = sessions.some((session) => (session.sidecarNames?.length ?? 0) > 0)
       ? await snapshotProcesses()
       : undefined;
-    const views = await Promise.all(
+    const rows = await Promise.all(
       sessions.map(async (session) => {
+        const revision = this.lifecycle.snapshot(session.id).revision;
         try {
-          return (
-            await this.enrichWithClassified(
-              session,
-              claudeAccounts,
-              allSessions,
-              sidecarProcSnapshot,
-            )
-          ).view;
+          const { view, source } = await this.enrichWithClassified(
+            session,
+            claudeAccounts,
+            allSessions,
+            sidecarProcSnapshot,
+          );
+          return { view, source, revision };
         } catch (error) {
           if (
             error instanceof SessionResourceNotFoundError &&
@@ -9627,7 +9844,13 @@ export class SessionService {
         }
       }),
     );
-    return views.filter((view): view is SessionListItemView => view !== undefined);
+    return (
+      await this.finalizeLifecycleRows(
+        rows.filter((row) => row !== undefined),
+        (record) => this.enrichWithClassified(record),
+        true,
+      )
+    ).filter(included);
   }
 
   async get(sessionId: string): Promise<SessionView> {
@@ -14705,8 +14928,10 @@ export class SessionService {
     request: CompleteSessionRequest = {},
     options?: { retainInList?: boolean; todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.applyManualStatusLocked(sessionId, "completed", request, options),
+    return this.runLifecycle("complete", [sessionId], request.operationId, () =>
+      this.withWorkspaceLifecycleLocks(sessionId, () =>
+        this.applyManualStatusLocked(sessionId, "completed", request, options),
+      ),
     );
   }
 
@@ -14731,20 +14956,22 @@ export class SessionService {
   }
 
   async selfDestruct(sessionId: string): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () => {
-      const session = readSession(this.config.dataDir, sessionId);
-      if (!session) {
-        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      }
-      return this.applyManualStatusLocked(
-        sessionId,
-        "completed",
-        {
-          prAction: "leave_open",
-        },
-        { eventAction: "self_destruct" },
-      );
-    });
+    return this.runLifecycle("complete", [sessionId], undefined, () =>
+      this.withWorkspaceLifecycleLocks(sessionId, () => {
+        const session = readSession(this.config.dataDir, sessionId);
+        if (!session) {
+          throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+        }
+        return this.applyManualStatusLocked(
+          sessionId,
+          "completed",
+          {
+            prAction: "leave_open",
+          },
+          { eventAction: "self_destruct" },
+        );
+      }),
+    );
   }
 
   async completeDesk(
@@ -14758,61 +14985,72 @@ export class SessionService {
     }
     const candidates = this.listDeskSessions(session);
 
-    return this.withSessionLifecycleLocks(
-      candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
-      async () => {
-        const emptySessionIds: string[] = [];
-        const unfinishedBlocked: Array<{
-          sessionId: string;
-          openItemIds: string[];
-          heldItemIds: string[];
-        }> = [];
-        for (const candidate of candidates) {
-          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
-          if (isTerminalSessionStatus(current.status)) continue;
-          const projection = ensureTodoLedger(this.config.dataDir, current);
-          const block = todoLedgerBlock(projection);
-          if (block === "empty") emptySessionIds.push(candidate.id);
-          else if (block === "unfinished") {
-            unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
+    const work = () =>
+      this.withSessionLifecycleLocks(
+        candidates.flatMap((candidate) => [candidate.id, workspaceIdOf(candidate)]),
+        async () => {
+          const emptySessionIds: string[] = [];
+          const unfinishedBlocked: Array<{
+            sessionId: string;
+            openItemIds: string[];
+            heldItemIds: string[];
+          }> = [];
+          for (const candidate of candidates) {
+            const current = readSession(this.config.dataDir, candidate.id);
+            if (!current)
+              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+            if (isTerminalSessionStatus(current.status)) continue;
+            const projection = ensureTodoLedger(this.config.dataDir, current);
+            const block = todoLedgerBlock(projection);
+            if (block === "empty") emptySessionIds.push(candidate.id);
+            else if (block === "unfinished") {
+              unfinishedBlocked.push({ sessionId: candidate.id, ...unfinishedTodo(projection) });
+            }
           }
-        }
-        if (options?.todoActor?.kind !== "human") {
-          if (emptySessionIds.length > 0) {
-            const error = new TodoEmptyLedgerError(emptySessionIds);
-            this.logManualStatusFailure(
-              "desk_complete",
-              "completed",
-              sessionId,
-              session.project,
-              error,
-            );
-            throw error;
+          if (options?.todoActor?.kind !== "human") {
+            if (emptySessionIds.length > 0) {
+              const error = new TodoEmptyLedgerError(emptySessionIds);
+              this.logManualStatusFailure(
+                "desk_complete",
+                "completed",
+                sessionId,
+                session.project,
+                error,
+              );
+              throw error;
+            }
+            if (unfinishedBlocked.length > 0) {
+              const error = new TodoOpenWorkError(unfinishedBlocked);
+              this.logManualStatusFailure(
+                "desk_complete",
+                "completed",
+                sessionId,
+                session.project,
+                error,
+              );
+              throw error;
+            }
           }
-          if (unfinishedBlocked.length > 0) {
-            const error = new TodoOpenWorkError(unfinishedBlocked);
-            this.logManualStatusFailure(
-              "desk_complete",
-              "completed",
-              sessionId,
-              session.project,
-              error,
-            );
-            throw error;
+          const completedIds: string[] = [];
+          for (const candidate of candidates) {
+            const current = readSession(this.config.dataDir, candidate.id);
+            if (!current)
+              throw new SessionResourceNotFoundError(`Session not found: ${candidate.id}`);
+            if (isTerminalSessionStatus(current.status)) continue;
+            await this.applyManualStatusLocked(candidate.id, "completed", request, {
+              ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
+              eventAction: "desk_complete",
+            });
+            completedIds.push(candidate.id);
           }
-        }
-        const completedIds: string[] = [];
-        for (const candidate of candidates) {
-          const current = readSession(this.config.dataDir, candidate.id) ?? candidate;
-          if (isTerminalSessionStatus(current.status)) continue;
-          await this.applyManualStatusLocked(candidate.id, "completed", request, {
-            ...(options?.todoActor ? { todoActor: options.todoActor } : {}),
-            eventAction: "desk_complete",
-          });
-          completedIds.push(candidate.id);
-        }
-        return { completedIds };
-      },
+          return { completedIds };
+        },
+      );
+    return this.runLifecycle(
+      "complete",
+      candidates.map((candidate) => candidate.id),
+      request.operationId,
+      work,
     );
   }
 
@@ -16626,8 +16864,8 @@ export class SessionService {
   }
 
   async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.restoreLocked(sessionId, request),
+    return this.runLifecycle("restore", [sessionId], request.operationId, () =>
+      this.withWorkspaceLifecycleLocks(sessionId, () => this.restoreLocked(sessionId, request)),
     );
   }
 
@@ -17183,21 +17421,9 @@ export class SessionService {
   // whole launch transaction to restore(). Nothing completion destroyed
   // (Telegram binding, sidecarPorts, artifacts, work item) is recreated.
   async reopen(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
-    // Refuse a second concurrent reopen outright instead of narrowing the
-    // read-check-then-write window: two overlapping calls that both pass the
-    // `status !== "completed"` guard would otherwise race into restore() for
-    // the same tmux session and worktree.
-    if (this.reopensInFlight.has(sessionId)) {
-      throw new SessionNotReopenableError(`Session ${sessionId} is already being reopened`);
-    }
-    this.reopensInFlight.add(sessionId);
-    try {
-      return await this.withWorkspaceLifecycleLocks(sessionId, () =>
-        this.reopenLocked(sessionId, request),
-      );
-    } finally {
-      this.reopensInFlight.delete(sessionId);
-    }
+    return this.runLifecycle("reopen", [sessionId], request.operationId, () =>
+      this.withWorkspaceLifecycleLocks(sessionId, () => this.reopenLocked(sessionId, request)),
+    );
   }
 
   private async reopenLocked(
@@ -17698,8 +17924,10 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.handoffLocked(sessionId, request, options),
+    return this.runLifecycle("complete", [sessionId], undefined, () =>
+      this.withWorkspaceLifecycleLocks(sessionId, () =>
+        this.handoffLocked(sessionId, request, options),
+      ),
     );
   }
 
@@ -20576,7 +20804,15 @@ export class SessionService {
     };
   }
 
-  private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView | undefined> {
+  private async enrichDashboard(
+    session: SessionRecord,
+  ): Promise<Omit<DashboardSessionView, "lifecycle"> | undefined> {
+    return (await this.assembleDashboard(session))?.view;
+  }
+
+  private async assembleDashboard(
+    session: SessionRecord,
+  ): Promise<{ view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord } | undefined> {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -20585,6 +20821,7 @@ export class SessionService {
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
+    const source = this.lifecycleSource(session);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
@@ -20640,27 +20877,30 @@ export class SessionService {
     );
 
     return {
-      ...dashboardSession,
-      ...(session.error ? { error: session.error } : {}),
-      // Always resolved for consumers, whatever shape the stored record is in.
-      // `deskId` rides along as a compat alias so a browser tab still running
-      // the previous bundle keeps grouping desks; drop it a release from now.
-      workspaceId: workspaceIdOf(dashboardSession),
-      deskId: workspaceIdOf(dashboardSession),
-      planMode: resolvePlanMode(dashboardSession),
-      restrictWrites: resolveRestrictWrites(dashboardSession),
-      ...(displaySlots ? { slots: displaySlots } : {}),
-      runtimeAlive: classified.runtime.runtimeAlive,
-      workspaceExists: workspacePresent,
-      state,
-      hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
-      lastActivityAt,
-      ...(hasServiceIssues ? { hasServiceIssues: true } : {}),
-      ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
-      ...(classified.liveModel ? { model: classified.liveModel } : {}),
-      tokenUsageView: this.deriveTokenUsageView(session),
-      preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
-      tokenBudgetView: this.deriveTokenBudgetView(session),
+      source,
+      view: {
+        ...dashboardSession,
+        ...(session.error ? { error: session.error } : {}),
+        // Always resolved for consumers, whatever shape the stored record is in.
+        // `deskId` rides along as a compat alias so a browser tab still running
+        // the previous bundle keeps grouping desks; drop it a release from now.
+        workspaceId: workspaceIdOf(dashboardSession),
+        deskId: workspaceIdOf(dashboardSession),
+        planMode: resolvePlanMode(dashboardSession),
+        restrictWrites: resolveRestrictWrites(dashboardSession),
+        ...(displaySlots ? { slots: displaySlots } : {}),
+        runtimeAlive: classified.runtime.runtimeAlive,
+        workspaceExists: workspacePresent,
+        state,
+        hasUnseenAttention: hasUnseenAttention(session, state, lastActivityAt),
+        lastActivityAt,
+        ...(hasServiceIssues ? { hasServiceIssues: true } : {}),
+        ...(runningSidecarNames.length > 0 ? { runningSidecarNames } : {}),
+        ...(classified.liveModel ? { model: classified.liveModel } : {}),
+        tokenUsageView: this.deriveTokenUsageView(session),
+        preflightTokenUsageView: this.derivePreflightTokenUsageView(session),
+        tokenBudgetView: this.deriveTokenBudgetView(session),
+      },
     };
   }
 
@@ -20825,13 +21065,26 @@ export class SessionService {
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<SessionView> {
-    const { view, classified } = await this.enrichWithClassified(
+    const revision = this.lifecycle.snapshot(session.id).revision;
+    const { view, classified, source } = await this.enrichWithClassified(
       session,
       claudeAccounts,
       sessionBatch,
       sidecarProcSnapshot,
     );
-    return this.withSessionDetail(view, classified.session);
+    const rows = await this.finalizeLifecycleRows(
+      [{ view: this.withSessionDetail(view, classified.session), source, revision }],
+      async (record) => {
+        const rebuilt = await this.enrichWithClassified(record);
+        return {
+          view: this.withSessionDetail(rebuilt.view, rebuilt.classified.session),
+          source: rebuilt.source,
+        };
+      },
+    );
+    const result = rows[0];
+    if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
+    return result;
   }
 
   // Re-attaches the six fields the list projection drops. The artifact walk
@@ -20840,7 +21093,10 @@ export class SessionService {
   // "lists and reads an artifact written by one desk sibling from another
   // sibling"). Kept as the single detail-assembly path so `enrich()` and
   // any future single-session reader never duplicate this walk elsewhere.
-  private withSessionDetail(view: SessionListItemView, session: SessionRecord): SessionView {
+  private withSessionDetail(
+    view: Omit<SessionListItemView, "lifecycle">,
+    session: SessionRecord,
+  ): Omit<SessionView, "lifecycle"> {
     const artifactWalk = listSessionArtifacts(this.config.dataDir, workspaceIdOf(session));
     const history = this.stateHistory.get(session.id) ?? [];
     return {
@@ -20874,8 +21130,9 @@ export class SessionService {
     sessionBatch?: SessionRecord[],
     sidecarProcSnapshot?: ProcSnapshot,
   ): Promise<{
-    view: SessionListItemView;
+    view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
+    source: SessionRecord;
     detectionOnlyError: boolean;
   }> {
     const hasIndependentError = (record: SessionRecord): boolean =>
@@ -20889,6 +21146,7 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
     session = persisted.session;
+    const source = this.lifecycleSource(session);
     const preReportHasIndependentError =
       hasIndependentError(session) ||
       (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
@@ -20984,7 +21242,7 @@ export class SessionService {
       ...sessionWithoutDetailFields
     } = session;
 
-    const view: SessionListItemView = {
+    const view: Omit<SessionListItemView, "lifecycle"> = {
       ...sessionWithoutDetailFields,
       // See enrichDashboard: always resolved, with `deskId` as a compat alias
       // for a browser tab still running the previous bundle.
@@ -21016,7 +21274,7 @@ export class SessionService {
       !inputHasIndependentError &&
       !preReportHasIndependentError &&
       !hasIndependentError(session);
-    return { view, classified, detectionOnlyError };
+    return { view, classified, source, detectionOnlyError };
   }
 
   private async classifySessionState(session: SessionRecord): Promise<SessionState> {

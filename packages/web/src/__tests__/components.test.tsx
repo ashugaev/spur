@@ -131,10 +131,12 @@ class MockMediaRecorder {
 
 function sessionsPayload() {
   return {
+    lifecycleInstanceId: "test-instance",
     projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
     sessions: [
       {
         id: "api-a1",
+        lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
         project: "api",
         agent: "claude",
         prompt: "Fix auth",
@@ -654,6 +656,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -742,6 +745,7 @@ describe("Dashboard", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -793,6 +797,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -846,6 +851,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -886,6 +892,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -974,6 +981,7 @@ describe("Dashboard", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               base,
               {
@@ -1209,6 +1217,7 @@ describe("Dashboard", () => {
 
   it("shows only daemon-configured projects in filter and spawn dropdowns", async () => {
     const sessionsData = {
+      lifecycleInstanceId: "test-instance",
       projects: [{ id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" }],
       sessions: [
         {
@@ -1261,6 +1270,7 @@ describe("Dashboard", () => {
           kind: "shepherd",
         },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: sessionsPayload().sessions,
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -1334,6 +1344,7 @@ describe("Dashboard", () => {
                 kind: "shepherd",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -2175,6 +2186,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2209,6 +2221,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2247,6 +2260,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2788,6 +2802,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawnedSession = {
@@ -2877,6 +2892,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawned = {
@@ -2943,6 +2959,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawned = {
@@ -3360,6 +3377,7 @@ describe("Dashboard", () => {
                 path: "/tmp/stub",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -3403,6 +3421,7 @@ describe("Dashboard", () => {
             },
           },
         ],
+        lifecycleInstanceId: "test-instance",
         sessions: [],
       };
     }

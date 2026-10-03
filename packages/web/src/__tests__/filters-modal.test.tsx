@@ -37,6 +37,7 @@ function session(
 ) {
   return {
     id,
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     project,
     agent,
     prompt: "prompt",
@@ -57,6 +58,7 @@ function session(
 }
 
 const sessionsResponse = {
+  lifecycleInstanceId: "test-instance",
   projects: [
     { id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" },
     { id: "web", name: "Web", configured: true, prefix: "web", path: "/tmp/web" },
@@ -358,6 +360,7 @@ describe("Filters modal", () => {
 
   it("All tags count reflects desks matching other filters, not the sum of individual tag chip counts", async () => {
     mockFetch({
+      lifecycleInstanceId: "test-instance",
       projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
       sessions: [
         session("api-1", "api", "claude", "running", "working", ["bug", "docs"]),
@@ -403,6 +406,7 @@ describe("Filters modal", () => {
 
 describe("Filters modal — PR-ready batch failure", () => {
   const sessionsWithReviewLink = {
+    lifecycleInstanceId: "test-instance",
     projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
     sessions: [
       {

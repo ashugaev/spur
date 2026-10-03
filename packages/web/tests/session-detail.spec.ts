@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { LifecycleAction, SessionLifecycleSnapshot } from "../src/lib/types";
 import {
   test,
   expect,
@@ -22,6 +23,29 @@ type ElementBox = {
   width: number;
   height: number;
 };
+
+function lifecycleReceipt(
+  operationId: string,
+  sessionId: string,
+  action: LifecycleAction,
+  phase: "pending" | "failed" | "succeeded",
+  revision: number,
+): SessionLifecycleSnapshot {
+  expect(operationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  return {
+    instanceId: "test-instance",
+    revision,
+    operation: {
+      operationId,
+      action,
+      phase,
+      targetIds: [sessionId],
+      outcomes: phase === "pending" ? [] : [{ sessionId, phase }],
+    },
+  };
+}
 
 test.use({ video: process.env.SPUR_SESSION_ARTIFACTS_DIR ? "on" : "off" });
 
@@ -1344,11 +1368,27 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
 
     let completeAttempts = 0;
-    const completeBodies: string[] = [];
+    const completeBodies: { operationId: string; skipPrCheck?: boolean }[] = [];
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
-      completeBodies.push(route.request().postData() ?? "");
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe("application/json");
+      const body = route.request().postDataJSON() as { operationId: string; skipPrCheck?: boolean };
+      expect(body).toEqual(
+        completeAttempts === 1
+          ? { operationId: body.operationId }
+          : { operationId: body.operationId, skipPrCheck: true },
+      );
+      completeBodies.push(body);
+      session.lifecycle = lifecycleReceipt(
+        body.operationId,
+        session.id,
+        "complete",
+        "pending",
+        completeAttempts * 2 - 1,
+      );
       if (completeAttempts === 1) {
+        session.lifecycle = lifecycleReceipt(body.operationId, session.id, "complete", "failed", 2);
         await route.fulfill({
           status: 409,
           contentType: "application/json",
@@ -1356,6 +1396,7 @@ test.describe("S2: Actions bar", () => {
             code: "github_pr_check_unavailable",
             sessionId: session.id,
             rateLimited: true,
+            lifecycle: session.lifecycle,
             pr: {
               number: 42,
               repo: "test/repo",
@@ -1365,10 +1406,20 @@ test.describe("S2: Actions bar", () => {
         });
         return;
       }
+      session.status = "completed";
+      session.state = "stopped";
+      session.runtimeAlive = false;
+      session.lifecycle = lifecycleReceipt(
+        body.operationId,
+        session.id,
+        "complete",
+        "succeeded",
+        4,
+      );
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ...session, status: "completed" }),
+        body: JSON.stringify(session),
       });
     });
 
@@ -1384,7 +1435,11 @@ test.describe("S2: Actions bar", () => {
     await dialog.getByRole("button", { name: "Skip PR Check & Proceed" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual(["", JSON.stringify({ skipPrCheck: true })]);
+    expect(completeBodies).toEqual([
+      { operationId: completeBodies[0].operationId },
+      { operationId: completeBodies[1].operationId, skipPrCheck: true },
+    ]);
+    expect(completeBodies[1].operationId).not.toBe(completeBodies[0].operationId);
   });
 
   test("PR check dialog hides Retry when the failure is not a rate limit", async ({ page }) => {
@@ -1452,11 +1507,23 @@ test.describe("S2: Actions bar", () => {
     await mockSessionDetail(page, session);
 
     let completeAttempts = 0;
-    const completeBodies: string[] = [];
+    const completeBodies: { operationId: string }[] = [];
     await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
-      completeBodies.push(route.request().postData() ?? "");
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe("application/json");
+      const body = route.request().postDataJSON() as { operationId: string };
+      expect(body).toEqual({ operationId: body.operationId });
+      completeBodies.push(body);
+      session.lifecycle = lifecycleReceipt(
+        body.operationId,
+        session.id,
+        "complete",
+        "pending",
+        completeAttempts * 2 - 1,
+      );
       if (completeAttempts === 1) {
+        session.lifecycle = lifecycleReceipt(body.operationId, session.id, "complete", "failed", 2);
         await route.fulfill({
           status: 409,
           contentType: "application/json",
@@ -1464,6 +1531,7 @@ test.describe("S2: Actions bar", () => {
             code: "github_pr_check_unavailable",
             sessionId: session.id,
             rateLimited: true,
+            lifecycle: session.lifecycle,
             pr: {
               number: 42,
               repo: "test/repo",
@@ -1473,10 +1541,20 @@ test.describe("S2: Actions bar", () => {
         });
         return;
       }
+      session.status = "completed";
+      session.state = "stopped";
+      session.runtimeAlive = false;
+      session.lifecycle = lifecycleReceipt(
+        body.operationId,
+        session.id,
+        "complete",
+        "succeeded",
+        4,
+      );
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ...session, status: "completed" }),
+        body: JSON.stringify(session),
       });
     });
 
@@ -1488,7 +1566,11 @@ test.describe("S2: Actions bar", () => {
     await dialog.getByRole("button", { name: "Retry PR Check" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual(["", ""]);
+    expect(completeBodies).toEqual([
+      { operationId: completeBodies[0].operationId },
+      { operationId: completeBodies[1].operationId },
+    ]);
+    expect(completeBodies[1].operationId).not.toBe(completeBodies[0].operationId);
   });
 
   test("no Terminal button when session status is completed", async ({ page }) => {
@@ -4296,14 +4378,39 @@ test.describe("S5: Runtime sidebar", () => {
       await mockSessionDetail(page, session);
       let release: (() => void) | undefined;
       let attempts = 0;
+      const restoreBodies: { operationId: string; overrideTokenBudget: true }[] = [];
       await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
-        expect(route.request().postDataJSON()).toEqual({ overrideTokenBudget: true });
+        expect(route.request().method()).toBe("POST");
+        expect(route.request().headers()["content-type"]).toBe("application/json");
+        const body = route.request().postDataJSON() as {
+          operationId: string;
+          overrideTokenBudget: true;
+        };
+        expect(body).toEqual({ operationId: body.operationId, overrideTokenBudget: true });
+        restoreBodies.push(body);
         attempts += 1;
+        session.lifecycle = lifecycleReceipt(
+          body.operationId,
+          session.id,
+          "restore",
+          "pending",
+          attempts * 2 - 1,
+        );
         await new Promise<void>((resolve) => {
           release = resolve;
         });
         if (attempts === 1) {
-          await route.fulfill({ status: 500, json: { error: "Approval failed; retry" } });
+          session.lifecycle = lifecycleReceipt(
+            body.operationId,
+            session.id,
+            "restore",
+            "failed",
+            2,
+          );
+          await route.fulfill({
+            status: 500,
+            json: { error: "Approval failed; retry", lifecycle: session.lifecycle },
+          });
         } else {
           session.status = "running";
           session.state = "working";
@@ -4315,7 +4422,14 @@ test.describe("S5: Runtime sidebar", () => {
             enforced: false,
             overridden: true,
           };
-          await route.fulfill({ status: 200, json: { ok: true } });
+          session.lifecycle = lifecycleReceipt(
+            body.operationId,
+            session.id,
+            "restore",
+            "succeeded",
+            4,
+          );
+          await route.fulfill({ status: 200, json: session });
         }
       });
       const capture = async (state: string) => {
@@ -4332,24 +4446,71 @@ test.describe("S5: Runtime sidebar", () => {
       await expect(page.getByText("BUDGET LIMITED", { exact: true })).toBeVisible();
       await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
       await capture("limited");
+      const pendingRead = page.waitForResponse(async (response) => {
+        if (
+          new URL(response.url()).pathname !== `/api/sessions/${session.id}` ||
+          response.request().method() !== "GET"
+        )
+          return false;
+        const current = (await response.json()) as typeof session;
+        return (
+          current.lifecycle.operation?.operationId === restoreBodies[0]?.operationId &&
+          current.lifecycle.operation?.phase === "pending"
+        );
+      });
       await page.getByRole("button", { name: "Continue anyway" }).click();
-      await expect(
-        page.getByRole("button", { name: "Approving and restoring session" }),
-      ).toBeDisabled();
       await expect.poll(() => Boolean(release)).toBe(true);
+      const pendingSession = (await (await pendingRead).json()) as typeof session;
+      expect(pendingSession.lifecycle).toEqual(
+        lifecycleReceipt(restoreBodies[0].operationId, session.id, "restore", "pending", 1),
+      );
+      await expect(page.getByText(/^working$/i)).toBeVisible();
+      for (const name of ["Desk agent", "Handoff", "Kill"]) {
+        const control = page.getByRole("button", { name, exact: true });
+        await expect(control).toBeVisible();
+        await expect(control).toBeDisabled();
+      }
+      for (const name of ["Continue anyway", "Restore", "Complete"]) {
+        await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+      }
+      await expect(page.getByText("Not accepting input. Token budget limit hit.")).toBeVisible();
+      await expect(page.getByPlaceholder("Message...")).toHaveCount(0);
       await capture("loading");
+      const failedRead = page.waitForResponse(async (response) => {
+        if (
+          new URL(response.url()).pathname !== `/api/sessions/${session.id}` ||
+          response.request().method() !== "GET"
+        )
+          return false;
+        const current = (await response.json()) as typeof session;
+        return (
+          current.lifecycle.operation?.operationId === restoreBodies[0].operationId &&
+          current.lifecycle.operation?.phase === "failed"
+        );
+      });
       release?.();
+      const failedSession = (await (await failedRead).json()) as typeof session;
+      expect(failedSession.lifecycle).toEqual(
+        lifecycleReceipt(restoreBodies[0].operationId, session.id, "restore", "failed", 2),
+      );
       await expect(page.getByText("Approval failed; retry")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Continue anyway" })).toBeEnabled();
       await capture("error");
       release = undefined;
       await page.getByRole("button", { name: "Continue anyway" }).click();
       await expect.poll(() => Boolean(release)).toBe(true);
       release?.();
       await expect(page.getByText("100 / 100")).toBeVisible();
+      await expect(page.getByPlaceholder("Message...")).toBeEnabled();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();
       await expect(page.getByText("100 of 100 · 100% · limit ignored")).toBeVisible();
       await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
       await capture("resumed");
+      expect(restoreBodies).toEqual([
+        { operationId: restoreBodies[0].operationId, overrideTokenBudget: true },
+        { operationId: restoreBodies[1].operationId, overrideTokenBudget: true },
+      ]);
+      expect(restoreBodies[1].operationId).not.toBe(restoreBodies[0].operationId);
       const video = page.video();
       const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
       if (video && artifacts) {
@@ -4379,11 +4540,16 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Continue anyway" })).toHaveCount(0);
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
-      expect(route.request().postData()).toBeNull();
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().headers()["content-type"]).toBe("application/json");
+      const body = route.request().postDataJSON() as { operationId: string };
+      expect(body).toEqual({ operationId: body.operationId });
+      session.lifecycle = lifecycleReceipt(body.operationId, session.id, "restore", "pending", 1);
       session.status = "running";
       session.state = "working";
       session.runtimeAlive = true;
-      await route.fulfill({ status: 200, json: { ok: true } });
+      session.lifecycle = lifecycleReceipt(body.operationId, session.id, "restore", "succeeded", 2);
+      await route.fulfill({ status: 200, json: session });
     });
     await page.getByRole("button", { name: "Restore" }).click();
     await expect(page.getByPlaceholder("Message...")).toBeEnabled();
@@ -4436,11 +4602,22 @@ test.describe("S5: Runtime sidebar", () => {
       });
       await mockSessionDetail(page, session);
       await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
-        expect(route.request().postData()).toBeNull();
+        expect(route.request().method()).toBe("POST");
+        expect(route.request().headers()["content-type"]).toBe("application/json");
+        const body = route.request().postDataJSON() as { operationId: string };
+        expect(body).toEqual({ operationId: body.operationId });
+        session.lifecycle = lifecycleReceipt(body.operationId, session.id, "restore", "pending", 1);
         session.status = "running";
         session.state = "working";
         session.runtimeAlive = true;
-        await route.fulfill({ status: 200, json: { ok: true } });
+        session.lifecycle = lifecycleReceipt(
+          body.operationId,
+          session.id,
+          "restore",
+          "succeeded",
+          2,
+        );
+        await route.fulfill({ status: 200, json: session });
       });
       await page.goto(`/sessions/${session.id}`);
       await expect(page.getByText("BUDGET LIMITED", { exact: true })).toBeVisible();

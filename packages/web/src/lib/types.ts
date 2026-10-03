@@ -387,7 +387,24 @@ export type SpurSidecarStopReport =
   | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
   | { outcome: "nothing-to-stop" };
 
+export type LifecycleAction = "complete" | "restore" | "reopen";
+export type LifecyclePhase = "pending" | "succeeded" | "failed";
+export interface LifecycleOperation {
+  operationId: string;
+  action: LifecycleAction;
+  phase: LifecyclePhase;
+  targetIds: string[];
+  outcomes: { sessionId: string; phase: "succeeded" | "failed" }[];
+}
+export interface SessionLifecycleSnapshot {
+  instanceId: string;
+  revision: number;
+  operation: LifecycleOperation | null;
+}
+
 export interface SpurSessionView {
+  lifecycle: SessionLifecycleSnapshot;
+  lifecyclePending?: LifecycleAction;
   id: string;
   project: string;
   agent: AgentName;
@@ -678,6 +695,7 @@ export interface AgentSuggestionsResponse {
 }
 
 export interface SpurSessionsResponse {
+  lifecycleInstanceId: string;
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
@@ -763,6 +781,8 @@ export interface DashboardRunningSidecar {
 }
 
 export interface DashboardSession {
+  lifecycle?: SessionLifecycleSnapshot;
+  lifecyclePending?: LifecycleAction;
   id: string;
   projectId: string;
   projectName: string;
@@ -855,6 +875,8 @@ export function toDashboardSession(
   };
   return {
     id: session.id,
+    lifecycle: session.lifecycle,
+    lifecyclePending: session.lifecyclePending,
     projectId: session.project,
     projectName,
     agent: session.agent,
@@ -940,6 +962,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 }
 
 export function isRestorable(session: DashboardSession): boolean {
+  if (session.lifecyclePending) return false;
   if (isTerminalSession(session)) return false;
   if (!session.workspaceExists) return false;
   if (
@@ -960,7 +983,7 @@ export function canPause(session: DashboardSession): boolean {
 }
 
 export function canComplete(session: DashboardSession): boolean {
-  return !isTerminalSession(session);
+  return !session.lifecyclePending && !isTerminalSession(session);
 }
 
 export function canRespawn(session: DashboardSession): boolean {
@@ -1033,6 +1056,7 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
+  if (session.lifecyclePending) return session.lifecyclePending === "complete" ? "done" : "working";
   if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";

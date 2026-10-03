@@ -24,9 +24,276 @@ import {
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
+import type { LifecycleAction, SessionLifecycleSnapshot } from "../src/lib/types";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+function lifecycleReceipt(
+  operationId: string,
+  targetIds: string[],
+  action: LifecycleAction,
+  phase: "pending" | "succeeded" | "failed",
+  revision = phase === "pending" ? 1 : 2,
+): SessionLifecycleSnapshot {
+  expect(operationId).toMatch(/^[\da-f-]{36}$/i);
+  return {
+    instanceId: "test-instance",
+    revision,
+    operation: {
+      operationId,
+      targetIds,
+      action,
+      phase,
+      outcomes: phase === "pending" ? [] : targetIds.map((sessionId) => ({ sessionId, phase })),
+    },
+  };
+}
+
+test.describe("Lifecycle reconciliation", () => {
+  test("complete stays hidden across three polls and stale settlement data", async ({
+    page,
+  }, testInfo) => {
+    const session = makeSessionWithPR({
+      id: "lifecycle-complete",
+      prompt: "Lifecycle complete",
+      slots: {
+        title: "Lifecycle complete",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    let rows = [session];
+    let polls = 0;
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
+    await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${session.id}`, (route) =>
+      route.fulfill({
+        json: { ...session, status: "completed", state: "stopped", runtimeAlive: false },
+      }),
+    );
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      rows = [
+        {
+          ...session,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "pending"),
+        },
+      ];
+      await held;
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
+      await route.fulfill({ json: { completedIds: [session.id], lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${session.id} as done` });
+    await done.click();
+    const before = polls;
+    for (let index = 0; index < 3; index += 1) {
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(done).toHaveCount(0);
+    }
+    expect(polls).toBeGreaterThanOrEqual(before + 3);
+    await page.reload();
+    await expect(done).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("complete-pending.png") });
+    release();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("complete-success.png") });
+  });
+
+  test("restore stays Working through omitted polls then follows returned Waiting and a later stop", async ({
+    page,
+  }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-restore", prompt: "Lifecycle restore" });
+    let waiting = makeWaitingSession({
+      ...stopped,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+    });
+    let rows = [stopped];
+    let current = waiting;
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: current }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      await held;
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [stopped.id], "restore", "succeeded"),
+      };
+      rows = [waiting];
+      await route.fulfill({ json: waiting });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    for (let index = 0; index < 3; index += 1) {
+      rows = index === 1 ? [] : [stopped];
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(restore).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: `Open web terminal for ${stopped.id}` }),
+      ).toBeVisible();
+    }
+    await page.screenshot({ path: testInfo.outputPath("restore-pending.png") });
+    release();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    rows = [waiting];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await page.screenshot({ path: testInfo.outputPath("restore-waiting.png") });
+    rows = [{ ...stopped, lifecycle: waiting.lifecycle }];
+    current = stopped;
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toBeVisible();
+  });
+
+  test("failure preserves a row added by polling and permits retry", async ({ page }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-failure", prompt: "Lifecycle failure" });
+    const added = makeWorkingSession({
+      id: "lifecycle-added",
+      prompt: "Added during restore",
+      worktreePath: "/tmp/added",
+    });
+    let rows = [stopped];
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: stopped }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      calls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      if (calls === 1) await held;
+      const lifecycle = lifecycleReceipt(operationId, [stopped.id], "restore", "failed", calls * 2);
+      rows = rows.map((row) => (row.id === stopped.id ? { ...stopped, lifecycle } : row));
+      await route.fulfill({ status: 500, json: { error: "Restore failed", lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    rows = [stopped, added];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    release();
+    await expect(restore).toBeVisible();
+    await expect(page.getByText("Restore failed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("restore-failure.png") });
+    await restore.click();
+    await expect.poll(() => calls).toBe(2);
+  });
+
+  test("dead-runtime running restore reconciles current Waiting without reverting to Restore", async ({
+    page,
+  }) => {
+    const old = makeWorkingSession({
+      id: "lifecycle-dead-runtime",
+      prompt: "Dead runtime restore",
+      runtimeAlive: false,
+    });
+    let waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
+    let rows = [old];
+    await mockSessions(page, () => rows);
+    let restoreCalls = 0;
+    await page.route(`**/api/sessions/${old.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [old.id], "restore", "succeeded"),
+      };
+      await route.fulfill({ json: waiting });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${old.id}` });
+    await restore.click();
+    await expect.poll(() => restoreCalls).toBe(1);
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+    rows = [waiting];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+  });
+
+  test("completed overlay follows a real reopen before terminal list confirmation", async ({
+    page,
+  }) => {
+    const old = makeSessionWithPR({
+      id: "lifecycle-reopened",
+      prompt: "Reopened completion",
+      slots: {
+        title: "Reopened completion",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    let current = {
+      ...old,
+      status: "completed" as SpurSessionView["status"],
+      state: "stopped" as SpurSessionView["state"],
+      runtimeAlive: false,
+    };
+    let rows = [old];
+    let polls = 0;
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
+    await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${old.id}`, (route) => {
+      return route.fulfill({ json: current });
+    });
+    await page.route(`**/api/sessions/${old.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      const lifecycle = lifecycleReceipt(operationId, [old.id], "complete", "succeeded");
+      current = { ...current, lifecycle };
+      rows = [current];
+      await route.fulfill({ json: { completedIds: [old.id], lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
+    await done.click();
+    await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
+    await expect(done).toHaveCount(0);
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    current = {
+      ...old,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+      lifecycle: current.lifecycle,
+    };
+    rows = [current];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toBeVisible();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+  });
+});
 
 test("token counts preserve exhaustion, rounding, and meaningful keyboard stops", async ({
   page,
@@ -1454,7 +1721,7 @@ test.describe("D4: Terminal button state", () => {
 
   test("clicking restore posts and refetches sessions", async ({ page }) => {
     const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
-    const restored = makeWorkingSession({
+    let restored = makeWorkingSession({
       ...stopped,
       status: "running",
       state: "working",
@@ -1467,11 +1734,17 @@ test.describe("D4: Terminal button state", () => {
     await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       restoreCalls += 1;
+      const body = route.request().postDataJSON() as { operationId: string };
+      expect(body).toEqual({ operationId: expect.any(String) });
+      restored = {
+        ...restored,
+        lifecycle: lifecycleReceipt(body.operationId, [stopped.id], "restore", "succeeded"),
+      };
       restoredState = true;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "{}",
+        body: JSON.stringify(restored),
       });
     });
     await page.goto("/");
@@ -1489,6 +1762,9 @@ test.describe("D4: Terminal button state", () => {
   test("restore failure leaves row visible and shows error", async ({ page }) => {
     const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
     await mockSessions(page, [session]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: session });
+    });
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
       await route.fulfill({
         status: 502,
@@ -1503,11 +1779,15 @@ test.describe("D4: Terminal button state", () => {
       .click();
 
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Dismiss toast" })).toHaveCount(1);
     await page.waitForTimeout(3000);
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
     await page.getByRole("button", { name: "Dismiss toast" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toHaveCount(0);
     await expect(page.getByText("Restore fails")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
+    ).toBeVisible();
   });
 });
 
@@ -1562,7 +1842,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let rows = [session];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1585,11 +1866,16 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeRequestSeen = true;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       await completeHold;
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle }),
       });
     });
 
@@ -1618,7 +1904,11 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let current = session;
+    await mockSessions(page, () => [current]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: current });
+    });
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1639,12 +1929,18 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
       completeBodies.push(route.request().postDataJSON());
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (completeAttempts === 1) {
+        current = {
+          ...current,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "failed"),
+        };
         await route.fulfill({
           status: 409,
           contentType: "application/json",
           body: JSON.stringify({
             code: "open_pr_action_required",
+            lifecycle: current.lifecycle,
             sessionId: session.id,
             pr: {
               number: 42,
@@ -1655,10 +1951,18 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         });
         return;
       }
+      current = {
+        ...session,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+        lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "succeeded", 4),
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle: current.lifecycle }),
       });
     });
 
@@ -1674,7 +1978,13 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+    expect(completeBodies).toEqual([
+      { scope: "desk", operationId: expect.any(String) },
+      { scope: "desk", prAction: "leave_open", operationId: expect.any(String) },
+    ]);
+    expect(completeBodies[0]).not.toEqual(completeBodies[1]);
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
 
   test("done click confirms active desk subagents and sends desk-scoped complete", async ({
@@ -1696,7 +2006,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       prompt: "Desk helper",
       slots: { title: "Desk helper", links: [] },
     });
-    await mockSessions(page, [session, subagent]);
+    let rows = [session, subagent];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1715,10 +2026,24 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     let completeBody: unknown = null;
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeBody = route.request().postDataJSON();
+      const { operationId } = completeBody as { operationId: string };
+      const lifecycle = lifecycleReceipt(
+        operationId,
+        [session.id, subagent.id],
+        "complete",
+        "succeeded",
+      );
+      rows = rows.map((row) => ({
+        ...row,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        lifecycle,
+      }));
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+        body: JSON.stringify({ completedIds: [session.id, subagent.id], lifecycle }),
       });
     });
     page.on("dialog", async (dialog) => {
@@ -1731,7 +2056,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.goto("/");
     await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
 
-    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
+    await expect
+      .poll(() => completeBody)
+      .toEqual({ scope: "desk", operationId: expect.any(String) });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -3994,6 +4321,7 @@ test.describe("D8: Loading feedback", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
+          lifecycleInstanceId: "test-instance",
           sessions: [],
           projects: [{ id: "my-project", name: "my-project", configured: true }],
           backlog: [],

@@ -50,6 +50,7 @@ async function parseSend(args: string[]): Promise<void> {
 
 function baseSession(overrides: Partial<SessionView> = {}): SessionView {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-1",
     project: "api",
     agent: "claude",
