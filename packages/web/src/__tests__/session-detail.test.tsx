@@ -2653,7 +2653,7 @@ describe("SessionDetail voice input", () => {
 
     // The loading row must still be visible while the older-page fetch is
     // in flight — it must not be cleared before the fetch resolves.
-    expect(screen.getByLabelText("Loading older messages")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Loading older messages")).toBeInTheDocument();
 
     resolveOlderPage?.(
       new Response(
