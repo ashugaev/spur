@@ -534,6 +534,69 @@ describe("github source", () => {
     handle.stop();
   });
 
+  // Pruning on poll eligibility wiped the snapshot and lifecycle baseline of any
+  // session that left eligibility for a single cycle, so its return re-baselined
+  // and re-emitted lifecycle events. Prune only on absence from disk.
+  it("keeps persisted snapshot and lifecycle baseline for an existing but ineligible session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ status: "stopped" })]);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(removeLifecycleBaselinedSessionMock).not.toHaveBeenCalled();
+    expect(clearGitHubMergeConflictRestoreReplayMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("prunes persisted snapshot and lifecycle baseline once the session is gone from disk", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([]);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(deleteReviewSourceSnapshotMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "github",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    expect(removeLifecycleBaselinedSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    handle.stop();
+  });
+
   it("uses structured session state instead of the git worktree probe", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
