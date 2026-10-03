@@ -42266,7 +42266,8 @@ describe("SessionService", () => {
         return { id: record.id, model: "old" };
       });
       const tick = internals.runDashboardCacheTick();
-      const original = sessions.get("api-1")!;
+      const original = sessions.get("api-1");
+      if (!original) throw new Error("missing fixture session api-1");
       const completed: SessionRecord = { ...original, status: "completed" };
       const added: SessionRecord = { ...original, id: "api-new", status: "completed" };
       sessions.set(completed.id, completed);
