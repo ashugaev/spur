@@ -9461,16 +9461,17 @@ export class SessionService {
     const current = readSession(this.config.dataDir, session.id) ?? session;
     const state = resolveWorkspaceState(this.config.dataDir, current);
     const slots = deriveSessionSlots(state);
-    if (!slots) return current;
+    if (!slots) return session;
     const links = slots.links.filter(
       (link) =>
         !names.has(normalizeSlotLabel(link.label)) || !this.isLegacySidecarLink(current, link),
     );
-    if (links.length === slots.links.length) return current;
-    return (
-      this.writeWorkspaceStateWithLegacyMirror(current, { ...state, slots: { ...slots, links } }) ??
-      current
-    );
+    if (links.length === slots.links.length) return session;
+    const prunedSlots = { ...slots, links };
+    this.writeWorkspaceStateWithLegacyMirror(current, { ...state, slots: prunedSlots });
+    // Spawn callers can carry a running record while disk still says spawning.
+    // Cleanup owns slots only; preserve their pending launch fields and identity.
+    return session.id === workspaceIdOf(session) ? { ...session, slots: prunedSlots } : session;
   }
 
   private invalidateSidecarEndpoint(ownerId: string, name: string): void {

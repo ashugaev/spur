@@ -1587,6 +1587,58 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("preserves staged launch fields when autostart prunes an exact legacy duplicate", async () => {
+      const { service, sessions, owner, config } = await setup();
+      const staged = {
+        ...owner,
+        launchCommand: "claude --resume native-launch",
+        agentSessionId: "native-launch",
+        slots: {
+          links: [
+            { label: "dev", url: "https://preview.example.com/3000" },
+            { label: "dev", url: "https://manual.example.com" },
+          ],
+        },
+      };
+      sessions.set(owner.id, {
+        ...staged,
+        status: "spawning",
+        launchCommand: "",
+        agentSessionId: "pending-native",
+      });
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const internals = service as unknown as {
+        startAutoStartSidecars(
+          session: SessionRecord,
+          project: AppConfig["projects"][string],
+        ): Promise<SessionRecord>;
+      };
+      const sidecar = (config.projects.api as AppConfig["projects"][string]).sidecars["dev"];
+      if (!sidecar) throw new Error("Missing dev fixture");
+      const result = await internals.startAutoStartSidecars(staged, {
+        ...config.projects.api,
+        sidecars: { dev: { ...sidecar, autoStart: true } },
+      });
+
+      expect(result).toMatchObject({
+        id: owner.id,
+        status: "running",
+        launchCommand: staged.launchCommand,
+        agentSessionId: staged.agentSessionId,
+        sidecarPorts: owner.sidecarPorts,
+        sidecarProcs: owner.sidecarProcs,
+        slots: { links: [{ label: "dev", url: "https://manual.example.com" }] },
+      });
+      expect(sessions.get(owner.id)?.slots).toEqual(result.slots);
+      sessions.set(owner.id, result);
+      const view = await service.startSidecar(owner.id, "dev");
+      expect(view.sidecars.find((sidecar) => sidecar.name === "dev")?.url).toBe(
+        "https://preview.example.com/3000",
+      );
+      expect(view.slots).toEqual(result.slots);
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    });
+
     it("discovers a listener beyond the old startup budget", async () => {
       const { service, views } = await setup();
       snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
@@ -5226,8 +5278,13 @@ describe("SessionService", () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
     tmuxSessionExistsMock.mockResolvedValue(false);
+    createTmuxSessionMock.mockImplementation(async () => {
+      tmuxSessionExistsMock.mockResolvedValue(true);
+    });
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
 
     const placeholder = await service.spawnInBackground({
       project: "api",
@@ -5249,6 +5306,7 @@ describe("SessionService", () => {
         }),
       );
     });
+    await service.settleBackgroundSpawns();
     expect(
       writeSessionMock.mock.calls.find(
         ([, session]) => session.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV === 3000,
@@ -17647,14 +17705,9 @@ describe("SessionService", () => {
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
-    // Pins the fix for #871 P2: reconcileStoppedSessions' three
-    // readRuntimeSnapshot reads (classification, reconcileUnexpectedStop's
-    // fresh:true confirm re-read, and the post-reconcile re-read) each cost
-    // exactly one probeTmuxProcessMatch call — never a SECOND, separately-
-    // fetched disagreement re-probe per read, which is what the old two-probe
-    // design added on top (doubling this to 6) and which a slow (>2s) first
-    // fetch could race against a second, differently-timed snapshot.
-    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(3);
+    // A live snapshot needs no dead-runtime confirmation. The fallback
+    // verdict and name match come from the same fetch (#871 P2).
+    expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(1);
 
     await service.reconcileStoppedSessions();
     expect(countPaneChildFallbackEvents()).toBe(1);
@@ -24480,9 +24533,10 @@ describe("SessionService", () => {
     mockCursorJsonlState("working");
 
     const service = await createDisposedSessionService();
+    service.dispose();
 
     const result = await service.get("api-1");
-    expect(result.status).toBe("running");
+    expect(result.status).toBe("errored");
     await service.settleBackgroundSpawns();
 
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
@@ -37886,7 +37940,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("startSidecar preserves an existing URL sidecar reservation and legacy slot when the restarted sidecar exits", async () => {
+  it("startSidecar preserves a reservation and custom slot but removes its exact URL duplicate when the restarted sidecar exits", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -37930,7 +37984,10 @@ describe("SessionService", () => {
         },
       },
       slots: {
-        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+        links: [
+          { label: "dev", url: "https://preview.example.com/3000" },
+          { label: "dev", url: "https://manual.example.com" },
+        ],
       },
     });
     sidecarTmuxAliveMock
@@ -37951,11 +38008,11 @@ describe("SessionService", () => {
       },
     });
     expect(sessions.get("api-1")?.slots?.links).toEqual([
-      { label: "dev", url: "https://preview.example.com/3000" },
+      { label: "dev", url: "https://manual.example.com" },
     ]);
   });
 
-  it("startSidecar preserves a previous URL slot when a running restarted sidecar times out", async () => {
+  it("startSidecar preserves a custom slot and reservation while a restarted sidecar has no listener", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -37999,7 +38056,10 @@ describe("SessionService", () => {
         },
       },
       slots: {
-        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+        links: [
+          { label: "dev", url: "https://preview.example.com/3000" },
+          { label: "dev", url: "https://manual.example.com" },
+        ],
       },
     });
     sidecarTmuxAliveMock
@@ -38007,24 +38067,24 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    // Background attention/dashboard polling also checks sidecar liveness (session rows
-    // display running sidecars); dispose those loops so the assertion below only bounds
-    // the URL probe's own retry/liveness-check cadence.
-    service.dispose();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
+    snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
 
-    await service.startSidecar("api-1", "dev");
-    await vi.advanceTimersByTimeAsync(181_000);
+    const result = await service.startSidecar("api-1", "dev");
 
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(isHostPortFreeMock).toHaveBeenCalledWith(3000);
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
-      { label: "dev", url: "https://preview.example.com/3000" },
+      { label: "dev", url: "https://manual.example.com" },
     ]);
-    expect(sidecarTmuxAliveMock.mock.calls.length).toBeLessThan(60);
+    expect(sessions.get("api-1")?.sidecarPorts?.dev).toEqual({ SPUR_RESERVED_PORT_DEV: 3000 });
+    expect(result.sidecars.find((sidecar) => sidecar.name === "dev")).not.toHaveProperty("url");
   });
 
-  it("startSidecar does not rearm the URL probe when an alive sidecar already has its link", async () => {
+  it("startSidecar keeps an alive sidecar running and removes only its exact URL duplicate", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -38068,21 +38128,27 @@ describe("SessionService", () => {
         },
       },
       slots: {
-        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+        links: [
+          { label: "dev", url: "https://preview.example.com/3000" },
+          { label: "dev", url: "https://manual.example.com" },
+        ],
       },
     });
     sidecarTmuxAliveMock.mockResolvedValue(true);
     isHostPortFreeMock.mockClear();
 
     const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+      deferBackgroundLoops: true,
+    });
 
     await service.startSidecar("api-1", "dev");
-    await vi.advanceTimersByTimeAsync(181_000);
 
     expect(isHostPortFreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
-      { label: "dev", url: "https://preview.example.com/3000" },
+      { label: "dev", url: "https://manual.example.com" },
     ]);
   });
 
@@ -39292,7 +39358,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("sidecar cleanup preserves the legacy sidecar slot", async () => {
+  it("sidecar cleanup removes the exact URL duplicate and preserves a custom sidecar slot", async () => {
     vi.useRealTimers();
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -39309,7 +39375,10 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
       slots: {
-        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+        links: [
+          { label: "dev", url: "https://preview.example.com/3000" },
+          { label: "dev", url: "https://manual.example.com" },
+        ],
       },
     });
     loadConfigMock.mockReturnValue({
@@ -39353,7 +39422,7 @@ describe("SessionService", () => {
     await service.kill("api-1", { force: true });
 
     expect(sessions.get("api-1")?.slots?.links).toEqual([
-      { label: "dev", url: "https://preview.example.com/3000" },
+      { label: "dev", url: "https://manual.example.com" },
     ]);
 
     service.dispose();
@@ -43073,11 +43142,15 @@ describe("SessionService", () => {
           }),
       );
 
-      await vi.advanceTimersByTimeAsync(2_000);
-      await vi.advanceTimersByTimeAsync(2_000);
-
-      expect(calls).toBe(1);
-      service.dispose();
+      try {
+        await vi.advanceTimersByTimeAsync(2_000);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(calls).toBe(1);
+      } finally {
+        service.dispose();
+        await vi.advanceTimersByTimeAsync(3_000);
+        await service.settleBackgroundSpawns();
+      }
     });
 
     it("retains the refresh fence after enrichment fails and recovers on the next tick", async () => {
@@ -48787,30 +48860,28 @@ describe("SessionService", () => {
       // seed a scoped-state entry the sweep is responsible for reclaiming.
       internals.codexMcpDialogOverrides.set("api-2", Date.now());
 
-      // api-1's enrich never resolves on the next tick (a wedged runtime
-      // probe, not a throw): the per-session loop's sequential `await`
-      // blocks on it forever, so this pins ordering alone, independent of
-      // the per-session try/catch (a throw would be swallowed by the catch
-      // either way; a hang cannot be, so the loop past api-1 never runs
-      // regardless of whether the try/catch exists). If the sweep is moved
-      // back to after the loop, it would never run either, and api-2's
-      // entry would never be reclaimed — this is what distinguishes the
-      // ordering.
+      // Hold api-1's probe through the sweep assertion: a sweep after the
+      // sequential enrichment loop could not reclaim api-2 while blocked.
+      let releaseProbe!: (alive: boolean) => void;
+      const blockedProbe = new Promise<boolean>((resolve) => {
+        releaseProbe = resolve;
+      });
       tmuxSessionExistsMock.mockImplementation((tmuxSession: string) => {
         if (tmuxSession === "api-1") {
-          return new Promise<boolean>(() => {});
+          return blockedProbe;
         }
         return Promise.resolve(true);
       });
 
-      await vi.advanceTimersByTimeAsync(5_000);
-      await drainBaselineTicks(internals);
-
-      // The sweep ran before the loop reached (and hung on) api-1: api-2's
-      // terminal scoped state is reclaimed regardless.
-      expect(internals.codexMcpDialogOverrides.has("api-2")).toBe(false);
-
-      service.dispose();
+      try {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await drainBaselineTicks(internals);
+        expect(internals.codexMcpDialogOverrides.has("api-2")).toBe(false);
+      } finally {
+        service.dispose();
+        releaseProbe(true);
+        await service.settleBackgroundSpawns();
+      }
     });
 
     it("still classifies a later session in the loop when an earlier session's enrich throws (per-session try/catch)", async () => {
@@ -52241,20 +52312,20 @@ describe("SessionService", () => {
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
           deferBackgroundLoops: true,
         });
-        service.dispose();
         const internals = staleInternals(service);
 
         const stop = service.stopSidecar("api-1", "proxy");
         await stopStartedBarrier;
         const wake = service.send("api-2", { message: "wake after stop", queue: false });
-        await Promise.resolve();
-
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-        expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
-
-        releaseStop();
-        await stop;
-        await wake;
+        try {
+          await Promise.resolve();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+        } finally {
+          releaseStop();
+          await stop;
+          await wake;
+        }
 
         expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
         expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
