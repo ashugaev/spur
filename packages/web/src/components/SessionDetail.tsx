@@ -172,7 +172,6 @@ function dedupeConflictCandidatesByPort(
 
 function splitSessionLinks(
   links: DashboardSession["links"],
-  sidecarLinkLabels: Set<string>,
 ): {
   surfacedLinks: DashboardSession["links"];
   visibleLinks: DashboardSession["links"];
@@ -189,7 +188,7 @@ function splitSessionLinks(
       }
       continue;
     }
-    if (!sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url)) {
+    if (!surfacedUrls.has(link.url)) {
       visibleLinks.push(link);
     }
   }
@@ -2703,10 +2702,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const sidecarLinkLabels = useMemo(
-    () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
-    [session],
-  );
   const allArtifacts = session?.artifacts ?? [];
   const agentArtifacts = useMemo(
     () =>
@@ -2782,10 +2777,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const { surfacedLinks, visibleLinks } = splitSessionLinks(
-    session?.links ?? [],
-    sidecarLinkLabels,
-  );
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(session?.links ?? []);
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {
@@ -3863,9 +3855,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 <div className="space-y-2">
                   {session.sidecars.map((sc) => {
-                    const sidecarOpenUrl = sc.alive
-                      ? session.links.find((link) => link.label === sc.name)?.url
-                      : undefined;
+                    const sidecarOpenUrl = sc.url;
                     return (
                       <div
                         key={sc.name}

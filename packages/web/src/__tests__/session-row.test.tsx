@@ -331,6 +331,23 @@ describe("SessionRow", () => {
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
 
+  it("removes a ready sidecar link on refresh while retaining a running URL-less sidecar", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    const props = { onCompleteSession, onRestoreSession };
+    const { rerender } = render(
+      <SessionRow {...props} session={makeSession({
+        sidecars: [{ name: "detached", alive: false, tmuxSession: "detached", url: "https://ready.example.com/" }],
+        runningSidecars: [{ name: "detached", url: "https://ready.example.com/" }, { name: "worker" }],
+      })} />,
+    );
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+    expect(screen.getByRole("link", { name: "detached" })).toHaveAttribute("href", "https://ready.example.com/");
+    rerender(<SessionRow {...props} session={makeSession({ runningSidecars: [{ name: "worker" }] })} />);
+    expect(screen.queryByRole("link", { name: "detached" })).not.toBeInTheDocument();
+    expect(screen.getByText("worker")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "worker" })).not.toBeInTheDocument();
+  });
+
   it("colors a dashboard sidecar age by ageWarn, not a fresh sidecar's age", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",

@@ -43,6 +43,7 @@ import type * as todoModule from "../../src/todo.js";
 import type * as reapModule from "../../src/sidecars/reap.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import type { ProcSnapshot } from "../../src/sidecars/reap.js";
+import type { ListenerSnapshot } from "../../src/port-probe.js";
 import {
   hasRetainedSessionError,
   isRespawnableStatus,
@@ -55,6 +56,7 @@ import {
   type ServiceInstanceRecord,
   type SessionMemoryRecord,
   type SessionRecord,
+  type SessionSidecarView,
   type SessionState,
   type SessionStateTransition,
   type SessionView,
@@ -186,6 +188,9 @@ const hasEstablishedConnectionsMock = vi.fn<HasEstablishedConnections>().mockRes
 // this never actually runs in those tests; the handful that DO set
 // sidecarPorts override it per test.
 const findListenerPidsMock = vi.fn<(port: number) => Promise<number[]>>().mockResolvedValue([]);
+const snapshotListenersMock = vi
+  .fn<() => Promise<ListenerSnapshot>>()
+  .mockResolvedValue({ ok: false });
 // Default: no real `ps` fork in the fast tier. A real subprocess spawn here
 // (the pre-fix default) is slow and non-fake-timer-bound, and every
 // SessionService construction fires one unawaited via the attention
@@ -750,6 +755,7 @@ vi.mock("../../src/port-probe.js", () => ({
   isHostPortFree: isHostPortFreeMock,
   hasEstablishedConnections: hasEstablishedConnectionsMock,
   findListenerPids: findListenerPidsMock,
+  snapshotListeners: snapshotListenersMock,
 }));
 
 vi.mock("../../src/disk-space.js", () => ({
@@ -1460,6 +1466,339 @@ async function useRealTodoLedger(): Promise<void> {
 }
 
 describe("SessionService", () => {
+  describe("sidecar endpoint readiness", () => {
+    async function setup() {
+      const config = {
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, restoreAfterReboot: false } },
+      };
+      config.projects.api.sidecars = {
+        dev: {
+          command: "node app.js",
+          autoStart: false,
+          ports: {
+            http: {
+              env: "DEV_PORT",
+              start: 3000,
+              end: 3001,
+              url: "https://preview.example.com/{port}",
+            },
+          },
+        },
+        daemon: {
+          command: "node daemon.js",
+          autoStart: false,
+          ports: {
+            tcp: { env: "DAEMON_PORT", start: 4000, end: 4000 },
+          },
+        },
+      };
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.settleBackgroundSpawns();
+      const reap = await import("../../src/sidecars/reap.js");
+      const identityProbe = vi.spyOn(reap, "readProcessStarttime").mockResolvedValue(123);
+      const owner = sessionRecord({
+        id: "api-1",
+        sidecarNames: ["dev", "daemon"],
+        sidecarPorts: { dev: { DEV_PORT: 3000 }, daemon: { DAEMON_PORT: 4000 } },
+        sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 123 } },
+        slots: { links: [{ label: "dev", url: "https://manual.example.com" }] },
+      });
+      sessions.set(owner.id, owner);
+      snapshotProcessesMock.mockResolvedValue({
+        ok: true,
+        byPid: new Map([
+          [100, { pid: 100, ppid: 1, pgid: 100, etimes: 30, rssKb: 1, args: "launcher" }],
+          [101, { pid: 101, ppid: 100, pgid: 101, etimes: 20, rssKb: 1, args: "setsid server" }],
+        ]),
+        byPgid: new Map(),
+      });
+      snapshotListenersMock.mockResolvedValue({
+        ok: true,
+        byPort: new Map([[3000, new Set([101])]]),
+      });
+      const internals = service as unknown as {
+        sidecarViews(
+          record: SessionRecord,
+          project: AppConfig["projects"][string],
+        ): Promise<SessionSidecarView[]>;
+        enrichDashboard(record: SessionRecord): Promise<DashboardSessionView>;
+        updateStateHistory(...args: unknown[]): Promise<void>;
+        finalizeLifecycleRows(...args: unknown[]): Promise<SessionView[]>;
+        invalidateSidecarEndpoint(ownerId: string, name: string): void;
+        allowSidecarEndpoint(ownerId: string, name: string): void;
+        teardownSessionSidecars(record: SessionRecord): Promise<void>;
+        reapSidecarByName(ownerId: string, name: string): Promise<unknown>;
+        dashboardCache: Map<string, DashboardSessionView>;
+        sidecarObservationRun: Promise<unknown> | undefined;
+      };
+      const views = () => {
+        const current = sessions.get(owner.id);
+        if (!current) throw new Error("Missing owner fixture");
+        return internals.sidecarViews(current, config.projects.api);
+      };
+      return { service, sessions, owner, internals, views, config, identityProbe };
+    }
+
+    function nextObservation() {
+      vi.setSystemTime(Date.now() + 1_001);
+    }
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+
+    function signal() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+
+    it("restores a linkless setsid listener without tmux and preserves manual slots", async () => {
+      const { service, views, owner, sessions } = await setup();
+      const view = await service.get(owner.id);
+      expect(view.sidecars[0]).toMatchObject({
+        alive: false,
+        url: "https://preview.example.com/3000",
+        ageSeconds: 30,
+      });
+      expect(view.sidecars[1]).not.toHaveProperty("url");
+      expect(view.slots?.links).toEqual(owner.slots?.links);
+      expect(sessions.get(owner.id)?.slots).toEqual(owner.slots);
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      expect((await views())[0]?.url).toBe(view.sidecars[0]?.url);
+      service.dispose();
+    });
+
+    it("discovers a listener beyond the old startup budget", async () => {
+      const { service, views } = await setup();
+      snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
+      expect((await views())[0]).not.toHaveProperty("url");
+      vi.setSystemTime(Date.now() + 181_000);
+      snapshotListenersMock.mockResolvedValue({
+        ok: true,
+        byPort: new Map([[3000, new Set([101])]]),
+      });
+      expect((await views())[0]?.url).toBe("https://preview.example.com/3000");
+      service.dispose();
+    });
+
+    it.each(["free", "foreign", "anonymous", "failed", "reused", "gone"])(
+      "cannot create readiness from %s",
+      async (kind) => {
+        const { service, views, identityProbe } = await setup();
+        if (kind === "failed") snapshotListenersMock.mockResolvedValue({ ok: false });
+        if (kind === "free")
+          snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
+        if (kind === "foreign")
+          snapshotListenersMock.mockResolvedValue({
+            ok: true,
+            byPort: new Map([[3000, new Set([999])]]),
+          });
+        if (kind === "anonymous")
+          snapshotListenersMock.mockResolvedValue({
+            ok: true,
+            byPort: new Map([[3000, new Set()]]),
+          });
+        if (kind === "reused") identityProbe.mockResolvedValue(124);
+        if (kind === "gone")
+          snapshotProcessesMock.mockResolvedValue({
+            ok: true,
+            byPid: new Map(),
+            byPgid: new Map(),
+          });
+        isHostPortFreeMock.mockResolvedValue(false);
+        expect((await views())[0]).not.toHaveProperty("url");
+        service.dispose();
+      },
+    );
+
+    it("retains readiness on unknown only until absence or reservation replacement", async () => {
+      const { service, views, sessions, owner } = await setup();
+      expect((await views())[0]).toHaveProperty("url");
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: false });
+      expect((await views())[0]).toHaveProperty("url");
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
+      expect((await views())[0]).not.toHaveProperty("url");
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({
+        ok: true,
+        byPort: new Map([[3000, new Set([101])]]),
+      });
+      expect((await views())[0]).toHaveProperty("url");
+      sessions.set(owner.id, { ...owner, sidecarPorts: { dev: { DEV_PORT: 3001 } } });
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: false });
+      expect((await views())[0]).not.toHaveProperty("url");
+      service.dispose();
+    });
+
+    it("keeps unknown readiness bounded to the recorded process identity", async () => {
+      const { service, views, sessions, owner, identityProbe } = await setup();
+      expect((await views())[0]).toHaveProperty("url");
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: false });
+      identityProbe.mockResolvedValue(null);
+      expect((await views())[0]).toHaveProperty("url");
+      sessions.set(owner.id, {
+        ...owner,
+        sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 124 } },
+      });
+      expect((await views())[0]).not.toHaveProperty("url");
+      service.dispose();
+    });
+
+    it("reopens observation after a successful no-op start", async () => {
+      const { service, views, internals, owner } = await setup();
+      expect((await views())[0]).toHaveProperty("url");
+      internals.invalidateSidecarEndpoint(owner.id, "dev");
+      expect((await views())[0]).not.toHaveProperty("url");
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      expect((await service.startSidecar(owner.id, "dev")).sidecars[0]).toHaveProperty("url");
+      expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("batches concurrent detail/dashboard callers and caches failed observations for 1s", async () => {
+      const { service, owner, internals } = await setup();
+      await Promise.all([
+        service.get(owner.id),
+        internals.enrichDashboard(owner),
+        service.get(owner.id),
+      ]);
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(1);
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      nextObservation();
+      snapshotListenersMock.mockResolvedValue({ ok: false });
+      await Promise.all([service.get(owner.id), internals.enrichDashboard(owner)]);
+      await service.get(owner.id);
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(2);
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it.each(["history", "finalize", "dashboard-finalize"])(
+      "stop wins after the %s response await",
+      async (boundary) => {
+        const { service, owner, internals } = await setup();
+        internals.dashboardCache.set(owner.id, await internals.enrichDashboard(owner));
+        const entered = signal();
+        const release = signal();
+        if (boundary === "history") {
+          vi.spyOn(internals, "updateStateHistory").mockImplementation(async () => {
+            entered.resolve();
+            await release.promise;
+          });
+        } else {
+          const original = internals.finalizeLifecycleRows.bind(internals);
+          vi.spyOn(internals, "finalizeLifecycleRows").mockImplementation(async (...args) => {
+            const result = await original(...args);
+            entered.resolve();
+            await release.promise;
+            return result;
+          });
+        }
+        const request =
+          boundary === "dashboard-finalize"
+            ? service.list({ view: "dashboard" })
+            : service.get(owner.id);
+        await entered.promise;
+        internals.invalidateSidecarEndpoint(owner.id, "dev");
+        release.resolve();
+        const result = await request;
+        const views = Array.isArray(result) ? result[0]?.sidecars : result.sidecars;
+        expect(views?.[0]).not.toHaveProperty("url");
+        expect(internals.dashboardCache.get(owner.id)?.sidecars?.[0]?.url).toBeUndefined();
+        service.dispose();
+      },
+    );
+
+    it.each(["stop", "reap", "teardown", "replace", "dispose"])(
+      "rejects in-flight observation after %s",
+      async (action) => {
+        const { service, views, internals, owner, sessions } = await setup();
+        const pending = deferred<ListenerSnapshot>();
+        const entered = signal();
+        snapshotListenersMock.mockImplementation(() => {
+          entered.resolve();
+          return pending.promise;
+        });
+        const request = views();
+        await entered.promise;
+        if (action === "stop") internals.invalidateSidecarEndpoint(owner.id, "dev");
+        if (action === "reap") await internals.reapSidecarByName(owner.id, "dev");
+        if (action === "teardown") await internals.teardownSessionSidecars(owner);
+        if (action === "replace")
+          sessions.set(owner.id, {
+            ...owner,
+            sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 124 } },
+          });
+        if (action === "dispose") service.dispose();
+        pending.resolve({ ok: true, byPort: new Map([[3000, new Set([101])]]) });
+        expect((await request)[0]).not.toHaveProperty("url");
+        await service.settleBackgroundSpawns();
+        expect(internals.sidecarObservationRun).toBeUndefined();
+        service.dispose();
+      },
+    );
+
+    it("public stop retires a running observation and leaves manual slots intact", async () => {
+      const { service, views, internals, owner, sessions } = await setup();
+      const pending = deferred<ListenerSnapshot>();
+      const entered = signal();
+      snapshotListenersMock.mockImplementation(() => {
+        entered.resolve();
+        return pending.promise;
+      });
+      const request = views();
+      await entered.promise;
+      const invalidated = signal();
+      const original = internals.invalidateSidecarEndpoint.bind(internals);
+      vi.spyOn(internals, "invalidateSidecarEndpoint").mockImplementation((id, name) => {
+        original(id, name);
+        invalidated.resolve();
+      });
+      const stopping = service.stopSidecar(owner.id, "dev");
+      await invalidated.promise;
+      pending.resolve({ ok: true, byPort: new Map([[3000, new Set([101])]]) });
+      expect((await request)[0]).not.toHaveProperty("url");
+      expect((await stopping).sidecars[0]).not.toHaveProperty("url");
+      expect(sessions.get(owner.id)?.slots).toEqual(owner.slots);
+      service.dispose();
+    });
+
+    it("projects the terminal shared anchor's endpoint to active members", async () => {
+      const { service, sessions, owner, internals } = await setup();
+      const anchor = { ...owner, status: "completed" as const };
+      const member = sessionRecord({ id: "api-2", workspaceId: owner.id, sidecarNames: ["dev"] });
+      sessions.set(owner.id, anchor);
+      sessions.set(member.id, member);
+      await internals.teardownSessionSidecars(anchor);
+      const [a, m, dashboard] = await Promise.all([
+        service.get(owner.id),
+        service.get(member.id),
+        internals.enrichDashboard(member),
+      ]);
+      expect(a.sidecars[0]?.url).toBe("https://preview.example.com/3000");
+      expect(m.sidecars[0]?.url).toBe(a.sidecars[0]?.url);
+      expect(dashboard.sidecars?.[0]?.url).toBe(a.sidecars[0]?.url);
+      sessions.set(member.id, { ...member, status: "completed" });
+      expect((await service.get(owner.id)).sidecars[0]).not.toHaveProperty("url");
+      service.dispose();
+    });
+  });
+
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
@@ -1726,6 +2065,7 @@ describe("SessionService", () => {
     isHostPortFreeMock.mockReset().mockResolvedValue(true);
     hasEstablishedConnectionsMock.mockReset().mockResolvedValue("none");
     findListenerPidsMock.mockReset().mockResolvedValue([]);
+    snapshotListenersMock.mockReset().mockResolvedValue({ ok: false });
     snapshotProcessesMock
       .mockReset()
       .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
@@ -13213,7 +13553,7 @@ describe("SessionService", () => {
       const views = await service.list();
 
       expect(views).toHaveLength(3);
-      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      expect(snapshotProcessesMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -13274,7 +13614,7 @@ describe("SessionService", () => {
       // cannot reliably await through.
       await internals.pollAttentionStates(false);
 
-      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      expect(snapshotProcessesMock).not.toHaveBeenCalled();
       service.dispose();
     });
   });
@@ -24983,7 +25323,7 @@ describe("SessionService", () => {
       expect(sessions.get("api-2")?.sidecarNames).toBeUndefined();
     });
 
-    it("stops a project sidecar requested from a desk sibling on the anchor's tmux and unlinks the anchor's slot", async () => {
+    it("stops a project sidecar requested from a desk sibling and preserves the anchor's slot", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
         projects: {
@@ -25023,7 +25363,9 @@ describe("SessionService", () => {
       const result = await service.stopSidecar("api-2", "daemon");
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--daemon");
-      expect(sessions.get("api-1")?.slots).toBeUndefined();
+      expect(sessions.get("api-1")?.slots?.links).toEqual([
+        { label: "daemon", url: "http://localhost:4100/" },
+      ]);
       expect(result.id).toBe("api-2");
     });
 
@@ -25082,6 +25424,7 @@ describe("SessionService", () => {
       });
       expect(sessions.get("api-1")?.slots?.links).toEqual([
         { label: "daemon", url: "http://localhost:4100/" },
+        { label: "playwright", url: "http://localhost:8730/" },
       ]);
       expect(sessions.get("api-1")?.status).toBe("stopped");
     });
@@ -29718,7 +30061,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("unlinks a published slot link when the reap pass kills its sidecar (isolated-ui/front-local shape)", async () => {
+    it("preserves a legacy slot link when the reap pass kills its sidecar", async () => {
       loadConfigMock.mockReturnValue(frontLocalConfig());
       const sessions = createSessionStore();
       sessions.set(
@@ -29751,7 +30094,9 @@ describe("SessionService", () => {
       await service.reapDeadSessionSidecars();
 
       expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--front-local");
-      expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+      expect(sessions.get("api-1")?.slots?.links).toEqual([
+        { label: "front-local", url: "https://preview.example.com/3002" },
+      ]);
       service.dispose();
     });
 
@@ -34766,7 +35111,7 @@ describe("SessionService", () => {
       // narrow case (github.com/ashugaev/spur/issues/912) where that
       // matters. Asserting a published slots.links here would assert
       // something this path never actually produces (sidecarTmuxAliveMock
-      // stays false throughout) — fetch invocation is the honest,
+      // stays false throughout) — port-probe invocation is the honest,
       // falsifiable check for "the same probe was scheduled".
       vi.useRealTimers();
       const child = spawnDisposableChild();
@@ -34809,10 +35154,6 @@ describe("SessionService", () => {
           ]),
           byPgid: new Map(),
         });
-        const fetchMock = vi
-          .spyOn(globalThis, "fetch")
-          .mockResolvedValue(new Response("ok", { status: 200 }));
-
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -34821,7 +35162,7 @@ describe("SessionService", () => {
         expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
         await vi.waitFor(
           () => {
-            expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:3000/", expect.anything());
+            expect(isHostPortFreeMock).toHaveBeenCalledWith(3000);
           },
           { timeout: 5_000 },
         );
@@ -37073,7 +37414,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("startSidecar preserves an existing URL sidecar reservation and unlinks stale slot when the restarted sidecar exits", async () => {
+  it("startSidecar preserves an existing URL sidecar reservation and legacy slot when the restarted sidecar exits", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -37124,7 +37465,6 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false);
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -37138,7 +37478,9 @@ describe("SessionService", () => {
         SPUR_RESERVED_PORT_DEV: 3000,
       },
     });
-    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+    expect(sessions.get("api-1")?.slots?.links).toEqual([
+      { label: "dev", url: "https://preview.example.com/3000" },
+    ]);
   });
 
   it("startSidecar preserves a previous URL slot when a running restarted sidecar times out", async () => {
@@ -37192,8 +37534,6 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     // Background attention/dashboard polling also checks sidecar liveness (session rows
@@ -37205,7 +37545,7 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(181_000);
 
     expect(killTmuxSessionMock).not.toHaveBeenCalled();
-    expect(fetchSpy).toHaveBeenCalled();
+    expect(isHostPortFreeMock).toHaveBeenCalledWith(3000);
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
       { label: "dev", url: "https://preview.example.com/3000" },
     ]);
@@ -37260,7 +37600,7 @@ describe("SessionService", () => {
       },
     });
     sidecarTmuxAliveMock.mockResolvedValue(true);
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
+    isHostPortFreeMock.mockClear();
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -37268,7 +37608,7 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(181_000);
 
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(isHostPortFreeMock).not.toHaveBeenCalled();
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([
       { label: "dev", url: "https://preview.example.com/3000" },
     ]);
@@ -38416,7 +38756,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
   });
 
-  it("sidecar readiness publishes a slot link after the HTTP endpoint responds", async () => {
+  it("sidecar readiness does not publish automatic slot links", async () => {
     vi.useRealTimers();
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -38465,36 +38805,22 @@ describe("SessionService", () => {
       sidecarAlive = true;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+    isHostPortFreeMock.mockImplementation(async () => !sidecarAlive);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.startSidecar("api-1", "dev");
 
-    // The link is published off a fire-and-forget chain behind an HTTP probe
-    // that sleeps SIDECAR_PROBE_INTERVAL_MS (1s) per retry. waitFor's 1s
-    // default cannot absorb even one retry under load.
-    await vi.waitFor(
-      () => {
-        expect(sessions.get("api-1")?.slots?.links).toEqual([
-          { label: "dev", url: "https://preview.example.com/3000" },
-        ]);
-      },
-      { timeout: 5_000 },
-    );
-    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+    expect(sessions.get("api-1")?.slots).toBeUndefined();
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
       "session.sidecar.link.published",
     );
 
-    // Real timers plus a fire-and-forget probe chain: an undisposed service
-    // here keeps polling past this test's end and can publish the link
-    // during a later test, after that test's beforeEach has reset the event
-    // mock — landing this test's event in the wrong accumulator.
     service.dispose();
   });
 
-  it("sidecar cleanup unlinks the published sidecar slot", async () => {
+  it("sidecar cleanup preserves the legacy sidecar slot", async () => {
     vi.useRealTimers();
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -38536,7 +38862,6 @@ describe("SessionService", () => {
         },
       },
     });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
     // Same call-order fragility as the previous test: drive "alive" off the
     // real launch/kill instead of a fixed call-count queue.
     let sidecarAlive = false;
@@ -38547,6 +38872,7 @@ describe("SessionService", () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
+    isHostPortFreeMock.mockImplementation(async () => !sidecarAlive);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -38554,7 +38880,9 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
     await service.kill("api-1", { force: true });
 
-    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
+    expect(sessions.get("api-1")?.slots?.links).toEqual([
+      { label: "dev", url: "https://preview.example.com/3000" },
+    ]);
 
     service.dispose();
   });
@@ -38605,7 +38933,6 @@ describe("SessionService", () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -38662,7 +38989,6 @@ describe("SessionService", () => {
       },
     });
     let sidecarAlive = false;
-    let probeSignal: AbortSignal | undefined;
     createTmuxSidecarSessionMock.mockImplementation(async () => {
       sidecarAlive = true;
     });
@@ -38670,32 +38996,17 @@ describe("SessionService", () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        probeSignal = init?.signal ?? undefined;
-        return new Promise<Response>((_resolve, reject) => {
-          if (!probeSignal) return;
-          if (probeSignal.aborted) {
-            reject(probeSignal.reason);
-            return;
-          }
-          probeSignal.addEventListener("abort", () => reject(probeSignal?.reason), { once: true });
-        });
-      },
-    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(0);
-    expect(probeSignal).toBeDefined();
-    expect(probeSignal?.aborted).toBe(false);
+    expect(isHostPortFreeMock).toHaveBeenCalledWith(3000);
 
     await service.complete("api-1");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(probeSignal?.aborted).toBe(true);
     expect(sessions.get("api-1")?.status).toBe("completed");
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
@@ -38745,7 +39056,6 @@ describe("SessionService", () => {
       },
     });
     let sidecarAlive = false;
-    let probeSignal: AbortSignal | undefined;
     createTmuxSidecarSessionMock.mockImplementation(async () => {
       sidecarAlive = true;
     });
@@ -38753,32 +39063,17 @@ describe("SessionService", () => {
       sidecarAlive = false;
     });
     sidecarTmuxAliveMock.mockImplementation(async () => sidecarAlive);
-    vi.spyOn(globalThis, "fetch").mockImplementation(
-      (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        probeSignal = init?.signal ?? undefined;
-        return new Promise<Response>((_resolve, reject) => {
-          if (!probeSignal) return;
-          if (probeSignal.aborted) {
-            reject(probeSignal.reason);
-            return;
-          }
-          probeSignal.addEventListener("abort", () => reject(probeSignal?.reason), { once: true });
-        });
-      },
-    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await service.startSidecar("api-1", "dev");
     await vi.advanceTimersByTimeAsync(0);
-    expect(probeSignal).toBeDefined();
-    expect(probeSignal?.aborted).toBe(false);
+    expect(isHostPortFreeMock).toHaveBeenCalledWith(3000);
 
     await service.kill("api-1", { force: true });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(probeSignal?.aborted).toBe(true);
     expect(sessions.get("api-1")?.status).toBe("killed");
     expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(

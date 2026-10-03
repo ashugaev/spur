@@ -180,11 +180,15 @@ describe("toDashboardSession", () => {
     ).toEqual([{ name: "isolated-ui" }]);
   });
 
-  it("matches running sidecars to slot links", () => {
+  it("uses ready sidecar URLs without tmux and ignores stale slot links", () => {
     expect(
       toDashboardSession(
         baseView({
           runningSidecarNames: ["isolated-ui", "worker"],
+          sidecars: [
+            { name: "isolated-ui", alive: true, tmuxSession: "ui", url: "https://ui.example.com/", ageSeconds: 7, ageWarn: false },
+            { name: "detached", alive: false, tmuxSession: "detached", url: "https://detached.example.com/" },
+          ],
           slots: {
             links: [
               { label: "isolated-ui", url: "http://127.0.0.1:5625/" },
@@ -193,6 +197,17 @@ describe("toDashboardSession", () => {
           },
         }),
       ).runningSidecars,
-    ).toEqual([{ name: "isolated-ui", url: "http://127.0.0.1:5625/" }, { name: "worker" }]);
+    ).toEqual([
+      { name: "isolated-ui", url: "https://ui.example.com/", ageSeconds: 7, ageWarn: false },
+      { name: "worker" },
+      { name: "detached", url: "https://detached.example.com/" },
+    ]);
+  });
+
+  it("preserves ordinary sidecar-labelled slots without treating them as ready", () => {
+    const links = [{ label: "isolated-ui", url: "https://stale.example.com/" }];
+    const session = toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"], slots: { links } }));
+    expect(session.runningSidecars).toEqual([{ name: "isolated-ui" }]);
+    expect(session.links).toEqual(links);
   });
 });
