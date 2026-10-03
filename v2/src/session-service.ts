@@ -3494,7 +3494,8 @@ export class SessionService {
 
   private trackBackgroundLoop(run: Promise<void>): Promise<void> {
     this.backgroundLoopRuns.add(run);
-    void run.finally(() => this.backgroundLoopRuns.delete(run));
+    const clear = () => this.backgroundLoopRuns.delete(run);
+    void run.then(clear, clear);
     return run;
   }
 

@@ -1808,6 +1808,34 @@ describe("SessionService", () => {
       expect(calls).toHaveLength(1);
     });
 
+    it("returns a tracked reaper rejection without detached failure and drains it", async () => {
+      const { service } = await setup();
+      const reaper = service as unknown as {
+        reapDeadSessionSidecars(): Promise<void>;
+        backgroundLoopRuns: Set<Promise<void>>;
+      };
+      const failure = new Error("controlled metadata failure");
+      listSessionsMock.mockImplementationOnce(() => {
+        throw failure;
+      });
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const run = reaper.reapDeadSessionSidecars();
+        expect(reaper.backgroundLoopRuns.has(run)).toBe(true);
+        await expect(run).rejects.toBe(failure);
+        await service.settleBackgroundSpawns();
+        service.dispose();
+        vi.useRealTimers();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(reaper.backgroundLoopRuns.size).toBe(0);
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.removeListener("unhandledRejection", unhandled);
+        service.dispose();
+      }
+    });
+
     it("projects only normalized current reserved legacy links without readout writes", async () => {
       const { service, sessions, owner, internals } = await setup();
       const slots = {
