@@ -74,6 +74,8 @@ describe("extractCommandBinary", () => {
     expect(extractCommandBinary(String.raw`"a\$\`\"\\b" --flag`, "fallback")).toBe('a$`"\\b');
     expect(extractCommandBinary("a\\\nb --flag", "fallback")).toBe("ab");
     expect(extractCommandBinary('"a\\\nb" --flag', "fallback")).toBe("ab");
+    expect(extractCommandBinary("FOO\\\n=bar opencode --auto", "fallback")).toBe("opencode");
+    expect(extractCommandBinary("FOO=bar \\\n  opencode --auto", "fallback")).toBe("opencode");
   });
 
   it.each(["'unterminated", '"unterminated', "trailing\\", "'' --flag", "A=1 B=2"])(

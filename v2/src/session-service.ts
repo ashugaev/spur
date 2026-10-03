@@ -16661,7 +16661,7 @@ export class SessionService {
         launchCommand: baseLaunchCommand,
         updatedAt: nowIso(),
       };
-      let freshProvisionalWritten = false;
+      const freshPhase = { provisionalWritten: false };
 
       try {
         await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
@@ -16674,7 +16674,7 @@ export class SessionService {
             env,
           });
           writeSession(this.config.dataDir, currentRetentionCandidate);
-          freshProvisionalWritten = true;
+          freshPhase.provisionalWritten = true;
           await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
             agent: session.agent,
           });
@@ -16701,10 +16701,10 @@ export class SessionService {
         });
       } catch (error) {
         if (
-          freshProvisionalWritten ||
+          freshPhase.provisionalWritten ||
           (await this.launchResourcesMayRemain(currentRetentionCandidate))
         ) {
-          if (!freshProvisionalWritten)
+          if (!freshPhase.provisionalWritten)
             writeSession(this.config.dataDir, currentRetentionCandidate);
           await this.retainLaunchedError(currentRetentionCandidate, error);
         }

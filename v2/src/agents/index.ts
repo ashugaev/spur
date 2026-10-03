@@ -747,7 +747,17 @@ export async function buildAgentRestorePlan(
 export function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
   let index = 0;
   while (index < launchCommand.length) {
-    while (/\s/.test(launchCommand[index] ?? "")) index += 1;
+    while (index < launchCommand.length) {
+      if (/\s/.test(launchCommand[index] ?? "")) {
+        index += 1;
+        continue;
+      }
+      if (launchCommand[index] === "\\" && launchCommand[index + 1] === "\n") {
+        index += 2;
+        continue;
+      }
+      break;
+    }
     if (index >= launchCommand.length) break;
 
     let value = "";
@@ -811,8 +821,12 @@ export function extractCommandBinary(launchCommand: string, fallbackBinary: stri
       if (char === "\\") {
         const next = launchCommand[index + 1];
         if (next === undefined) return fallbackBinary;
+        if (next === "\n") {
+          index += 2;
+          continue;
+        }
         if (!assignment) assignmentPrefixValid = false;
-        if (next !== "\n") value += next;
+        value += next;
         index += 2;
         continue;
       }
