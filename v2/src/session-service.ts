@@ -16563,6 +16563,18 @@ export class SessionService {
         message,
       }),
     );
+    const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+    const recoveryContextMessage = buildInitialMessage(
+      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+      recoverySidecarNames,
+      this.config.tags,
+      project.branchNaming?.regex,
+      session.selfDestruct,
+      telegramAgentInstructions(
+        project,
+        readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
+      ),
+    );
     const planOptions = {
       ...withAgentModeOptions(
         withProjectAgentOptions(session.agent, project, {
@@ -16573,10 +16585,14 @@ export class SessionService {
       ),
       ...this.resolveClaudeAuthPlanOptions(session),
     };
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
-      ...planOptions,
-      ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-    });
+    const baseLaunchPlan = buildAgentLaunchPlan(
+      session.agent,
+      session.agent === "opencode" ? recoveryContextMessage : session.prompt,
+      {
+        ...planOptions,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      },
+    );
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     // A pinned claude resumes via --session-id on the native-resume attempt below;
     // only the fresh-launch fallback (on resume failure) mints a new id, since
@@ -16628,129 +16644,215 @@ export class SessionService {
     // behavior on why the pane died.
     let usedFreshLaunch = !recoveryPlan;
     let launched = false;
-    try {
-      await createTmuxSession({
-        sessionName: session.tmuxSession,
-        cwd: session.worktreePath,
-        launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-        launchScriptDir: sessionToolDir,
-        env,
-      });
-      launched = true;
-      writeSession(
-        this.config.dataDir,
-        this.applyReservedSidecars(
-          {
-            ...sessionWithAgentId,
-            status: "running",
-            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-          },
-          mcpSidecarUpdate,
-        ),
-      );
-      await waitForTmuxReady(
-        session.tmuxSession,
-        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
-        undefined,
-        { agent: session.agent },
-      );
-      // fresh:true: this session's tmux pane was just created by
-      // createTmuxSession above and may postdate the last fleet-pane
-      // snapshot, which would otherwise wrongly see it as absent and abort a
-      // genuinely successful recovery.
-      if (
-        !(await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
+    let freshOpenCodeRecord: SessionRecord | undefined;
+    const launchFreshOpenCode = async (): Promise<void> => {
+      const {
+        agentSessionId: _staleAgentSessionId,
+        error: _staleError,
+        sidecarProcs: _staleSidecarProcs,
+        ...freshBase
+      } = sessionWithAgentId;
+      let currentRetentionCandidate: SessionRecord = {
+        ...this.applyReservedSidecars(freshBase, mcpSidecarUpdate),
+        ...(Object.keys(mcpSidecarUpdate.sidecarProcs ?? {}).length > 0
+          ? { sidecarProcs: { ...mcpSidecarUpdate.sidecarProcs } }
+          : {}),
+        status: "running",
+        launchCommand: baseLaunchCommand,
+        updatedAt: nowIso(),
+      };
+      const freshPhase = { provisionalWritten: false };
+
+      try {
+        await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
+          const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
+          await createTmuxSession({
+            sessionName: session.tmuxSession,
+            cwd: session.worktreePath,
+            launchCommand: baseLaunchCommand,
+            launchScriptDir: sessionToolDir,
+            env,
+          });
+          writeSession(this.config.dataDir, currentRetentionCandidate);
+          freshPhase.provisionalWritten = true;
+          await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
             agent: session.agent,
-            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-          },
-          { fresh: true },
-        ))
-      ) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`);
-      }
-    } catch (error) {
-      const failedAttempt = this.applyReservedSidecars(
-        { ...sessionWithAgentId, launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand },
-        mcpSidecarUpdate,
-      );
-      if (!launched) launched = await this.launchResourcesMayRemain(failedAttempt);
-      if (launched) {
-        await this.retainLaunchedError(failedAttempt, error);
-        throw error;
-      }
-      if (!recoveryPlan) {
+          });
+          if (
+            !(await agentProcessAlive(
+              {
+                tmuxSession: session.tmuxSession,
+                agent: session.agent,
+                launchCommand: baseLaunchCommand,
+              },
+              { fresh: true },
+            ))
+          ) {
+            throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+          }
+          const agentSessionId = await waitForNewOpenCodeSessionId(baseline);
+          currentRetentionCandidate = {
+            ...currentRetentionCandidate,
+            agentSessionId,
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, currentRetentionCandidate);
+          recoveredAgentSessionId = agentSessionId;
+        });
+      } catch (error) {
+        if (
+          freshPhase.provisionalWritten ||
+          (await this.launchResourcesMayRemain(currentRetentionCandidate))
+        ) {
+          if (!freshPhase.provisionalWritten)
+            writeSession(this.config.dataDir, currentRetentionCandidate);
+          await this.retainLaunchedError(currentRetentionCandidate, error);
+        }
         throw error;
       }
 
-      const failure = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.recover.resume_failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
-        details: {
-          agent: session.agent,
-          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
-          launchCommand: recoveryPlan.launchCommand,
-          failure,
-        },
-      });
-      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
-      usedFreshLaunch = true;
-      // Mint a fresh claude id for the fallback launch (fresh per attempt so a
-      // retry never reuses a possibly-existing transcript id) — the pinned id
-      // may already own a transcript, and claude rejects --session-id on it.
-      const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
-      const freshPlan = freshClaudeId
-        ? buildAgentLaunchPlan(session.agent, session.prompt, {
-            ...planOptions,
-            ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-            agentSessionId: freshClaudeId,
-          })
-        : baseLaunchPlan;
-      const freshLaunchCommand = freshPlan.launchCommand;
-      recoveredAgentSessionId = freshClaudeId;
-      persistedLaunchCommand = freshLaunchCommand;
-      await createTmuxSession({
-        sessionName: session.tmuxSession,
-        cwd: session.worktreePath,
-        launchCommand: freshLaunchCommand,
-        launchScriptDir: sessionToolDir,
-        env,
-      });
-      writeSession(
-        this.config.dataDir,
-        this.applyReservedSidecars(
+      try {
+        if (
+          !recoveredAgentSessionId ||
+          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId))
+        ) {
+          throw new Error("OpenCode did not persist the launch prompt");
+        }
+      } catch (error) {
+        await this.retainLaunchedError(currentRetentionCandidate, error);
+        throw error;
+      }
+      freshOpenCodeRecord = currentRetentionCandidate;
+    };
+
+    if (session.agent === "opencode" && !recoveryPlan) {
+      await launchFreshOpenCode();
+    } else {
+      try {
+        await createTmuxSession({
+          sessionName: session.tmuxSession,
+          cwd: session.worktreePath,
+          launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+          launchScriptDir: sessionToolDir,
+          env,
+        });
+        launched = true;
+        writeSession(
+          this.config.dataDir,
+          this.applyReservedSidecars(
+            {
+              ...sessionWithAgentId,
+              status: "running",
+              launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+            },
+            mcpSidecarUpdate,
+          ),
+        );
+        await waitForTmuxReady(
+          session.tmuxSession,
+          recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+          undefined,
+          { agent: session.agent },
+        );
+        if (
+          !(await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+            },
+            { fresh: true },
+          ))
+        ) {
+          throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+        }
+      } catch (error) {
+        const failedAttempt = this.applyReservedSidecars(
           {
             ...sessionWithAgentId,
-            status: "running",
-            launchCommand: freshLaunchCommand,
-            ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-            updatedAt: nowIso(),
+            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
           },
           mcpSidecarUpdate,
-        ),
-      );
-      await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
-        agent: session.agent,
-      });
-      // fresh:true — same rationale as the resume-plan check above: this
-      // pane was just (re)created and may postdate the last fleet snapshot.
-      if (
-        !(await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
+        );
+        if (!launched) {
+          launched =
+            session.agent === "opencode"
+              ? await this.agentLaunchResourcesMayRemain(failedAttempt)
+              : await this.launchResourcesMayRemain(failedAttempt);
+        }
+        if (launched) {
+          await this.retainLaunchedError(failedAttempt, error);
+          throw error;
+        }
+        if (!recoveryPlan) throw error;
+
+        const failure = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.recover.resume_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
+          details: {
             agent: session.agent,
-            launchCommand: freshLaunchCommand,
+            agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+            launchCommand: recoveryPlan.launchCommand,
+            failure,
           },
-          { fresh: true },
-        ))
-      ) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
-          cause: error,
         });
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+        usedFreshLaunch = true;
+        if (session.agent === "opencode") {
+          await launchFreshOpenCode();
+        } else {
+          const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
+          const freshPlan = freshClaudeId
+            ? buildAgentLaunchPlan(session.agent, session.prompt, {
+                ...planOptions,
+                ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+                agentSessionId: freshClaudeId,
+              })
+            : baseLaunchPlan;
+          const freshLaunchCommand = freshPlan.launchCommand;
+          recoveredAgentSessionId = freshClaudeId;
+          persistedLaunchCommand = freshLaunchCommand;
+          await createTmuxSession({
+            sessionName: session.tmuxSession,
+            cwd: session.worktreePath,
+            launchCommand: freshLaunchCommand,
+            launchScriptDir: sessionToolDir,
+            env,
+          });
+          writeSession(
+            this.config.dataDir,
+            this.applyReservedSidecars(
+              {
+                ...sessionWithAgentId,
+                status: "running",
+                launchCommand: freshLaunchCommand,
+                ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+                updatedAt: nowIso(),
+              },
+              mcpSidecarUpdate,
+            ),
+          );
+          await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
+            agent: session.agent,
+          });
+          if (
+            !(await agentProcessAlive(
+              {
+                tmuxSession: session.tmuxSession,
+                agent: session.agent,
+                launchCommand: freshLaunchCommand,
+              },
+              { fresh: true },
+            ))
+          ) {
+            throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
+              cause: error,
+            });
+          }
+        }
       }
     }
 
@@ -16763,32 +16865,15 @@ export class SessionService {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
-        message: `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
+        message:
+          session.agent === "opencode"
+            ? `${session.id} relaunched with a fresh agent process; no native resume was available, restoring task context through launch`
+            : `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
         details: {
           agent: session.agent,
           agentSessionId: sessionWithAgentId.agentSessionId ?? null,
         },
       });
-      const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
-      const recoveryContextMessage = buildInitialMessage(
-        buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
-        recoverySidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        session.selfDestruct,
-        telegramAgentInstructions(
-          project,
-          readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
-        ),
-      );
-      const recoveryPaneTarget = {
-        id: session.id,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: persistedLaunchCommand,
-        worktreePath: session.worktreePath,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      };
       if (session.agent === "codex") {
         // codex's rollout-based ack lags a resume enough that waiting on it
         // here would reproduce the exact bug f79fb970f fixed for restore(): a
@@ -16801,12 +16886,20 @@ export class SessionService {
           agent: session.agent,
         });
         this.recordPaneWrite(session, writeStartedAt);
-      } else {
+      } else if (session.agent !== "opencode") {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
         // pacing of their own (claude) — lets an ack that never confirms on a
         // live pane resolve as "submit_unconfirmed" instead of throwing and
         // tearing down an otherwise-healthy relaunch.
+        const recoveryPaneTarget = {
+          id: session.id,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: persistedLaunchCommand,
+          worktreePath: session.worktreePath,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        };
         const contextSendOutcome = await this.sendAgentMessage(
           recoveryPaneTarget,
           recoveryContextMessage,
@@ -16851,7 +16944,7 @@ export class SessionService {
       submitRequeuedMessage: _replacedRequeue,
       submitFailedMessage: _replacedFailure,
       ...recoveredBase
-    } = sessionWithAgentId;
+    } = freshOpenCodeRecord ?? sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
     // new pane is live, and before any caller (send/deliverPrepared/
     // tryDeliverQueuedMessage/switchAuth, all downstream of
@@ -20218,6 +20311,10 @@ export class SessionService {
 
   private async launchResourcesMayRemain(session: SessionRecord): Promise<boolean> {
     if (Object.keys(session.sidecarProcs ?? {}).length > 0) return true;
+    return this.agentLaunchResourcesMayRemain(session);
+  }
+
+  private async agentLaunchResourcesMayRemain(session: SessionRecord): Promise<boolean> {
     try {
       const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
       return runtime.runtimeAlive || runtime.probeUnresponsive;
