@@ -101,7 +101,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
 - `projects.<id>.backlog.<backlogId>.{source,query,intervalMs 60000,runOnStart false}` (`.spawn` parsed, ignored — wire a `jira:work_item.new` trigger instead).
-- Launch UI: model-supported Reasoning choices; Default inherits live project effort; [API](daemon-api.md).
+- Launch UI (spawn, respawn, handoff, desk spawn): agent/model-supported Reasoning choices; Default inherits live project effort; same-agent respawn/handoff carries current effort until Default clears it; [API](daemon-api.md).
 
 ## Admission control
 
