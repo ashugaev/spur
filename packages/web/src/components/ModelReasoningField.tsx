@@ -54,38 +54,19 @@ export function ModelReasoningField({
   useEffect(() => {
     const agentChanged = previous.current.agent !== modelProps.agent;
     const modelChanged = previous.current.model !== modelProps.value;
+    const clearUnsupported = (level: ProviderReasoningEffort) => {
+      reasoningCallback.current({ kind: lifecycle ? "clear" : "default-new" });
+      setAttention(
+        `${level[0].toUpperCase() + level.slice(1)} not offered by ${current?.modelLabel ?? modelProps.value ?? "this model"}, using Default`,
+      );
+    };
     if (agentChanged) {
       previous.current = { agent: modelProps.agent, model: modelProps.value };
       if (selected !== undefined) reasoningCallback.current({ kind: "default-new" });
       setAttention(null);
-    } else if (
-      !loading &&
-      modelChanged &&
-      current?.error === null &&
-      current.levels !== undefined
-    ) {
-      if (
-        selected !== undefined &&
-        current?.error === null &&
-        !current.levels?.includes(selected)
-      ) {
-        reasoningCallback.current({ kind: lifecycle ? "clear" : "default-new" });
-        setAttention(
-          `${selected[0].toUpperCase() + selected.slice(1)} not offered by ${current.modelLabel ?? modelProps.value ?? "this model"}, using Default`,
-        );
-      }
-      previous.current = { agent: modelProps.agent, model: modelProps.value };
-    } else if (
-      !loading &&
-      (reasoningIntent.kind === "explicit" || reasoningIntent.kind === "carried") &&
-      current?.error === null &&
-      current.levels !== undefined &&
-      !current.levels.includes(reasoningIntent.level)
-    ) {
-      reasoningCallback.current({ kind: lifecycle ? "clear" : "default-new" });
-      setAttention(
-        `${reasoningIntent.level[0].toUpperCase() + reasoningIntent.level.slice(1)} not offered by ${current.modelLabel ?? modelProps.value ?? "this model"}, using Default`,
-      );
+    } else if (!loading && current?.error === null && current.levels !== undefined) {
+      if (selected !== undefined && !current.levels.includes(selected)) clearUnsupported(selected);
+      if (modelChanged) previous.current = { agent: modelProps.agent, model: modelProps.value };
     }
   }, [
     modelProps.agent,
