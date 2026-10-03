@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import type { NonSharedBuffer } from "node:buffer";
 
 const fsMockState = vi.hoisted(() => ({
   files: new Map<string, string>(),
@@ -80,7 +81,16 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as childProcess from "node:child_process";
-import { existsSync, linkSync, mkdirSync, rmSync, statSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  type PathLike,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import {
   branchStatus,
   checkProjectWorkspace,
@@ -96,6 +106,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "../../src/workspace.js";
+import { withTimeout } from "../../src/promise-timeout.js";
 
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
 
@@ -111,6 +122,7 @@ const mockExecFileAsync = (() => {
 const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
 const mockLinkSync = linkSync as unknown as Mock;
 const mockMkdirSync = mkdirSync as unknown as Mock<typeof mkdirSync>;
+const mockRealpathSync = realpathSync as unknown as Mock<typeof realpathSync>;
 const mockRmSync = rmSync as unknown as Mock<typeof rmSync>;
 const mockStatSync = statSync as unknown as Mock;
 const mockSymlinkSync = symlinkSync as unknown as Mock<typeof symlinkSync>;
@@ -146,6 +158,63 @@ const baseInput = {
 function mockWorkspaceLockResolution(): void {
   mockGitSuccess("/repo/api/.git");
 }
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushUntil(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) {
+    await Promise.resolve();
+  }
+  expect(condition()).toBe(true);
+}
+
+function mockRealpathValue(
+  path: PathLike,
+  resolvedPath = path.toString(),
+): string | NonSharedBuffer {
+  return Buffer.isBuffer(path) ? Buffer.from(resolvedPath) : resolvedPath;
+}
+
+function mockCreateWorktreeGit(options: {
+  commonDir?: (repoPath: string) => Promise<string> | string;
+  add?: (repoPath: string, args: string[]) => Promise<void> | void;
+}): void {
+  mockExecFileAsync.mockImplementation(
+    async (_command: string, args: string[], execOptions: { cwd: string }) => {
+      const repoPath = execOptions.cwd;
+      if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+        const commonDir = await (options.commonDir?.(repoPath) ?? `${repoPath}/.git`);
+        return { stdout: `${commonDir}\n`, stderr: "" };
+      }
+      if (args[0] === "show-ref" && args[3] === "refs/remotes/origin/main") {
+        return { stdout: "", stderr: "" };
+      }
+      if (args[0] === "show-ref") {
+        throw Object.assign(new Error("missing ref"), { code: 1 });
+      }
+      if (args[0] === "worktree" && args[1] === "add") {
+        await options.add?.(repoPath, args);
+      }
+      return { stdout: "", stderr: "" };
+    },
+  );
+}
+
+beforeEach(() => {
+  mockRealpathSync.mockImplementation((path) => mockRealpathValue(path));
+});
 
 describe("createWorktree", () => {
   beforeEach(() => {
@@ -360,83 +429,270 @@ describe("createWorktree", () => {
     );
   });
 
-  it("waits for a valid metadata lock holder longer than five seconds", async () => {
-    const events: string[] = [];
-    let firstAddStarted!: () => void;
-    let firstAddRelease!: () => void;
-    const firstAddStartedPromise = new Promise<void>((resolve) => {
-      firstAddStarted = resolve;
-    });
-    const firstAddReleasePromise = new Promise<void>((resolve) => {
-      firstAddRelease = resolve;
-    });
-
-    mockExecFileAsync.mockImplementation(async (_command: string, args: string[]) => {
-      if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
-        return { stdout: "/repo/api/.git\n", stderr: "" };
-      }
-      if (JSON.stringify(args) === JSON.stringify(["worktree", "prune", "--expire", "now"])) {
-        events.push("worktree prune");
-        return { stdout: "", stderr: "" };
-      }
-      if (JSON.stringify(args) === JSON.stringify(["fetch", "origin", "--quiet"])) {
-        events.push("fetch");
-        return { stdout: "", stderr: "" };
-      }
-      if (args[0] === "show-ref" && args[3] === "refs/remotes/origin/main") {
-        return { stdout: "", stderr: "" };
-      }
-      if (args[0] === "show-ref") {
-        throw Object.assign(new Error("missing ref"), { code: 1 });
-      }
-      if (args[0] === "worktree" && args[1] === "add") {
-        if (args[4] === "/tmp/spur-worktrees/api/api-1") {
-          events.push("first worktree add start");
-          firstAddStarted();
-          await firstAddReleasePromise;
-          events.push("first worktree add end");
-          return { stdout: "", stderr: "" };
-        }
-        events.push("second worktree add start");
-        return { stdout: "", stderr: "" };
-      }
-      return { stdout: "", stderr: "" };
+  it("admits same-repository worktree mutations in FIFO order", async () => {
+    const releases = Array.from({ length: 43 }, () => deferred());
+    const addOrder: number[] = [];
+    let activeAdds = 0;
+    let maxActiveAdds = 0;
+    mockCreateWorktreeGit({
+      add: async (_repoPath, args) => {
+        const sessionId = Number(
+          args
+            .find((arg) => arg.includes("/api-"))
+            ?.split("api-")
+            .at(-1),
+        );
+        addOrder.push(sessionId);
+        activeAdds += 1;
+        maxActiveAdds = Math.max(maxActiveAdds, activeAdds);
+        await releases[sessionId - 1]?.promise;
+        activeAdds -= 1;
+      },
     });
 
+    const worktrees = Array.from({ length: 43 }, (_, index) =>
+      createWorktree({
+        ...baseInput,
+        sessionId: `api-${index + 1}`,
+        branch: `api-${index + 1}`,
+      }),
+    );
+
+    try {
+      for (let index = 0; index < releases.length; index += 1) {
+        await flushUntil(() => addOrder.length === index + 1);
+        expect(addOrder).toEqual(Array.from({ length: index + 1 }, (_, item) => item + 1));
+        expect(
+          mockExecFileAsync.mock.calls.filter(
+            (call) => call[1][0] === "rev-parse" && call[1].includes("--git-common-dir"),
+          ),
+        ).toHaveLength(index + 1);
+        releases[index]?.resolve(undefined);
+      }
+      await Promise.all(worktrees);
+      expect(maxActiveAdds).toBe(1);
+      expect(timerMockState.sleeps).toHaveLength(0);
+    } finally {
+      for (const release of releases) release.resolve(undefined);
+      await Promise.allSettled(worktrees);
+    }
+  });
+
+  it("keeps a late same-repository caller behind the current tail", async () => {
+    const releases = [deferred(), deferred(), deferred()];
+    const addOrder: string[] = [];
+    mockCreateWorktreeGit({
+      add: async (_repoPath, args) => {
+        const branchFlag = args.indexOf("-b");
+        const branch = branchFlag === -1 ? args.at(-1) : args[branchFlag + 1];
+        addOrder.push(branch ?? "");
+        await releases[addOrder.length - 1]?.promise;
+      },
+    });
+    const inputs = [1, 2, 3].map((number) => ({
+      ...baseInput,
+      sessionId: `api-${number}`,
+      branch: `api-${number}`,
+    }));
+    const [firstInput, secondInput, thirdInput] = inputs;
+    if (!firstInput || !secondInput || !thirdInput) {
+      throw new Error("Expected three worktree inputs");
+    }
+    const started: Array<Promise<string>> = [];
+
+    try {
+      started.push(createWorktree(firstInput));
+      started.push(createWorktree(secondInput));
+      await flushUntil(() => addOrder.length === 1);
+      releases[0]?.resolve(undefined);
+      await flushUntil(() => addOrder.length === 2);
+      started.push(createWorktree(thirdInput));
+      await Promise.resolve();
+      expect(addOrder).toEqual(["api-1", "api-2"]);
+      releases[1]?.resolve(undefined);
+      await flushUntil(() => addOrder.length === 3);
+      expect(addOrder).toEqual(["api-1", "api-2", "api-3"]);
+      releases[2]?.resolve(undefined);
+      await Promise.all(started);
+    } finally {
+      for (const release of releases) release.resolve(undefined);
+      await Promise.allSettled(started);
+    }
+  });
+
+  it("coalesces realpath aliases before resolving the common directory", async () => {
+    const firstAdd = deferred();
+    const addOrder: string[] = [];
+    mockRealpathSync.mockImplementation((path) =>
+      mockRealpathValue(path, path === "/repo/api-link" ? "/repo/api" : path.toString()),
+    );
+    mockCreateWorktreeGit({
+      add: async (repoPath) => {
+        addOrder.push(repoPath);
+        if (repoPath === "/repo/api") await firstAdd.promise;
+      },
+    });
     const first = createWorktree(baseInput);
-    await firstAddStartedPromise;
-
-    const dateNow = vi.spyOn(Date, "now");
-    dateNow.mockReturnValue(5_001);
-    dateNow.mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(5_001);
-
     const second = createWorktree({
       ...baseInput,
+      repoPath: "/repo/api-link",
       sessionId: "api-2",
       branch: "api-2",
     });
-    for (let attempt = 0; attempt < 10 && timerMockState.sleeps.length === 0; attempt += 1) {
-      await Promise.resolve();
+
+    try {
+      await flushUntil(() => addOrder.length === 1);
+      expect(
+        mockExecFileAsync.mock.calls.filter(
+          (call) => call[1][0] === "rev-parse" && call[1].includes("--git-common-dir"),
+        ),
+      ).toHaveLength(1);
+      firstAdd.resolve(undefined);
+      await Promise.all([first, second]);
+      expect(addOrder).toEqual(["/repo/api", "/repo/api-link"]);
+    } finally {
+      firstAdd.resolve(undefined);
+      await Promise.allSettled([first, second]);
     }
+  });
 
-    expect(timerMockState.sleeps).toHaveLength(1);
-    expect(events).toEqual(["worktree prune", "fetch", "first worktree add start"]);
+  it("starts the file-lock deadline after local queue admission", async () => {
+    const firstAdd = deferred();
+    let addCount = 0;
+    let now = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const lockPath = "/repo/api/.git/spur-workspace.lock";
+    let lockAttempts = 0;
+    mockLinkSync.mockImplementation((source: string, target: string) => {
+      if (target === lockPath && (lockAttempts += 1) === 2) {
+        fsMockState.files.set(lockPath, `${process.pid}:foreign-owner\n`);
+        throw fsError("EEXIST");
+      }
+      fsMockState.linkFile(source, target);
+    });
+    mockCreateWorktreeGit({
+      add: async () => {
+        addCount += 1;
+        if (addCount === 1) await firstAdd.promise;
+      },
+    });
+    const first = createWorktree(baseInput);
+    const second = createWorktree({ ...baseInput, sessionId: "api-2", branch: "api-2" });
 
-    firstAddRelease();
-    await first;
-    timerMockState.sleeps.shift()?.();
-    await second;
-    dateNow.mockRestore();
+    try {
+      await flushUntil(() => addCount === 1);
+      now = 5 * 60_000 + 1;
+      firstAdd.resolve(undefined);
+      await first;
+      await flushUntil(() => timerMockState.sleeps.length === 1);
+      fsMockState.files.delete(lockPath);
+      timerMockState.sleeps.shift()?.();
+      await second;
+      expect(addCount).toBe(2);
+    } finally {
+      firstAdd.resolve(undefined);
+      fsMockState.files.delete(lockPath);
+      for (const resolveSleep of timerMockState.sleeps.splice(0)) resolveSleep();
+      await Promise.allSettled([first, second]);
+      dateNow.mockRestore();
+    }
+  });
 
-    expect(events).toEqual([
-      "worktree prune",
-      "fetch",
-      "first worktree add start",
-      "first worktree add end",
-      "worktree prune",
-      "fetch",
-      "second worktree add start",
+  it("bounds same-repository queue wait when the head stays active", async () => {
+    vi.useFakeTimers();
+    const firstAdd = deferred();
+    let addCount = 0;
+    mockCreateWorktreeGit({
+      add: async () => {
+        addCount += 1;
+        if (addCount === 1) await firstAdd.promise;
+      },
+    });
+    const first = createWorktree(baseInput);
+    const second = createWorktree({ ...baseInput, sessionId: "api-2", branch: "api-2" });
+
+    try {
+      await flushUntil(() => addCount === 1);
+      const secondRejection = expect(second).rejects.toThrow(
+        "Timed out waiting for workspace git metadata queue: /repo/api",
+      );
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await secondRejection;
+      expect(addCount).toBe(1);
+
+      firstAdd.resolve(undefined);
+      await first;
+      await expect(
+        createWorktree({ ...baseInput, sessionId: "api-3", branch: "api-3" }),
+      ).resolves.toBe("/tmp/spur-worktrees/api/api-3");
+    } finally {
+      firstAdd.resolve(undefined);
+      await Promise.allSettled([first, second]);
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the queue when common-directory resolution fails", async () => {
+    const firstProbe = deferred<string>();
+    let probeCount = 0;
+    mockCreateWorktreeGit({
+      commonDir: async () => {
+        probeCount += 1;
+        if (probeCount === 1) return firstProbe.promise;
+        return "/repo/api/.git";
+      },
+    });
+    const first = createWorktree(baseInput);
+    const second = createWorktree({ ...baseInput, sessionId: "api-2", branch: "api-2" });
+
+    try {
+      await flushUntil(() => probeCount === 1);
+      const probeError = new Error("common directory unavailable");
+      firstProbe.reject(probeError);
+      await expect(first).rejects.toBe(probeError);
+      await expect(
+        withTimeout(second, 1_000, "queued worktree did not run after probe failure"),
+      ).resolves.toBe("/tmp/spur-worktrees/api/api-2");
+      await expect(
+        createWorktree({ ...baseInput, sessionId: "api-3", branch: "api-3" }),
+      ).resolves.toBe("/tmp/spur-worktrees/api/api-3");
+    } finally {
+      firstProbe.reject(new Error("cleanup"));
+      await Promise.allSettled([first, second]);
+    }
+  });
+
+  it("runs distinct repositories concurrently", async () => {
+    const releases = new Map([
+      ["/repo/api", deferred()],
+      ["/repo/web", deferred()],
     ]);
+    const active = new Set<string>();
+    mockCreateWorktreeGit({
+      add: async (repoPath) => {
+        active.add(repoPath);
+        await releases.get(repoPath)?.promise;
+        active.delete(repoPath);
+      },
+    });
+    const api = createWorktree(baseInput);
+    const web = createWorktree({
+      ...baseInput,
+      repoPath: "/repo/web",
+      projectId: "web",
+      sessionId: "web-1",
+      branch: "web-1",
+    });
+
+    try {
+      await flushUntil(() => active.size === 2);
+      expect(active).toEqual(new Set(["/repo/api", "/repo/web"]));
+      for (const release of releases.values()) release.resolve(undefined);
+      await Promise.all([api, web]);
+    } finally {
+      for (const release of releases.values()) release.resolve(undefined);
+      await Promise.allSettled([api, web]);
+    }
   });
 
   it("does not remove a fresh metadata lock when stale cleanup races with another waiter", async () => {
@@ -471,26 +727,28 @@ describe("createWorktree", () => {
     });
 
     const worktree = createWorktree(baseInput);
-    for (let attempt = 0; attempt < 10 && timerMockState.sleeps.length === 0; attempt += 1) {
-      await Promise.resolve();
+    try {
+      await flushUntil(() => timerMockState.sleeps.length === 1);
+      expect(fsMockState.files.get(lockPath)).toBe(`${freshContent}\n`);
+      expect(
+        mockExecFileAsync.mock.calls.some(
+          (call) =>
+            call[0] === "git" &&
+            Array.isArray(call[1]) &&
+            call[1][0] === "worktree" &&
+            call[1][1] === "add",
+        ),
+      ).toBe(false);
+
+      fsMockState.files.delete(lockPath);
+      timerMockState.sleeps.shift()?.();
+      await expect(worktree).resolves.toBe("/tmp/spur-worktrees/api/api-1");
+    } finally {
+      fsMockState.files.delete(lockPath);
+      for (const resolveSleep of timerMockState.sleeps.splice(0)) resolveSleep();
+      await Promise.allSettled([worktree]);
+      kill.mockRestore();
     }
-
-    expect(timerMockState.sleeps).toHaveLength(1);
-    expect(fsMockState.files.get(lockPath)).toBe(`${freshContent}\n`);
-    expect(
-      mockExecFileAsync.mock.calls.some(
-        (call) =>
-          call[0] === "git" &&
-          Array.isArray(call[1]) &&
-          call[1][0] === "worktree" &&
-          call[1][1] === "add",
-      ),
-    ).toBe(false);
-
-    fsMockState.files.delete(lockPath);
-    timerMockState.sleeps.shift()?.();
-    await expect(worktree).resolves.toBe("/tmp/spur-worktrees/api/api-1");
-    kill.mockRestore();
   });
 });
 
