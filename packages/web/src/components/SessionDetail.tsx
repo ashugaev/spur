@@ -18,7 +18,12 @@ import { BusyContent } from "@/components/BusyContent";
 import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
-import { ModelSelect } from "@/components/ModelSelect";
+import { ModelReasoningField } from "@/components/ModelReasoningField";
+import {
+  initialReasoningIntent,
+  serializeReasoningIntent,
+  type ReasoningIntent,
+} from "@/lib/reasoning-effort";
 import { TokenCount } from "@/components/TokenCount";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
@@ -1653,6 +1658,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  const [respawnReasoningIntent, setRespawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself.
   // Submit gates on this, not on `respawnModel === null` — a settled-empty
   // catalog also has a null model but is a valid, submittable state.
@@ -1666,6 +1674,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
+  const [handoffReasoningIntent, setHandoffReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself.
   // Submit gates on this, not on `handoffModel === null` — a settled-empty
   // catalog also has a null model but is a valid, submittable state.
@@ -1686,6 +1697,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
   const [deskSpawnModel, setDeskSpawnModel] = useState<string | null>(null);
+  const [deskSpawnReasoningIntent, setDeskSpawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   const [deskSpawnModelResolved, setDeskSpawnModelResolved] = useState(false);
   const deskSpawnDefaults = useResolvedSpawnDefaults(
     deskSpawnOpen && session ? session.projectId : "",
@@ -2271,6 +2285,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           prompt: nextPrompt,
           agent: respawnAgent,
           model: respawnModel,
+          reasoningIntent: respawnReasoningIntent,
           attachments: respawnAttachments,
           startupAttachmentIds: respawnStartupAttachmentIds,
         },
@@ -2349,6 +2364,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
     setHandoffAgent(defaultAgent);
     setHandoffModel(null);
+    setHandoffReasoningIntent(
+      initialReasoningIntent(defaultAgent === session.agent, session.reasoningEffort),
+    );
     setHandoffOpen(true);
   }, [session]);
 
@@ -2360,6 +2378,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       // Only the settled-empty-catalog case omits `model`; every other model
       // state (including a manual pick or a resolved default) sends it.
       if (handoffModel !== null) payload.model = handoffModel;
+      const reasoningEffort = serializeReasoningIntent(handoffReasoningIntent);
+      if (reasoningEffort !== undefined) payload.reasoningEffort = reasoningEffort;
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
@@ -2384,6 +2404,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
     setDeskSpawnModel(null);
+    setDeskSpawnReasoningIntent(initialReasoningIntent(false));
     setDeskSpawnModelResolved(false);
     setDeskSpawnPrompt("");
     setDeskSpawnBranch(session.branch ?? "");
@@ -2404,6 +2425,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           prompt: nextPrompt,
           agent: deskSpawnAgent,
           model: deskSpawnModel,
+          reasoningIntent: deskSpawnReasoningIntent,
           attachments: deskSpawnAttachments,
           branch: deskSpawnBranch,
           planMode: deskSpawnPlanMode,
@@ -2865,6 +2887,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     // the agent's catalog would stay selected and submittable). Passing
     // carry lets the resolver re-derive the same value, filtered.
     setRespawnModel(null);
+    setRespawnReasoningIntent(initialReasoningIntent(true, session.reasoningEffort));
     setRespawnOpen(true);
   }, [session]);
 
@@ -4148,6 +4171,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {handoffOpen && session && handoffAgent ? (
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="handoff-modal-title"
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
                 if (event.target === event.currentTarget && busyAction !== "handoff") {
@@ -4170,7 +4196,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }}
               >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2
+                    id="handoff-modal-title"
+                    className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                  >
                     Handoff
                   </h2>
                   <button
@@ -4196,22 +4225,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     Spur builds the main handoff prompt from this session&apos;s task, links,
                     branch, and workspace. Add optional notes below.
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <AgentSelect
                       ariaLabel="Handoff agent"
                       onChange={(next) => {
                         setHandoffAgent(next);
                         setHandoffModel(null);
+                        setHandoffReasoningIntent(
+                          next === session.agent
+                            ? { kind: "clear" }
+                            : initialReasoningIntent(false),
+                        );
                       }}
                       value={handoffAgent}
                     />
-                    <div className="min-w-40 flex-1">
-                      <ModelSelect
+                    <div className="contents">
+                      <ModelReasoningField
+                        submitting={busyAction === "handoff"}
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
                         carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
-                        onResolvedChange={setHandoffModelResolved}
+                        onValidityChange={setHandoffModelResolved}
+                        lifecycle
+                        reasoningLabel="Handoff reasoning"
+                        reasoningIntent={handoffReasoningIntent}
+                        onReasoningChange={setHandoffReasoningIntent}
+                        projectReasoningEffort={handoffSpawnDefaults.reasoningEffort}
                         spawnDefaults={handoffSpawnDefaults}
                         value={handoffModel}
                       />
@@ -4289,6 +4329,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 kind: "respawn",
                 model: {
                   value: respawnModel,
+                  reasoningIntent: respawnReasoningIntent,
+                  onReasoningChange: setRespawnReasoningIntent,
                   onChange: setRespawnModel,
                   spawnDefaults: respawnSpawnDefaults,
                   carry: { agent: session.agent, model: session.model },
@@ -4343,6 +4385,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAgentChange={(next) => {
                 setRespawnAgent(next);
                 setRespawnModel(null);
+                setRespawnReasoningIntent(
+                  next === session.agent ? { kind: "clear" } : initialReasoningIntent(false),
+                );
               }}
               onClose={() => setRespawnOpen(false)}
               onPromptChange={setRespawnPrompt}
@@ -4383,6 +4428,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 kind: "desk",
                 model: {
                   value: deskSpawnModel,
+                  reasoningIntent: deskSpawnReasoningIntent,
+                  onReasoningChange: setDeskSpawnReasoningIntent,
                   onChange: setDeskSpawnModel,
                   spawnDefaults: deskSpawnDefaults,
                   carry: { agent: session.agent, model: session.model },
@@ -4401,6 +4448,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAgentChange={(next) => {
                 setDeskSpawnAgent(next);
                 setDeskSpawnModel(null);
+                setDeskSpawnReasoningIntent(initialReasoningIntent(false));
                 setDeskSpawnModelResolved(false);
               }}
               onClose={() => setDeskSpawnOpen(false)}

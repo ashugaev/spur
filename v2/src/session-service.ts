@@ -113,7 +113,11 @@ import {
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
-import { resolveCursorLaunchModel, validateOpenCodeModel } from "./agents/models.js";
+import {
+  resolveAgentReasoningEffort,
+  resolveCursorLaunchModel,
+  validateOpenCodeModel,
+} from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeCompacting,
@@ -1586,6 +1590,9 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
   mcpBindings?: SidecarMcpBinding[];
   mcpExclude?: string[];
 }) {
@@ -1601,6 +1608,9 @@ async function setupSessionAgentHooks(args: {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
+    ...(args.model !== undefined ? { model: args.model } : {}),
+    ...(args.reasoningEffort !== undefined ? { reasoningEffort: args.reasoningEffort } : {}),
+    ...(args.reasoningVariantNames ? { reasoningVariantNames: args.reasoningVariantNames } : {}),
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
@@ -1649,6 +1659,8 @@ function withAgentModeOptions(
     opencodeConfigContent?: string;
     codexArgs?: string[];
     reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
+    model?: string;
   },
   modes: { planMode: boolean; restrictWrites: boolean },
 ): {
@@ -1658,6 +1670,8 @@ function withAgentModeOptions(
   opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
 } {
@@ -1729,14 +1743,16 @@ async function probeAgentProcess(
 }
 
 function withProjectAgentOptions(
-  agent: AgentName,
-  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
+  project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
     opencodeConfigContent?: string;
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
   },
 ): {
   claudeSettingsPath?: string;
@@ -1746,13 +1762,12 @@ function withProjectAgentOptions(
   opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+  model?: string;
 } {
-  const reasoningEffort =
-    agent === "claude" || agent === "codex" ? project.reasoningEffort?.[agent] : undefined;
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -2631,33 +2646,50 @@ async function resolveAgentLaunchModel(
   agent: AgentName,
   model: string | undefined,
   explicitModel?: string,
-  validatedExplicitModel?: string,
 ): Promise<string | undefined> {
   if (agent === "cursor") {
     return resolveCursorLaunchModel(model);
   }
-  if (
-    agent === "opencode" &&
-    explicitModel !== undefined &&
-    explicitModel !== validatedExplicitModel
-  ) {
+  if (agent === "opencode" && explicitModel !== undefined) {
     return validateOpenCodeModel(explicitModel);
   }
   return model;
 }
 
-function resolveSpawnRequestLaunchModel(
+interface AgentLaunchSelection {
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+}
+
+async function resolveSpawnRequestLaunchSelection(
   request: SpawnSessionRequest,
   project: ProjectConfig,
   agent: AgentName,
-  validatedExplicitModel?: string,
-): Promise<string | undefined> {
-  return resolveAgentLaunchModel(
+  codexHomePath: string,
+  preserveModel = false,
+): Promise<AgentLaunchSelection> {
+  const effort =
+    request.reasoningEffort !== undefined
+      ? request.reasoningEffort
+      : project.reasoningEffort?.[agent];
+  const model = preserveModel
+    ? request.model
+    : resolveSpawnModel({ requestModel: request.model, resolvedAgent: agent, project });
+  if (effort !== undefined) {
+    const selection = await resolveAgentReasoningEffort(agent, model, effort, { codexHomePath });
+    return {
+      ...(selection.model !== undefined ? { model: selection.model } : {}),
+      reasoningEffort: selection.reasoningEffort,
+      ...(selection.variantNames ? { reasoningVariantNames: selection.variantNames } : {}),
+    };
+  }
+  const resolvedModel = await resolveAgentLaunchModel(
     agent,
-    resolveSpawnModel({ requestModel: request.model, resolvedAgent: agent, project }),
-    request.model,
-    validatedExplicitModel,
+    model,
+    preserveModel ? undefined : request.model,
   );
+  return resolvedModel !== undefined ? { model: resolvedModel } : {};
 }
 
 function resolveSpawnDefaultBranch(args: {
@@ -2698,6 +2730,7 @@ type SpawnPreflightSelection =
     };
 
 interface PreparedSpawn {
+  launchSelection: AgentLaunchSelection;
   request: SpawnSessionRequest;
   project: ProjectConfig;
   agent: SessionRecord["agent"];
@@ -2734,11 +2767,18 @@ export function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort | null;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
+  const reasoningEffort =
+    options?.reasoningEffort !== undefined
+      ? (options.reasoningEffort ?? undefined)
+      : agent === session.agent
+        ? session.reasoningEffort
+        : undefined;
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -2746,6 +2786,7 @@ export function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
@@ -2782,16 +2823,24 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort | null;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
   },
 ): SpawnSessionRequest {
+  const reasoningEffort =
+    options.reasoningEffort !== undefined
+      ? (options.reasoningEffort ?? undefined)
+      : options.agent === session.agent
+        ? session.reasoningEffort
+        : undefined;
   return {
     project: session.project,
     prompt: options.prompt,
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -5408,6 +5457,7 @@ export class SessionService {
     );
     return {
       model: model ?? null,
+      reasoningEffort: project.reasoningEffort?.[agent] ?? null,
       worktree: resolveSpawnWorktree(project, undefined),
     };
   }
@@ -11252,7 +11302,7 @@ export class SessionService {
       modeResolution?: "strict" | "carried";
       replacingSessionId?: string;
       admissionReservation?: symbol;
-      validatedExplicitModel?: string;
+      validatedLaunchSelection?: AgentLaunchSelection;
       closeoutOwnerTransfer?: boolean;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
@@ -11277,6 +11327,7 @@ export class SessionService {
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
+    let launchSelection: AgentLaunchSelection;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -11313,12 +11364,15 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveSpawnRequestLaunchModel(
-        request,
-        project,
-        agent,
-        options?.validatedExplicitModel,
-      );
+      launchSelection =
+        options?.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
+      resolvedModel = launchSelection.model;
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -11465,6 +11519,9 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
@@ -11615,6 +11672,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        ...launchSelection,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -11624,8 +11682,9 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
+          ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
         { planMode, restrictWrites },
@@ -12296,6 +12355,7 @@ export class SessionService {
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
+    let launchSelection: AgentLaunchSelection;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -12319,7 +12379,13 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveSpawnRequestLaunchModel(request, project, agent);
+      launchSelection = await resolveSpawnRequestLaunchSelection(
+        request,
+        project,
+        agent,
+        this.config.models.codexHome,
+      );
+      resolvedModel = launchSelection.model;
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -12368,6 +12434,9 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
@@ -12429,6 +12498,7 @@ export class SessionService {
 
       return {
         request,
+        launchSelection,
         project,
         agent,
         prompt,
@@ -12753,6 +12823,7 @@ export class SessionService {
         sessionId,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
+        ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
@@ -12762,10 +12833,10 @@ export class SessionService {
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(withProjectAgentOptions(agent, project, hookSetup), {
-          planMode,
-          restrictWrites,
-        }),
+        ...withAgentModeOptions(
+          withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
+          { planMode, restrictWrites },
+        ),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -16557,6 +16628,19 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      {
+        project: session.project,
+        ...(session.model !== undefined ? { model: session.model } : {}),
+        ...(session.reasoningEffort !== undefined
+          ? { reasoningEffort: session.reasoningEffort }
+          : {}),
+      },
+      project,
+      session.agent,
+      this.config.models.codexHome,
+      true,
+    );
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
@@ -16578,6 +16662,7 @@ export class SessionService {
     );
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
+      ...launchSelection,
       dataDir: this.config.dataDir,
       sessionId: session.id,
       worktreePath: session.worktreePath,
@@ -16590,7 +16675,7 @@ export class SessionService {
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
-    const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
+    const resolvedModel = launchSelection.model;
     // Carried the same leniency as restore()'s own resolution: an unmoded
     // session, or one whose mode was renamed/removed out from under it,
     // degrades to no-mode with a warning rather than blocking recovery.
@@ -16616,8 +16701,9 @@ export class SessionService {
     );
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(session.agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
+          ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
         { planMode, restrictWrites },
@@ -17090,6 +17176,20 @@ export class SessionService {
     }
 
     this.assertAdmissible(current.project, "restore");
+    const restoreProjectConfig = this.getProject(current.project);
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      {
+        project: current.project,
+        ...(current.model !== undefined ? { model: current.model } : {}),
+        ...(current.reasoningEffort !== undefined
+          ? { reasoningEffort: current.reasoningEffort }
+          : {}),
+      },
+      restoreProjectConfig,
+      current.agent,
+      this.config.models.codexHome,
+      true,
+    );
 
     this.logEvent("session.restore.started", {
       level: "info",
@@ -17124,12 +17224,12 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const restoreProjectConfig = this.getProject(current.project);
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig);
       mcpSidecarUpdate = mcpStart.session;
       const mcpBindings = mcpStart.mcpBindings;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
+        ...launchSelection,
         dataDir: this.config.dataDir,
         sessionId: current.id,
         worktreePath: current.worktreePath,
@@ -17174,15 +17274,16 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(current.agent, restoreProjectConfig, {
+          withProjectAgentOptions(restoreProjectConfig, {
             ...hookSetup,
+            ...launchSelection,
             ...(sessionAgentConfig.planOptions ?? {}),
           }),
           { planMode, restrictWrites },
         ),
         ...this.resolveClaudeAuthPlanOptions(current),
       };
-      const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
+      const resolvedModel = launchSelection.model;
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -17999,6 +18100,21 @@ export class SessionService {
     }
 
     const forceKillSource = request.forceKillSource === true;
+    const bootstrap = this.isUnconfiguredProjectId(session.project);
+    const respawnRequest = resolveRespawnRequest(session, {
+      ...(bootstrap ? { bootstrap: true } : {}),
+      ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.reasoningEffort !== undefined
+        ? { reasoningEffort: request.reasoningEffort }
+        : {}),
+    });
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      respawnRequest,
+      this.resolveSpawnTarget(respawnRequest, "carried").project,
+      respawnRequest.agent ?? session.agent,
+      this.config.models.codexHome,
+    );
     if (session.status !== "completed") {
       await this.ensureKillDirtyWorktreeAllowed(session, forceKillSource);
     }
@@ -18030,7 +18146,6 @@ export class SessionService {
       });
     }
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
-    const bootstrap = this.isUnconfiguredProjectId(session.project);
     // A completed record is never killed by the branch below (it's gated on
     // status !== "completed"), so it can still legitimately own a live agent
     // pane. Close that source out before spawning its replacement, or the
@@ -18050,9 +18165,13 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
       }),
       {
         modeResolution: "carried",
+        validatedLaunchSelection: launchSelection,
         closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
@@ -18119,10 +18238,19 @@ export class SessionService {
 
     try {
       const agent = parseAgentName(request.agent);
-      const validatedExplicitModel =
-        agent === "opencode" && request.model !== undefined
-          ? await resolveAgentLaunchModel(agent, request.model, request.model)
-          : undefined;
+      const carriedRequest = resolveRespawnRequest(session, {
+        agent,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
+      });
+      const launchSelection = await resolveSpawnRequestLaunchSelection(
+        carriedRequest,
+        this.getProject(session.project),
+        agent,
+        this.config.models.codexHome,
+      );
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -18198,6 +18326,9 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
+          ...(request.reasoningEffort !== undefined
+            ? { reasoningEffort: request.reasoningEffort }
+            : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
@@ -18207,7 +18338,7 @@ export class SessionService {
           admissionReservation,
           modeResolution: "carried",
           closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
-          ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
+          validatedLaunchSelection: launchSelection,
         },
       );
       this.clearCloseoutOwner(session.id);

@@ -31,6 +31,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { buildSpawnOverrides, buildSpawnSessionPayload } from "@/lib/spawn-payload";
+import { initialReasoningIntent, type ReasoningIntent } from "@/lib/reasoning-effort";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
@@ -1071,6 +1072,9 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  const [spawnReasoningIntent, setSpawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself. Submit
   // gates on this, not on `spawnModel === null` — a settled-empty catalog
   // also has a null model but is a valid, submittable state.
@@ -1610,6 +1614,7 @@ export function Dashboard() {
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
+    setSpawnReasoningIntent(draft?.reasoningIntent ?? initialReasoningIntent(false));
     setSpawnSessionMode(draft?.sessionMode ?? null);
     setSpawnBranch(draft?.branch ?? "");
     spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
@@ -1707,6 +1712,8 @@ export function Dashboard() {
       prompt: spawnPrompt,
       agent: spawnAgent,
       model: spawnModel,
+      reasoningIntent:
+        spawnReasoningIntent.kind === "explicit" ? spawnReasoningIntent : { kind: "default-new" },
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
@@ -1726,6 +1733,7 @@ export function Dashboard() {
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
+    spawnReasoningIntent,
     spawnPlanMode,
     spawnPrompt,
     spawnSelfDestruct,
@@ -1998,6 +2006,7 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
         model: spawnModel,
+        reasoningIntent: spawnReasoningIntent,
         mode: effectiveSessionMode,
         attachments: spawnAttachmentsRef.current,
         branch: spawnBranch,
@@ -2038,6 +2047,7 @@ export function Dashboard() {
         });
       setSpawnPrompt("");
       setSpawnModel(null);
+      setSpawnReasoningIntent(initialReasoningIntent(false));
       setSpawnSessionMode(null);
       setSpawnBranch("");
       spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
@@ -2890,6 +2900,8 @@ export function Dashboard() {
                 },
                 model: {
                   value: spawnModel,
+                  reasoningIntent: spawnReasoningIntent,
+                  onReasoningChange: setSpawnReasoningIntent,
                   onChange: (next) => {
                     setSpawnModel(next);
                   },
@@ -3059,6 +3071,7 @@ export function Dashboard() {
               onAgentChange={(next) => {
                 setSpawnAgent(next);
                 setSpawnModel(null);
+                setSpawnReasoningIntent(initialReasoningIntent(false));
               }}
               onClose={closeSpawnModal}
               onPromptChange={(next) => {

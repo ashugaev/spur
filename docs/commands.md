@@ -46,7 +46,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## spawn
 
-`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
 
 Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
 
@@ -62,8 +62,8 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
 `spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference).
-`spur respawn <sessionId> [--force] [--json]` (fresh id, no carryover).
-`spur handoff <sessionId> --agent <name> [--model <id>] [--notes <text>] [--json]` — hands off to another agent in the same workspace.
+`spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
+`spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; provider/model effort validation in `v2/src/session-service.ts`.
 
 ## todo
 

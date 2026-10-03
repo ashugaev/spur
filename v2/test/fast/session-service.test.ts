@@ -129,6 +129,7 @@ const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
 const validateOpenCodeModelMock = vi.fn(async (model: string): Promise<string> => model);
+const resolveAgentReasoningEffortMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
@@ -726,6 +727,7 @@ vi.mock("../../src/agents/codex.js", () => ({
 }));
 
 vi.mock("../../src/agents/models.js", () => ({
+  resolveAgentReasoningEffort: resolveAgentReasoningEffortMock,
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
   validateOpenCodeModel: validateOpenCodeModelMock,
 }));
@@ -2128,6 +2130,14 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (model: string | undefined) => model);
     validateOpenCodeModelMock.mockReset().mockImplementation(async (model: string) => model);
+    resolveAgentReasoningEffortMock
+      .mockReset()
+      .mockImplementation(
+        async (_agent: string, model: string | undefined, reasoningEffort: string) => ({
+          ...(model !== undefined ? { model } : {}),
+          reasoningEffort,
+        }),
+      );
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     // A resolved create means `new-session` landed, which is exactly when the
     // real createTmuxSidecarSession fires onCreated. Cases where nothing was
@@ -4477,6 +4487,7 @@ describe("SessionService", () => {
 
     await expect(service.spawnDefaults("api", "cursor")).resolves.toEqual({
       model: "composer-1.5",
+      reasoningEffort: null,
       worktree: true,
     });
     expect(resolveCursorLaunchModelMock).toHaveBeenCalledWith("auto");
@@ -6961,6 +6972,220 @@ describe("SessionService", () => {
     );
     expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("reasoningEffort");
   });
+
+  it("persists an explicit reasoning override instead of the project default", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          reasoningEffort: { codex: "high" },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: null,
+    });
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      reasoningEffort: "low",
+    });
+    expect(sessions.get("api-1")?.reasoningEffort).toBe("low");
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      expect.any(String),
+      expect.objectContaining({ reasoningEffort: "low" }),
+    );
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("spawnDefaults exposes current project reasoning without creating an override", async () => {
+    const config: ReturnType<typeof baseConfig> & {
+      projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
+    } = baseConfig();
+    config.projects.api!.reasoningEffort = { claude: "medium" };
+    loadConfigMock.mockReturnValue(config);
+    const service = await createDisposedSessionService();
+    await expect(service.spawnDefaults("api", "claude")).resolves.toMatchObject({
+      reasoningEffort: "medium",
+    });
+    config.projects.api!.reasoningEffort.claude = "low";
+    await expect(service.spawnDefaults("api", "claude")).resolves.toMatchObject({
+      reasoningEffort: "low",
+    });
+    expect(resolveAgentReasoningEffortMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["respawn", "handoff"] as const)(
+    "preserves reasoning intent through %s preflight and actual spawn",
+    async (action) => {
+      const config: ReturnType<typeof baseConfig> & {
+        projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
+      } = baseConfig();
+      config.projects.api!.reasoningEffort = { claude: "medium" };
+      loadConfigMock.mockReturnValue(config);
+      mockClaudeJsonlState("waiting");
+      workspaceExistsMock.mockReturnValue(true);
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const spawnSpy = vi.spyOn(service, "spawn");
+      for (const intent of [undefined, "low", null] as const) {
+        sessions.set(
+          "api-1",
+          runningSession({
+            status: action === "respawn" ? "completed" : "running",
+            reasoningEffort: "high",
+            model: "sonnet",
+          }),
+        );
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        resolveAgentReasoningEffortMock.mockClear();
+        buildAgentLaunchPlanMock.mockClear();
+        spawnSpy.mockClear();
+        await service[action]("api-1", {
+          agent: "claude",
+          ...(intent !== undefined ? { reasoningEffort: intent } : {}),
+        });
+        const effective = intent === null ? "medium" : (intent ?? "high");
+        expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+          "claude",
+          "sonnet",
+          effective,
+          expect.any(Object),
+        );
+        expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+          "claude",
+          expect.any(String),
+          expect.objectContaining({ reasoningEffort: effective }),
+        );
+        const successor = sessions.get("api-2");
+        expect(successor).toBeDefined();
+        if (intent === null) {
+          expect(successor).not.toHaveProperty("reasoningEffort");
+          expect(spawnSpy.mock.calls[0]?.[0]).not.toHaveProperty("reasoningEffort");
+        } else {
+          expect(successor?.reasoningEffort).toBe(intent ?? "high");
+          expect(spawnSpy.mock.calls[0]?.[0].reasoningEffort).toBe(intent ?? "high");
+        }
+      }
+    },
+  );
+
+  it.each(["respawn", "handoff"] as const)(
+    "drops old reasoning on agent switch or explicit clear without a project default in %s",
+    async (action) => {
+      mockClaudeJsonlState("waiting");
+      workspaceExistsMock.mockReturnValue(true);
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      for (const sourceAgent of ["claude", "codex"] as const) {
+        sessions.set(
+          "api-1",
+          runningSession({
+            agent: sourceAgent,
+            status: action === "respawn" ? "completed" : "running",
+            reasoningEffort: "high",
+            model: "sonnet",
+          }),
+        );
+        reserveNextSessionIdMock.mockResolvedValue("api-2");
+        resolveAgentReasoningEffortMock.mockClear();
+        buildAgentLaunchPlanMock.mockClear();
+        await service[action]("api-1", {
+          agent: "claude",
+          model: "sonnet",
+          ...(sourceAgent === "claude" ? { reasoningEffort: null } : {}),
+        });
+        expect(resolveAgentReasoningEffortMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-2")).not.toHaveProperty("reasoningEffort");
+        expect(buildAgentLaunchPlanMock.mock.calls[0]?.[2]).not.toHaveProperty("reasoningEffort");
+      }
+    },
+  );
+
+  it.each(["respawn", "handoff"] as const)(
+    "rejects unsupported project reasoning reached by clear before %s teardown",
+    async (action) => {
+      const config: ReturnType<typeof baseConfig> & {
+        projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
+      } = baseConfig();
+      config.projects.api!.reasoningEffort = { claude: "high" };
+      loadConfigMock.mockReturnValue(config);
+      const source = runningSession({
+        status: action === "respawn" ? "completed" : "running",
+        reasoningEffort: "low",
+        model: "haiku",
+      });
+      const sessions = createSessionStore(source);
+      workspaceExistsMock.mockReturnValue(true);
+      resolveAgentReasoningEffortMock.mockRejectedValueOnce(
+        new Error("unsupported project effort"),
+      );
+      const service = await createDisposedSessionService();
+      await expect(
+        service[action]("api-1", { agent: "claude", reasoningEffort: null }),
+      ).rejects.toThrow("unsupported project effort");
+      expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+        "claude",
+        "haiku",
+        "high",
+        expect.any(Object),
+      );
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toEqual(source);
+    },
+  );
+
+  it("rejects unsupported reasoning before allocating a session or worktree", async () => {
+    resolveAgentReasoningEffortMock.mockRejectedValueOnce(new Error("unsupported reasoningEffort"));
+    const service = await createDisposedSessionService();
+    await expect(
+      service.spawn({ project: "api", agent: "cursor", prompt: "hello", reasoningEffort: "ultra" }),
+    ).rejects.toThrow("unsupported reasoningEffort");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["respawn", "handoff"] as const)(
+    "revalidates inherited reasoning before %s tears down its source",
+    async (action) => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: action === "respawn" ? "completed" : "running",
+          reasoningEffort: "high",
+          model: "opus",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      resolveAgentReasoningEffortMock.mockRejectedValueOnce(
+        new Error("unsupported reasoningEffort for new model"),
+      );
+      const service = await createDisposedSessionService();
+      await expect(service[action]("api-1", { agent: "claude", model: "sonnet" })).rejects.toThrow(
+        "unsupported reasoningEffort for new model",
+      );
+      expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+        "claude",
+        "sonnet",
+        "high",
+        expect.any(Object),
+      );
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.status).toBe(action === "respawn" ? "completed" : "running");
+    },
+  );
 
   it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
     buildAgentLaunchPlanMock.mockImplementationOnce(
@@ -13493,6 +13718,20 @@ describe("SessionService", () => {
   });
 
   describe("resolveRespawnRequest", () => {
+    it("carries explicit reasoning only within the same agent and lets requests override it", async () => {
+      const { resolveRespawnRequest } = await loadSessionServiceModule();
+      const session = runningSession({ status: "completed", reasoningEffort: "high" });
+      expect(resolveRespawnRequest(session).reasoningEffort).toBe("high");
+      expect(resolveRespawnRequest(session, { model: "sonnet" }).reasoningEffort).toBe("high");
+      expect(resolveRespawnRequest(session, { reasoningEffort: null })).not.toHaveProperty(
+        "reasoningEffort",
+      );
+      expect(resolveRespawnRequest(session, { agent: "codex" }).reasoningEffort).toBeUndefined();
+      expect(
+        resolveRespawnRequest(session, { agent: "codex", reasoningEffort: "low" }).reasoningEffort,
+      ).toBe("low");
+      expect(resolveRespawnRequest(runningSession()).reasoningEffort).toBeUndefined();
+    });
     it("forwards the terminal session's claudeAccountId so respawn keeps the rotated account", async () => {
       const { resolveRespawnRequest } = await loadSessionServiceModule();
       const request = resolveRespawnRequest(
@@ -32490,58 +32729,94 @@ describe("SessionService", () => {
     expect(inputLogEntries("api-1")).toEqual([]);
   });
 
-  it("restores OpenCode from the stored native session id without newest-session discovery", async () => {
-    const nativeSessionId = "ses_exact_stored";
-    createSessionStore(
-      runningSession({
-        agent: "opencode",
-        agentSessionId: nativeSessionId,
-        launchCommand: "opencode --auto",
-      }),
-    );
-    buildAgentRestorePlanMock.mockImplementation(
-      async (
-        agent: string,
-        _worktreePath: string,
-        initialMessage: string,
-        options?: { agentSessionId?: string },
-      ) => ({
+  it.each([undefined, "high"] as const)(
+    "restores OpenCode native identity with live defaults or explicit effort %s",
+    async (reasoningEffort) => {
+      const nativeSessionId = "ses_exact_stored";
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            reasoningEffort: { opencode: "low" },
+          },
+        },
+      });
+      resolveAgentReasoningEffortMock.mockImplementationOnce(async (_agent, model, effort) => ({
+        model,
+        reasoningEffort: effort,
+        variantNames: ["low", "high", "custom"],
+      }));
+      createSessionStore(
+        runningSession({
+          agent: "opencode",
+          model: "provider/model",
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+          agentSessionId: nativeSessionId,
+          launchCommand: "opencode --auto",
+        }),
+      );
+      buildAgentRestorePlanMock.mockImplementation(
+        async (
+          agent: string,
+          _worktreePath: string,
+          initialMessage: string,
+          options?: { agentSessionId?: string },
+        ) => ({
+          agent,
+          launchCommand: `opencode --auto --session ${options?.agentSessionId ?? "missing"}`,
+          initialMessage,
+          readyMarkers: ["OpenCode"],
+        }),
+      );
+      buildAgentResumePlanMock.mockImplementation((agent: string, agentSessionId: string) => ({
         agent,
-        launchCommand: `opencode --auto --session ${options?.agentSessionId ?? "missing"}`,
-        initialMessage,
+        launchCommand: `opencode --auto --session ${agentSessionId}`,
         readyMarkers: ["OpenCode"],
-      }),
-    );
-    buildAgentResumePlanMock.mockImplementation((agent: string, agentSessionId: string) => ({
-      agent,
-      launchCommand: `opencode --auto --session ${agentSessionId}`,
-      readyMarkers: ["OpenCode"],
-    }));
-    findAgentSessionIdMock.mockResolvedValue("ses_wrong_newest");
-    mockExitedThenRestoredProcess();
+      }));
+      findAgentSessionIdMock.mockResolvedValue("ses_wrong_newest");
+      mockExitedThenRestoredProcess();
 
-    const service = await createDisposedSessionService();
-    await service.restore("api-1");
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
 
-    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
-      "opencode",
-      "/tmp/spur-worktrees/api/api-1",
-      expect.any(String),
-      expect.objectContaining({ agentSessionId: nativeSessionId }),
-    );
-    expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
-      "opencode",
-      nativeSessionId,
-      `opencode --auto --session ${nativeSessionId}`,
-      expect.any(Object),
-    );
-    expect(findAgentSessionIdMock).not.toHaveBeenCalled();
-    expect(createTmuxSessionMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        launchCommand: `opencode --auto --session ${nativeSessionId}`,
-      }),
-    );
-  });
+      expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+        "opencode",
+        "/tmp/spur-worktrees/api/api-1",
+        expect.any(String),
+        expect.objectContaining({ agentSessionId: nativeSessionId }),
+      );
+      expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+        "opencode",
+        nativeSessionId,
+        `opencode --auto --session ${nativeSessionId}`,
+        expect.any(Object),
+      );
+      expect(findAgentSessionIdMock).not.toHaveBeenCalled();
+      expect(resolveAgentReasoningEffortMock).toHaveBeenCalledTimes(1);
+      expect(setupAgentHooksMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: "provider/model",
+          reasoningEffort: reasoningEffort ?? "low",
+          reasoningVariantNames: ["low", "high", "custom"],
+        }),
+      );
+      expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+        "opencode",
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({
+          reasoningEffort: reasoningEffort ?? "low",
+          reasoningVariantNames: ["low", "high", "custom"],
+        }),
+      );
+      expect(createTmuxSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          launchCommand: `opencode --auto --session ${nativeSessionId}`,
+        }),
+      );
+    },
+  );
 
   it("restores Codex from the stored native session id without newest-session discovery", async () => {
     const nativeSessionId = "codex-main-thread";

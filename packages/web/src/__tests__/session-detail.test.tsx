@@ -210,6 +210,56 @@ function firePreviewPointerEvent(
   fireEvent(element, event);
 }
 
+describe("SessionDetail reasoning validity", () => {
+  it.each(["Desk agent", "Handoff"])(
+    "settles %s choices with no stored model and survives a repeated agent choice",
+    async (opener) => {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1")
+          return new Response(JSON.stringify(sessionFixture({ model: undefined })));
+        if (url.startsWith("/api/models"))
+          return new Response(
+            JSON.stringify({
+              models: [{ id: "selected", label: "Selected", reasoningEfforts: ["low", "high"] }],
+              defaultReasoningEfforts: ["low", "high"],
+            }),
+          );
+        if (url.includes("spawn-defaults"))
+          return new Response(
+            JSON.stringify({ model: "selected", worktree: true, reasoningEffort: null }),
+          );
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "" }));
+        return new Response(JSON.stringify({}));
+      });
+      render(<SessionDetail sessionId="api-a1" />);
+      fireEvent.click(await screen.findByRole("button", { name: opener }));
+      const surface = opener === "Desk agent" ? "Desk spawn" : "Handoff";
+      expect(screen.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
+      const submit = screen
+        .getAllByRole("button", { name: opener === "Desk agent" ? /^spawn$/i : /^handoff$/i })
+        .at(-1)!;
+      if (opener === "Desk agent")
+        fireEvent.change(screen.getByRole("textbox", { name: "Desk agent prompt" }), {
+          target: { value: "Verify reasoning" },
+        });
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: `${surface} model` })).toHaveTextContent(
+          "Selected",
+        ),
+      );
+      await waitFor(() => expect(submit).toBeEnabled());
+      const agent = screen.getByRole("combobox", { name: `${surface} agent` }) as HTMLSelectElement;
+      fireEvent.change(agent, { target: { value: agent.value } });
+      fireEvent.change(screen.getByRole("combobox", { name: `${surface} reasoning` }), {
+        target: { value: "high" },
+      });
+      await waitFor(() => expect(submit).toBeEnabled());
+    },
+  );
+});
+
 describe("SessionDetail header", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

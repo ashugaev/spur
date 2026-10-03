@@ -2,27 +2,356 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as OpenCode from "../../src/agents/opencode.js";
+import type * as Claude from "../../src/agents/claude.js";
 
-const { execFileMock } = vi.hoisted(() => ({
+const { execFileMock, readOpenCodeJsonMock, claudeCapabilitiesMock } = vi.hoisted(() => ({
   execFileMock: vi.fn(),
+  readOpenCodeJsonMock: vi.fn(),
+  claudeCapabilitiesMock: vi.fn(),
 }));
 const originalPath = process.env["PATH"];
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
+  spawn: vi.fn(),
+}));
+
+vi.mock("../../src/agents/claude.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof Claude>()),
+  discoverClaudeModelCapabilities: claudeCapabilitiesMock,
+}));
+
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof OpenCode>()),
+  readOpenCodeJson: readOpenCodeJsonMock,
 }));
 
 import {
   listAgentModels,
+  listAgentModelCatalog,
   parseCursorModelsOutput,
   pickCursorNormalModelId,
   resolveCursorLaunchModel,
   parseOpenCodeModelsOutput,
   validateOpenCodeModel,
+  parseOpenCodeVerboseModelsOutput,
+  resolveAgentReasoningEffort,
+  AgentReasoningEffortError,
 } from "../../src/agents/models.js";
+import type { ProviderReasoningEffort } from "../../src/types.js";
 
 beforeEach(() => {
   execFileMock.mockReset();
+  readOpenCodeJsonMock.mockReset();
+  claudeCapabilitiesMock.mockReset().mockResolvedValue([
+    ...["opus", "sonnet", "fable"].map((value) => ({
+      value,
+      displayName: value.charAt(0).toUpperCase() + value.slice(1),
+      supportsEffort: true,
+      supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    })),
+    { value: "haiku", displayName: "Haiku", supportsEffort: false, supportedEffortLevels: [] },
+  ]);
+});
+
+describe("resolveAgentReasoningEffort", () => {
+  it("uses authoritative Claude model capabilities for catalog and validation", async () => {
+    const catalog = await listAgentModelCatalog("claude");
+    expect(catalog.defaultReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(catalog.models.find((model) => model.id === "haiku")?.reasoningEfforts).toEqual([]);
+    await expect(resolveAgentReasoningEffort("claude", "haiku", "high")).rejects.toThrow(
+      "not available",
+    );
+    claudeCapabilitiesMock.mockRejectedValue(new Error("offline"));
+    expect((await listAgentModelCatalog("claude")).reasoningError).toContain("unavailable");
+    await expect(resolveAgentReasoningEffort("claude", "sonnet", "high")).rejects.toThrow(
+      "capabilities unavailable",
+    );
+  });
+
+  it("matches Claude custom IDs and resolved IDs without model-version tables", async () => {
+    claudeCapabilitiesMock.mockResolvedValue([
+      {
+        value: "custom",
+        resolvedModel: "resolved",
+        displayName: "Fable",
+        supportsEffort: true,
+        supportedEffortLevels: ["max", "low", "max"],
+      },
+    ]);
+    expect(
+      (await listAgentModelCatalog("claude")).models.find((model) => model.id === "fable")
+        ?.reasoningEfforts,
+    ).toEqual(["low", "max"]);
+    await expect(resolveAgentReasoningEffort("claude", "resolved", "max")).resolves.toEqual({
+      model: "resolved",
+      reasoningEffort: "max",
+    });
+    await expect(resolveAgentReasoningEffort("claude", "unadvertised", "max")).rejects.toThrow(
+      "capabilities unavailable",
+    );
+  });
+
+  it("advertises omitted-model Codex compatibility without inventing model rows", async () => {
+    expect(await listAgentModelCatalog("codex")).toEqual({
+      models: [],
+      defaultReasoningEfforts: ["low", "medium", "high"],
+    });
+  });
+  it.each(["low", "medium", "high", "xhigh", "max"] as const)(
+    "accepts Claude %s",
+    async (effort) => {
+      await expect(resolveAgentReasoningEffort("claude", "opus", effort)).resolves.toEqual({
+        model: "opus",
+        reasoningEffort: effort,
+      });
+    },
+  );
+
+  it.each(["none", "minimal", "ultra"] as const)(
+    "rejects unsupported Claude %s",
+    async (effort) => {
+      await expect(resolveAgentReasoningEffort("claude", "opus", effort)).rejects.toThrow(
+        "not available",
+      );
+    },
+  );
+
+  it("rejects unknown runtime levels before discovery", async () => {
+    await expect(
+      resolveAgentReasoningEffort(
+        "opencode",
+        "provider/model",
+        "unknown" as ProviderReasoningEffort,
+      ),
+    ).rejects.toThrow("Invalid reasoningEffort");
+    expect(readOpenCodeJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects null fresh reasoning intent before provider discovery", async () => {
+    await expect(
+      resolveAgentReasoningEffort("claude", "sonnet", null as unknown as ProviderReasoningEffort),
+    ).rejects.toThrow("Invalid reasoningEffort");
+    expect(claudeCapabilitiesMock).not.toHaveBeenCalled();
+  });
+
+  it("classifies invalid effort as a client error", async () => {
+    await expect(resolveAgentReasoningEffort("claude", undefined, "ultra")).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    await expect(resolveAgentReasoningEffort("claude", undefined, "ultra")).rejects.toBeInstanceOf(
+      AgentReasoningEffortError,
+    );
+    await expect(resolveAgentReasoningEffort("claude", undefined, "high")).resolves.toEqual({
+      reasoningEffort: "high",
+    });
+  });
+
+  it("uses matching Codex supported_reasoning_levels", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spur-codex-effort-"));
+    await writeFile(
+      join(dir, "models_cache.json"),
+      JSON.stringify({
+        models: [
+          {
+            slug: "current",
+            visibility: "list",
+            supported_reasoning_levels: [
+              { effort: "high" },
+              { effort: "ultra" },
+              { effort: "unknown" },
+              null,
+            ],
+          },
+          { slug: "other", visibility: "list", supported_reasoning_levels: [{ effort: "max" }] },
+          { slug: "hidden", visibility: "hidden", supported_reasoning_levels: [{ effort: "max" }] },
+        ],
+      }),
+    );
+    await expect(
+      resolveAgentReasoningEffort("codex", "current", "ultra", { codexHomePath: dir }),
+    ).resolves.toEqual({ model: "current", reasoningEffort: "ultra" });
+    await expect(
+      resolveAgentReasoningEffort("codex", "current", "max", { codexHomePath: dir }),
+    ).rejects.toThrow("not available");
+    await expect(
+      resolveAgentReasoningEffort("codex", "current", "low", { codexHomePath: dir }),
+    ).rejects.toThrow("not available");
+    await expect(
+      resolveAgentReasoningEffort("codex", "hidden", "max", { codexHomePath: dir }),
+    ).resolves.toEqual({ model: "hidden", reasoningEffort: "max" });
+    expect(
+      (await listAgentModels("codex", { codexHomePath: dir })).map((model) => model.id),
+    ).toEqual(["current", "other"]);
+  });
+
+  it.each(["missing", "malformed"])(
+    "keeps low/medium/high compatibility for %s Codex cache",
+    async (kind) => {
+      const dir = await mkdtemp(join(tmpdir(), "spur-codex-effort-"));
+      if (kind === "malformed") await writeFile(join(dir, "models_cache.json"), "{broken");
+      await expect(
+        resolveAgentReasoningEffort("codex", "current", "medium", { codexHomePath: dir }),
+      ).resolves.toEqual({ model: "current", reasoningEffort: "medium" });
+      await expect(
+        resolveAgentReasoningEffort("codex", "current", "xhigh", { codexHomePath: dir }),
+      ).rejects.toThrow("not available");
+    },
+  );
+
+  function advertiseCursorModels(key: string): void {
+    process.env["SPUR_CURSOR_BIN"] = `cursor-effort-${key}`;
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (error: Error | null, result: { stdout: string }) => void,
+      ) =>
+        cb(null, {
+          stdout: [
+            "auto - Auto",
+            "family-high - High (current)",
+            "family-xhigh - Extra High",
+            "family-high-fast - High Fast",
+            "family-xhigh-fast - Extra High Fast",
+            "family-thinking-high - Thinking High",
+            "family-thinking-max - Thinking Max",
+            "legacy-extra-high - Extra High",
+          ].join("\n"),
+        }),
+    );
+  }
+
+  it.each([
+    ["family-high", "xhigh", "family-xhigh"],
+    ["family-high-fast", "xhigh", "family-xhigh-fast"],
+    ["family-thinking-high", "max", "family-thinking-max"],
+    ["family", "high", "family-high"],
+    ["legacy", "xhigh", "legacy-extra-high"],
+    ["auto", "xhigh", "family-xhigh"],
+  ] as const)("selects advertised alias for %s at %s", async (model, effort, expected) => {
+    advertiseCursorModels(model);
+    await expect(resolveAgentReasoningEffort("cursor", model, effort)).resolves.toEqual({
+      model: expected,
+      reasoningEffort: effort,
+    });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces bracket effort once and preserves other parameters", async () => {
+    advertiseCursorModels("bracket");
+    await expect(
+      resolveAgentReasoningEffort(
+        "cursor",
+        "family[context=1m,effort=low,fast=true,effort=high]",
+        "xhigh",
+      ),
+    ).resolves.toEqual({
+      model: "family[context=1m,fast=true,effort=xhigh]",
+      reasoningEffort: "xhigh",
+    });
+  });
+
+  it("rejects unsupported Cursor families and preserves fast mode on validation", async () => {
+    advertiseCursorModels("reject");
+    await expect(
+      resolveAgentReasoningEffort("cursor", "family-thinking-high-fast", "max"),
+    ).rejects.toThrow("not available");
+    await expect(resolveAgentReasoningEffort("cursor", "unknown", "high")).rejects.toThrow(
+      "not available",
+    );
+  });
+
+  it("rejects unresolved Cursor Auto", async () => {
+    process.env["SPUR_CURSOR_BIN"] = "cursor-effort-auto-only";
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (error: Error | null, result: { stdout: string }) => void,
+      ) => cb(null, { stdout: "auto - Auto" }),
+    );
+    await expect(resolveAgentReasoningEffort("cursor", "auto", "high")).rejects.toThrow(
+      "not available",
+    );
+  });
+
+  const verboseModel = (variants: Record<string, unknown>) =>
+    `provider/model\n${JSON.stringify({ id: "model", providerID: "provider", name: 'brace } and escaped \\"', variants }, null, 2)}\n`;
+
+  it("returns every advertised OpenCode variant from one bounded discovery", async () => {
+    readOpenCodeJsonMock.mockResolvedValue(
+      verboseModel({ low: {}, high: { nested: { option: true } }, "custom-thinking": {} }),
+    );
+    await expect(
+      resolveAgentReasoningEffort("opencode", "provider/model", "high"),
+    ).resolves.toEqual({
+      model: "provider/model",
+      reasoningEffort: "high",
+      variantNames: ["low", "high", "custom-thinking"],
+    });
+    expect(readOpenCodeJsonMock).toHaveBeenCalledExactlyOnceWith(["models", "--verbose"], {
+      timeoutMs: 20_000,
+    });
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("requires OpenCode model before discovery", async () => {
+    await expect(resolveAgentReasoningEffort("opencode", undefined, "high")).rejects.toThrow(
+      "requires a model",
+    );
+    expect(readOpenCodeJsonMock).not.toHaveBeenCalled();
+  });
+
+  it("wraps OpenCode discovery failure as a client error and retains its cause", async () => {
+    process.env["SPUR_OPENCODE_BIN"] = process.execPath;
+    const cause = new Error("models timed out");
+    readOpenCodeJsonMock.mockRejectedValue(cause);
+    await expect(
+      resolveAgentReasoningEffort("opencode", "provider/model", "high"),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      cause,
+      message: "Cannot validate OpenCode reasoningEffort: model list unavailable",
+    });
+  });
+
+  it("rejects unadvertised OpenCode level and model", async () => {
+    readOpenCodeJsonMock.mockResolvedValue(verboseModel({ low: {}, custom: {} }));
+    await expect(resolveAgentReasoningEffort("opencode", "provider/model", "high")).rejects.toThrow(
+      "not available",
+    );
+    await expect(resolveAgentReasoningEffort("opencode", "provider/other", "low")).rejects.toThrow(
+      'OpenCode model "provider/other" is not available',
+    );
+  });
+
+  it.each([{ "": {}, high: {} }, { " ": {}, high: {} }, { high: null }, { high: [] }])(
+    "rejects invalid OpenCode variant map %j",
+    (variants) => {
+      expect(parseOpenCodeVerboseModelsOutput(verboseModel(variants))).toEqual([]);
+    },
+  );
+
+  it("parses balanced OpenCode blocks and skips malformed or mismatched model records", () => {
+    const valid = verboseModel({ high: {} });
+    expect(
+      parseOpenCodeVerboseModelsOutput(
+        `noise\nprovider/bad\n{broken}\nprovider/wrong\n{"id":"else","providerID":"provider","variants":{"high":{}}}\n${valid}`,
+      ),
+    ).toEqual([
+      {
+        id: "provider/model",
+        label: "provider/model",
+        variantNames: ["high"],
+        reasoningEfforts: ["high"],
+      },
+    ]);
+    expect(parseOpenCodeVerboseModelsOutput('provider/model\n{"variants":')).toEqual([]);
+  });
 });
 
 afterEach(() => {
@@ -35,8 +364,8 @@ describe("listAgentModels claude", () => {
   it("returns the curated static list", async () => {
     const models = await listAgentModels("claude");
     expect(models.map((m) => m.id)).toEqual(["opus", "sonnet", "haiku", "fable"]);
-    expect(models.find((m) => m.id === "opus")?.isDefault).toBe(true);
-    expect(models.find((m) => m.id === "sonnet")?.isDefault).toBeUndefined();
+    expect(models.find((m) => m.id === "opus")?.isDefault).toBeUndefined();
+    expect(models.find((m) => m.id === "sonnet")?.isDefault).toBe(true);
   });
 });
 
@@ -55,8 +384,8 @@ describe("listAgentModels codex", () => {
     );
     const models = await listAgentModels("codex", { codexHomePath: dir });
     expect(models).toEqual([
-      { id: "gpt-current", label: "Current GPT" },
-      { id: "no-name", label: "no-name" },
+      { id: "gpt-current", label: "Current GPT", reasoningEfforts: ["low", "medium", "high"] },
+      { id: "no-name", label: "no-name", reasoningEfforts: ["low", "medium", "high"] },
     ]);
   });
 
@@ -102,7 +431,7 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     // Same graceful degrade as any other exec failure (e.g. cursor missing).
-    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true, reasoningEfforts: [] }]);
     // Asserted after the call, not inside the mock implementation: a thrown
     // expectation there would be swallowed by listCursorModels' catch-all
     // and silently pass as just another "exec failed" case.
@@ -119,7 +448,7 @@ describe("listAgentModels cursor", () => {
       },
     );
     const models = await listAgentModels("cursor");
-    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(models).toEqual([{ id: "auto", label: "Auto", isDefault: true, reasoningEfforts: [] }]);
   });
 
   it("dedupes concurrent calls onto a single exec instead of running `cursor models` twice", async () => {
@@ -140,7 +469,9 @@ describe("listAgentModels cursor", () => {
     expect(execFileMock).toHaveBeenCalledTimes(1);
     resolveExec({ stdout: ["auto - Auto"].join("\n") });
     const [firstModels, secondModels] = await Promise.all([first, second]);
-    expect(firstModels).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(firstModels).toEqual([
+      { id: "auto", label: "Auto", isDefault: true, reasoningEfforts: [] },
+    ]);
     expect(secondModels).toEqual(firstModels);
     expect(execFileMock).toHaveBeenCalledTimes(1);
   });
@@ -153,7 +484,7 @@ describe("listAgentModels cursor", () => {
       },
     );
     const failed = await listAgentModels("cursor");
-    expect(failed).toEqual([{ id: "auto", label: "Auto", isDefault: true }]);
+    expect(failed).toEqual([{ id: "auto", label: "Auto", isDefault: true, reasoningEfforts: [] }]);
     expect(execFileMock).toHaveBeenCalledTimes(1);
 
     execFileMock.mockImplementationOnce(
@@ -167,7 +498,9 @@ describe("listAgentModels cursor", () => {
       },
     );
     const succeeded = await listAgentModels("cursor");
-    expect(succeeded).toEqual([{ id: "composer-2.5", label: "Composer 2.5", isCurrent: true }]);
+    expect(succeeded).toEqual([
+      { id: "composer-2.5", label: "Composer 2.5", isCurrent: true, reasoningEfforts: [] },
+    ]);
     expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 
@@ -192,9 +525,9 @@ describe("listAgentModels cursor", () => {
     );
     const models = await listAgentModels("cursor");
     expect(models).toEqual([
-      { id: "auto", label: "Auto", isDefault: true },
-      { id: "composer-2.5", label: "Composer 2.5", isCurrent: true },
-      { id: "composer-2.5-fast", label: "Composer 2.5 Fast" },
+      { id: "auto", label: "Auto", isDefault: true, reasoningEfforts: [] },
+      { id: "composer-2.5", label: "Composer 2.5", isCurrent: true, reasoningEfforts: [] },
+      { id: "composer-2.5-fast", label: "Composer 2.5 Fast", reasoningEfforts: [] },
     ]);
   });
 });
@@ -259,11 +592,7 @@ describe("parseOpenCodeModelsOutput", () => {
   it("reports a missing executable while validating an explicit model", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
     process.env["PATH"] = "";
-    execFileMock.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
-        cb(new Error("ENOENT"));
-      },
-    );
+    readOpenCodeJsonMock.mockRejectedValue(new Error("ENOENT"));
 
     await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
       "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
@@ -272,11 +601,7 @@ describe("parseOpenCodeModelsOutput", () => {
 
   it("keeps the validation-specific error when an available executable cannot list models", async () => {
     process.env["SPUR_OPENCODE_BIN"] = process.execPath;
-    execFileMock.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
-        cb(new Error("models failed"));
-      },
-    );
+    readOpenCodeJsonMock.mockRejectedValue(new Error("models failed"));
 
     await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
       'Cannot validate OpenCode model "openai/gpt-5": model list unavailable',
@@ -286,11 +611,7 @@ describe("parseOpenCodeModelsOutput", () => {
   it("reports the missing executable instead of returning an empty catalog", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-missing";
     process.env["PATH"] = "";
-    execFileMock.mockImplementation(
-      (_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null) => void) => {
-        cb(new Error("ENOENT"));
-      },
-    );
+    readOpenCodeJsonMock.mockRejectedValue(new Error("ENOENT"));
 
     await expect(listAgentModels("opencode")).rejects.toThrow(
       "opencode executable not found: opencode-model-test-missing; install it on PATH or set SPUR_OPENCODE_BIN to an executable path",
@@ -299,14 +620,7 @@ describe("parseOpenCodeModelsOutput", () => {
 
   it("rejects an explicit model when discovery returns no models", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-empty";
-    execFileMock.mockImplementation(
-      (
-        _cmd: string,
-        _args: string[],
-        _opts: unknown,
-        cb: (err: Error | null, result: { stdout: string }) => void,
-      ) => cb(null, { stdout: "" }),
-    );
+    readOpenCodeJsonMock.mockResolvedValue("");
 
     await expect(validateOpenCodeModel("openai/gpt-5")).rejects.toThrow(
       'Cannot validate OpenCode model "openai/gpt-5": model list is empty',
@@ -315,14 +629,7 @@ describe("parseOpenCodeModelsOutput", () => {
 
   it("rejects an explicit model absent from the discovered catalog", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
-    execFileMock.mockImplementation(
-      (
-        _cmd: string,
-        _args: string[],
-        _opts: unknown,
-        cb: (err: Error | null, result: { stdout: string }) => void,
-      ) => cb(null, { stdout: "openai/gpt-5\n" }),
-    );
+    readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/missing")).rejects.toThrow(
       'OpenCode model "openai/missing" is not available',
@@ -331,15 +638,32 @@ describe("parseOpenCodeModelsOutput", () => {
 
   it("accepts an explicit model present in the discovered catalog", async () => {
     process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
-    execFileMock.mockImplementation(
-      (
-        _cmd: string,
-        _args: string[],
-        _opts: unknown,
-        cb: (err: Error | null, result: { stdout: string }) => void,
-      ) => cb(null, { stdout: "openai/gpt-5\n" }),
-    );
+    readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/gpt-5")).resolves.toBe("openai/gpt-5");
+  });
+
+  it("retains OpenCode models with missing or empty variants and exposes only canonical levels", async () => {
+    readOpenCodeJsonMock.mockResolvedValue(
+      [
+        'provider/plain\n{"id":"plain","providerID":"provider"}',
+        'provider/empty\n{"id":"empty","providerID":"provider","variants":{}}',
+        'provider/effort\n{"id":"effort","providerID":"provider","variants":{"high":{},"low":{},"custom":{}}}',
+      ].join("\n"),
+    );
+    const catalog = await listAgentModelCatalog("opencode");
+    expect(catalog.models.map((model) => model.id)).toEqual([
+      "provider/plain",
+      "provider/empty",
+      "provider/effort",
+    ]);
+    expect(catalog.models.map((model) => model.reasoningEfforts)).toEqual([
+      [],
+      [],
+      ["low", "high"],
+    ]);
+    await expect(resolveAgentReasoningEffort("opencode", "provider/plain", "high")).rejects.toThrow(
+      "not available",
+    );
   });
 });
