@@ -7,6 +7,8 @@ allowed-tools: Read, Grep, Glob, Bash
 
 GITHUB OPERATIONS VIA gh
 
+  PR review/approval continuation: read .agents/skills/github/references/review-contract.md.
+
 ISSUE PRIORITY
 
   Assign exactly one label: priority:critical, priority:medium, priority:low.

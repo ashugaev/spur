@@ -73,6 +73,11 @@ projects:
         schedule: "0 3 */3 * *"
         runOnStart: false
     triggers:
+      gh-approved:
+        source: gh
+        event: github:approved
+        send:
+          prompt: "Run $manager and $github. Read .agents/skills/github/references/review-contract.md owner gate. Explicitly recheck current lane receipts/affirmations, paginated review history, required checks and blocking threads on active PR. Resume authorized work after gate passes; leave merge to human."
       gh-changes-requested:
         source: gh
         event: github:changes_requested
