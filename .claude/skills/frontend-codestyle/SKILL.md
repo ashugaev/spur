@@ -81,5 +81,6 @@ Require Vitest unit/component and Playwright E2E coverage in GitHub CI. Follow `
 
   Playwright E2E covers 100% of UI surfaces. Each new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
   Build must pass: `pnpm --dir packages/web build`.
-  Manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually. Use the official Playwright MCP agent (`playwright-test-generator`) for new E2E tests.
+  Manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually.
+  Use `playwright-test-generator` for new E2E tests when exposed. If missing, write repository Playwright fixtures/browser tools and record the missing tool in validation notes.
   Capture screenshots for each touched state (idle, active, error, loading) and review them.
