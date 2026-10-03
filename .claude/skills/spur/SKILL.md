@@ -43,6 +43,7 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
   Config: docs/configuration.md; events: docs/configuration.md#events
+  Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
 
 EDITING THIS FILE

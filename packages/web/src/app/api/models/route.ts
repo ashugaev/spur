@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     // staying unresolved (and submit disabled) indefinitely.
     const payload = await spurRequestJson<AgentModelsResponse>(
       `/models?agent=${encodeURIComponent(agent)}`,
-      { timeoutMs: 8_000 },
+      { timeoutMs: 25_000 },
     );
     return NextResponse.json(payload);
   } catch (error) {

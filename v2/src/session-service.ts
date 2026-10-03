@@ -113,7 +113,11 @@ import {
   type CodexRolloutStateRecord,
 } from "./agents/codex.js";
 import { DEFAULT_CURSOR_MODEL, cursorConfigDirForSession } from "./agents/cursor.js";
-import { resolveCursorLaunchModel, validateOpenCodeModel } from "./agents/models.js";
+import {
+  resolveAgentReasoningEffort,
+  resolveCursorLaunchModel,
+  validateOpenCodeModel,
+} from "./agents/models.js";
 import {
   claudeUsageMenuOptionOneSelected,
   detectClaudeCompacting,
@@ -1581,6 +1585,9 @@ async function setupSessionAgentHooks(args: {
   sessionToolDir: string;
   restrictWrites: boolean;
   modelsCacheHome: string;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
   mcpBindings?: SidecarMcpBinding[];
   mcpExclude?: string[];
 }) {
@@ -1596,6 +1603,9 @@ async function setupSessionAgentHooks(args: {
     agent: args.agent,
     worktreePath: args.worktreePath,
     sessionToolDir: args.sessionToolDir,
+    ...(args.model !== undefined ? { model: args.model } : {}),
+    ...(args.reasoningEffort !== undefined ? { reasoningEffort: args.reasoningEffort } : {}),
+    ...(args.reasoningVariantNames ? { reasoningVariantNames: args.reasoningVariantNames } : {}),
     ...(args.restrictWrites ? { restrictWrites: true as const } : {}),
     ...(args.mcpBindings?.length ? { mcpBindings: args.mcpBindings } : {}),
     ...(args.agent === "codex" ? { modelsCacheHome: args.modelsCacheHome } : {}),
@@ -1644,6 +1654,8 @@ function withAgentModeOptions(
     opencodeConfigContent?: string;
     codexArgs?: string[];
     reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
+    model?: string;
   },
   modes: { planMode: boolean; restrictWrites: boolean },
 ): {
@@ -1653,6 +1665,8 @@ function withAgentModeOptions(
   opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+  model?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
 } {
@@ -1724,14 +1738,16 @@ async function probeAgentProcess(
 }
 
 function withProjectAgentOptions(
-  agent: AgentName,
-  project: Pick<ProjectConfig, "codexArgs" | "reasoningEffort">,
+  project: Pick<ProjectConfig, "codexArgs">,
   options: {
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
     opencodeConfigContent?: string;
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
   },
 ): {
   claudeSettingsPath?: string;
@@ -1741,13 +1757,12 @@ function withProjectAgentOptions(
   opencodeConfigContent?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+  model?: string;
 } {
-  const reasoningEffort =
-    agent === "claude" || agent === "codex" ? project.reasoningEffort?.[agent] : undefined;
   return {
     ...options,
     ...(project.codexArgs ? { codexArgs: project.codexArgs } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -2632,33 +2647,50 @@ async function resolveAgentLaunchModel(
   agent: AgentName,
   model: string | undefined,
   explicitModel?: string,
-  validatedExplicitModel?: string,
 ): Promise<string | undefined> {
   if (agent === "cursor") {
     return resolveCursorLaunchModel(model);
   }
-  if (
-    agent === "opencode" &&
-    explicitModel !== undefined &&
-    explicitModel !== validatedExplicitModel
-  ) {
+  if (agent === "opencode" && explicitModel !== undefined) {
     return validateOpenCodeModel(explicitModel);
   }
   return model;
 }
 
-function resolveSpawnRequestLaunchModel(
+interface AgentLaunchSelection {
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
+}
+
+async function resolveSpawnRequestLaunchSelection(
   request: SpawnSessionRequest,
   project: ProjectConfig,
   agent: AgentName,
-  validatedExplicitModel?: string,
-): Promise<string | undefined> {
-  return resolveAgentLaunchModel(
+  codexHomePath: string,
+  preserveModel = false,
+): Promise<AgentLaunchSelection> {
+  const effort =
+    request.reasoningEffort !== undefined
+      ? request.reasoningEffort
+      : project.reasoningEffort?.[agent];
+  const model = preserveModel
+    ? request.model
+    : resolveSpawnModel({ requestModel: request.model, resolvedAgent: agent, project });
+  if (effort !== undefined) {
+    const selection = await resolveAgentReasoningEffort(agent, model, effort, { codexHomePath });
+    return {
+      ...(selection.model !== undefined ? { model: selection.model } : {}),
+      reasoningEffort: selection.reasoningEffort,
+      ...(selection.variantNames ? { reasoningVariantNames: selection.variantNames } : {}),
+    };
+  }
+  const resolvedModel = await resolveAgentLaunchModel(
     agent,
-    resolveSpawnModel({ requestModel: request.model, resolvedAgent: agent, project }),
-    request.model,
-    validatedExplicitModel,
+    model,
+    preserveModel ? undefined : request.model,
   );
+  return resolvedModel !== undefined ? { model: resolvedModel } : {};
 }
 
 function resolveSpawnDefaultBranch(args: {
@@ -2699,6 +2731,7 @@ type SpawnPreflightSelection =
     };
 
 interface PreparedSpawn {
+  launchSelection: AgentLaunchSelection;
   request: SpawnSessionRequest;
   project: ProjectConfig;
   agent: SessionRecord["agent"];
@@ -2735,11 +2768,18 @@ export function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort | null;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
   const agent = options?.agent ?? session.agent;
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
+  const reasoningEffort =
+    options?.reasoningEffort !== undefined
+      ? (options.reasoningEffort ?? undefined)
+      : agent === session.agent
+        ? session.reasoningEffort
+        : undefined;
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
@@ -2747,6 +2787,7 @@ export function resolveRespawnRequest(
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent,
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(session.claudeAccountId ? { claudeAccountId: session.claudeAccountId } : {}),
     ...(session.mode !== undefined ? { mode: session.mode } : {}),
     ...(session.planMode !== undefined && { planMode: session.planMode }),
@@ -2783,16 +2824,24 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
+    reasoningEffort?: ProviderReasoningEffort | null;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
   },
 ): SpawnSessionRequest {
+  const reasoningEffort =
+    options.reasoningEffort !== undefined
+      ? (options.reasoningEffort ?? undefined)
+      : options.agent === session.agent
+        ? session.reasoningEffort
+        : undefined;
   return {
     project: session.project,
     prompt: options.prompt,
     agent: options.agent,
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     reuseWorkspaceSessionId: session.id,
     originalTaskPrompt: options.originalTaskPrompt,
     ...(session.project === SHEPHERD_PROJECT_ID ? { bareSpawnMessage: true } : {}),
@@ -5390,6 +5439,7 @@ export class SessionService {
     );
     return {
       model: model ?? null,
+      reasoningEffort: project.reasoningEffort?.[agent] ?? null,
       worktree: resolveSpawnWorktree(project, undefined),
     };
   }
@@ -11199,7 +11249,7 @@ export class SessionService {
       modeResolution?: "strict" | "carried";
       replacingSessionId?: string;
       admissionReservation?: symbol;
-      validatedExplicitModel?: string;
+      validatedLaunchSelection?: AgentLaunchSelection;
       closeoutOwnerTransfer?: boolean;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
@@ -11224,6 +11274,7 @@ export class SessionService {
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     let resolvedModel: string | undefined;
+    let launchSelection: AgentLaunchSelection;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -11260,12 +11311,15 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveSpawnRequestLaunchModel(
-        request,
-        project,
-        agent,
-        options?.validatedExplicitModel,
-      );
+      launchSelection =
+        options?.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
+      resolvedModel = launchSelection.model;
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -11412,6 +11466,9 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
@@ -11562,6 +11619,7 @@ export class SessionService {
         sessionToolDir,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
+        ...launchSelection,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
         ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
       });
@@ -11571,8 +11629,9 @@ export class SessionService {
         restrictWrites,
       });
       const planOptions = withAgentModeOptions(
-        withProjectAgentOptions(agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
+          ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
         { planMode, restrictWrites },
@@ -12243,6 +12302,7 @@ export class SessionService {
     let allowedTriggers: string[] | undefined;
     let selfDestruct: SelfDestructConfig | undefined;
     let resolvedModel: string | undefined;
+    let launchSelection: AgentLaunchSelection;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
     let reuseCtx: {
@@ -12266,7 +12326,13 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      resolvedModel = await resolveSpawnRequestLaunchModel(request, project, agent);
+      launchSelection = await resolveSpawnRequestLaunchSelection(
+        request,
+        project,
+        agent,
+        this.config.models.codexHome,
+      );
+      resolvedModel = launchSelection.model;
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -12315,6 +12381,9 @@ export class SessionService {
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
         ...(mode !== undefined ? { mode: mode.name } : {}),
         planMode,
         ...(restrictWrites ? { restrictWrites: true } : {}),
@@ -12376,6 +12445,7 @@ export class SessionService {
 
       return {
         request,
+        launchSelection,
         project,
         agent,
         prompt,
@@ -12700,6 +12770,7 @@ export class SessionService {
         sessionId,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
+        ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
         ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
@@ -12709,10 +12780,10 @@ export class SessionService {
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
-        ...withAgentModeOptions(withProjectAgentOptions(agent, project, hookSetup), {
-          planMode,
-          restrictWrites,
-        }),
+        ...withAgentModeOptions(
+          withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
+          { planMode, restrictWrites },
+        ),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -16518,6 +16589,19 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
   ): Promise<SessionRecord> {
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      {
+        project: session.project,
+        ...(session.model !== undefined ? { model: session.model } : {}),
+        ...(session.reasoningEffort !== undefined
+          ? { reasoningEffort: session.reasoningEffort }
+          : {}),
+      },
+      project,
+      session.agent,
+      this.config.models.codexHome,
+      true,
+    );
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
@@ -16539,6 +16623,7 @@ export class SessionService {
     );
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
+      ...launchSelection,
       dataDir: this.config.dataDir,
       sessionId: session.id,
       worktreePath: session.worktreePath,
@@ -16551,7 +16636,7 @@ export class SessionService {
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
-    const resolvedModel = await resolveAgentLaunchModel(session.agent, session.model);
+    const resolvedModel = launchSelection.model;
     // Carried the same leniency as restore()'s own resolution: an unmoded
     // session, or one whose mode was renamed/removed out from under it,
     // degrades to no-mode with a warning rather than blocking recovery.
@@ -16563,20 +16648,37 @@ export class SessionService {
         message,
       }),
     );
+    const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
+    const recoveryContextMessage = buildInitialMessage(
+      buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
+      recoverySidecarNames,
+      this.config.tags,
+      project.branchNaming?.regex,
+      session.selfDestruct,
+      telegramAgentInstructions(
+        project,
+        readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
+      ),
+    );
     const planOptions = {
       ...withAgentModeOptions(
-        withProjectAgentOptions(session.agent, project, {
+        withProjectAgentOptions(project, {
           ...hookSetup,
+          ...launchSelection,
           ...(sessionAgentConfig.planOptions ?? {}),
         }),
         { planMode, restrictWrites },
       ),
       ...this.resolveClaudeAuthPlanOptions(session),
     };
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, {
-      ...planOptions,
-      ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-    });
+    const baseLaunchPlan = buildAgentLaunchPlan(
+      session.agent,
+      session.agent === "opencode" ? recoveryContextMessage : session.prompt,
+      {
+        ...planOptions,
+        ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+      },
+    );
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     // A pinned claude resumes via --session-id on the native-resume attempt below;
     // only the fresh-launch fallback (on resume failure) mints a new id, since
@@ -16628,129 +16730,215 @@ export class SessionService {
     // behavior on why the pane died.
     let usedFreshLaunch = !recoveryPlan;
     let launched = false;
-    try {
-      await createTmuxSession({
-        sessionName: session.tmuxSession,
-        cwd: session.worktreePath,
-        launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-        launchScriptDir: sessionToolDir,
-        env,
-      });
-      launched = true;
-      writeSession(
-        this.config.dataDir,
-        this.applyReservedSidecars(
-          {
-            ...sessionWithAgentId,
-            status: "running",
-            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-          },
-          mcpSidecarUpdate,
-        ),
-      );
-      await waitForTmuxReady(
-        session.tmuxSession,
-        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
-        undefined,
-        { agent: session.agent },
-      );
-      // fresh:true: this session's tmux pane was just created by
-      // createTmuxSession above and may postdate the last fleet-pane
-      // snapshot, which would otherwise wrongly see it as absent and abort a
-      // genuinely successful recovery.
-      if (
-        !(await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
+    let freshOpenCodeRecord: SessionRecord | undefined;
+    const launchFreshOpenCode = async (): Promise<void> => {
+      const {
+        agentSessionId: _staleAgentSessionId,
+        error: _staleError,
+        sidecarProcs: _staleSidecarProcs,
+        ...freshBase
+      } = sessionWithAgentId;
+      let currentRetentionCandidate: SessionRecord = {
+        ...this.applyReservedSidecars(freshBase, mcpSidecarUpdate),
+        ...(Object.keys(mcpSidecarUpdate.sidecarProcs ?? {}).length > 0
+          ? { sidecarProcs: { ...mcpSidecarUpdate.sidecarProcs } }
+          : {}),
+        status: "running",
+        launchCommand: baseLaunchCommand,
+        updatedAt: nowIso(),
+      };
+      const freshPhase = { provisionalWritten: false };
+
+      try {
+        await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
+          const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
+          await createTmuxSession({
+            sessionName: session.tmuxSession,
+            cwd: session.worktreePath,
+            launchCommand: baseLaunchCommand,
+            launchScriptDir: sessionToolDir,
+            env,
+          });
+          writeSession(this.config.dataDir, currentRetentionCandidate);
+          freshPhase.provisionalWritten = true;
+          await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
             agent: session.agent,
-            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
-          },
-          { fresh: true },
-        ))
-      ) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`);
-      }
-    } catch (error) {
-      const failedAttempt = this.applyReservedSidecars(
-        { ...sessionWithAgentId, launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand },
-        mcpSidecarUpdate,
-      );
-      if (!launched) launched = await this.launchResourcesMayRemain(failedAttempt);
-      if (launched) {
-        await this.retainLaunchedError(failedAttempt, error);
-        throw error;
-      }
-      if (!recoveryPlan) {
+          });
+          if (
+            !(await agentProcessAlive(
+              {
+                tmuxSession: session.tmuxSession,
+                agent: session.agent,
+                launchCommand: baseLaunchCommand,
+              },
+              { fresh: true },
+            ))
+          ) {
+            throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+          }
+          const agentSessionId = await waitForNewOpenCodeSessionId(baseline);
+          currentRetentionCandidate = {
+            ...currentRetentionCandidate,
+            agentSessionId,
+            updatedAt: nowIso(),
+          };
+          writeSession(this.config.dataDir, currentRetentionCandidate);
+          recoveredAgentSessionId = agentSessionId;
+        });
+      } catch (error) {
+        if (
+          freshPhase.provisionalWritten ||
+          (await this.launchResourcesMayRemain(currentRetentionCandidate))
+        ) {
+          if (!freshPhase.provisionalWritten)
+            writeSession(this.config.dataDir, currentRetentionCandidate);
+          await this.retainLaunchedError(currentRetentionCandidate, error);
+        }
         throw error;
       }
 
-      const failure = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.recover.resume_failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
-        details: {
-          agent: session.agent,
-          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
-          launchCommand: recoveryPlan.launchCommand,
-          failure,
-        },
-      });
-      await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
-      usedFreshLaunch = true;
-      // Mint a fresh claude id for the fallback launch (fresh per attempt so a
-      // retry never reuses a possibly-existing transcript id) — the pinned id
-      // may already own a transcript, and claude rejects --session-id on it.
-      const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
-      const freshPlan = freshClaudeId
-        ? buildAgentLaunchPlan(session.agent, session.prompt, {
-            ...planOptions,
-            ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
-            agentSessionId: freshClaudeId,
-          })
-        : baseLaunchPlan;
-      const freshLaunchCommand = freshPlan.launchCommand;
-      recoveredAgentSessionId = freshClaudeId;
-      persistedLaunchCommand = freshLaunchCommand;
-      await createTmuxSession({
-        sessionName: session.tmuxSession,
-        cwd: session.worktreePath,
-        launchCommand: freshLaunchCommand,
-        launchScriptDir: sessionToolDir,
-        env,
-      });
-      writeSession(
-        this.config.dataDir,
-        this.applyReservedSidecars(
+      try {
+        if (
+          !recoveredAgentSessionId ||
+          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId))
+        ) {
+          throw new Error("OpenCode did not persist the launch prompt");
+        }
+      } catch (error) {
+        await this.retainLaunchedError(currentRetentionCandidate, error);
+        throw error;
+      }
+      freshOpenCodeRecord = currentRetentionCandidate;
+    };
+
+    if (session.agent === "opencode" && !recoveryPlan) {
+      await launchFreshOpenCode();
+    } else {
+      try {
+        await createTmuxSession({
+          sessionName: session.tmuxSession,
+          cwd: session.worktreePath,
+          launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+          launchScriptDir: sessionToolDir,
+          env,
+        });
+        launched = true;
+        writeSession(
+          this.config.dataDir,
+          this.applyReservedSidecars(
+            {
+              ...sessionWithAgentId,
+              status: "running",
+              launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+            },
+            mcpSidecarUpdate,
+          ),
+        );
+        await waitForTmuxReady(
+          session.tmuxSession,
+          recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+          undefined,
+          { agent: session.agent },
+        );
+        if (
+          !(await agentProcessAlive(
+            {
+              tmuxSession: session.tmuxSession,
+              agent: session.agent,
+              launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+            },
+            { fresh: true },
+          ))
+        ) {
+          throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+        }
+      } catch (error) {
+        const failedAttempt = this.applyReservedSidecars(
           {
             ...sessionWithAgentId,
-            status: "running",
-            launchCommand: freshLaunchCommand,
-            ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-            updatedAt: nowIso(),
+            launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
           },
           mcpSidecarUpdate,
-        ),
-      );
-      await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
-        agent: session.agent,
-      });
-      // fresh:true — same rationale as the resume-plan check above: this
-      // pane was just (re)created and may postdate the last fleet snapshot.
-      if (
-        !(await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
+        );
+        if (!launched) {
+          launched =
+            session.agent === "opencode"
+              ? await this.agentLaunchResourcesMayRemain(failedAttempt)
+              : await this.launchResourcesMayRemain(failedAttempt);
+        }
+        if (launched) {
+          await this.retainLaunchedError(failedAttempt, error);
+          throw error;
+        }
+        if (!recoveryPlan) throw error;
+
+        const failure = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.recover.resume_failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
+          details: {
             agent: session.agent,
-            launchCommand: freshLaunchCommand,
+            agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+            launchCommand: recoveryPlan.launchCommand,
+            failure,
           },
-          { fresh: true },
-        ))
-      ) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
-          cause: error,
         });
+        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+        usedFreshLaunch = true;
+        if (session.agent === "opencode") {
+          await launchFreshOpenCode();
+        } else {
+          const freshClaudeId = isPinnedClaude ? randomUUID() : undefined;
+          const freshPlan = freshClaudeId
+            ? buildAgentLaunchPlan(session.agent, session.prompt, {
+                ...planOptions,
+                ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+                agentSessionId: freshClaudeId,
+              })
+            : baseLaunchPlan;
+          const freshLaunchCommand = freshPlan.launchCommand;
+          recoveredAgentSessionId = freshClaudeId;
+          persistedLaunchCommand = freshLaunchCommand;
+          await createTmuxSession({
+            sessionName: session.tmuxSession,
+            cwd: session.worktreePath,
+            launchCommand: freshLaunchCommand,
+            launchScriptDir: sessionToolDir,
+            env,
+          });
+          writeSession(
+            this.config.dataDir,
+            this.applyReservedSidecars(
+              {
+                ...sessionWithAgentId,
+                status: "running",
+                launchCommand: freshLaunchCommand,
+                ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+                updatedAt: nowIso(),
+              },
+              mcpSidecarUpdate,
+            ),
+          );
+          await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
+            agent: session.agent,
+          });
+          if (
+            !(await agentProcessAlive(
+              {
+                tmuxSession: session.tmuxSession,
+                agent: session.agent,
+                launchCommand: freshLaunchCommand,
+              },
+              { fresh: true },
+            ))
+          ) {
+            throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
+              cause: error,
+            });
+          }
+        }
       }
     }
 
@@ -16763,32 +16951,15 @@ export class SessionService {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
-        message: `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
+        message:
+          session.agent === "opencode"
+            ? `${session.id} relaunched with a fresh agent process; no native resume was available, restoring task context through launch`
+            : `${session.id} relaunched with a fresh agent process; no native resume was available, resending task context`,
         details: {
           agent: session.agent,
           agentSessionId: sessionWithAgentId.agentSessionId ?? null,
         },
       });
-      const recoverySidecarNames = manualSidecarNames(resolveSessionSidecars(session, project));
-      const recoveryContextMessage = buildInitialMessage(
-        buildRestorePrompt(session.prompt, planMode, restrictWrites, mode),
-        recoverySidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        session.selfDestruct,
-        telegramAgentInstructions(
-          project,
-          readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
-        ),
-      );
-      const recoveryPaneTarget = {
-        id: session.id,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: persistedLaunchCommand,
-        worktreePath: session.worktreePath,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      };
       if (session.agent === "codex") {
         // codex's rollout-based ack lags a resume enough that waiting on it
         // here would reproduce the exact bug f79fb970f fixed for restore(): a
@@ -16801,12 +16972,20 @@ export class SessionService {
           agent: session.agent,
         });
         this.recordPaneWrite(session, writeStartedAt);
-      } else {
+      } else if (session.agent !== "opencode") {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
         // pacing of their own (claude) — lets an ack that never confirms on a
         // live pane resolve as "submit_unconfirmed" instead of throwing and
         // tearing down an otherwise-healthy relaunch.
+        const recoveryPaneTarget = {
+          id: session.id,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: persistedLaunchCommand,
+          worktreePath: session.worktreePath,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        };
         const contextSendOutcome = await this.sendAgentMessage(
           recoveryPaneTarget,
           recoveryContextMessage,
@@ -16851,7 +17030,7 @@ export class SessionService {
       submitRequeuedMessage: _replacedRequeue,
       submitFailedMessage: _replacedFailure,
       ...recoveredBase
-    } = sessionWithAgentId;
+    } = freshOpenCodeRecord ?? sessionWithAgentId;
     // finishStaleWake runs after the agent process check above confirmed the
     // new pane is live, and before any caller (send/deliverPrepared/
     // tryDeliverQueuedMessage/switchAuth, all downstream of
@@ -16958,6 +17137,20 @@ export class SessionService {
     }
 
     this.assertAdmissible(current.project, "restore");
+    const restoreProjectConfig = this.getProject(current.project);
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      {
+        project: current.project,
+        ...(current.model !== undefined ? { model: current.model } : {}),
+        ...(current.reasoningEffort !== undefined
+          ? { reasoningEffort: current.reasoningEffort }
+          : {}),
+      },
+      restoreProjectConfig,
+      current.agent,
+      this.config.models.codexHome,
+      true,
+    );
 
     this.logEvent("session.restore.started", {
       level: "info",
@@ -16992,12 +17185,12 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const restoreProjectConfig = this.getProject(current.project);
       const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig);
       mcpSidecarUpdate = mcpStart.session;
       const mcpBindings = mcpStart.mcpBindings;
       const hookSetup = await setupSessionAgentHooks({
         agent: current.agent,
+        ...launchSelection,
         dataDir: this.config.dataDir,
         sessionId: current.id,
         worktreePath: current.worktreePath,
@@ -17042,15 +17235,16 @@ export class SessionService {
         : "";
       const planOptions = {
         ...withAgentModeOptions(
-          withProjectAgentOptions(current.agent, restoreProjectConfig, {
+          withProjectAgentOptions(restoreProjectConfig, {
             ...hookSetup,
+            ...launchSelection,
             ...(sessionAgentConfig.planOptions ?? {}),
           }),
           { planMode, restrictWrites },
         ),
         ...this.resolveClaudeAuthPlanOptions(current),
       };
-      const resolvedModel = await resolveAgentLaunchModel(current.agent, current.model);
+      const resolvedModel = launchSelection.model;
       const launchPlanOptions = {
         ...planOptions,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -17867,6 +18061,21 @@ export class SessionService {
     }
 
     const forceKillSource = request.forceKillSource === true;
+    const bootstrap = this.isUnconfiguredProjectId(session.project);
+    const respawnRequest = resolveRespawnRequest(session, {
+      ...(bootstrap ? { bootstrap: true } : {}),
+      ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.reasoningEffort !== undefined
+        ? { reasoningEffort: request.reasoningEffort }
+        : {}),
+    });
+    const launchSelection = await resolveSpawnRequestLaunchSelection(
+      respawnRequest,
+      this.resolveSpawnTarget(respawnRequest, "carried").project,
+      respawnRequest.agent ?? session.agent,
+      this.config.models.codexHome,
+    );
     if (session.status !== "completed") {
       await this.ensureKillDirtyWorktreeAllowed(session, forceKillSource);
     }
@@ -17898,7 +18107,6 @@ export class SessionService {
       });
     }
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
-    const bootstrap = this.isUnconfiguredProjectId(session.project);
     // A completed record is never killed by the branch below (it's gated on
     // status !== "completed"), so it can still legitimately own a live agent
     // pane. Close that source out before spawning its replacement, or the
@@ -17918,9 +18126,13 @@ export class SessionService {
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
       }),
       {
         modeResolution: "carried",
+        validatedLaunchSelection: launchSelection,
         closeoutOwnerTransfer: session.closeoutOwner === true,
         ...(request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : {}),
       },
@@ -17987,10 +18199,19 @@ export class SessionService {
 
     try {
       const agent = parseAgentName(request.agent);
-      const validatedExplicitModel =
-        agent === "opencode" && request.model !== undefined
-          ? await resolveAgentLaunchModel(agent, request.model, request.model)
-          : undefined;
+      const carriedRequest = resolveRespawnRequest(session, {
+        agent,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined
+          ? { reasoningEffort: request.reasoningEffort }
+          : {}),
+      });
+      const launchSelection = await resolveSpawnRequestLaunchSelection(
+        carriedRequest,
+        this.getProject(session.project),
+        agent,
+        this.config.models.codexHome,
+      );
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -18066,6 +18287,9 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
+          ...(request.reasoningEffort !== undefined
+            ? { reasoningEffort: request.reasoningEffort }
+            : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
           ...(remainingPipelineSteps ? { pipelineSteps: remainingPipelineSteps } : {}),
@@ -18075,7 +18299,7 @@ export class SessionService {
           admissionReservation,
           modeResolution: "carried",
           closeoutOwnerTransfer: sourceForSpawn.closeoutOwner === true,
-          ...(validatedExplicitModel !== undefined ? { validatedExplicitModel } : {}),
+          validatedLaunchSelection: launchSelection,
         },
       );
       this.clearCloseoutOwner(session.id);
@@ -20218,6 +20442,10 @@ export class SessionService {
 
   private async launchResourcesMayRemain(session: SessionRecord): Promise<boolean> {
     if (Object.keys(session.sidecarProcs ?? {}).length > 0) return true;
+    return this.agentLaunchResourcesMayRemain(session);
+  }
+
+  private async agentLaunchResourcesMayRemain(session: SessionRecord): Promise<boolean> {
     try {
       const runtime = await this.readRuntimeSnapshot(session, { fresh: true });
       return runtime.runtimeAlive || runtime.probeUnresponsive;

@@ -16,6 +16,7 @@ interface RespawnBody {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: string | null;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -23,6 +24,7 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const body = (await request.json().catch(() => ({}))) as RespawnBody;
     const payload: Record<string, unknown> = {};
+    if (body.reasoningEffort !== undefined) payload.reasoningEffort = body.reasoningEffort;
     if (typeof body.prompt === "string") payload.prompt = body.prompt;
     if (Array.isArray(body.attachments) && body.attachments.length > 0) {
       payload.attachments = body.attachments;

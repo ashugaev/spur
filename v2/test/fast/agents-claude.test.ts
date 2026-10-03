@@ -92,6 +92,16 @@ describe("buildClaudePlan", () => {
     expect(plan.launchCommand).toContain("--effort medium");
   });
 
+  it.each(["xhigh", "max"] as const)("transports %s on launch and resume", (reasoningEffort) => {
+    for (const command of [
+      buildClaudePlan("prompt", { reasoningEffort }).launchCommand,
+      buildClaudeResumePlan("session", "claude", { reasoningEffort }).launchCommand,
+    ]) {
+      expect(command).toContain(`--effort ${reasoningEffort}`);
+      expect(command.match(/--effort/g)).toHaveLength(1);
+    }
+  });
+
   it("uses SPUR_CLAUDE_BIN override", () => {
     process.env["SPUR_CLAUDE_BIN"] = "/opt/claude-bin";
     const plan = buildClaudePlan("prompt");
@@ -442,8 +452,10 @@ describe("buildClaudeRestorePlan", () => {
     const result = await buildClaudeRestorePlan("/worktree/path", "prompt", {
       settingsPath: "/settings.json",
       planMode: true,
+      reasoningEffort: "max",
     });
     expect(result?.launchCommand).toContain("--settings '/settings.json'");
     expect(result?.launchCommand).toContain("--permission-mode plan");
+    expect(result?.launchCommand).toContain("--effort max");
   });
 });

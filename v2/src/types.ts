@@ -476,6 +476,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
@@ -748,6 +749,17 @@ export interface ProjectConfig {
   staleAfterMinutes?: number;
 }
 
+export type ProviderReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+export type AgentReasoningEffortConfig = Partial<Record<AgentName, ProviderReasoningEffort>>;
+
 export interface TokenUsageTotals {
   inputTokens: number;
   outputTokens: number;
@@ -814,11 +826,6 @@ export type SessionTokenUsageView =
       unenforced: boolean;
       reason: "structured_usage_unavailable";
     };
-
-export type ProviderReasoningEffort = "low" | "medium" | "high";
-export type AgentReasoningEffortConfig = Partial<
-  Record<"claude" | "codex", ProviderReasoningEffort>
->;
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
@@ -1100,6 +1107,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -1424,6 +1432,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -1681,11 +1690,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort | null;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
 }
 
@@ -1727,6 +1738,7 @@ export interface ProjectListEntry {
 // or built-in default.
 export interface SpawnDefaultsResponse {
   model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
   worktree: boolean;
 }
 

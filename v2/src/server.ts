@@ -8,7 +8,7 @@ import {
   SessionLifecycleError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { listAgentModels } from "./agents/models.js";
+import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
@@ -1171,7 +1171,10 @@ export async function startServer(
           return;
         }
         sendJson(response, 200, {
-          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+          agent,
+          ...(await listAgentModelCatalog(agent, {
+            codexHomePath: service.config.models.codexHome,
+          })),
         });
         return;
       }
@@ -2073,6 +2076,7 @@ export async function startServer(
         return;
       }
       if (
+        error instanceof AgentReasoningEffortError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||

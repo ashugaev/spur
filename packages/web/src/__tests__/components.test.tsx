@@ -337,6 +337,9 @@ describe("Dashboard", () => {
       );
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -1959,6 +1962,9 @@ describe("Dashboard", () => {
       fireEvent.change(prompt, { target: { value } });
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn", exact: true })).toBeEnabled();
       });
       fireEvent.keyDown(prompt, keydown);
 

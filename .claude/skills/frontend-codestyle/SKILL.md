@@ -82,4 +82,5 @@ VALIDATION
   Add matching Playwright E2E coverage for each new or changed UI surface in `packages/web/tests/` in the same commit.
   Build must pass: `pnpm --dir packages/web build`.
   Manual browser check: use available browser tooling on branch's real isolated-ui sidecar; verify touched scenarios and secure-context behavior through its HTTPS URL when required.
+  Use `playwright-test-generator` for new E2E tests when exposed. If missing, write repository Playwright fixtures/browser tools and record the missing tool in validation notes.
   Capture screenshots for each touched state (idle, active, error, loading) and review them.

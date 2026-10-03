@@ -74,6 +74,7 @@ interface AgentPlanOptions {
   codexHomePath?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -209,6 +210,9 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -301,11 +305,13 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -360,11 +366,10 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 // (b) launchCommand's first token is always agentExecutableCommand(agent)
 // (executable.ts:33-36), never a user-authored `exec ...` prefix — the
 // `exec $BIN "$@"` shape in issue #871 is wrapper-script CONTENT a plan never
-// records as the launch command itself. That token is not always what
-// extractCommandBinary derives, though: a quoted env prefix whose value
-// contains whitespace (OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT)
-// mis-tokenizes to an arbitrary fragment, neither the canonical name nor an
-// SPUR_*_BIN path.
+// records as the launch command itself. extractCommandBinary now skips quoted
+// assignment prefixes such as OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT
+// and returns the real executable there. The residual no longer includes that
+// launch shape.
 // (c) The remaining real case is a non-exec wrapper (e.g. matchers
 // ["codex-wrap.sh","codex"]) whose pass 1 matches for the agent's whole life: the
 // gate still arms there, and on such a host RESIDUAL 2's `set +m` shape can read a
@@ -677,9 +682,21 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
     readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
-    setup: async ({ mcpBindings, restrictWrites }) => {
+    setup: async ({
+      mcpBindings,
+      restrictWrites,
+      model,
+      reasoningEffort,
+      reasoningVariantNames,
+    }) => {
       await assertOpenCodeCompatibility();
-      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      const configContent = buildOpenCodeConfig(
+        mcpBindings,
+        restrictWrites,
+        model && reasoningEffort && reasoningVariantNames
+          ? { model, reasoningEffort, variantNames: reasoningVariantNames }
+          : undefined,
+      );
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
@@ -745,29 +762,111 @@ export async function buildAgentRestorePlan(
 }
 
 export function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
-  const trimmed = launchCommand.trim();
-  if (!trimmed) {
-    return fallbackBinary;
-  }
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-      continue;
-    }
-    if (token.startsWith("'")) {
-      const closing = token.indexOf("'", 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+  let index = 0;
+  while (index < launchCommand.length) {
+    while (index < launchCommand.length) {
+      if (/\s/.test(launchCommand[index] ?? "")) {
+        index += 1;
+        continue;
       }
-    }
-    if (token.startsWith('"')) {
-      const closing = token.indexOf('"', 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+      if (launchCommand[index] === "\\" && launchCommand[index + 1] === "\n") {
+        index += 2;
+        continue;
       }
+      break;
     }
-    return token;
+    if (index >= launchCommand.length) break;
+
+    let value = "";
+    let quote: "single" | "double" | null = null;
+    let wordStarted = false;
+    let assignmentPrefixValid = true;
+    let assignmentNameLength = 0;
+    let assignment = false;
+
+    while (index < launchCommand.length) {
+      const char = launchCommand[index] ?? "";
+      if (quote === null && /\s/.test(char)) break;
+      wordStarted = true;
+
+      if (quote === "single") {
+        if (char === "'") quote = null;
+        else value += char;
+        index += 1;
+        continue;
+      }
+
+      if (quote === "double") {
+        if (char === '"') {
+          quote = null;
+          index += 1;
+          continue;
+        }
+        if (char === "\\") {
+          const next = launchCommand[index + 1];
+          if (next === undefined) return fallbackBinary;
+          if (next === "\n") {
+            index += 2;
+            continue;
+          }
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
+            value += next;
+            index += 2;
+            continue;
+          }
+          value += `\\${next}`;
+          index += 2;
+          continue;
+        }
+        value += char;
+        index += 1;
+        continue;
+      }
+
+      if (char === "'") {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "single";
+        index += 1;
+        continue;
+      }
+      if (char === '"') {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "double";
+        index += 1;
+        continue;
+      }
+      if (char === "\\") {
+        const next = launchCommand[index + 1];
+        if (next === undefined) return fallbackBinary;
+        if (next === "\n") {
+          index += 2;
+          continue;
+        }
+        if (!assignment) assignmentPrefixValid = false;
+        value += next;
+        index += 2;
+        continue;
+      }
+      if (char === "=" && !assignment) {
+        assignment = assignmentPrefixValid && assignmentNameLength > 0;
+        value += char;
+        index += 1;
+        continue;
+      }
+      if (!assignment) {
+        const validNameChar =
+          assignmentNameLength === 0 ? /[A-Za-z_]/.test(char) : /[A-Za-z0-9_]/.test(char);
+        if (!validNameChar) assignmentPrefixValid = false;
+        assignmentNameLength += 1;
+      }
+      value += char;
+      index += 1;
+    }
+
+    if (!wordStarted || quote !== null) return fallbackBinary;
+    if (!assignment) return value || fallbackBinary;
   }
+
   return fallbackBinary;
 }
 
@@ -806,6 +905,9 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
