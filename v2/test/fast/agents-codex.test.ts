@@ -50,7 +50,6 @@ import {
   buildCodexResumePlan,
   buildCodexRestorePlan,
   codexHookHomePath,
-  copyCodexAgentDefinitions,
   ensureCodexHooksConfig,
   appendCodexTrustedProjects,
   findCodexSessionId,
@@ -133,28 +132,6 @@ describe("codexHookHomePath", () => {
   it("joins session tool dir with codex-home", () => {
     const result = codexHookHomePath("/session/tool/dir");
     expect(result).toBe("/session/tool/dir/codex-home");
-  });
-});
-
-describe("copyCodexAgentDefinitions", () => {
-  it("copies user agent definitions recursively with force", async () => {
-    mockExistsSync.mockReturnValue(true);
-
-    await copyCodexAgentDefinitions("/session/codex-home");
-
-    expect(mockCp).toHaveBeenCalledWith(
-      "/home/testuser/.codex/agents",
-      "/session/codex-home/agents",
-      { recursive: true, force: true },
-    );
-  });
-
-  it("does not copy when user agent definitions do not exist", async () => {
-    mockExistsSync.mockReturnValue(false);
-
-    await copyCodexAgentDefinitions("/session/codex-home");
-
-    expect(mockCp).not.toHaveBeenCalled();
   });
 });
 
