@@ -10,7 +10,7 @@ Try to falsify that the implementation satisfies each acceptance criterion. Adve
 PROCESS
   1  Get diff: `git diff origin/HEAD...HEAD`
   2  Read the spec's Acceptance criteria, Verification, Invariants.
-  3  Check evidence under `AGENTS.md` validation policy; run targeted quick checks when needed.
+  3  Run checks: `pnpm typecheck && pnpm lint`; follow manager's CI/local check ownership; run targeted local tests only when needed to verify changed boundary.
   4  For each acceptance criterion, inspect its bound verification and try to falsify it.
   5  Verify call-sites for changed functions/interfaces: `rg "functionName" packages/ --type ts -l`
   6  Organize findings by severity. Report only >80% confidence issues.
@@ -30,7 +30,7 @@ REVIEW AREAS
 
 OUTPUT
   Review: APPROVED | CHANGES_REQUESTED
-  Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
+  Checks: typecheck: OK|FAIL  lint: OK|FAIL  targeted test: OK|FAIL|NOT REQUIRED
   Requirements: covered <criterion> — `file:line` | missing <criterion> — NOT COVERED
   MUST FIX (critical/high): `file:line`: <issue> — <fix>
   SHOULD FIX (medium): `file`: <issue>
@@ -38,7 +38,7 @@ OUTPUT
   PR conclusion comment:
     Code Review Conclusion
     Status: APPROVED | CHANGES_REQUESTED
-    Checks: typecheck OK|FAIL; lint OK|FAIL; test OK|FAIL
+    Checks: typecheck OK|FAIL; lint OK|FAIL; targeted test OK|FAIL|NOT REQUIRED
     Requirements: covered | not covered
     Objections: none | <critical/high objections>
     Conclusion: <ship/hold decision in one sentence>

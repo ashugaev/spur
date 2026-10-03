@@ -119,6 +119,8 @@ const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const captureOpenCodeSessionBaselineMock = vi.fn();
 const resolveNewOpenCodeSessionIdMock = vi.fn();
+const waitForOpenCodeLaunchMessageMock = vi.fn();
+const withOpenCodeLaunchIdentityLockMock = vi.fn();
 const readOpenCodeStateMock = vi.fn();
 const readOpenCodeStructuredStateMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
@@ -526,6 +528,8 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     ...actual,
     captureOpenCodeSessionBaseline: captureOpenCodeSessionBaselineMock,
     resolveNewOpenCodeSessionId: resolveNewOpenCodeSessionIdMock,
+    waitForOpenCodeLaunchMessage: waitForOpenCodeLaunchMessageMock,
+    withOpenCodeLaunchIdentityLock: withOpenCodeLaunchIdentityLockMock,
     readOpenCodeState: readOpenCodeStateMock,
     readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
   };
@@ -1548,6 +1552,12 @@ describe("SessionService", () => {
       sessionIds: new Set<string>(),
     }));
     resolveNewOpenCodeSessionIdMock.mockReset().mockResolvedValue("ses_owned");
+    waitForOpenCodeLaunchMessageMock.mockReset().mockResolvedValue(true);
+    withOpenCodeLaunchIdentityLockMock
+      .mockReset()
+      .mockImplementation(async (_worktreePath: string, action: () => Promise<unknown>) =>
+        action(),
+      );
     readOpenCodeStateMock.mockReset().mockResolvedValue(null);
     readOpenCodeStructuredStateMock.mockReset().mockImplementation(async (...args: unknown[]) => ({
       state: await readOpenCodeStateMock(...args),
@@ -42531,7 +42541,8 @@ describe("SessionService", () => {
         return { id: record.id, model: "old" };
       });
       const tick = internals.runDashboardCacheTick();
-      const original = sessions.get("api-1")!;
+      const original = sessions.get("api-1");
+      if (!original) throw new Error("missing fixture session api-1");
       const completed: SessionRecord = { ...original, status: "completed" };
       const added: SessionRecord = { ...original, id: "api-new", status: "completed" };
       sessions.set(completed.id, completed);
@@ -52881,6 +52892,624 @@ describe("SessionService", () => {
           }
           expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
           expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("the real trigger");
+        },
+      );
+    });
+
+    describe("OpenCode fresh recovery", () => {
+      function useOpenCodeLaunchPlan() {
+        buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+          agent,
+          launchCommand: `opencode --auto --prompt ${JSON.stringify(prompt)}`,
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["OpenCode"],
+        }));
+      }
+
+      function seedStoppedOpenCode(overrides: Partial<SessionRecord> = {}) {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...runningSession({
+            agent: "opencode",
+            launchCommand: "opencode --auto",
+            status: "stopped",
+          }),
+          stopReason: "stale_timeout",
+          ...overrides,
+        });
+        findAgentSessionIdMock.mockResolvedValue(null);
+        useOpenCodeLaunchPlan();
+        return sessions;
+      }
+
+      it.each([
+        ["without a native id", false],
+        ["after native resume fails before create", true],
+      ] as const)(
+        "OpenCode binds a fresh native session %s before delivering the trigger",
+        async (_scenario, pinned) => {
+          loadConfigMock.mockReturnValue({ ...baseConfig() });
+          const sessions = createSessionStore();
+          sessions.set("api-1", {
+            id: "api-1",
+            project: "api",
+            agent: "opencode",
+            ...(pinned ? { agentSessionId: "ses_old" } : {}),
+            prompt: "the original task prompt",
+            branch: "api-1",
+            worktree: true,
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            tmuxSession: "api-1",
+            launchCommand: "opencode --auto",
+            status: "stopped",
+            stopReason: "stale_timeout",
+            createdAt: "2026-03-18T10:00:00.000Z",
+            updatedAt: "2026-03-18T09:00:00.000Z",
+          });
+          findAgentSessionIdMock.mockResolvedValue(pinned ? "ses_old" : null);
+          buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+            agent,
+            launchCommand: `opencode --auto --prompt ${JSON.stringify(prompt)}`,
+            initialMessage: "",
+            initialMessageDeliveredOnLaunch: true,
+            readyMarkers: ["OpenCode"],
+          }));
+          buildAgentResumePlanMock.mockImplementation((_agent: string, id: string) => ({
+            launchCommand: `opencode --auto --session ${id}`,
+            readyMarkers: ["OpenCode"],
+          }));
+
+          const order: string[] = [];
+          let insideIdentityLock = false;
+          let freshCreated = false;
+          let createCalls = 0;
+          withOpenCodeLaunchIdentityLockMock.mockImplementation(
+            async (_worktreePath: string, action: () => Promise<unknown>) => {
+              insideIdentityLock = true;
+              order.push("lock");
+              try {
+                return await action();
+              } finally {
+                insideIdentityLock = false;
+                order.push("unlock");
+              }
+            },
+          );
+          captureOpenCodeSessionBaselineMock.mockImplementation(async () => {
+            expect(insideIdentityLock).toBe(true);
+            order.push("baseline");
+            return { worktreePath: "/tmp/spur-worktrees/api/api-1", sessionIds: new Set() };
+          });
+          createTmuxSessionMock.mockImplementation(async () => {
+            createCalls += 1;
+            if (pinned && createCalls === 1) {
+              order.push("resume-failed");
+              throw new Error("resume launch refused before create");
+            }
+            expect(insideIdentityLock).toBe(true);
+            freshCreated = true;
+            order.push("fresh-create");
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => freshCreated);
+          isProcessRunningInTmuxMock.mockImplementation(async () => {
+            if (freshCreated && !order.includes("resolve")) {
+              expect(insideIdentityLock).toBe(true);
+            }
+            return freshCreated;
+          });
+          resolveNewOpenCodeSessionIdMock.mockImplementation(async () => {
+            expect(insideIdentityLock).toBe(true);
+            order.push("resolve");
+            return "ses_new";
+          });
+          const persistSession = writeSessionMock.getMockImplementation();
+          writeSessionMock.mockImplementation((...args) => {
+            persistSession?.(...args);
+            const written = args[1];
+            if (written?.agent !== "opencode" || written?.status !== "running") return;
+            if (!insideIdentityLock) return;
+            order.push(written.agentSessionId === "ses_new" ? "persist-id" : "persist-provisional");
+          });
+          waitForOpenCodeLaunchMessageMock.mockImplementation(async (id: string) => {
+            expect(insideIdentityLock).toBe(false);
+            expect(id).toBe("ses_new");
+            order.push("verify");
+            return true;
+          });
+          agentWaitsForSubmitAckMock.mockImplementation((agent: string) => agent === "opencode");
+          createAgentSubmitAckBindingMock.mockImplementation(
+            async (agent: string, context: { agentSessionId?: string }) => {
+              expect(order.at(-1)).toBe("verify");
+              expect(agent).toBe("opencode");
+              expect(context).toEqual(expect.objectContaining({ agentSessionId: "ses_new" }));
+              order.push("trigger-binding");
+              return null;
+            },
+          );
+
+          const service = await createDisposedSessionService();
+          if (pinned) {
+            vi.spyOn(
+              service as unknown as {
+                killAgentPaneAndConfirmExit(session: SessionRecord): Promise<void>;
+              },
+              "killAgentPaneAndConfirmExit",
+            ).mockImplementation(async () => {
+              order.push("cleanup");
+            });
+          }
+          const send = service.send("api-1", {
+            message: "the real trigger",
+            queue: false,
+          });
+          if (!pinned) await vi.advanceTimersByTimeAsync(60_000);
+          const result = await send;
+
+          expect(result.status).toBe("running");
+          expect(order).toEqual(
+            pinned
+              ? [
+                  "cleanup",
+                  "resume-failed",
+                  "cleanup",
+                  "lock",
+                  "baseline",
+                  "fresh-create",
+                  "persist-provisional",
+                  "resolve",
+                  "persist-id",
+                  "unlock",
+                  "verify",
+                  "trigger-binding",
+                ]
+              : [
+                  "lock",
+                  "baseline",
+                  "fresh-create",
+                  "persist-provisional",
+                  "resolve",
+                  "persist-id",
+                  "unlock",
+                  "verify",
+                  "trigger-binding",
+                ],
+          );
+          expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain("the original task prompt");
+          expect(waitForOpenCodeLaunchMessageMock.mock.calls[0]).toEqual(["ses_new"]);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+            "api-1",
+            expect.stringContaining("the real trigger"),
+            { agent: "opencode" },
+          );
+          expect(sessions.get("api-1")).toEqual(
+            expect.objectContaining({ agentSessionId: "ses_new", status: "running" }),
+          );
+        },
+      );
+
+      it("retains a fresh OpenCode launch verification failure against only the new native id", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...runningSession({
+            agent: "opencode",
+            launchCommand: "opencode --auto",
+            status: "stopped",
+          }),
+          stopReason: "stale_timeout",
+        });
+        findAgentSessionIdMock.mockResolvedValue(null);
+        buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+          agent,
+          launchCommand: `opencode --auto --prompt ${JSON.stringify(prompt)}`,
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["OpenCode"],
+        }));
+        let created = false;
+        createTmuxSessionMock.mockImplementation(async () => {
+          created = true;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => created);
+        isProcessRunningInTmuxMock.mockImplementation(async () => created);
+        resolveNewOpenCodeSessionIdMock.mockResolvedValue("ses_new");
+        waitForOpenCodeLaunchMessageMock.mockResolvedValue(false);
+
+        const service = await createDisposedSessionService();
+        const rejection = expect(
+          service.send("api-1", { message: "the real trigger", queue: false }),
+        ).rejects.toThrow("OpenCode did not persist the launch prompt");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await rejection;
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toEqual(
+          expect.objectContaining({
+            agentSessionId: "ses_new",
+            error: "OpenCode did not persist the launch prompt",
+            status: "running",
+          }),
+        );
+      });
+
+      it("retains a post-provisional OpenCode readiness failure after the fresh runtime disappears", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...runningSession({
+            agent: "opencode",
+            launchCommand: "opencode --auto",
+            status: "stopped",
+          }),
+          stopReason: "stale_timeout",
+        });
+        findAgentSessionIdMock.mockResolvedValue(null);
+        buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+          agent,
+          launchCommand: `opencode --auto --prompt ${JSON.stringify(prompt)}`,
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["OpenCode"],
+        }));
+        let runtimePresent = false;
+        createTmuxSessionMock.mockImplementation(async () => {
+          runtimePresent = true;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => runtimePresent);
+        isProcessRunningInTmuxMock.mockImplementation(async () => runtimePresent);
+        waitForTmuxReadyMock.mockImplementation(async () => {
+          runtimePresent = false;
+          throw new Error("fresh readiness failed");
+        });
+
+        const service = await createDisposedSessionService();
+        const rejection = expect(
+          service.send("api-1", { message: "the real trigger", queue: false }),
+        ).rejects.toThrow("fresh readiness failed");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await rejection;
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toEqual(
+          expect.objectContaining({ status: "errored", error: "fresh readiness failed" }),
+        );
+        expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+      });
+
+      it("retains a sidecar-only pre-provisional OpenCode failure on the clean candidate", async () => {
+        loadConfigMock.mockReturnValue({ ...baseConfig() });
+        const sidecarIdentity = { pid: 111, pgid: 111, starttime: 1 };
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...runningSession({
+            agent: "opencode",
+            launchCommand: "opencode --auto",
+            status: "stopped",
+          }),
+          stopReason: "stale_timeout",
+          sidecarProcs: { mcp: sidecarIdentity },
+        });
+        findAgentSessionIdMock.mockResolvedValue(null);
+        buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+          agent,
+          launchCommand: `opencode --auto --prompt ${JSON.stringify(prompt)}`,
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["OpenCode"],
+        }));
+        captureOpenCodeSessionBaselineMock.mockRejectedValue(new Error("baseline failed"));
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        isProcessRunningInTmuxMock.mockResolvedValue(false);
+
+        const service = await createDisposedSessionService();
+        const rejection = expect(
+          service.send("api-1", { message: "the real trigger", queue: false }),
+        ).rejects.toThrow("baseline failed");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await rejection;
+
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toEqual(
+          expect.objectContaining({
+            status: "errored",
+            error: "baseline failed",
+            sidecarProcs: { mcp: sidecarIdentity },
+          }),
+        );
+        expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+      });
+
+      it.each(["baseline", "create"] as const)(
+        "leaves the prior record unchanged when a no-resource fresh %s step fails",
+        async (step) => {
+          const sessions = seedStoppedOpenCode();
+          const before = sessions.get("api-1");
+          tmuxSessionExistsMock.mockResolvedValue(false);
+          isProcessRunningInTmuxMock.mockResolvedValue(false);
+          if (step === "baseline") {
+            captureOpenCodeSessionBaselineMock.mockRejectedValue(new Error("baseline unavailable"));
+          } else {
+            createTmuxSessionMock.mockRejectedValue(new Error("create refused"));
+          }
+
+          const service = await createDisposedSessionService();
+          const rejection = expect(
+            service.send("api-1", { message: "trigger", queue: false }),
+          ).rejects.toThrow(step === "baseline" ? "baseline unavailable" : "create refused");
+          await vi.advanceTimersByTimeAsync(60_000);
+          await rejection;
+
+          expect(sessions.get("api-1")).toEqual(before);
+          expect(logSpurEventMock).not.toHaveBeenCalledWith(
+            TEST_DATA_DIR,
+            expect.objectContaining({ event: "session.runtime.errored" }),
+          );
+        },
+      );
+
+      it("retains a partial fresh create against a clean record", async () => {
+        const sessions = seedStoppedOpenCode();
+        let partialRuntime = false;
+        createTmuxSessionMock.mockImplementation(async () => {
+          partialRuntime = true;
+          throw new Error("create failed after pane allocation");
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => partialRuntime);
+        isProcessRunningInTmuxMock.mockImplementation(async () => partialRuntime);
+
+        const service = await createDisposedSessionService();
+        const rejection = expect(
+          service.send("api-1", { message: "trigger", queue: false }),
+        ).rejects.toThrow("create failed after pane allocation");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await rejection;
+
+        expect(sessions.get("api-1")).toEqual(
+          expect.objectContaining({
+            status: "running",
+            error: "create failed after pane allocation",
+          }),
+        );
+        expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+      });
+
+      it.each([
+        ["dead", false, "errored"],
+        ["probe-unresponsive", true, "running"],
+      ] as const)(
+        "retains a fresh process check failure with %s runtime classification",
+        async (_case, probeUnresponsive, expectedStatus) => {
+          const sessions = seedStoppedOpenCode();
+          let created = false;
+          createTmuxSessionMock.mockImplementation(async () => {
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: !created,
+            matchedByName: !created,
+            unresponsive: created && probeUnresponsive,
+          }));
+
+          const service = await createDisposedSessionService();
+          const rejection = expect(
+            service.send("api-1", { message: "trigger", queue: false }),
+          ).rejects.toThrow("Agent opencode exited before recovery became ready");
+          await vi.advanceTimersByTimeAsync(60_000);
+          await rejection;
+
+          expect(sessions.get("api-1")).toEqual(
+            expect.objectContaining({
+              status: expectedStatus,
+              error: "Agent opencode exited before recovery became ready",
+            }),
+          );
+          expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+        },
+      );
+
+      it.each(["zero-id", "ambiguous-id"] as const)(
+        "retains a fresh OpenCode identity %s failure without stale fields",
+        async (failure) => {
+          const sessions = seedStoppedOpenCode();
+          let created = false;
+          createTmuxSessionMock.mockImplementation(async () => {
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          isProcessRunningInTmuxMock.mockImplementation(async () => created);
+          let firstResolveAt: number | undefined;
+          if (failure === "zero-id") {
+            resolveNewOpenCodeSessionIdMock.mockImplementation(async () => {
+              firstResolveAt ??= Date.now();
+              return null;
+            });
+          } else {
+            resolveNewOpenCodeSessionIdMock.mockRejectedValue(
+              new Error("Multiple new OpenCode sessions appeared"),
+            );
+          }
+
+          const service = await createDisposedSessionService();
+          const delivery = service.send("api-1", { message: "trigger", queue: false });
+          const rejection = expect(delivery).rejects.toThrow(
+            failure === "zero-id"
+              ? "OpenCode did not create a session"
+              : "Multiple new OpenCode sessions appeared",
+          );
+          await vi.waitFor(() => expect(resolveNewOpenCodeSessionIdMock).toHaveBeenCalledTimes(1));
+          if (failure === "zero-id") await vi.advanceTimersByTimeAsync(60_100);
+          await rejection;
+
+          expect(sessions.get("api-1")).toEqual(
+            expect.objectContaining({
+              status: "running",
+              error:
+                failure === "zero-id"
+                  ? expect.stringContaining("OpenCode did not create a session")
+                  : "Multiple new OpenCode sessions appeared",
+            }),
+          );
+          expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+          expect(
+            resolveNewOpenCodeSessionIdMock.mock.calls.every((call) => call.length === 1),
+          ).toBe(true);
+          if (failure === "zero-id") {
+            expect(Date.now() - (firstResolveAt ?? Date.now())).toBeGreaterThanOrEqual(60_000);
+          }
+        },
+      );
+
+      it("removes the old native id when failed resume reaches an ambiguous fresh identity", async () => {
+        const sessions = seedStoppedOpenCode({ agentSessionId: "ses_old" });
+        findAgentSessionIdMock.mockResolvedValue("ses_old");
+        buildAgentResumePlanMock.mockReturnValue({
+          launchCommand: "opencode --auto --session ses_old",
+          readyMarkers: ["OpenCode"],
+        });
+        let freshCreated = false;
+        let creates = 0;
+        createTmuxSessionMock.mockImplementation(async () => {
+          creates += 1;
+          if (creates === 1) throw new Error("resume refused before create");
+          freshCreated = true;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => freshCreated);
+        isProcessRunningInTmuxMock.mockImplementation(async () => freshCreated);
+        resolveNewOpenCodeSessionIdMock.mockRejectedValue(
+          new Error("Multiple new OpenCode sessions appeared"),
+        );
+
+        const service = await createDisposedSessionService();
+        const delivery = service.send("api-1", { message: "trigger", queue: false });
+        const rejection = expect(delivery).rejects.toThrow(
+          "Multiple new OpenCode sessions appeared",
+        );
+        await vi.waitFor(() => expect(resolveNewOpenCodeSessionIdMock).toHaveBeenCalledTimes(1));
+        await rejection;
+
+        expect(creates).toBe(2);
+        expect(sessions.get("api-1")).toEqual(
+          expect.objectContaining({
+            status: "running",
+            error: "Multiple new OpenCode sessions appeared",
+          }),
+        );
+        expect(sessions.get("api-1")).not.toHaveProperty("agentSessionId");
+      });
+
+      it.each([
+        ["completed create", false, "resume readiness failed"],
+        ["unresponsive process probe", true, "Agent opencode exited before recovery became ready"],
+      ] as const)(
+        "retains a native resume failure after %s instead of launching fresh",
+        async (_case, probeUnresponsive, expectedError) => {
+          const sessions = seedStoppedOpenCode({ agentSessionId: "ses_old" });
+          findAgentSessionIdMock.mockResolvedValue("ses_old");
+          buildAgentResumePlanMock.mockReturnValue({
+            launchCommand: "opencode --auto --session ses_old",
+            readyMarkers: ["OpenCode"],
+          });
+          let created = false;
+          createTmuxSessionMock.mockImplementation(async () => {
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          if (probeUnresponsive) {
+            probeTmuxProcessMatchMock.mockResolvedValue({
+              alive: false,
+              matchedByName: false,
+              unresponsive: true,
+            });
+          } else {
+            waitForTmuxReadyMock.mockRejectedValue(new Error(expectedError));
+          }
+
+          const service = await createDisposedSessionService();
+          await expect(service.send("api-1", { message: "trigger", queue: false })).rejects.toThrow(
+            expectedError,
+          );
+
+          expect(captureOpenCodeSessionBaselineMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get("api-1")).toEqual(
+            expect.objectContaining({
+              agentSessionId: "ses_old",
+              status: "running",
+              error: expectedError,
+            }),
+          );
+        },
+      );
+
+      it.each(["opencode", "claude"] as const)(
+        "lets a pinned %s pre-create resume failure fall back when a new MCP proc is the only resource",
+        async (agent) => {
+          loadConfigMock.mockReturnValue({ ...baseConfig() });
+          const sessions = createSessionStore();
+          sessions.set(
+            "api-1",
+            runningSession({
+              agent,
+              agentSessionId: "ses_old",
+              launchCommand: agent === "opencode" ? "opencode --auto" : "claude",
+              status: "stopped",
+              stopReason: "stale_timeout",
+            }),
+          );
+          findAgentSessionIdMock.mockResolvedValue("ses_old");
+          if (agent === "opencode") useOpenCodeLaunchPlan();
+          buildAgentResumePlanMock.mockReturnValue({
+            launchCommand: `${agent} --resume ses_old`,
+            readyMarkers: [agent],
+          });
+          let freshCreated = false;
+          let creates = 0;
+          createTmuxSessionMock.mockImplementation(async () => {
+            creates += 1;
+            if (creates === 1) throw new Error("resume refused before create");
+            freshCreated = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => freshCreated);
+          isProcessRunningInTmuxMock.mockImplementation(async () => freshCreated);
+          resolveNewOpenCodeSessionIdMock.mockResolvedValue("ses_new");
+
+          const service = await createDisposedSessionService();
+          vi.spyOn(
+            service as unknown as {
+              startMcpSidecars(
+                session: SessionRecord,
+                project: unknown,
+              ): Promise<{ session: SessionRecord; mcpBindings: [] }>;
+            },
+            "startMcpSidecars",
+          ).mockImplementation(async (session) => ({
+            session: {
+              ...session,
+              sidecarProcs: { mcp: { pid: 777, pgid: 777, starttime: 7 } },
+            },
+            mcpBindings: [],
+          }));
+          const delivery = service.send("api-1", { message: "trigger", queue: false });
+          if (agent === "opencode") {
+            await vi.waitFor(() =>
+              expect(resolveNewOpenCodeSessionIdMock).toHaveBeenCalledTimes(1),
+            );
+          }
+          const result = await delivery;
+
+          expect(result.status).toBe("running");
+          expect(creates).toBe(2);
+          expect(captureOpenCodeSessionBaselineMock).toHaveBeenCalledTimes(
+            agent === "opencode" ? 1 : 0,
+          );
+          expect(sessions.get("api-1")?.agentSessionId).not.toBe("ses_old");
+          if (agent === "opencode") {
+            expect(sessions.get("api-1")?.sidecarProcs?.mcp?.pid).toBe(777);
+          }
         },
       );
     });

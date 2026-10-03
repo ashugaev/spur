@@ -6,7 +6,12 @@ import {
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { claudeCommand } from "./agents/claude.js";
-import { buildEphemeralCodexConfig, codexCommand, linkCodexAuth } from "./agents/codex.js";
+import {
+  buildEphemeralCodexConfig,
+  codexCommand,
+  copyCodexAgentDefinitions,
+  linkCodexAuth,
+} from "./agents/codex.js";
 import { cursorCommand } from "./agents/cursor.js";
 import {
   deleteOpenCodeSession,
@@ -461,6 +466,7 @@ async function runCodexPreflight(
     const ephemeralConfig = await buildEphemeralCodexConfig([cwd]);
     await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
     await linkCodexAuth(codexHomePath);
+    await copyCodexAgentDefinitions(codexHomePath);
 
     let stdout: string;
     try {
@@ -581,7 +587,7 @@ async function runOpenCodePreflight(prompt: string, cwd: string): Promise<SpawnP
     raw = await runPreflightExec(
       "opencode",
       opencodeCommand(),
-      ["run", "--format", "json", "--agent", "build", prompt],
+      ["run", "--format", "json", "--agent", "build", "--auto", prompt],
       {
         cwd,
         timeout: PREFLIGHT_TIMEOUT_MS,

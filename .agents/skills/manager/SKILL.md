@@ -22,7 +22,7 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
   0 direct                  `developer`
   1 self-plan               `architect` -> `spec-critic` -> `developer`
   2 strong-plan-cheap-exec  `researcher` -> `critic` -> `architect` -> `spec-critic` -> `developer`
-  3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off. See `docs/workflow-technical-updates.md`.
+  3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off
 
   Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
   Telegram source, agent sends, or Telegram suffix touched   manager runs `telegram-e2e` after `tester`, before close-out
@@ -30,11 +30,12 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
   Visible change in `packages/web`                      `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes
   `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, `.cursor/BUGBOT.md` touched   `skill-writer` (caveman pass) before `reviewer`
   New user-facing surface (command, flag, config field, source type, provider, event, install/deploy/CLI) or published docs touched   `docs` before `reviewer`; `developer` documents the surface and updates the owning doc, same change
-  Any code change                                        `reviewer` -> `tester`; `github` close-out (mandatory PR)
+  Any code change                                        `reviewer`; `github` close-out (mandatory PR)
+  Every task                                             `tester`; checks match scope
   Default close-out                                      `self-verify`
-  Wording-only docs or analysis                          close-out only
+  Wording-only docs or analysis                          `tester` -> close-out
 
-Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Reviewer and tester apply to any code change on top of the tier. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
+Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
 
 CANONICAL GATE ORDER
 
@@ -58,7 +59,10 @@ RULES
   - One manager step = one Spur ToDo item = one phase = one owner = one output; each dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
   - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
-  - Follow `AGENTS.md` validation policy. Never poll or wait for remote CI.
+  - Assign smoke and full automated suites to CI.
+  - Require agent-operated manual affected-behavior proof on a real isolated sidecar; run targeted local automated checks only when needed to verify changed boundary.
+  - Block release without successful manual proof and required CI checks, tied to final reviewed revision. CI query permission stays in `AGENTS.md`/`CLAUDE.md`.
+  - Never poll or wait for remote CI.
 
 CONTEXT HANDOFF
 

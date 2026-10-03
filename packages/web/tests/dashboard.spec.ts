@@ -24,6 +24,7 @@ import {
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
 import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
+import { MAX_ATTACHMENT_COUNT } from "../src/lib/file-attachments";
 import type { LifecycleAction, SessionLifecycleSnapshot } from "../src/lib/types";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
@@ -3313,12 +3314,15 @@ test.describe("D7: Spawn modal", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await expect(textarea).toHaveValue("Keep me");
-    await expect(page.getByText(/Daemon down/i)).toBeVisible();
+    await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Daemon down/i);
   });
 
   test("spawn prompt accepts image attachments and forwards them in the request body", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     await mockSessions(
       page,
@@ -3349,7 +3353,12 @@ test.describe("D7: Spawn modal", () => {
     await textarea.fill("Prompt with image");
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
-      dt.items.add(new File(["PNG"], "spawn.png", { type: "image/png" }));
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 16;
+      const bytes = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]), (c) =>
+        c.charCodeAt(0),
+      );
+      dt.items.add(new File([bytes], "spawn.png", { type: "image/png" }));
       return dt;
     });
     await textarea.dispatchEvent("drop", { dataTransfer });
@@ -3365,6 +3374,317 @@ test.describe("D7: Spawn modal", () => {
       prompt: "Prompt with image",
       attachments: [{ name: "spawn.png", data: expect.any(String) }],
     });
+  });
+
+  test.describe("spawn photo preparation", () => {
+    type ReadGate = Window & { finishPhotoReads: (fail?: boolean) => void; photoReadCount: number };
+
+    async function prepare(page: Page) {
+      await page.route("**/api/preflight", (route) =>
+        route.fulfill({ status: 200, json: { branch: "feature/photo-test" } }),
+      );
+      await mockSessions(
+        page,
+        [makeWorkingSession({ id: "photo-1", project: "my-project" })],
+        DEFAULT_PROJECTS,
+      );
+      await page.goto("/");
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+      await expect(page.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+    }
+
+    async function gateReads(page: Page) {
+      await page.evaluate(() => {
+        const original = FileReader.prototype.readAsDataURL;
+        const callbacks: Array<(fail: boolean) => void> = [];
+        const state = window as ReadGate;
+        state.photoReadCount = 0;
+        FileReader.prototype.readAsDataURL = function (blob: Blob) {
+          state.photoReadCount += 1;
+          callbacks.push((fail) => {
+            if (fail) this.dispatchEvent(new ProgressEvent("error"));
+            else original.call(this, blob);
+          });
+        };
+        state.finishPhotoReads = (fail = false) => {
+          FileReader.prototype.readAsDataURL = original;
+          callbacks.splice(0).forEach((callback) => callback(fail));
+        };
+      });
+    }
+
+    async function addPhoto(page: Page, gesture: "paste" | "drop", name = "photo.png") {
+      await page.getByPlaceholder("Prompt...").evaluate(
+        (textarea, options) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 16;
+          const bytes = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]), (c) =>
+            c.charCodeAt(0),
+          );
+          const transfer = new DataTransfer();
+          transfer.items.add(new File([bytes], options.name, { type: "image/png" }));
+          textarea.dispatchEvent(
+            options.gesture === "paste"
+              ? new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer })
+              : new DragEvent("drop", { bubbles: true, dataTransfer: transfer }),
+          );
+        },
+        { gesture, name },
+      );
+    }
+
+    for (const gesture of ["paste", "drop"] as const) {
+      test(`pending ${gesture} photo blocks spawn and shortcut until real reader resolves`, async ({
+        page,
+      }) => {
+        const requests: Record<string, unknown>[] = [];
+        await page.route("**/api/spawn", async (route) => {
+          requests.push(route.request().postDataJSON() as Record<string, unknown>);
+          await route.fulfill({
+            status: 201,
+            json: makeSpawningSession({ id: "photo-ack", project: "my-project" }),
+          });
+        });
+        await prepare(page);
+        await gateReads(page);
+        await addPhoto(page, gesture);
+        const spawn = page.getByRole("button", { name: /^spawn$/i });
+        await expect(spawn).toBeDisabled();
+        await page.getByPlaceholder("Prompt...").press("ControlOrMeta+Enter");
+        expect(requests).toHaveLength(0);
+        await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+        await page.evaluate(() => (window as ReadGate).finishPhotoReads());
+        await expect(page.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+        await expect(spawn).toBeEnabled();
+        await spawn.click();
+        await expect.poll(() => requests.length).toBe(1);
+        expect(requests[0]).toMatchObject({
+          attachments: [{ name: "photo.png", data: expect.any(String) }],
+        });
+      });
+    }
+
+    for (const width of [780, 390]) {
+      test(`in-flight spawn ignores close attempts and retains late failure at ${width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 844 });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const requests: Record<string, unknown>[] = [];
+        await page.route("**/api/spawn", async (route) => {
+          requests.push(route.request().postDataJSON() as Record<string, unknown>);
+          if (requests.length === 1) await gate;
+          await route.fulfill({ status: 502, json: { error: "Late spawn failure" } });
+        });
+        await prepare(page);
+        await page.getByPlaceholder("Prompt...").fill("Keep photo");
+        await addPhoto(page, "drop", "ready.png");
+        const dialog = page.getByRole("dialog");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect.poll(() => requests.length).toBe(1);
+        const close = dialog.getByRole("button", { name: "Close", exact: true });
+        await expect(close).toBeDisabled();
+        await close.dispatchEvent("click");
+        await dialog.dispatchEvent("click");
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        release();
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(
+          await alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          }),
+        ).toBe(true);
+        await expect(close).toBeEnabled();
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(requests[1]).toMatchObject({
+          prompt: "Keep photo",
+          attachments: [{ name: "ready.png" }],
+        });
+        await close.click();
+        await expect(dialog).toHaveCount(0);
+      });
+    }
+
+    test("in-flight spawn success still closes and resets the modal", async ({ page }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/spawn", async (route) => {
+        await gate;
+        await route.fulfill({
+          status: 201,
+          json: makeSpawningSession({ id: "photo-success", project: "my-project" }),
+        });
+      });
+      await prepare(page);
+      await page.getByPlaceholder("Prompt...").fill("Clear photo");
+      await addPhoto(page, "paste", "ready.png");
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await dialog.getByRole("button", { name: /^spawn$/i }).click();
+      await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+      release();
+      await expect(dialog).toHaveCount(0);
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toHaveCount(0);
+    });
+
+    test("closed modal ignores stale photo reads", async ({ page }) => {
+      await prepare(page);
+      await gateReads(page);
+      await addPhoto(page, "paste", "obsolete.png");
+      await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await page.evaluate(() => (window as ReadGate).finishPhotoReads());
+      await addPhoto(page, "drop", "current.png");
+      await expect(page.getByRole("button", { name: "Remove current.png" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Remove obsolete.png" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+    });
+
+    test("photo read failure and spawn failure retain ready selection for retry", async ({
+      page,
+    }) => {
+      const requests: Record<string, unknown>[] = [];
+      await page.route("**/api/spawn", async (route) => {
+        requests.push(route.request().postDataJSON() as Record<string, unknown>);
+        await route.fulfill(
+          requests.length === 1
+            ? { status: 502, json: { error: "Injected spawn failure" } }
+            : {
+                status: 201,
+                json: makeSpawningSession({ id: "photo-retry", project: "my-project" }),
+              },
+        );
+      });
+      await prepare(page);
+      await page.getByPlaceholder("Prompt...").fill("Keep photo");
+      await addPhoto(page, "drop", "ready.png");
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await gateReads(page);
+      await addPhoto(page, "paste", "broken.png");
+      await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+      await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Failed to read/);
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
+        "Injected spawn failure",
+      );
+      await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect.poll(() => requests.length).toBe(2);
+      expect(requests[1]).toMatchObject({
+        prompt: "Keep photo",
+        attachments: [{ name: "ready.png" }],
+      });
+    });
+
+    test("photo picker permits removal and same-file reselection with repeated additions", async ({
+      page,
+    }) => {
+      const requests: Record<string, unknown>[] = [];
+      await page.route("**/api/spawn", async (route) => {
+        requests.push(route.request().postDataJSON() as Record<string, unknown>);
+        await route.fulfill({
+          status: 201,
+          json: makeSpawningSession({ id: "photo-picker", project: "my-project" }),
+        });
+      });
+      await prepare(page);
+      const data = await page.evaluate(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 16;
+        return canvas.toDataURL("image/png").split(",")[1];
+      });
+      const file = {
+        name: "picker.png",
+        mimeType: "image/png",
+        buffer: Buffer.from(data, "base64"),
+      };
+      const input = page.getByRole("dialog").locator('input[type="file"]');
+      await input.setInputFiles(file);
+      await expect(page.getByRole("button", { name: "Remove picker.png" })).toBeVisible();
+      await page.getByRole("button", { name: "Remove picker.png" }).click();
+      await input.setInputFiles(file);
+      await expect(page.getByRole("button", { name: "Remove picker.png" })).toBeVisible();
+      await addPhoto(page, "paste", "second.png");
+      await expect(page.getByRole("button", { name: "Remove second.png" })).toBeVisible();
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect.poll(() => requests.length).toBe(1);
+      expect(requests[0]).toMatchObject({
+        attachments: [{ name: "picker.png" }, { name: "second.png" }],
+      });
+    });
+
+    for (const viewport of [
+      { width: 780, height: 493 },
+      { width: 390, height: 844 },
+    ]) {
+      test(`photo read and limit errors receive pointer events inside dialog at ${viewport.width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize(viewport);
+        await prepare(page);
+        await gateReads(page);
+        await addPhoto(page, "paste");
+        await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+        await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
+        const dialog = page.getByRole("dialog");
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText(/Failed to read attachment/);
+        const textReceivesPointer = () =>
+          alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          });
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        const data = await page.evaluate(() => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 16;
+          return canvas.toDataURL("image/png").split(",")[1];
+        });
+        await dialog.locator('input[type="file"]').setInputFiles(
+          Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, index) => ({
+            name: `limit-${index}.png`,
+            mimeType: "image/png",
+            buffer: Buffer.from(data, "base64"),
+          })),
+        );
+        await expect(alert).toHaveText(/Too many attachments/);
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+      });
+    }
   });
 });
 
@@ -3629,6 +3949,9 @@ test.describe("D7d: Branch name normalization", () => {
   });
 
   test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
     await page.route("**/api/spawn", async (route) => {
@@ -4207,6 +4530,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
   test("the user can retry manually after an ack failure without losing content or creating duplicate cards", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     const placeholder = makeSpawningSession({
       id: "spawn-bg-manual-retry-1",
       project: "my-project",
