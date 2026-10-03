@@ -4181,6 +4181,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {handoffOpen && session && handoffAgent ? (
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="handoff-modal-title"
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
                 if (event.target === event.currentTarget && busyAction !== "handoff") {
@@ -4203,7 +4206,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }}
               >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2
+                    id="handoff-modal-title"
+                    className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                  >
                     Handoff
                   </h2>
                   <button

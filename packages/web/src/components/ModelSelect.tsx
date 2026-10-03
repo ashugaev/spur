@@ -183,7 +183,7 @@ export function ModelSelect({
 
   useEffect(() => {
     onResolvedChangeRef.current(resolved, error);
-  }, [resolved, error]);
+  }, [resolved, error, agent, value]);
 
   // Once both fetches settle, preselect a concrete model instead of leaving
   // the field on a "server decides" sentinel. Only runs while unresolved: the
