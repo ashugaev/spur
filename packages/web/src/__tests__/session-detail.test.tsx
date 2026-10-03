@@ -1831,7 +1831,7 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("shows a ready sidecar Open without tmux or Terminal", async () => {
+  it("shows ready sidecar Open from projected API without tmux, Terminal or duplicate slot", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -1858,7 +1858,10 @@ describe("SessionDetail voice input", () => {
       );
     });
     const sidecarRow = screen.getByText("isolated-ui").closest("div")?.parentElement;
-    expect(within(sidecarRow as HTMLElement).queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+    expect(
+      within(sidecarRow as HTMLElement).queryByRole("button", { name: "Terminal" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "isolated-ui" })).not.toBeInTheDocument();
   });
 
   it("does not render sidecar Open from a stale same-name slot and preserves the slot", async () => {
@@ -1885,7 +1888,10 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "isolated-daemon" })).toHaveAttribute("href", "http://example.com:5601");
+      expect(screen.getByRole("link", { name: "isolated-daemon" })).toHaveAttribute(
+        "href",
+        "http://example.com:5601",
+      );
     });
     expect(screen.queryByRole("link", { name: "Open" })).not.toBeInTheDocument();
   });

@@ -212,7 +212,7 @@ import {
   snapshotListeners,
   type ListenerSnapshot,
 } from "./port-probe.js";
-import { classifyProcessOwnership, readProcessCwd } from "./process-tree.js";
+import { readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
@@ -308,6 +308,8 @@ import {
   applySlotsUpdate,
   ensureSessionSlotTool,
   normalizeSlotLinks,
+  normalizeSlotLabel,
+  normalizeSlotUrl,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
   type AppliedSlotsUpdate,
@@ -3270,6 +3272,7 @@ export class SessionService {
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
   private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
   // Every spawn owns one future live-session slot from its synchronous
@@ -3461,7 +3464,7 @@ export class SessionService {
     this.startScheduledWakeMonitor();
     this.startSidecarReaper();
     this.startMemoryShedLoop();
-    this.dashboardCacheReady = this.runDashboardCacheTick();
+    this.dashboardCacheReady = this.trackBackgroundLoop(this.runDashboardCacheTick());
     this.startDashboardCacheLoop();
     this.startReaperLoop();
     this.startSessionGcLoop();
@@ -3475,14 +3478,24 @@ export class SessionService {
    * the caller is gone.
    */
   async settleBackgroundSpawns(): Promise<void> {
-    await Promise.allSettled([
-      ...this.backgroundSpawnRuns,
-      ...this.queuedDeliveryAttempts,
-      ...this.prCheckRuns,
-      ...this.sidecarHealTasks.values(),
-      ...(this.sidecarObservationRun ? [this.sidecarObservationRun] : []),
-      ...(this.dashboardCacheReady ? [this.dashboardCacheReady] : []),
-    ]);
+    let runs: Promise<unknown>[];
+    do {
+      runs = [
+        ...this.backgroundSpawnRuns,
+        ...this.backgroundLoopRuns,
+        ...this.queuedDeliveryAttempts,
+        ...this.prCheckRuns,
+        ...this.sidecarHealTasks.values(),
+        ...(this.sidecarObservationRun ? [this.sidecarObservationRun] : []),
+      ];
+      await Promise.allSettled(runs);
+    } while (runs.length > 0);
+  }
+
+  private trackBackgroundLoop(run: Promise<void>): Promise<void> {
+    this.backgroundLoopRuns.add(run);
+    void run.finally(() => this.backgroundLoopRuns.delete(run));
+    return run;
   }
 
   dispose(): void {
@@ -3525,7 +3538,7 @@ export class SessionService {
       return;
     }
     this.sidecarReaperTimer = setInterval(() => {
-      void this.runSidecarReaper();
+      void this.trackBackgroundLoop(this.runSidecarReaper());
     }, SIDECAR_REAPER_INTERVAL_MS);
     this.sidecarReaperTimer.unref();
   }
@@ -3706,10 +3719,12 @@ export class SessionService {
   }
 
   private async runSidecarReaper(): Promise<void> {
+    if (this.isDeliveryStopped()) return;
     try {
       await this.reapDeadSessionSidecars();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (this.isDeliveryStopped()) return;
       this.logEvent("session.sidecar_reaper.failed", {
         level: "warn",
         message: `Sidecar reaper failed: ${message}`,
@@ -4160,8 +4175,12 @@ export class SessionService {
   // tmux ownership (not process ppid) so a transient empty listSessions read
   // can never reap a live sidecar. Guarded against re-entrancy: a slow pass
   // (large tmux fleet) must not overlap the next interval tick.
-  private async reapDeadSessionSidecars(): Promise<void> {
-    if (this.sidecarReaperRunning) {
+  private reapDeadSessionSidecars(): Promise<void> {
+    return this.trackBackgroundLoop(this.reapDeadSessionSidecarsRun());
+  }
+
+  private async reapDeadSessionSidecarsRun(): Promise<void> {
+    if (this.sidecarReaperRunning || this.isDeliveryStopped()) {
       return;
     }
     this.sidecarReaperRunning = true;
@@ -4188,7 +4207,9 @@ export class SessionService {
       }
 
       const names = await listTmuxSessionNames();
+      if (this.isDeliveryStopped()) return;
       for (const name of names) {
+        if (this.isDeliveryStopped()) return;
         const builtinName = builtinNames.find((n) => name.endsWith(`--${n}`));
         if (!builtinName) {
           continue;
@@ -4208,6 +4229,7 @@ export class SessionService {
         }
         const sessionId = name.slice(0, -`--${builtinName}`.length);
         await this.reapSidecarByName(sessionId, builtinName);
+        if (this.isDeliveryStopped()) return;
         this.clearSidecarProcEntry(sessionId, builtinName);
       }
       // Built-in (always mcp, per-session) sidecars are fully handled above
@@ -4384,13 +4406,14 @@ export class SessionService {
   // entry. Never throws — reapSidecarByName/reapRecordedIdentity already
   // degrade a survivor to a log, not a rejected promise.
   private async executeSidecarReapPlan(plan: SidecarReapPlan): Promise<void> {
-    if (plan.reap.length === 0 && plan.warn.length === 0) {
+    if (this.isDeliveryStopped() || (plan.reap.length === 0 && plan.warn.length === 0)) {
       return;
     }
     const selected: SidecarReapPlan["reap"] = [];
     for (const entry of plan.reap) {
       const owner = readSession(this.config.dataDir, entry.ownerId);
       if (owner && (await this.workspaceRetainsResources(owner))) continue;
+      if (this.isDeliveryStopped()) return;
       selected.push(entry);
     }
     for (const entry of selected) this.invalidateSidecarEndpoint(entry.ownerId, entry.sidecarName);
@@ -4403,12 +4426,14 @@ export class SessionService {
         ? await snapshotProcesses()
         : { ok: false, byPid: new Map(), byPgid: new Map() };
     for (const entry of selected) {
+      if (this.isDeliveryStopped()) return;
       const owner = readSession(this.config.dataDir, entry.ownerId);
       if (owner && (await this.workspaceRetainsResources(owner))) {
         this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
         continue;
       }
       const identity = owner?.sidecarProcs?.[entry.sidecarName];
+      if (this.isDeliveryStopped()) return;
       const treeRssKb =
         identity && preSignalSnapshot.ok
           ? collectTree(identity.pid, preSignalSnapshot).reduce(
@@ -4433,6 +4458,7 @@ export class SessionService {
       const outcome = await this.killSidecar(entry.ownerId, entry.sidecarName, {
         touchUpdatedAt: false,
       });
+      if (this.isDeliveryStopped()) return;
       this.logEvent("session.sidecar.reaped", {
         level: "info",
         sessionId: entry.ownerId,
@@ -4478,6 +4504,7 @@ export class SessionService {
     // to two passes (same discipline as executeSidecarReapPlan's own
     // pre-signal snapshot).
     const psSnapshot = await snapshotProcesses();
+    if (this.isDeliveryStopped()) return { reap: [], warn: [], keep: [] };
     // Detection runs BEFORE the sidecarGc.enabled check below: that switch
     // governs killing, and a detect-only event that kills nothing has no
     // reason to inherit it — a host with GC disabled still gets orphan
@@ -5766,7 +5793,10 @@ export class SessionService {
         receipt.revision !== row.revision ||
         !isDeepStrictEqual(
           row.view.slots,
-          deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, current)),
+          this.projectSidecarSlots(
+            current,
+            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, current)),
+          ),
         )
       );
     };
@@ -6008,9 +6038,9 @@ export class SessionService {
     if (this.attentionMonitorTimer) {
       return;
     }
-    void this.runAttentionMonitor(true);
+    void this.trackBackgroundLoop(this.runAttentionMonitor(true));
     this.attentionMonitorTimer = setInterval(() => {
-      void this.runAttentionMonitor(false);
+      void this.trackBackgroundLoop(this.runAttentionMonitor(false));
     }, ATTENTION_POLL_INTERVAL_MS);
     this.attentionMonitorTimer.unref();
   }
@@ -6398,6 +6428,7 @@ export class SessionService {
   }
 
   private async pollAttentionStates(baseline: boolean): Promise<void> {
+    if (this.isDeliveryStopped()) return;
     if (this.attentionMonitorRunning) {
       this.attentionMonitorSuppressedTicks += 1;
       return;
@@ -6427,6 +6458,7 @@ export class SessionService {
       const claudeAccounts = this.computeClaudeAccountsView();
       this.prCheckGitSpentMs = 0;
       for (const session of liveSessions) {
+        if (this.isDeliveryStopped()) return;
         try {
           this.warnIfTokenBudgetUnenforced(session);
           const { view, classified, detectionOnlyError } = await this.enrichWithClassified(
@@ -6434,6 +6466,7 @@ export class SessionService {
             claudeAccounts,
             allSessions,
           );
+          if (this.isDeliveryStopped()) return;
           if (
             view.status === "running" &&
             view.tokenBudgetView?.exhausted &&
@@ -6448,6 +6481,7 @@ export class SessionService {
             continue;
           }
           await this.checkPrForSession(session, view.state);
+          if (this.isDeliveryStopped()) return;
           if (detectionOnlyError) {
             const previousAttention = this.attentionStates.get(view.id);
             if (previousAttention !== undefined) nextStates.set(view.id, previousAttention);
@@ -6683,7 +6717,7 @@ export class SessionService {
       return;
     }
     this.dashboardCacheTimer = setInterval(() => {
-      void this.runDashboardCacheTick();
+      void this.trackBackgroundLoop(this.runDashboardCacheTick());
     }, DASHBOARD_CACHE_INTERVAL_MS);
     this.dashboardCacheTimer.unref();
   }
@@ -6696,7 +6730,7 @@ export class SessionService {
   }
 
   private async runDashboardCacheTick(): Promise<void> {
-    if (this.dashboardLoopRunning) {
+    if (this.dashboardLoopRunning || this.isDeliveryStopped()) {
       return;
     }
     this.dashboardLoopRunning = true;
@@ -6799,6 +6833,7 @@ export class SessionService {
           }),
         ),
       );
+      if (this.isDeliveryStopped()) return;
       for (const [index, session] of due.entries()) {
         if (refreshedDuringTick(session.id)) continue;
         const view = enriched[index];
@@ -9045,6 +9080,7 @@ export class SessionService {
     clearPort?: number;
     onStarted?: () => void;
   }): Promise<SessionRecord> {
+    args.session = this.pruneLegacySidecarLinks(args.session, new Set([args.sidecarName]));
     const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
     this.invalidateSidecarEndpoint(args.session.id, args.sidecarName);
     // Presence AND unresponsiveness off one read each: a timeout-killed probe
@@ -9394,6 +9430,48 @@ export class SessionService {
     return `${sessionId}\0${sidecarName}`;
   }
 
+  private isLegacySidecarLink(
+    session: SessionRecord,
+    link: SessionSlots["links"][number],
+  ): boolean {
+    const name = normalizeSlotLabel(link.label);
+    const sidecar = this.resolveProjectForSession(session)?.sidecars[name];
+    if (!sidecar) return false;
+    const owner = this.resolveSidecarOwnerRecord(session, sidecar);
+    const current = this.resolveSidecarUrlLink(owner, name, sidecar);
+    return (
+      current !== undefined && normalizeSlotUrl(link.url) === normalizeSlotUrl(current.linkUrl)
+    );
+  }
+
+  private projectSidecarSlots(
+    session: SessionRecord,
+    slots: SessionSlots | undefined,
+  ): SessionSlots | undefined {
+    if (!slots) return undefined;
+    const links = slots.links.filter((link) => !this.isLegacySidecarLink(session, link));
+    return links.length === slots.links.length ? slots : { ...slots, links };
+  }
+
+  private pruneLegacySidecarLinks(
+    session: SessionRecord,
+    names: ReadonlySet<string>,
+  ): SessionRecord {
+    const current = readSession(this.config.dataDir, session.id) ?? session;
+    const state = resolveWorkspaceState(this.config.dataDir, current);
+    const slots = deriveSessionSlots(state);
+    if (!slots) return current;
+    const links = slots.links.filter(
+      (link) =>
+        !names.has(normalizeSlotLabel(link.label)) || !this.isLegacySidecarLink(current, link),
+    );
+    if (links.length === slots.links.length) return current;
+    return (
+      this.writeWorkspaceStateWithLegacyMirror(current, { ...state, slots: { ...slots, links } }) ??
+      current
+    );
+  }
+
   private invalidateSidecarEndpoint(ownerId: string, name: string): void {
     const key = this.sidecarEndpointKey(ownerId, name);
     const previous = this.sidecarEndpoints.get(key);
@@ -9403,7 +9481,6 @@ export class SessionService {
     for (const record of listSessions(this.config.dataDir)) {
       const project = this.resolveProjectForSession(record);
       if (this.sidecarOwnerIdForName(record, project, name) !== ownerId) continue;
-      this.dashboardRefreshVersions.set(record.id, ++this.dashboardRefreshSequence);
       const cached = this.dashboardCache.get(record.id);
       for (const view of cached?.sidecars ?? []) {
         if (view.name === name) delete view.url;
@@ -9439,26 +9516,18 @@ export class SessionService {
       for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
         const sidecar = project?.sidecars[name];
         const link = sidecar ? this.resolveSidecarUrlLink(session, name, sidecar) : undefined;
-        if (!link) continue;
         rootPids.add(identity.pid);
-        urlPorts.add(link.reservedPort);
+        if (link) urlPorts.add(link.reservedPort);
       }
     }
     const run = Promise.all(
       [...rootPids].map(async (pid) => [pid, await readProcessStarttime(pid)] as const),
     ).then(async (roots) => {
       const starttimes = new Map(roots);
-      const [listeners, processes] = await Promise.all([snapshotListeners(), snapshotProcesses()]);
-      if (listeners.ok) {
-        const listenerPids = new Set(
-          [...urlPorts].flatMap((port) => [...(listeners.byPort.get(port) ?? [])]),
-        );
-        await Promise.all(
-          [...listenerPids].map(async (pid) => {
-            if (!starttimes.has(pid)) starttimes.set(pid, await readProcessStarttime(pid));
-          }),
-        );
-      }
+      const [listeners, processes] = await Promise.all([
+        urlPorts.size ? snapshotListeners() : Promise.resolve({ ok: false as const }),
+        snapshotProcesses(),
+      ]);
       const value = { listeners, processes, starttimes, revision };
       if (!this.deliveryStopped && revision === this.sidecarObservationRevision) {
         this.sidecarObservation = { value, completedAt: Date.now() };
@@ -9512,6 +9581,11 @@ export class SessionService {
   ): Promise<SessionSidecarView[]> {
     const names = sessionSidecarNames(session, project);
     if (names.length === 0) return [];
+    const hasIdentity = names.some((name) => {
+      const sidecar = project?.sidecars[name];
+      const owner = sidecar ? this.resolveSidecarOwnerRecord(session, sidecar) : session;
+      return owner.sidecarProcs?.[name] !== undefined;
+    });
     const claims = new Map(
       await Promise.all(
         names.map(async (name) => {
@@ -9528,7 +9602,14 @@ export class SessionService {
         }),
       ),
     );
-    const observation = await this.observeSidecars();
+    const observation: SidecarObservation = hasIdentity
+      ? await this.observeSidecars()
+      : {
+          listeners: { ok: false },
+          processes: { ok: false, byPid: new Map(), byPgid: new Map() },
+          starttimes: new Map(),
+          revision: this.sidecarObservationRevision,
+        };
     const views: SessionSidecarView[] = [];
     for (const name of names) {
       const sidecar = project?.sidecars[name];
@@ -9593,46 +9674,15 @@ export class SessionService {
         observation.processes.ok &&
         observation.listeners.ok
       ) {
-        const pids = observation.listeners.byPort.get(link.reservedPort);
-        const tree = new Set(collectTree(identity.pid, observation.processes));
-        const owned = pids && [...pids].some((pid) => tree.has(pid));
-        if (
-          pids === undefined ||
-          (pids.size > 0 &&
-            !owned &&
-            !observation.listeners.unattributedPorts?.has(link.reservedPort))
-        ) {
-          delete entry.url;
-        } else if (owned) {
-          const ownerships = await Promise.all(
-            [...pids]
-              .filter((pid) => tree.has(pid))
-              .map(async (pid) => {
-                const observed = observation.starttimes.get(pid);
-                const current = await readProcessStarttime(pid);
-                if (observed === undefined || observed === null || current === null) return "unknown";
-                if (observed !== current) return "foreign";
-                const ownership = await classifyProcessOwnership(pid, identity.pid);
-                if (ownership !== "owned") return ownership;
-                const confirmed = await readProcessStarttime(pid);
-                return confirmed === observed
-                  ? "owned"
-                  : confirmed === null
-                    ? "unknown"
-                    : "foreign";
-              }),
-          );
-          const confirmed = await readProcessStarttime(identity.pid);
-          if (confirmed === identity.starttime && ownerships.includes("owned"))
-            entry.url = link.linkUrl;
-          else if (
-            (confirmed !== null && confirmed !== identity.starttime) ||
-            ownerships.every((ownership) => ownership === "foreign")
-          )
-            delete entry.url;
-        }
+        const confirmed = await readProcessStarttime(identity.pid);
+        if (confirmed === identity.starttime) entry.url = link.linkUrl;
+        else if (confirmed !== null) delete entry.url;
       }
-      if (entry.url) {
+      if (
+        entry.url &&
+        initial.starttime === identity.starttime &&
+        starttime === identity.starttime
+      ) {
         view.url = entry.url;
         this.sidecarViewClaims.set(view, {
           ownerId: owner.id,
@@ -10710,6 +10760,7 @@ export class SessionService {
   // our bin, port not reserved by any live session). Registry-driven over
   // BUILTIN_SIDECARS; best-effort, logs the killed count per sidecar name.
   private async sweepLeakedBuiltinSidecars(context: "boot" | "reaper"): Promise<void> {
+    if (this.isDeliveryStopped()) return;
     const ownedPortsByName = new Map<string, Set<number>>();
     for (const session of listSessions(this.config.dataDir)) {
       if (isTerminalSessionStatus(session.status)) continue;
@@ -10723,8 +10774,10 @@ export class SessionService {
       }
     }
     for (const [name, builtin] of Object.entries(BUILTIN_SIDECARS)) {
+      if (this.isDeliveryStopped()) return;
       if (!builtin.sweepLeaked) continue;
       const killed = await builtin.sweepLeaked(ownedPortsByName.get(name) ?? new Set<number>());
+      if (this.isDeliveryStopped()) return;
       if (killed <= 0) continue;
       if (context === "boot") {
         this.logEvent("daemon.startup.sidecar_sweep", {
@@ -15418,6 +15471,7 @@ export class SessionService {
     const identity = owner?.sidecarProcs?.[sidecarName];
     const fallback = owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
     const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
+    if (this.isDeliveryStopped()) return outcome;
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
   }
@@ -15443,6 +15497,7 @@ export class SessionService {
   // a live claim by the sweep predicate. Mirrors the `delete mirrored.slots`
   // pattern in writeWorkspaceStateWithLegacyMirror.
   private clearSidecarProcEntry(ownerId: string, sidecarName: string): void {
+    if (this.isDeliveryStopped()) return;
     const record = readSession(this.config.dataDir, ownerId);
     if (!record?.sidecarProcs?.[sidecarName]) {
       return;
@@ -15473,7 +15528,9 @@ export class SessionService {
   ): Promise<ReapOutcome | null> {
     this.invalidateSidecarEndpoint(ownerId, sidecarName);
     let outcome: ReapOutcome | null;
-    if (await sidecarTmuxAlive(ownerId, sidecarName)) {
+    const alive = await sidecarTmuxAlive(ownerId, sidecarName);
+    if (this.isDeliveryStopped()) return null;
+    if (alive) {
       outcome = await this.reapSidecarByName(ownerId, sidecarName);
     } else {
       const owner = readSession(this.config.dataDir, ownerId);
@@ -15486,6 +15543,7 @@ export class SessionService {
       }
     }
 
+    if (this.isDeliveryStopped()) return outcome;
     const afterKill = readSession(this.config.dataDir, ownerId);
     if (!afterKill) return outcome;
     if (touchUpdatedAt) {
@@ -15538,6 +15596,10 @@ export class SessionService {
     const ownerId = this.sidecarOwnerIdForName(session, project, sidecarName);
     const sidecar = project?.sidecars[sidecarName];
     const clearsWorkspaceReplay = sidecar !== undefined && !sidecar.mcp;
+    this.pruneLegacySidecarLinks(
+      readSession(this.config.dataDir, ownerId) ?? session,
+      new Set([sidecarName]),
+    );
     this.invalidateSidecarEndpoint(ownerId, sidecarName);
 
     // Claimed synchronously before any await, and released in the finally
@@ -15669,6 +15731,7 @@ export class SessionService {
   // batch through ONE shared grace window — not one sleep per sidecar (that
   // would multiply teardown latency by sidecar count).
   private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
+    if (this.isDeliveryStopped()) return;
     const project = this.resolveProjectForSession(session);
     // Recheck sibling retention before each signal and identity removal.
     const deskSiblingsRunning = this.hasRunningWorkspaceMembers(session);
@@ -15694,8 +15757,15 @@ export class SessionService {
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
       selected.push({ ownerId, scName });
     }
+    if (this.isDeliveryStopped()) return;
     // Select retention first, then retire the entire batch before any signal await.
-    for (const { ownerId, scName } of selected) this.invalidateSidecarEndpoint(ownerId, scName);
+    for (const { ownerId, scName } of selected) {
+      this.pruneLegacySidecarLinks(
+        readSession(this.config.dataDir, ownerId) ?? session,
+        new Set([scName]),
+      );
+      this.invalidateSidecarEndpoint(ownerId, scName);
+    }
     for (const { ownerId, scName } of selected) {
       const sidecar = project?.sidecars[scName];
       if (
@@ -15707,6 +15777,7 @@ export class SessionService {
         this.allowSidecarEndpoint(ownerId, scName);
         continue;
       }
+      if (this.isDeliveryStopped()) break;
       const record = readSession(this.config.dataDir, ownerId);
       const identity = record?.sidecarProcs?.[scName];
       const fallback =
@@ -15715,6 +15786,7 @@ export class SessionService {
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    if (this.isDeliveryStopped()) return;
     for (const [index, entry] of pendingBySidecar.entries()) {
       this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
       if (!project?.sidecars[entry.scName]?.mcp && this.hasRunningWorkspaceMembers(session)) {
@@ -19958,6 +20030,7 @@ export class SessionService {
     serverError: boolean,
     serverErrorEvidence?: "error" | "recovered",
   ): Promise<SessionStateTransition[]> {
+    if (this.isDeliveryStopped()) return [];
     // Recovery evidence is independent of the displayed state and restore warmup.
     if (serverError && !session.serverErrorAt) {
       this.writeServerErrorMarker(session.id, nowIso());
@@ -20090,6 +20163,7 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
+    if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
@@ -20132,6 +20206,7 @@ export class SessionService {
         // single transient tmux/list-windows blip would agree with itself on
         // both reads and mark a genuinely live session stopped.
         confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+        if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
       if (
         live(confirmedRuntime) &&
@@ -20530,6 +20605,17 @@ export class SessionService {
           probeUnresponsive: false,
         }
       : await this.readRuntimeSnapshot(session);
+    if (this.isDeliveryStopped())
+      return {
+        session,
+        runtime,
+        state: "stopped",
+        source: "status",
+        historySourcePath: null,
+        workspacePresent: workspaceExists(session.worktreePath),
+        serverError: false,
+        agentActivityAt: null,
+      };
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     if (runtime.probeUnresponsive || workspace.diagnostic) {
@@ -21104,7 +21190,10 @@ export class SessionService {
     const source = this.lifecycleSource(session);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const displaySlots = deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session));
+    const displaySlots = this.projectSidecarSlots(
+      session,
+      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session)),
+    );
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
@@ -21175,7 +21264,11 @@ export class SessionService {
   ): { status: "present"; session: SessionRecord } | { status: "missing" } {
     const current = readSession(this.config.dataDir, session.id);
     if (!current) return { status: "missing" };
-    if (current.agent !== session.agent || current.agentSessionId !== session.agentSessionId) {
+    if (
+      this.isDeliveryStopped() ||
+      current.agent !== session.agent ||
+      current.agentSessionId !== session.agentSessionId
+    ) {
       return { status: "present", session: current };
     }
     const tokenUsage = this.reconcileClassifiedTokenUsage(current.tokenUsage, classified);
@@ -21447,8 +21540,9 @@ export class SessionService {
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = deriveSessionSlots(
-      resolveWorkspaceState(this.config.dataDir, anchorRecord),
+    const displaySlots = this.projectSidecarSlots(
+      session,
+      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, anchorRecord)),
     );
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,

@@ -128,7 +128,7 @@ export interface SpurSidecarPort {
 export interface SpurSessionSidecarView {
   name: string;
   alive: boolean;
-  /** Configured URL of an owned listening endpoint, independent of tmux liveness. */
+  /** Configured listening port URL with a current live launcher; independent of tmux liveness. */
   url?: string;
   ports?: SpurSidecarPort[];
   tmuxSession: string;
@@ -870,10 +870,12 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
-  const runningSidecarNames = [...new Set([
-    ...(session.runningSidecarNames ?? []),
-    ...(session.sidecars ?? []).filter((sc) => sc.url).map((sc) => sc.name),
-  ])];
+  const runningSidecarNames = [
+    ...new Set([
+      ...(session.runningSidecarNames ?? []),
+      ...(session.sidecars ?? []).filter((sc) => sc.url).map((sc) => sc.name),
+    ]),
+  ];
   const sidecarViewsByName = new Map((session.sidecars ?? []).map((sc) => [sc.name, sc]));
   const runningSidecars = runningSidecarNames.map((name) => {
     const view = sidecarViewsByName.get(name);

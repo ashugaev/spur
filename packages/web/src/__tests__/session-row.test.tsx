@@ -335,14 +335,32 @@ describe("SessionRow", () => {
     useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
     const props = { onCompleteSession, onRestoreSession };
     const { rerender } = render(
-      <SessionRow {...props} session={makeSession({
-        sidecars: [{ name: "detached", alive: false, tmuxSession: "detached", url: "https://ready.example.com/" }],
-        runningSidecars: [{ name: "detached", url: "https://ready.example.com/" }, { name: "worker" }],
-      })} />,
+      <SessionRow
+        {...props}
+        session={makeSession({
+          sidecars: [
+            {
+              name: "detached",
+              alive: false,
+              tmuxSession: "detached",
+              url: "https://ready.example.com/",
+            },
+          ],
+          runningSidecars: [
+            { name: "detached", url: "https://ready.example.com/" },
+            { name: "worker" },
+          ],
+        })}
+      />,
     );
     fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
-    expect(screen.getByRole("link", { name: "detached" })).toHaveAttribute("href", "https://ready.example.com/");
-    rerender(<SessionRow {...props} session={makeSession({ runningSidecars: [{ name: "worker" }] })} />);
+    expect(screen.getByRole("link", { name: "detached" })).toHaveAttribute(
+      "href",
+      "https://ready.example.com/",
+    );
+    rerender(
+      <SessionRow {...props} session={makeSession({ runningSidecars: [{ name: "worker" }] })} />,
+    );
     expect(screen.queryByRole("link", { name: "detached" })).not.toBeInTheDocument();
     expect(screen.getByText("worker")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "worker" })).not.toBeInTheDocument();

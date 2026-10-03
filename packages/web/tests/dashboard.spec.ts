@@ -1526,7 +1526,9 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(sidecarPanel.getByRole("button")).toHaveCount(0);
     await expect(sidecarPanel.getByRole("link")).toHaveCount(1);
     ready = false;
-    await expect(sidecarPanel.getByRole("link", { name: "isolated-ui" })).toHaveCount(0, { timeout: 15000 });
+    await expect(sidecarPanel.getByRole("link", { name: "isolated-ui" })).toHaveCount(0, {
+      timeout: 15000,
+    });
     await expect(sidecarPanel.getByText("preview")).toBeVisible();
   });
 

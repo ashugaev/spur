@@ -175,9 +175,7 @@ function dedupeConflictCandidatesByPort(
   });
 }
 
-function splitSessionLinks(
-  links: DashboardSession["links"],
-): {
+function splitSessionLinks(links: DashboardSession["links"]): {
   surfacedLinks: DashboardSession["links"];
   visibleLinks: DashboardSession["links"];
 } {

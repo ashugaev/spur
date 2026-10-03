@@ -186,8 +186,20 @@ describe("toDashboardSession", () => {
         baseView({
           runningSidecarNames: ["isolated-ui", "worker"],
           sidecars: [
-            { name: "isolated-ui", alive: true, tmuxSession: "ui", url: "https://ui.example.com/", ageSeconds: 7, ageWarn: false },
-            { name: "detached", alive: false, tmuxSession: "detached", url: "https://detached.example.com/" },
+            {
+              name: "isolated-ui",
+              alive: true,
+              tmuxSession: "ui",
+              url: "https://ui.example.com/",
+              ageSeconds: 7,
+              ageWarn: false,
+            },
+            {
+              name: "detached",
+              alive: false,
+              tmuxSession: "detached",
+              url: "https://detached.example.com/",
+            },
           ],
           slots: {
             links: [
@@ -206,7 +218,9 @@ describe("toDashboardSession", () => {
 
   it("preserves ordinary sidecar-labelled slots without treating them as ready", () => {
     const links = [{ label: "isolated-ui", url: "https://stale.example.com/" }];
-    const session = toDashboardSession(baseView({ runningSidecarNames: ["isolated-ui"], slots: { links } }));
+    const session = toDashboardSession(
+      baseView({ runningSidecarNames: ["isolated-ui"], slots: { links } }),
+    );
     expect(session.runningSidecars).toEqual([{ name: "isolated-ui" }]);
     expect(session.links).toEqual(links);
   });

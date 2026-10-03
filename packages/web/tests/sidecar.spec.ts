@@ -299,7 +299,10 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(openLink).toBeVisible();
     await expect(openLink).toHaveAttribute("href", "https://ready.example.com/");
     await expect(sidecarSection.getByRole("button", { name: /terminal/i })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "isolated-ui", exact: true })).toHaveAttribute("href", "http://example.com:5601");
+    await expect(page.getByRole("link", { name: "isolated-ui", exact: true })).toHaveAttribute(
+      "href",
+      "http://example.com:5601",
+    );
   });
 
   test("stale slot URL cannot create sidecar Open", async ({ page }) => {
@@ -313,10 +316,15 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     const section = page.locator("section").filter({ hasText: "Sidecars" });
     await expect(section).toBeVisible();
     await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute("href", "https://stale.example.com/");
+    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute(
+      "href",
+      "https://stale.example.com/",
+    );
   });
 
-  test("ready URL refresh adds Open and stop removes Open without deleting slots", async ({ page }) => {
+  test("ready URL refresh adds Open and stop removes Open while preserving unmatched slot target", async ({
+    page,
+  }) => {
     let ready = false;
     let stopped = false;
     const session = makeWorkingSession({
@@ -327,9 +335,18 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await mockTagCatalog(page);
     const current = () => ({
       ...session,
-      sidecars: [{ ...session.sidecars?.[0], name: "dev", alive: !stopped, ...(ready && !stopped ? { url: "https://ready.example.com/" } : {}) }],
+      sidecars: [
+        {
+          ...session.sidecars?.[0],
+          name: "dev",
+          alive: !stopped,
+          ...(ready && !stopped ? { url: "https://ready.example.com/" } : {}),
+        },
+      ],
     });
-    await page.route(`**/api/sessions/${session.id}`, (route) => route.fulfill({ json: current() }));
+    await page.route(`**/api/sessions/${session.id}`, (route) =>
+      route.fulfill({ json: current() }),
+    );
     await page.route(`**/api/sessions/${session.id}/sidecars/dev/stop`, (route) => {
       stopped = true;
       return route.fulfill({ json: current() });
@@ -339,10 +356,17 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(section).toBeVisible();
     await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
     ready = true;
-    await expect(section.getByRole("link", { name: "Open" })).toHaveAttribute("href", "https://ready.example.com/", { timeout: 15000 });
+    await expect(section.getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "https://ready.example.com/",
+      { timeout: 15000 },
+    );
     await section.getByRole("button", { name: "Stop sidecar dev" }).click();
     await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute("href", "https://legacy.example.com/");
+    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute(
+      "href",
+      "https://legacy.example.com/",
+    );
   });
 
   test("starting one sidecar keeps other sidecar start buttons enabled", async ({ page }) => {

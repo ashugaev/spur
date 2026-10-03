@@ -1278,7 +1278,7 @@ export interface SidecarPortView {
 export interface SessionSidecarView {
   name: string;
   alive: boolean;
-  /** Configured URL of an owned TCP listener; independent of tmux liveness. */
+  /** Configured URL with a live recorded launcher and reserved TCP listener. */
   url?: string;
   ports: SidecarPortView[];
   tmuxSession: string;

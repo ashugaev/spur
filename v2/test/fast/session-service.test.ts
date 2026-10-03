@@ -27,6 +27,7 @@ import { resolveBootstrapConfigReferencePath } from "../../src/bootstrap-prompt.
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as telegramSourceStateModule from "../../src/telegram-source-state.js";
 import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
@@ -837,7 +838,8 @@ vi.mock("../../src/host-memory.js", () => ({
   readHostMemory: readHostMemoryMock,
 }));
 
-vi.mock("../../src/session-slots.js", () => ({
+vi.mock("../../src/session-slots.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof sessionSlotsModule>()),
   AGENT_STATE_TOOL_NAME: "spur-agent-state",
   SELF_DESTRUCT_TOOL_NAME: "spur-self-destruct",
   SLOT_TOOL_NAME: "spur-slots",
@@ -1423,8 +1425,9 @@ const SUBMIT_UNCONFIRMED: AgentSendOutcome = "submit_unconfirmed";
 
 async function createDisposedSessionService() {
   const { SessionService } = await loadSessionServiceModule();
-  const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-  service.dispose();
+  const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+    deferBackgroundLoops: true,
+  });
   return service;
 }
 
@@ -1597,23 +1600,13 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it.each(["free", "foreign", "anonymous", "failed", "reused", "gone"])(
+    it.each(["free", "failed", "reused", "gone"])(
       "cannot create readiness from %s",
       async (kind) => {
         const { service, views, identityProbe } = await setup();
         if (kind === "failed") snapshotListenersMock.mockResolvedValue({ ok: false });
         if (kind === "free")
           snapshotListenersMock.mockResolvedValue({ ok: true, byPort: new Map() });
-        if (kind === "foreign")
-          snapshotListenersMock.mockResolvedValue({
-            ok: true,
-            byPort: new Map([[3000, new Set([999])]]),
-          });
-        if (kind === "anonymous")
-          snapshotListenersMock.mockResolvedValue({
-            ok: true,
-            byPort: new Map([[3000, new Set()]]),
-          });
         if (kind === "reused") identityProbe.mockResolvedValue(124);
         if (kind === "gone")
           snapshotProcessesMock.mockResolvedValue({
@@ -1655,7 +1648,7 @@ describe("SessionService", () => {
       nextObservation();
       snapshotListenersMock.mockResolvedValue({ ok: false });
       identityProbe.mockResolvedValue(null);
-      expect((await views())[0]).toHaveProperty("url");
+      expect((await views())[0]).not.toHaveProperty("url");
       sessions.set(owner.id, {
         ...owner,
         sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 124 } },
@@ -1664,7 +1657,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("rejects cached ancestry when the root or listener identity changes", async () => {
+    it("rejects cached root reuse while accepting listener identity changes", async () => {
       const { service, views, sessions, owner, identityProbe, ownershipProbe } = await setup();
       let rootStarttime = 123;
       let listenerStarttime = 456;
@@ -1682,15 +1675,28 @@ describe("SessionService", () => {
       nextObservation();
       expect((await views())[0]).toHaveProperty("url");
       listenerStarttime = 457;
-      expect((await views())[0]).not.toHaveProperty("url");
+      expect((await views())[0]).toHaveProperty("url");
       expect(snapshotListenersMock).toHaveBeenCalledTimes(2);
       nextObservation();
       expect((await views())[0]).toHaveProperty("url");
       ownershipProbe.mockResolvedValue("foreign");
-      expect((await views())[0]).not.toHaveProperty("url");
+      expect((await views())[0]).toHaveProperty("url");
       expect(snapshotListenersMock).toHaveBeenCalledTimes(3);
       service.dispose();
     });
+
+    it.each([{ pids: [] }, { pids: [999] }, { pids: [101, 999] }])(
+      "publishes a reserved LISTEN regardless of reported PIDs $pids",
+      async ({ pids }) => {
+        const { service, views } = await setup();
+        snapshotListenersMock.mockResolvedValue({
+          ok: true,
+          byPort: new Map([[3000, new Set(pids)]]),
+        });
+        expect((await views())[0]).toHaveProperty("url", "https://preview.example.com/3000");
+        service.dispose();
+      },
+    );
 
     it("retains a shared sidecar when a sibling starts during an earlier teardown signal", async () => {
       const { service, sessions, owner, internals, views, config } = await setup();
@@ -1767,6 +1773,73 @@ describe("SessionService", () => {
       expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
       expect(writeSessionMock).not.toHaveBeenCalled();
       service.dispose();
+    });
+
+    it("drains a delegated reap before disposing fixture ownership", async () => {
+      const { service, sessions, owner, internals } = await setup();
+      sessions.set(owner.id, { ...owner, status: "stopped" });
+      listTmuxSessionNamesMock.mockResolvedValue(new Set(["missing--playwright"]));
+      const reap = await import("../../src/sidecars/reap.js");
+      const entered = signal();
+      const release = signal();
+      const calls: string[] = [];
+      vi.spyOn(reap, "reapSidecarPane").mockImplementation(async (name) => {
+        entered.resolve();
+        await release.promise;
+        calls.push(name);
+        return { sessionName: name, panePid: null, survivors: [], blindKill: true };
+      });
+      const reaper = internals as unknown as { reapDeadSessionSidecars(): Promise<void> };
+      const run = reaper.reapDeadSessionSidecars();
+      await entered.promise;
+      service.dispose();
+      writeSessionMock.mockClear();
+      let drained = false;
+      const drain = service.settleBackgroundSpawns().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      release.resolve();
+      await Promise.all([run, drain]);
+      expect(calls).toEqual(["missing--playwright"]);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      await reaper.reapDeadSessionSidecars();
+      expect(calls).toHaveLength(1);
+    });
+
+    it("projects only normalized current reserved legacy links without readout writes", async () => {
+      const { service, sessions, owner, internals } = await setup();
+      const slots = {
+        title: "Keep title",
+        tags: ["bug"],
+        links: [
+          { label: " DEV ", url: " https://preview.example.com/3000 " },
+          { label: "dev", url: "https://custom.example.com/" },
+          { label: "daemon", url: "http://localhost:4000/" },
+          { label: "tracker", url: "https://tracker.example.com/" },
+        ],
+      };
+      sessions.set(owner.id, { ...owner, slots });
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      const receipt = lifecycle.begin("complete", [owner.id]);
+      lifecycle.settle(
+        receipt,
+        true,
+        () => "succeeded",
+        () => true,
+      );
+      writeSessionMock.mockClear();
+      const detailed = await service.get(owner.id);
+      expect(detailed.lifecycle.revision).toBeGreaterThan(0);
+      const dashboard = (await service.list({ view: "dashboard" }))[0];
+      for (const view of [detailed, dashboard]) {
+        expect(view?.slots).toEqual({ ...slots, links: slots.links.slice(1) });
+      }
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(sessions.get(owner.id)?.slots).toEqual(slots);
+      await internals.teardownSessionSidecars(sessions.get(owner.id) ?? owner);
+      expect(sessions.get(owner.id)?.slots).toEqual({ ...slots, links: slots.links.slice(1) });
     });
 
     it.each(["history", "finalize", "dashboard-finalize"])(
@@ -2410,8 +2483,8 @@ describe("SessionService", () => {
     for (const service of activeSessionServices.splice(0)) {
       // Drain fire-and-forget background spawns so their trailing writeSession calls
       // cannot bleed into the next test's re-pointed session store (shared "api-1" id).
-      await service.settleBackgroundSpawns();
       service.dispose();
+      await service.settleBackgroundSpawns();
     }
     vi.clearAllTimers();
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
@@ -7009,13 +7082,13 @@ describe("SessionService", () => {
     const config: ReturnType<typeof baseConfig> & {
       projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
     } = baseConfig();
-    config.projects.api!.reasoningEffort = { claude: "medium" };
+    config.projects.api.reasoningEffort = { claude: "medium" };
     loadConfigMock.mockReturnValue(config);
     const service = await createDisposedSessionService();
     await expect(service.spawnDefaults("api", "claude")).resolves.toMatchObject({
       reasoningEffort: "medium",
     });
-    config.projects.api!.reasoningEffort.claude = "low";
+    config.projects.api.reasoningEffort.claude = "low";
     await expect(service.spawnDefaults("api", "claude")).resolves.toMatchObject({
       reasoningEffort: "low",
     });
@@ -7029,7 +7102,7 @@ describe("SessionService", () => {
       const config: ReturnType<typeof baseConfig> & {
         projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
       } = baseConfig();
-      config.projects.api!.reasoningEffort = { claude: "medium" };
+      config.projects.api.reasoningEffort = { claude: "medium" };
       loadConfigMock.mockReturnValue(config);
       mockClaudeJsonlState("waiting");
       workspaceExistsMock.mockReturnValue(true);
@@ -7116,7 +7189,7 @@ describe("SessionService", () => {
       const config: ReturnType<typeof baseConfig> & {
         projects: { api: { reasoningEffort?: AppConfig["projects"][string]["reasoningEffort"] } };
       } = baseConfig();
-      config.projects.api!.reasoningEffort = { claude: "high" };
+      config.projects.api.reasoningEffort = { claude: "high" };
       loadConfigMock.mockReturnValue(config);
       const source = runningSession({
         status: action === "respawn" ? "completed" : "running",
@@ -13851,27 +13924,34 @@ describe("SessionService", () => {
         },
       });
       const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ id: "api-1", sidecarNames: ["dev"] }));
-      sessions.set("api-2", runningSession({ id: "api-2", sidecarNames: ["dev"] }));
-      sessions.set("api-3", runningSession({ id: "api-3", sidecarNames: ["dev"] }));
+      for (const id of ["api-1", "api-2", "api-3"]) {
+        sessions.set(
+          id,
+          runningSession({
+            id,
+            sidecarNames: ["dev"],
+            sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 123 } },
+          }),
+        );
+      }
       sidecarTmuxAliveMock.mockResolvedValue(false);
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      const internals = service as unknown as {
-        attentionMonitorRunning: boolean;
-        dashboardCacheReady: Promise<void> | null;
-      };
-      await internals.dashboardCacheReady;
-      for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
-        await Promise.resolve();
-      }
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
       snapshotProcessesMock.mockClear();
+      snapshotListenersMock.mockClear();
 
       const views = await service.list();
 
       expect(views).toHaveLength(3);
-      expect(snapshotProcessesMock).not.toHaveBeenCalled();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      await service.list();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(Date.now() + 1_001);
+      await service.list();
+      expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
+      expect(snapshotListenersMock).not.toHaveBeenCalled();
       service.dispose();
     });
 
@@ -23806,7 +23886,9 @@ describe("SessionService", () => {
     expect(listed[0]).not.toHaveProperty("queuedMessages");
     expect(listed[0]).not.toHaveProperty("artifacts");
     expect(listed[0]).not.toHaveProperty("services");
-    expect(listed[0]).not.toHaveProperty("sidecars");
+    expect(listed[0]?.sidecars).toEqual([
+      { name: "dev", alive: true, ports: [], tmuxSession: "api-1--dev" },
+    ]);
     expect(listed[0]).not.toHaveProperty("workspaceAccess");
     expect(listed[0]).not.toHaveProperty("stateHistory");
     // Read only from the single-session views, and ~14% of the listing payload.
@@ -23827,7 +23909,10 @@ describe("SessionService", () => {
     expect(tmuxSessionExistsMock.mock.calls.every((call) => call[0] !== "api-2")).toBe(true);
     expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "dev");
     expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-1", "preview");
-    expect(sidecarTmuxAliveMock).not.toHaveBeenCalledWith("api-2", "dev");
+    expect(listed[1]?.sidecars).toEqual([
+      { name: "dev", alive: true, ports: [], tmuxSession: "api-2--dev" },
+      { name: "preview", alive: false, ports: [], tmuxSession: "api-2--preview" },
+    ]);
   });
 
   it("dashboard list persists stopped for a running session with a dead pane", async () => {
@@ -30442,8 +30527,13 @@ describe("SessionService", () => {
       const service = new SessionService(
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
-      ) as unknown as { reapDeadSessionSidecars(): Promise<void>; dispose(): void };
+      ) as unknown as {
+        reapDeadSessionSidecars(): Promise<void>;
+        settleBackgroundSpawns(): Promise<void>;
+        dispose(): void;
+      };
 
+      await service.settleBackgroundSpawns();
       snapshotProcessesMock.mockClear();
 
       await service.reapDeadSessionSidecars();
@@ -41592,6 +41682,7 @@ describe("SessionService", () => {
         .find((record) => record.id === "api-2");
       expect(spawnedRecord?.slots?.links).toEqual([
         { label: "tracker", url: "https://github.com/org/repo/issues/1" },
+        { label: "dev", url: "http://127.0.0.1:3000/" },
       ]);
     });
   });
