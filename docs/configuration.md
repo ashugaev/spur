@@ -147,7 +147,7 @@ Event names by source:
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
 - `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`). Template: `{{key}}` plus inherited `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
-- `script`: `script:item.new`. Template: `{{id}} {{url}} {{number}} {{title}} {{repo}} {{externalId}}` plus valid scalar item keys.
+- `script`: `script:item.new`; template contract: `v2/src/event-sources/script.ts`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>`.
 - `telegram`: `telegram:message`. Voice-note transcription: [voice.md](voice.md#telegram-voice-notes).
