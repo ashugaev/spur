@@ -1210,6 +1210,9 @@ export async function createRuntimeTestContext(
     SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
     ...(useFakeTools
       ? {
+          SPUR_DISABLE_AUTOSTART: "0",
+          SPUR_SESSION: "",
+          SPUR_SIDECAR_NAME: "",
           HOME: rootDir,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
           SPUR_TMUX_SOCKET_NAME: tmuxSocketName,

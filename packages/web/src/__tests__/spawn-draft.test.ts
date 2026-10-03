@@ -13,6 +13,7 @@ const draft: SpawnDraft = {
   prompt: "Fix reconnect state loss",
   agent: "codex",
   model: "gpt-5.6-codex",
+  reasoningIntent: { kind: "default-new" },
   branch: "feature/spawn-draft",
   branchIsExplicit: true,
   workspaceMode: "worktree",
@@ -37,7 +38,7 @@ describe("spawn draft storage", () => {
     writeSpawnDraft(draft, window.localStorage, NOW);
 
     expect(readSpawnDraft(window.localStorage, NOW)).toEqual(draft);
-    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain('"version":4');
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain('"version":5');
   });
 
   it.each([
@@ -79,6 +80,38 @@ describe("spawn draft storage", () => {
       preflightBatchId: null,
       preflightBatchProjectId: null,
     });
+  });
+
+  it("migrates a v4 draft to live reasoning defaults", () => {
+    const { reasoningIntent: _intent, ...legacy } = draft;
+    window.localStorage.setItem(
+      SPAWN_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...legacy, version: 4, savedAt: NOW }),
+    );
+    expect(readSpawnDraft(window.localStorage, NOW)?.reasoningIntent).toEqual({
+      kind: "default-new",
+    });
+  });
+
+  it("persists an explicit level for capability revalidation on reopen", () => {
+    const explicitDraft: SpawnDraft = {
+      ...draft,
+      reasoningIntent: { kind: "explicit", level: "high" },
+    };
+    writeSpawnDraft(explicitDraft, window.localStorage, NOW);
+    expect(readSpawnDraft(window.localStorage, NOW)).toEqual(explicitDraft);
+  });
+
+  it.each([
+    { kind: "clear" },
+    { kind: "carried", level: "high" },
+    { kind: "explicit", level: "unknown" },
+  ])("rejects lifecycle or invalid reasoning intent %j in a fresh draft", (reasoningIntent) => {
+    window.localStorage.setItem(
+      SPAWN_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...draft, reasoningIntent, version: 5, savedAt: NOW }),
+    );
+    expect(readSpawnDraft(window.localStorage, NOW)).toBeNull();
   });
 
   it("discards a stored draft with undefined sessionMode", () => {

@@ -176,6 +176,19 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="medium"'`);
   });
 
+  it.each(["none", "minimal", "xhigh", "max", "ultra"] as const)(
+    "transports %s on launch and resume",
+    (reasoningEffort) => {
+      for (const command of [
+        buildCodexPlan("prompt", { reasoningEffort }).launchCommand,
+        buildCodexResumePlan("session", "codex", { reasoningEffort }).launchCommand,
+      ]) {
+        expect(command).toContain(`-c 'model_reasoning_effort="${reasoningEffort}"'`);
+        expect(command.match(/model_reasoning_effort=/g)).toHaveLength(1);
+      }
+    },
+  );
+
   it("appends typed reasoning effort after legacy raw args", () => {
     const plan = buildCodexPlan("prompt", {
       codexArgs: ["-c", 'model_reasoning_effort="high"'],

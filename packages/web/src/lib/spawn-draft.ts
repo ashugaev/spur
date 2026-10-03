@@ -1,7 +1,8 @@
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import type { WorkspaceMode } from "@/lib/types";
+import { isProviderReasoningEffort, type ReasoningIntent } from "@/lib/reasoning-effort";
 
-const SPAWN_DRAFT_VERSION = 4;
+const SPAWN_DRAFT_VERSION = 5;
 const SPAWN_DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const SPAWN_DRAFT_STORAGE_KEY = "spur:spawn-draft";
 
@@ -9,6 +10,7 @@ export interface SpawnDraft {
   prompt: string;
   agent: AgentName;
   model: string | null;
+  reasoningIntent?: Extract<ReasoningIntent, { kind: "default-new" | "explicit" }>;
   branch: string;
   branchIsExplicit: boolean;
   workspaceMode: WorkspaceMode;
@@ -35,7 +37,7 @@ export interface SpawnDraft {
 }
 
 interface StoredSpawnDraft extends SpawnDraft {
-  version: 3 | typeof SPAWN_DRAFT_VERSION;
+  version: 3 | 4 | typeof SPAWN_DRAFT_VERSION;
   savedAt: number;
 }
 
@@ -56,11 +58,21 @@ function isWorkspaceMode(value: unknown): value is WorkspaceMode {
   return value === "worktree" || value === "shared";
 }
 
+function isDraftReasoningIntent(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const intent = value as Record<string, unknown>;
+  return (
+    intent.kind === "default-new" ||
+    (intent.kind === "explicit" && isProviderReasoningEffort(intent.level))
+  );
+}
+
 function isStoredSpawnDraft(value: unknown, now: number): value is StoredSpawnDraft {
   if (!value || typeof value !== "object") return false;
   const draft = value as Record<string, unknown>;
   return (
-    (draft.version === 3 || draft.version === SPAWN_DRAFT_VERSION) &&
+    (draft.version === 3 || draft.version === 4 || draft.version === SPAWN_DRAFT_VERSION) &&
+    (draft.version !== SPAWN_DRAFT_VERSION || isDraftReasoningIntent(draft.reasoningIntent)) &&
     typeof draft.savedAt === "number" &&
     Number.isFinite(draft.savedAt) &&
     draft.savedAt <= now &&
@@ -102,9 +114,12 @@ export function readSpawnDraft(
       return null;
     }
     const { version, savedAt: _savedAt, ...draft } = parsed;
-    return version === 3
-      ? { ...draft, preflightBatchId: null, preflightBatchProjectId: null }
-      : draft;
+    return {
+      ...draft,
+      ...(version === 3 ? { preflightBatchId: null, preflightBatchProjectId: null } : {}),
+      reasoningIntent:
+        version === SPAWN_DRAFT_VERSION ? draft.reasoningIntent : { kind: "default-new" },
+    };
   } catch {
     try {
       storage.removeItem(SPAWN_DRAFT_STORAGE_KEY);
@@ -126,6 +141,7 @@ export function writeSpawnDraft(
       SPAWN_DRAFT_STORAGE_KEY,
       JSON.stringify({
         ...draft,
+        reasoningIntent: draft.reasoningIntent ?? { kind: "default-new" },
         preflightBatchId: draft.preflightBatchId ?? null,
         preflightBatchProjectId: draft.preflightBatchProjectId ?? null,
         version: SPAWN_DRAFT_VERSION,

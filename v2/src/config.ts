@@ -28,6 +28,7 @@ import {
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ProviderReasoningEffort,
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
@@ -296,17 +297,39 @@ function parseProjectReasoningEffort(
   const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
   const effort: AgentReasoningEffortConfig = {};
   for (const [agent, entry] of Object.entries(raw)) {
-    if (agent !== "claude" && agent !== "codex") {
+    if (agent !== "claude" && agent !== "codex" && agent !== "cursor" && agent !== "opencode") {
       throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
     }
-    if (entry !== "low" && entry !== "medium" && entry !== "high") {
-      throw new Error(
-        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
-      );
-    }
-    effort[agent] = entry;
+    effort[agent] = parseReasoningEffort(
+      entry,
+      `projects.${projectId}.reasoningEffort.${agent}`,
+      agent,
+    );
   }
   return effort;
+}
+
+function parseReasoningEffort(
+  value: unknown,
+  label: string,
+  agent?: AgentName,
+): ProviderReasoningEffort {
+  if (
+    value !== "none" &&
+    value !== "minimal" &&
+    value !== "low" &&
+    value !== "medium" &&
+    value !== "high" &&
+    value !== "xhigh" &&
+    value !== "max" &&
+    value !== "ultra"
+  ) {
+    throw new Error(`${label} must be a recognized reasoning effort`);
+  }
+  if (agent === "claude" && (value === "none" || value === "minimal" || value === "ultra")) {
+    throw new Error(`${label} must be "low", "medium", "high", "xhigh", or "max" for Claude`);
+  }
+  return value;
 }
 
 function parseTriggerSpawnBlock(
@@ -320,6 +343,10 @@ function parseTriggerSpawnBlock(
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const model = asOptionalString(raw["model"], `${label}.model`);
+  const reasoningEffort =
+    raw["reasoningEffort"] === undefined
+      ? undefined
+      : parseReasoningEffort(raw["reasoningEffort"], `${label}.reasoningEffort`, agent);
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
@@ -340,6 +367,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
@@ -378,6 +406,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "reasoningEffort",
       "mode",
       "branch",
       "overrides",

@@ -76,5 +76,30 @@ describe("spawn", () => {
 
     const body = postJsonMock.mock.calls[0]?.[2];
     expect(body).not.toHaveProperty("mode");
+    expect(body).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("posts explicit reasoning effort", async () => {
+    await parseCli(["spawn", "api", "ship it", "--reasoning-effort", "ultra", "--json"]);
+    expect(postJsonMock.mock.calls[0]?.[2]).toMatchObject({ reasoningEffort: "ultra" });
+  });
+
+  it("rejects unknown reasoning effort before a request", async () => {
+    const { createProgram } = await import("../../src/cli.js");
+    const program = createProgram("/tmp/dist/cli.js").exitOverride();
+    program.commands.find((command) => command.name() === "spawn")?.exitOverride();
+    program.configureOutput({ writeErr: () => undefined });
+    await expect(
+      program.parseAsync([
+        "node",
+        "spur",
+        "spawn",
+        "api",
+        "--reasoning-effort",
+        "invalid",
+        "--json",
+      ]),
+    ).rejects.toThrow("Allowed choices");
+    expect(postJsonMock).not.toHaveBeenCalled();
   });
 });

@@ -1557,6 +1557,45 @@ describe("Spur web API routes", () => {
     expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
+  it.each(["high", null, undefined])(
+    "lifecycle proxies preserve reasoning intent %s",
+    async (reasoningEffort) => {
+      mockedSpurRequestJson.mockResolvedValue({ id: "api-a1" });
+      for (const handler of [respawnSession, handoffSession]) {
+        mockedSpurRequestJson.mockClear();
+        await handler(
+          new Request("http://localhost/api/sessions/api-a1", {
+            method: "POST",
+            body: JSON.stringify({ agent: "claude", reasoningEffort }),
+          }),
+          { params: Promise.resolve({ id: "api-a1" }) },
+        );
+        const init = mockedSpurRequestJson.mock.calls[0][1] as { body: string };
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        if (reasoningEffort === undefined) expect(body).not.toHaveProperty("reasoningEffort");
+        else expect(body.reasoningEffort).toBe(reasoningEffort);
+      }
+    },
+  );
+
+  it("spawn proxy forwards explicit reasoning and rejects clear before daemon allocation", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ id: "api-a1" });
+    const send = (reasoningEffort: string | null) =>
+      spawnSession(
+        new NextRequest("http://localhost/api/spawn", {
+          method: "POST",
+          body: JSON.stringify({ projectId: "p", prompt: "task", reasoningEffort }),
+        }),
+      );
+    expect((await send("high")).status).toBe(201);
+    expect(
+      JSON.parse((mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body).reasoningEffort,
+    ).toBe("high");
+    mockedSpurRequestJson.mockClear();
+    expect((await send(null)).status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
+  });
+
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
   it("POST /api/sessions/:id/respawn forwards terminateSessionId to daemon", async () => {
