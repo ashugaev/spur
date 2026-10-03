@@ -34,6 +34,110 @@ const initialSpurConfig = process.env["SPUR_CONFIG"];
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
+describe("script source configuration", () => {
+  async function scriptConfig(fields: string, trigger = "") {
+    return loadConfig(
+      await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sources:
+      check:
+        type: script
+${fields.includes("command:") ? "" : "        command: [bash, ./check.sh]"}
+${fields.includes("schedule:") ? "" : '        schedule: "*/5 * * * *"'}
+${fields}
+${trigger}`),
+    );
+  }
+  it("applies script defaults at boundary", async () => {
+    const config = await scriptConfig("");
+    expect(config.projects["api"]?.sources["check"]).toEqual({
+      type: "script",
+      command: ["bash", "./check.sh"],
+      schedule: "*/5 * * * *",
+      cwd: config.projects["api"]?.path,
+      timeoutMs: 60000,
+      env: {},
+      emitExisting: false,
+      runOnStart: false,
+    });
+  });
+  it("keeps string command as one executable and literal env values intact", async () => {
+    vi.stubEnv("SCRIPT_REGION", "zone");
+    const config = await scriptConfig(
+      '        command: "./check.sh --flag"\n        env: {REGION: US, EXPANDED: "' +
+        "$" +
+        '{SCRIPT_REGION}", EMPTY: ""}',
+    );
+    expect(config.projects["api"]?.sources["check"]).toMatchObject({
+      command: ["./check.sh --flag"],
+      env: { REGION: "US", EXPANDED: "zone", EMPTY: "" },
+    });
+  });
+  it.each(["[]", "[1]", '""', '["bad\\0arg"]'])("rejects invalid command %s", async (command) => {
+    await expect(scriptConfig(`        command: ${command}`)).rejects.toThrow(
+      "projects.api.sources.check.command",
+    );
+  });
+  it.each(['"bad cron"', '"* * * * * *"', "null"])(
+    "rejects invalid schedule %s",
+    async (schedule) => {
+      await expect(scriptConfig(`        schedule: ${schedule}`)).rejects.toThrow(
+        "projects.api.sources.check.schedule",
+      );
+    },
+  );
+  it.each([1, 2147483647])("accepts timeout boundary %s", async (timeoutMs) => {
+    const config = await scriptConfig(`        timeoutMs: ${timeoutMs}`);
+    expect(config.projects["api"]?.sources["check"]).toMatchObject({ timeoutMs });
+  });
+  it.each(["0", "-1", "1.5", "2147483648", '"100"'])(
+    "rejects invalid timeout %s",
+    async (timeout) => {
+      await expect(scriptConfig(`        timeoutMs: ${timeout}`)).rejects.toThrow(
+        "projects.api.sources.check.timeoutMs",
+      );
+    },
+  );
+  it.each(['{A: "' + "$" + '{SPUR_SCRIPT_TEST_UNSET}"}', '{SPUR_X: "spoof"}'])(
+    "rejects invalid env %s",
+    async (env) => {
+      vi.stubEnv("SPUR_SCRIPT_TEST_UNSET", "");
+      await expect(scriptConfig(`        env: ${env}`)).rejects.toThrow(
+        "projects.api.sources.check.env",
+      );
+    },
+  );
+  const trigger = (event: string, action: string) =>
+    `    triggers:\n      handle:\n        source: check\n        event: ${event}\n        ${action}`;
+  it("accepts script spawn autoComplete", async () => {
+    const config = await scriptConfig(
+      "",
+      trigger("script:item.new", 'spawn: {prompt: "{{id}}", autoComplete: true}'),
+    );
+    expect(config.projects["api"]?.triggers["handle"]).toMatchObject({
+      event: "script:item.new",
+      spawn: { autoComplete: true },
+    });
+  });
+  it("rejects wrong events, send triggers and duplicate work-item triggers", async () => {
+    await expect(scriptConfig("", trigger("cron:tick", "spawn: {prompt: fix}"))).rejects.toThrow(
+      "script:item.new",
+    );
+    await expect(
+      scriptConfig("", trigger("script:item.new", "send: {prompt: fix}")),
+    ).rejects.toThrow("send is unsupported");
+    await expect(
+      scriptConfig(
+        "",
+        trigger("script:item.new", "spawn: {prompt: fix}") +
+          "\n      second:\n        source: check\n        event: script:item.new\n        spawn: {prompt: fix}",
+      ),
+    ).rejects.toThrow(/at most one|multiple|already|only one/i);
+  });
+});
+
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
 }
