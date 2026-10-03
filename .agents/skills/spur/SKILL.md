@@ -33,6 +33,7 @@ SAFETY
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
+  A `script` source runs its command as the daemon user on every schedule tick; treat project `spur.yaml` as code.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
 
