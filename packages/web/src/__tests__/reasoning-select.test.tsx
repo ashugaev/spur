@@ -53,6 +53,56 @@ describe("ReasoningSelect", () => {
 });
 
 describe("model capability revalidation", () => {
+  it("preserves untouched carried intent after initial preselection on capability error, but blocks changed model", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          models: [
+            { id: "sonnet", label: "Sonnet" },
+            { id: "other", label: "Other" },
+          ],
+          reasoningError: "Native capabilities unavailable",
+        }),
+      }),
+    );
+    function CarriedComposer() {
+      const [model, setModel] = useState<string | null>(null);
+      const [valid, setValid] = useState(false);
+      return (
+        <>
+          <ModelReasoningField
+            agent="claude"
+            value={model}
+            onChange={setModel}
+            carry={{ agent: "claude", model: "sonnet" }}
+            spawnDefaults={{ model: "sonnet", worktree: false, loading: false, error: null }}
+            onValidityChange={setValid}
+            lifecycle
+            reasoningLabel="Respawn reasoning"
+            reasoningIntent={{ kind: "carried", level: "high" }}
+            onReasoningChange={() => {}}
+          />
+          <button disabled={!valid}>Submit current</button>
+          <button onClick={() => setModel("other")}>Change model</button>
+        </>
+      );
+    }
+    render(<CarriedComposer />);
+    await screen.findByText("Reasoning · Unavailable");
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Submit current" }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Change model" }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Submit current" }) as HTMLButtonElement).disabled,
+      ).toBe(true),
+    );
+  });
   function Composer() {
     const [model, setModel] = useState<string | null>("supported");
     const [intent, setIntent] = useState<ReasoningIntent>({ kind: "carried", level: "high" });

@@ -35,6 +35,13 @@ export function ModelReasoningField({
   });
   const [attention, setAttention] = useState<string | null>(null);
   const previous = useRef({ agent: modelProps.agent, model: modelProps.value });
+  const carriedModel = useRef({
+    agent: modelProps.agent,
+    model:
+      modelProps.carry?.agent === modelProps.agent
+        ? (modelProps.carry.model ?? modelProps.value)
+        : modelProps.value,
+  });
   const callback = useRef(onValidityChange);
   callback.current = onValidityChange;
   const reasoningCallback = useRef(onReasoningChange);
@@ -48,7 +55,9 @@ export function ModelReasoningField({
       : undefined;
   const valid =
     selected === undefined ||
-    (reasoningIntent.kind === "carried" && previous.current.model === modelProps.value) ||
+    (reasoningIntent.kind === "carried" &&
+      carriedModel.current.agent === modelProps.agent &&
+      carriedModel.current.model === modelProps.value) ||
     (!loading && current?.error === null && current.levels?.includes(selected) === true);
 
   useEffect(() => {
