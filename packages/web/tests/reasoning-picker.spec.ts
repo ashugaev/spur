@@ -242,11 +242,13 @@ test.describe("Reasoning selector browser intent", () => {
           "Reasoning · High",
         ]);
         await select.selectOption("medium");
-        expect(await submit(page, surface)).toMatchObject({
-          agent,
+        const payload = await submit(page, surface);
+        expect(payload).toMatchObject({
           model: modelId(agent),
           reasoningEffort: "medium",
         });
+        if (surface === "Respawn") expect(payload).not.toHaveProperty("agent");
+        else expect(payload).toHaveProperty("agent", agent);
       });
     }
     test(`${surface}: live project Default stays omitted`, async ({ page }) => {
@@ -410,6 +412,7 @@ test.describe("Reasoning selector browser intent", () => {
   });
 
   test("fresh draft preserves explicit choice across reload", async ({ page }) => {
+    await page.route("**/api/preflight", (route) => route.fulfill({ json: { branch: null } }));
     const select = await open(page, "Spawn");
     await select.selectOption("medium");
     await expect
