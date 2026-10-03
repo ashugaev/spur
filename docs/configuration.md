@@ -135,7 +135,7 @@ Claude server-error continuation: 3 attempts, 30+ minutes apart. ToDo nudges: 3 
 
 ## Events
 
-Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 
 Event names by source:
 
@@ -144,6 +144,7 @@ Event names by source:
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
 - `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`). Template: `{{key}}` plus inherited `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `script`: `script:item.new`. Template: `{{id}} {{url}} {{number}} {{title}} {{repo}} {{externalId}}` plus valid scalar item keys.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>`.
 - `telegram`: `telegram:message`. Voice-note transcription: [voice.md](voice.md#telegram-voice-notes).
