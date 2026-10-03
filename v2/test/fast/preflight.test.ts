@@ -17,6 +17,9 @@ const { mockRm } = vi.hoisted(() => ({
 const { mockReadFile } = vi.hoisted(() => ({
   mockReadFile: vi.fn<typeof FsPromises.readFile>(),
 }));
+const { mockCopyCodexAgentDefinitions } = vi.hoisted(() => ({
+  mockCopyCodexAgentDefinitions: vi.fn(),
+}));
 const { mockExportOpenCodeSession, mockDeleteOpenCodeSession } = vi.hoisted(() => ({
   mockExportOpenCodeSession: vi.fn(),
   mockDeleteOpenCodeSession: vi.fn(),
@@ -66,6 +69,7 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => {
   return {
     ...actual,
     codexCommand: () => "/mock/bin/codex",
+    copyCodexAgentDefinitions: mockCopyCodexAgentDefinitions,
   };
 });
 
@@ -305,6 +309,8 @@ describe("runSpawnPreflight", () => {
     mockRm.mockResolvedValue(undefined);
     mockReadFile.mockReset();
     mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockCopyCodexAgentDefinitions.mockReset();
+    mockCopyCodexAgentDefinitions.mockResolvedValue(undefined);
     mockExportOpenCodeSession.mockReset();
     mockDeleteOpenCodeSession.mockReset();
     mockDeleteOpenCodeSession.mockResolvedValue(undefined);
@@ -423,11 +429,39 @@ describe("runSpawnPreflight", () => {
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options?.env?.["CODEX_HOME"]).toMatch(/spur-preflight-[^/]+\/codex-home$/);
+    expect(mockCopyCodexAgentDefinitions).toHaveBeenCalledWith(options?.env?.["CODEX_HOME"]);
     expect(options).toEqual(
       expect.objectContaining({
         cwd: PROJECT.path,
         timeout: 60_000,
       }),
+    );
+  });
+
+  it("cleans up and does not launch codex when agent definition staging fails", async () => {
+    const stagingError = new Error("agent definition copy failed");
+    mockCopyCodexAgentDefinitions.mockRejectedValueOnce(stagingError);
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).rejects.toBe(stagingError);
+
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(mockRm).toHaveBeenCalledWith(
+      expect.stringMatching(/spur-preflight-[^/]+$/),
+      {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      },
     );
   });
 
@@ -843,6 +877,17 @@ describe("runSpawnPreflight", () => {
         reasoningOutputTokens: 6,
       },
     });
+    const [command, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect(command).toBe("/mock/bin/opencode");
+    expect(args).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--agent",
+      "build",
+      "--auto",
+      expect.stringContaining("Account for preflight tokens"),
+    ]);
     expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
     expect(mockDeleteOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
   });

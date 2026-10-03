@@ -673,6 +673,12 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
   }
 }
 
+export async function copyCodexAgentDefinitions(codexHome: string): Promise<void> {
+  const userAgentsDir = join(homedir(), ".codex", "agents");
+  if (!existsSync(userAgentsDir)) return;
+  await cp(userAgentsDir, join(codexHome, "agents"), { recursive: true, force: true });
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
@@ -712,10 +718,7 @@ export async function ensureCodexHooksConfig(
       throw error;
     });
   }
-  const userAgentsDir = join(homedir(), ".codex", "agents");
-  if (existsSync(userAgentsDir)) {
-    await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
-  }
+  await copyCodexAgentDefinitions(codexDir);
   await writeFile(hooksPath, JSON.stringify(next, null, 2) + "\n", "utf8");
   return codexDir;
 }
