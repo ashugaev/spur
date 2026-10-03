@@ -25,7 +25,7 @@ ISSUE PRIORITY
   Keep valid priority unless new evidence changes classification.
   Read current state before mutation; skip closed issues.
   Remove competing priority labels; verify exactly one remains and type labels match evidence.
-  Leave failed classification/write ineligible for automatic spawn.
+  Require verified classification/labels for spawn; comment only on classification changes.
 
   LABELS
     priority:critical  B60205  Secret exposure, unrecoverable loss, or core outage without workaround
@@ -38,14 +38,15 @@ ISSUE DISPOSITION
   Keep valid low-impact bugs open with priority:low; low priority alone does not justify rejection.
   Keep valid enhancements open for human selection; permit evidenced closure for redundant/implemented/rejected enhancements.
   Recheck current issue state; post concise reason/evidence and canonical issue/doc link before closing.
-  Require successful comment and label writes before closure or spawn.
-  Use completed for existing resolution; not_planned for invalid, duplicate, or rejected proposal.
+  Require successful closure comment and label writes.
+  Use completed for existing resolution, --duplicate-of for duplicates, "not planned" for invalid/rejected proposals.
 
 ISSUE WORKERS
 
   Repeat ISSUE PRIORITY and ISSUE DISPOSITION against current report before selecting work and before worker edits.
   Auto-select only confirmed actionable bugs labeled bug with exactly one priority:critical or priority:medium; critical first.
-  Require explicit human selection/approval for specific feature; priority, labels, capacity, or old assignment grant none.
+  Accept feature approval only from explicit human task/spawn request naming issue and feature scope.
+  Recheck approval for withdrawal or scope changes; labels, priority, capacity, or assignment grant none.
   Constrain mixed-report automatic work to verified bug portion; split feature backlog or state separate human-owned feature scope.
   Preserve live-session dedup; recheck state, evidence, type, priority, and scope immediately before spawn.
   Skip closed, uncertain, downgraded, or failed-write candidates; leave slots empty without eligible bugs.
