@@ -9401,14 +9401,13 @@ export class SessionService {
     record: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
-  ): { projectId: string; reservedPort: number; linkUrl: string } | undefined {
+  ): { reservedPort: number; linkUrl: string } | undefined {
     const urlPort = Object.values(sidecar.ports ?? {}).find((port) => port.url !== undefined);
     const url = urlPort?.url;
     if (!urlPort || url === undefined) return undefined;
     const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
     if (typeof reservedPort !== "number") return undefined;
     return {
-      projectId: record.project,
       reservedPort,
       linkUrl: buildSidecarLinkUrl(url, reservedPort),
     };
