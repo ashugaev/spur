@@ -4881,7 +4881,7 @@ describe("SessionService", () => {
         ...(hasInbound ? { lastInboundAt: "2026-03-18T10:00:00.000Z" } : {}),
       });
       findAgentSessionIdMock.mockResolvedValue("session-uuid");
-      createSessionStore(
+      readSessionMock.mockReturnValue(
         sessionRecord({
           id: "api-1",
           prompt: "hello",
