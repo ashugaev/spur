@@ -3,7 +3,7 @@
 import type { ReactNode, RefObject } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
-import { ModelSelect } from "@/components/ModelSelect";
+import { ModelReasoningField } from "@/components/ModelReasoningField";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { IconCloseButton } from "@/components/IconCloseButton";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -22,6 +22,7 @@ import {
 } from "@/lib/submit-hotkeys";
 import type { CarrySpawnModel, ResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import type { WorkspaceMode } from "@/lib/types";
+import type { ReasoningIntent } from "@/lib/reasoning-effort";
 
 export interface FieldControl<T> {
   value: T;
@@ -38,6 +39,8 @@ export interface ModelFieldControl extends FieldControl<string | null> {
   spawnDefaults: ResolvedSpawnDefaults;
   carry: CarrySpawnModel | null;
   onResolvedChange: (resolved: boolean, error: string | null) => void;
+  reasoningIntent: ReasoningIntent;
+  onReasoningChange: (next: ReasoningIntent) => void;
 }
 
 export interface ToggleControl {
@@ -168,11 +171,13 @@ function ModeFields({
   agent,
   onAgentChange,
   agentAriaLabel,
+  submitting,
 }: {
   mode: SpawnModalMode;
   agent: AgentName;
   onAgentChange: (next: AgentName) => void;
   agentAriaLabel: string;
+  submitting: boolean;
 }) {
   if (mode.kind === "spawn") {
     return (
@@ -192,13 +197,18 @@ function ModeFields({
             ))}
           </select>
           <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
-          <div className="min-w-40 flex-1">
-            <ModelSelect
+          <div className="contents">
+            <ModelReasoningField
+              submitting={submitting}
               agent={agent}
               ariaLabel="Spawn model"
               carry={mode.model.carry}
               onChange={mode.model.onChange}
-              onResolvedChange={mode.model.onResolvedChange}
+              onValidityChange={mode.model.onResolvedChange}
+              reasoningLabel="Spawn reasoning"
+              reasoningIntent={mode.model.reasoningIntent}
+              onReasoningChange={mode.model.onReasoningChange}
+              projectReasoningEffort={mode.model.spawnDefaults.reasoningEffort}
               spawnDefaults={mode.model.spawnDefaults}
               value={mode.model.value}
             />
@@ -274,15 +284,21 @@ function ModeFields({
 
   if (mode.kind === "respawn") {
     return (
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
-        <div className="min-w-40 flex-1">
-          <ModelSelect
+        <div className="contents">
+          <ModelReasoningField
+            submitting={submitting}
             agent={agent}
             ariaLabel="Respawn model"
             carry={mode.model.carry}
             onChange={mode.model.onChange}
-            onResolvedChange={mode.model.onResolvedChange}
+            onValidityChange={mode.model.onResolvedChange}
+            lifecycle
+            reasoningLabel="Respawn reasoning"
+            reasoningIntent={mode.model.reasoningIntent}
+            onReasoningChange={mode.model.onReasoningChange}
+            projectReasoningEffort={mode.model.spawnDefaults.reasoningEffort}
             spawnDefaults={mode.model.spawnDefaults}
             value={mode.model.value}
           />
@@ -293,15 +309,20 @@ function ModeFields({
 
   return (
     <>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
-        <div className="min-w-40 flex-1">
-          <ModelSelect
+        <div className="contents">
+          <ModelReasoningField
+            submitting={submitting}
             agent={agent}
             ariaLabel="Desk spawn model"
             carry={mode.model.carry}
             onChange={mode.model.onChange}
-            onResolvedChange={mode.model.onResolvedChange}
+            onValidityChange={mode.model.onResolvedChange}
+            reasoningLabel="Desk spawn reasoning"
+            reasoningIntent={mode.model.reasoningIntent}
+            onReasoningChange={mode.model.onReasoningChange}
+            projectReasoningEffort={mode.model.spawnDefaults.reasoningEffort}
             spawnDefaults={mode.model.spawnDefaults}
             value={mode.model.value}
           />
@@ -406,6 +427,7 @@ export function SpawnModal({
                 agentAriaLabel={agentAriaLabel}
                 mode={mode}
                 onAgentChange={onAgentChange}
+                submitting={submitting}
               />
             </div>
           </div>

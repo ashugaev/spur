@@ -1070,6 +1070,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     workspaceId,
     agent: normalizedSession.agent,
     ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
+    ...(normalizedSession.reasoningEffort !== undefined
+      ? { reasoningEffort: normalizedSession.reasoningEffort }
+      : {}),
     ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined

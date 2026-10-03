@@ -74,6 +74,7 @@ interface AgentPlanOptions {
   codexHomePath?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -209,6 +210,9 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -301,11 +305,13 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -676,9 +682,21 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
     readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
-    setup: async ({ mcpBindings, restrictWrites }) => {
+    setup: async ({
+      mcpBindings,
+      restrictWrites,
+      model,
+      reasoningEffort,
+      reasoningVariantNames,
+    }) => {
       await assertOpenCodeCompatibility();
-      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      const configContent = buildOpenCodeConfig(
+        mcpBindings,
+        restrictWrites,
+        model && reasoningEffort && reasoningVariantNames
+          ? { model, reasoningEffort, variantNames: reasoningVariantNames }
+          : undefined,
+      );
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
@@ -887,6 +905,9 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;

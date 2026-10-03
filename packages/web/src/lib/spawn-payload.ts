@@ -5,7 +5,8 @@ import {
   encodeFileAttachments,
   type FileAttachment,
 } from "@/lib/file-attachments";
-import type { SpawnOverrides, WorkspaceMode } from "@/lib/types";
+import type { ProviderReasoningEffort, SpawnOverrides, WorkspaceMode } from "@/lib/types";
+import { serializeReasoningIntent, type ReasoningIntent } from "@/lib/reasoning-effort";
 
 type EncodedFileAttachment = ReturnType<typeof encodeFileAttachments>[number];
 
@@ -15,6 +16,7 @@ export interface SpawnStep {
 }
 
 interface ComposerFields {
+  reasoningIntent?: ReasoningIntent;
   agent: AgentName;
   attachments: FileAttachment[];
   model: string | null;
@@ -46,6 +48,7 @@ export interface DeskSpawnPayloadFields extends ComposerFields {
 }
 
 export interface SpawnSessionPayload {
+  reasoningEffort?: ProviderReasoningEffort;
   projectId: string;
   prompt: string;
   agent: AgentName;
@@ -65,6 +68,7 @@ export interface SpawnSessionPayload {
 }
 
 export interface RespawnSessionPayload {
+  reasoningEffort?: ProviderReasoningEffort | null;
   prompt: string;
   startupAttachmentIds: string[];
   attachments?: EncodedFileAttachment[];
@@ -74,6 +78,7 @@ export interface RespawnSessionPayload {
 }
 
 export interface DeskSpawnPayload {
+  reasoningEffort?: ProviderReasoningEffort;
   projectId: string;
   prompt: string;
   agent: AgentName;
@@ -115,6 +120,9 @@ export function buildSpawnSessionPayload(fields: SpawnPayloadFields): SpawnSessi
     overrides: buildSpawnOverrides(fields.workspaceMode, fields.defaultBranch),
   };
   if (fields.model !== null) payload.model = fields.model;
+  const effort = fields.reasoningIntent && serializeReasoningIntent(fields.reasoningIntent);
+  if (effort === null) throw new Error("Fresh spawn cannot clear reasoning effort");
+  if (effort !== undefined) payload.reasoningEffort = effort;
   if (fields.preflightBatchId) payload.preflightBatchId = fields.preflightBatchId;
   if (fields.mode) payload.mode = fields.mode;
 
@@ -151,6 +159,8 @@ export function buildRespawnSessionPayload(
   if (forceKillSource) payload.forceKillSource = true;
   if (fields.agent !== sourceAgent) payload.agent = fields.agent;
   if (fields.model !== null) payload.model = fields.model;
+  const effort = fields.reasoningIntent && serializeReasoningIntent(fields.reasoningIntent);
+  if (effort !== undefined) payload.reasoningEffort = effort;
   return payload;
 }
 
@@ -166,6 +176,9 @@ export function buildDeskSpawnPayload(
     overrides: { worktree: session.worktree },
   };
   if (fields.model !== null) payload.model = fields.model;
+  const effort = fields.reasoningIntent && serializeReasoningIntent(fields.reasoningIntent);
+  if (effort === null) throw new Error("Desk spawn cannot clear reasoning effort");
+  if (effort !== undefined) payload.reasoningEffort = effort;
   const attachments = encodedAttachments(fields.attachments);
   if (attachments.length > 0) payload.attachments = attachments;
   const branch = fields.branch.trim();

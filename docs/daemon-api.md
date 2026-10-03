@@ -4,7 +4,7 @@
 
 - `GET /info` — `lifecycleInstanceId`: process identity; `v2/src/session-lifecycle.ts`.
 - `GET /headroom`
-- `GET /models`
+- `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /user-actions`
 - `GET /deploy/versions`
 - `GET /deploy/switch/status`
@@ -26,7 +26,7 @@
 - `POST /projects/disconnect`
 - `GET /backlog/available`
 - `GET /projects/:id/slash-commands`
-- `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, worktree}`
+- `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, reasoningEffort, worktree}`; unset effort is `null`.
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight`
@@ -34,7 +34,7 @@
 ## Session routes
 
 - `GET /sessions` — array body; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`.
-- `POST /sessions`
+- `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background`
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
@@ -57,8 +57,8 @@
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/handoff`
-- `POST /sessions/:id/respawn`
+- `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
+- `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
