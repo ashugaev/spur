@@ -1690,13 +1690,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
+  reasoningEffort?: ProviderReasoningEffort | null;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
-  reasoningEffort?: ProviderReasoningEffort;
+  reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
 }
 
@@ -1738,6 +1738,7 @@ export interface ProjectListEntry {
 // or built-in default.
 export interface SpawnDefaultsResponse {
   model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
   worktree: boolean;
 }
 

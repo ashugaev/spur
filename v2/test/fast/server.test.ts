@@ -4396,13 +4396,21 @@ describe("startServer", () => {
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=claude`,
       );
       expect(claudeResponse.status).toBe(200);
-      await expect(claudeResponse.json()).resolves.toEqual({ model: "sonnet", worktree: false });
+      await expect(claudeResponse.json()).resolves.toEqual({
+        model: "sonnet",
+        worktree: false,
+        reasoningEffort: null,
+      });
 
       const codexResponse = await fetch(
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=codex`,
       );
       expect(codexResponse.status).toBe(200);
-      await expect(codexResponse.json()).resolves.toEqual({ model: null, worktree: false });
+      await expect(codexResponse.json()).resolves.toEqual({
+        model: null,
+        worktree: false,
+        reasoningEffort: null,
+      });
 
       const badAgentResponse = await fetch(
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=nope`,

@@ -3,6 +3,40 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SpawnModal, type SpawnModalMode } from "@/components/SpawnModal";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
+import type { ReasoningIntent } from "@/lib/reasoning-effort";
+
+vi.mock("@/components/ModelReasoningField", () => ({
+  ModelReasoningField: ({
+    reasoningLabel,
+    ariaLabel,
+    onReasoningChange,
+    lifecycle,
+  }: {
+    reasoningLabel: string;
+    ariaLabel: string;
+    onReasoningChange: (intent: ReasoningIntent) => void;
+    lifecycle?: boolean;
+  }) => (
+    <>
+      <select aria-label={ariaLabel}>
+        <option value="model">Model</option>
+      </select>
+      <select
+        aria-label={reasoningLabel}
+        onChange={(event) =>
+          onReasoningChange(
+            event.target.value === "default"
+              ? { kind: lifecycle ? "clear" : "default-new" }
+              : { kind: "explicit", level: "high" },
+          )
+        }
+      >
+        <option value="default">Reasoning · Default</option>
+        <option value="high">Reasoning · High</option>
+      </select>
+    </>
+  ),
+}));
 
 function makeVoiceInput(overrides: Partial<UseVoiceInput> = {}): UseVoiceInput {
   return {
@@ -38,6 +72,8 @@ const spawnMode: SpawnModalMode = {
     spawnDefaults: { model: null, worktree: null, loading: false, error: null },
     carry: null,
     onResolvedChange: vi.fn(),
+    reasoningIntent: { kind: "default-new" },
+    onReasoningChange: vi.fn(),
   },
   branch: { value: "", onChange: vi.fn() },
   workspaceMode: { value: "worktree", onChange: vi.fn() },
@@ -54,6 +90,8 @@ const respawnMode: SpawnModalMode = {
     spawnDefaults: { model: null, worktree: null, loading: false, error: null },
     carry: null,
     onResolvedChange: vi.fn(),
+    reasoningIntent: { kind: "default-new" },
+    onReasoningChange: vi.fn(),
   },
 };
 
@@ -65,6 +103,8 @@ const deskMode: SpawnModalMode = {
     spawnDefaults: { model: null, worktree: null, loading: false, error: null },
     carry: null,
     onResolvedChange: vi.fn(),
+    reasoningIntent: { kind: "default-new" },
+    onReasoningChange: vi.fn(),
   },
   branch: { value: "", onChange: vi.fn() },
   planMode: { value: false, onChange: vi.fn() },
@@ -106,6 +146,21 @@ function renderModal(mode: SpawnModalMode, overrides: Record<string, unknown> = 
 }
 
 describe("SpawnModal", () => {
+  it.each([
+    [spawnMode, "Spawn reasoning", "default-new"],
+    [respawnMode, "Respawn reasoning", "clear"],
+    [deskMode, "Desk spawn reasoning", "default-new"],
+  ] as const)(
+    "wires %s reasoning intent to its controlled composer",
+    (mode, label, defaultKind) => {
+      const onReasoningChange = vi.fn();
+      renderModal({ ...mode, model: { ...mode.model, onReasoningChange } });
+      fireEvent.change(screen.getByLabelText(label), { target: { value: "high" } });
+      expect(onReasoningChange).toHaveBeenLastCalledWith({ kind: "explicit", level: "high" });
+      fireEvent.change(screen.getByLabelText(label), { target: { value: "default" } });
+      expect(onReasoningChange).toHaveBeenLastCalledWith({ kind: defaultKind });
+    },
+  );
   it("spawn mode renders project, workspace, self-destruct, steps, and prompt", () => {
     renderModal(spawnMode);
     expect(screen.getByLabelText("Spawn project")).toBeInTheDocument();

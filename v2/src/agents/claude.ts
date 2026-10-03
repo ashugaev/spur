@@ -1,5 +1,6 @@
-import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { readdir, stat, mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
@@ -30,6 +31,175 @@ export function listClaudeModels(): AgentModel[] {
   return CLAUDE_MODELS.map((model) =>
     model.id === DEFAULT_CLAUDE_MODEL ? { ...model, isDefault: true } : model,
   );
+}
+
+export interface ClaudeModelCapability {
+  value: string;
+  resolvedModel?: string;
+  displayName: string;
+  supportsEffort: boolean;
+  supportedEffortLevels: string[];
+}
+
+const capabilityCache = new Map<string, { models: ClaudeModelCapability[]; expiresAt: number }>();
+const capabilityRequests = new Map<string, Promise<ClaudeModelCapability[]>>();
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parseClaudeModelCapabilities(value: unknown): ClaudeModelCapability[] {
+  if (!Array.isArray(value)) throw new Error("Claude model capabilities unavailable");
+  return value.map((row: unknown) => {
+    if (
+      !isObject(row) ||
+      typeof row["value"] !== "string" ||
+      !row["value"] ||
+      typeof row["displayName"] !== "string" ||
+      typeof row["supportsEffort"] !== "boolean" ||
+      (row["resolvedModel"] !== undefined && typeof row["resolvedModel"] !== "string") ||
+      (row["supportsEffort"] &&
+        (!Array.isArray(row["supportedEffortLevels"]) ||
+          !row["supportedEffortLevels"].every((level: unknown) => typeof level === "string")))
+    )
+      throw new Error("Malformed Claude model capabilities");
+    return {
+      value: row["value"],
+      displayName: row["displayName"],
+      supportsEffort: row["supportsEffort"],
+      ...(typeof row["resolvedModel"] === "string" ? { resolvedModel: row["resolvedModel"] } : {}),
+      supportedEffortLevels: row["supportsEffort"]
+        ? (row["supportedEffortLevels"] as string[])
+        : [],
+    };
+  });
+}
+
+async function probeClaudeModelCapabilities(command: string): Promise<ClaudeModelCapability[]> {
+  const cwd = await mkdtemp(join(tmpdir(), "spur-claude-models-"));
+  try {
+    return await new Promise<ClaudeModelCapability[]>((resolve, reject) => {
+      const child = spawn(
+        command,
+        [
+          "-p",
+          "--input-format",
+          "stream-json",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--no-session-persistence",
+          "--setting-sources",
+          "",
+          "--settings",
+          '{"disableAllHooks":true}',
+          "--strict-mcp-config",
+          "--mcp-config",
+          '{"mcpServers":{}}',
+          "--tools",
+          "",
+        ],
+        {
+          cwd,
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            DISABLE_AUTO_UPDATE: "1",
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          },
+        },
+      );
+      let buffer = "";
+      let outputBytes = 0;
+      let settled = false;
+      let result: ClaudeModelCapability[] | undefined;
+      let failure: Error | undefined;
+      const finish = (error?: Error, models?: ClaudeModelCapability[]) => {
+        if (settled) return;
+        settled = true;
+        failure = error;
+        result = models;
+        clearTimeout(deadline);
+        child.stdin.destroy();
+        child.kill("SIGKILL");
+      };
+      const deadline = setTimeout(
+        () => finish(new Error("Claude model capabilities timed out")),
+        5_000,
+      );
+      child.on("error", (error) => finish(error));
+      child.on("close", () => {
+        clearTimeout(deadline);
+        if (result) resolve(result);
+        else reject(failure ?? new Error("Claude model capabilities unavailable"));
+      });
+      child.stdin.on("error", (error) => finish(error));
+      child.stderr.on("data", (chunk: Buffer) => {
+        outputBytes += chunk.length;
+        if (outputBytes > 1024 * 1024)
+          finish(new Error("Claude model capability output exceeded limit"));
+      });
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        outputBytes += chunk.length;
+        if (outputBytes > 1024 * 1024) {
+          finish(new Error("Claude model capability output exceeded limit"));
+          return;
+        }
+        buffer += chunk.toString("utf8");
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          let envelope: unknown;
+          try {
+            envelope = JSON.parse(line);
+          } catch {
+            finish(new Error("Malformed Claude initialize response"));
+            return;
+          }
+          if (!isObject(envelope) || envelope["type"] !== "control_response") continue;
+          const response = envelope["response"];
+          if (!isObject(response) || response["request_id"] !== "spur-model-caps") continue;
+          const payload = response["response"];
+          try {
+            if (response["subtype"] !== "success" || !isObject(payload))
+              throw new Error("Claude initialize failed");
+            finish(undefined, parseClaudeModelCapabilities(payload["models"]));
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+          }
+          return;
+        }
+      });
+      child.stdin.write(
+        JSON.stringify({
+          type: "control_request",
+          request_id: "spur-model-caps",
+          request: { subtype: "initialize", hooks: {} },
+        }) + "\n",
+      );
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+}
+
+export async function discoverClaudeModelCapabilities(): Promise<ClaudeModelCapability[]> {
+  const command = claudeCommand();
+  const cached = capabilityCache.get(command);
+  if (cached && cached.expiresAt > Date.now()) return cached.models;
+  const active = capabilityRequests.get(command);
+  if (active) return active;
+  const request = probeClaudeModelCapabilities(command)
+    .then((models) => {
+      capabilityCache.set(command, { models, expiresAt: Date.now() + 5 * 60 * 1000 });
+      return models;
+    })
+    .finally(() => capabilityRequests.delete(command));
+  capabilityRequests.set(command, request);
+  return request;
 }
 
 const RESTRICT_WRITES_DENY_COMMAND =

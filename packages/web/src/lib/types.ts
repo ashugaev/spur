@@ -27,14 +27,27 @@ export interface BranchExistsResponse {
   checkedOutAt: string | null;
 }
 
+export type ProviderReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+
 export interface AgentModel {
   id: string;
   label: string;
   isDefault?: boolean;
+  reasoningEfforts?: ProviderReasoningEffort[];
 }
 
 export interface AgentModelsResponse {
   models: AgentModel[];
+  defaultReasoningEfforts?: ProviderReasoningEffort[];
+  reasoningError?: string;
 }
 
 // What a spawn would resolve to for this project+agent if the request named
@@ -43,6 +56,7 @@ export interface AgentModelsResponse {
 export interface SpawnDefaultsResponse {
   model: string | null;
   worktree: boolean;
+  reasoningEffort?: ProviderReasoningEffort | null;
 }
 
 export interface SpurServiceView {
@@ -409,6 +423,7 @@ export interface SpurSessionView {
   project: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -788,6 +803,7 @@ export interface DashboardSession {
   projectName: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   title: string | null;
   prompt: string;
   originalTaskPrompt: string | null;
@@ -881,6 +897,7 @@ export function toDashboardSession(
     projectName,
     agent: session.agent,
     ...(session.model !== undefined ? { model: session.model } : {}),
+    ...(session.reasoningEffort !== undefined ? { reasoningEffort: session.reasoningEffort } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     originalTaskPrompt: session.originalTaskPrompt?.trim() || null,

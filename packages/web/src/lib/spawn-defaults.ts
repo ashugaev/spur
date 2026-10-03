@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { AgentName } from "@/lib/agents";
-import type { AgentModel, SpawnDefaultsResponse } from "@/lib/types";
+import type { AgentModel, ProviderReasoningEffort, SpawnDefaultsResponse } from "@/lib/types";
 
 // The session's actual running model, carried across a respawn or handoff of
 // the same agent. Mirrors resolveCarriedSpawnModel on the daemon
@@ -42,6 +42,7 @@ export function resolvePreselectedModelId(args: {
 }
 
 export interface ResolvedSpawnDefaults {
+  reasoningEffort?: ProviderReasoningEffort | null;
   model: string | null;
   worktree: boolean | null;
   loading: boolean;
@@ -55,6 +56,8 @@ export function useResolvedSpawnDefaults(
   projectId: string,
   agent: AgentName,
 ): ResolvedSpawnDefaults {
+  const identity = `${projectId}:${agent}`;
+  const [resolvedIdentity, setResolvedIdentity] = useState(identity);
   // loading starts true whenever a projectId is already known at mount: the
   // effect below fetches unconditionally in that case, so the pre-effect
   // render must not read as settled.
@@ -66,6 +69,7 @@ export function useResolvedSpawnDefaults(
   });
 
   useEffect(() => {
+    setResolvedIdentity(identity);
     if (!projectId) {
       setState({ model: null, worktree: null, loading: false, error: null });
       return;
@@ -90,7 +94,13 @@ export function useResolvedSpawnDefaults(
           setState({ model: null, worktree: null, loading: false, error: message });
           return;
         }
-        setState({ model: payload.model, worktree: payload.worktree, loading: false, error: null });
+        setState({
+          model: payload.model,
+          worktree: payload.worktree,
+          reasoningEffort: payload.reasoningEffort ?? null,
+          loading: false,
+          error: null,
+        });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -104,7 +114,15 @@ export function useResolvedSpawnDefaults(
     return () => {
       cancelled = true;
     };
-  }, [projectId, agent]);
+  }, [projectId, agent, identity]);
 
-  return state;
+  return resolvedIdentity === identity
+    ? state
+    : {
+        model: null,
+        worktree: null,
+        reasoningEffort: null,
+        loading: Boolean(projectId),
+        error: null,
+      };
 }

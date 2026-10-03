@@ -17,7 +17,17 @@ import type { AgentModel, AgentModelsResponse } from "@/lib/types";
 
 const FAVORITES_STORAGE_KEY = "spur:model-favorites";
 
-interface ModelSelectProps {
+export interface ModelCatalogState {
+  agent: AgentName;
+  model: string | null;
+  loading: boolean;
+  error: string | null;
+  levels: AgentModelsResponse["defaultReasoningEfforts"];
+  modelLabel?: string;
+}
+
+export interface ModelSelectProps {
+  onCatalogChange?: (state: ModelCatalogState) => void;
   agent: AgentName;
   value: string | null;
   onChange: (id: string | null) => void;
@@ -61,7 +71,12 @@ export function ModelSelect({
   carry,
   onResolvedChange,
   ariaLabel = "Model",
+  onCatalogChange,
 }: ModelSelectProps) {
+  const [catalog, setCatalog] = useState<AgentModelsResponse | null>(null);
+  const [catalogAgent, setCatalogAgent] = useState<AgentName | null>(null);
+  const catalogCallback = useRef(onCatalogChange);
+  catalogCallback.current = onCatalogChange;
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<AgentModel[]>([]);
   // Starts true: the mount effect below always kicks off a fetch for the
@@ -78,6 +93,9 @@ export function ModelSelect({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setCatalog(null);
+    setCatalogAgent(null);
+    setModels([]);
     setError(null);
     // Backstop above the server-side 8s spurRequest timeout (packages/web/
     // src/app/api/models/route.ts): that bound should always resolve this
@@ -85,7 +103,7 @@ export function ModelSelect({
     // the error state — never an indefinite disable — even if that upstream
     // bound is ever bypassed or missing.
     void fetch(`/api/models?agent=${encodeURIComponent(agent)}`, {
-      signal: AbortSignal.timeout(12_000),
+      signal: AbortSignal.timeout(30_000),
     })
       .then(async (response) => {
         const payload = (await response.json()) as AgentModelsResponse | { error?: string };
@@ -98,6 +116,8 @@ export function ModelSelect({
           return;
         }
         setModels(payload.models);
+        setCatalog(payload);
+        setCatalogAgent(agent);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -105,12 +125,29 @@ export function ModelSelect({
         setModels([]);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setCatalogAgent(agent);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [agent]);
+
+  useEffect(() => {
+    catalogCallback.current?.({
+      agent,
+      model: value,
+      modelLabel: catalog?.models.find((model) => model.id === value)?.label,
+      loading: loading || catalogAgent !== agent,
+      error: error ?? catalog?.reasoningError ?? null,
+      levels:
+        value === null
+          ? catalog?.defaultReasoningEfforts
+          : catalog?.models.find((model) => model.id === value)?.reasoningEfforts,
+    });
+  }, [agent, value, loading, error, catalog, catalogAgent]);
 
   // If the current selection is not part of the freshly loaded list, drop it.
   useEffect(() => {

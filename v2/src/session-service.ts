@@ -2768,7 +2768,7 @@ export function resolveRespawnRequest(
     attachments?: SendMessageAttachment[];
     agent?: AgentName;
     model?: string;
-    reasoningEffort?: ProviderReasoningEffort;
+    reasoningEffort?: ProviderReasoningEffort | null;
     bootstrap?: boolean;
   },
 ): SpawnSessionRequest {
@@ -2776,7 +2776,7 @@ export function resolveRespawnRequest(
   const model = resolveCarriedSpawnModel(session, agent, options?.model);
   const reasoningEffort =
     options?.reasoningEffort !== undefined
-      ? options.reasoningEffort
+      ? (options.reasoningEffort ?? undefined)
       : agent === session.agent
         ? session.reasoningEffort
         : undefined;
@@ -2824,7 +2824,7 @@ function resolveHandoffSpawnRequest(
     prompt: string;
     agent: AgentName;
     model?: string;
-    reasoningEffort?: ProviderReasoningEffort;
+    reasoningEffort?: ProviderReasoningEffort | null;
     originalTaskPrompt: string;
     attachments?: SendMessageAttachment[];
     pipelineSteps?: string[];
@@ -2832,7 +2832,7 @@ function resolveHandoffSpawnRequest(
 ): SpawnSessionRequest {
   const reasoningEffort =
     options.reasoningEffort !== undefined
-      ? options.reasoningEffort
+      ? (options.reasoningEffort ?? undefined)
       : options.agent === session.agent
         ? session.reasoningEffort
         : undefined;
@@ -5439,6 +5439,7 @@ export class SessionService {
     );
     return {
       model: model ?? null,
+      reasoningEffort: project.reasoningEffort?.[agent] ?? null,
       worktree: resolveSpawnWorktree(project, undefined),
     };
   }
@@ -18193,8 +18194,8 @@ export class SessionService {
           prompt,
           agent,
           ...(model !== undefined ? { model } : {}),
-          ...(carriedRequest.reasoningEffort !== undefined
-            ? { reasoningEffort: carriedRequest.reasoningEffort }
+          ...(request.reasoningEffort !== undefined
+            ? { reasoningEffort: request.reasoningEffort }
             : {}),
           originalTaskPrompt: originalTask,
           ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),

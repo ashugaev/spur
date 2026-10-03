@@ -2,7 +2,11 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { listClaudeModels } from "./claude.js";
+import {
+  DEFAULT_CLAUDE_MODEL,
+  discoverClaudeModelCapabilities,
+  listClaudeModels,
+} from "./claude.js";
 import { DEFAULT_CURSOR_MODEL, cursorCommand } from "./cursor.js";
 import { opencodeCommand, readOpenCodeJson } from "./opencode.js";
 import { missingAgentExecutableMessage, resolveAgentExecutable } from "./executable.js";
@@ -17,6 +21,28 @@ export interface AgentModel {
   isCurrent?: boolean;
   reasoningEfforts?: ProviderReasoningEffort[];
   variantNames?: string[];
+}
+
+export interface AgentModelCatalog {
+  models: AgentModel[];
+  defaultReasoningEfforts: ProviderReasoningEffort[];
+  reasoningError?: string;
+}
+
+const REASONING_EFFORTS: ProviderReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+const CODEX_COMPATIBILITY_EFFORTS: ProviderReasoningEffort[] = ["low", "medium", "high"];
+
+function orderedEfforts(levels: readonly string[]): ProviderReasoningEffort[] {
+  return REASONING_EFFORTS.filter((level) => levels.includes(level));
 }
 
 export class AgentReasoningEffortError extends Error {
@@ -74,7 +100,13 @@ function parseCodexModelsCache(raw: string, includeHidden = false): AgentModel[]
           isRecord(level) && isReasoningEffort(level["effort"]) ? [level["effort"]] : [],
         )
       : undefined;
-    models.push({ id: slug, label, ...(reasoningEfforts ? { reasoningEfforts } : {}) });
+    models.push({
+      id: slug,
+      label,
+      reasoningEfforts: reasoningEfforts
+        ? orderedEfforts(reasoningEfforts)
+        : CODEX_COMPATIBILITY_EFFORTS,
+    });
   }
   return models;
 }
@@ -234,11 +266,14 @@ export function parseOpenCodeVerboseModelsOutput(stdout: string): AgentModel[] {
         isRecord(parsed) &&
         typeof parsed["providerID"] === "string" &&
         typeof parsed["id"] === "string" &&
-        `${parsed["providerID"]}/${parsed["id"]}` === id &&
-        isRecord(parsed["variants"]) &&
-        !Array.isArray(parsed["variants"])
+        `${parsed["providerID"]}/${parsed["id"]}` === id
       ) {
         const variants = parsed["variants"];
+        if (variants === undefined) {
+          models.push({ id, label: id, variantNames: [], reasoningEfforts: [] });
+          break;
+        }
+        if (!isRecord(variants) || Array.isArray(variants)) break;
         const variantNames = Object.keys(variants);
         if (
           variantNames.every(
@@ -246,7 +281,12 @@ export function parseOpenCodeVerboseModelsOutput(stdout: string): AgentModel[] {
               key.trim().length > 0 && isRecord(variants[key]) && !Array.isArray(variants[key]),
           )
         ) {
-          models.push({ id, label: id, variantNames });
+          models.push({
+            id,
+            label: id,
+            variantNames,
+            reasoningEfforts: orderedEfforts(variantNames),
+          });
         }
       }
       break;
@@ -260,11 +300,10 @@ export function parseOpenCodeVerboseModelsOutput(stdout: string): AgentModel[] {
 const OPENCODE_MODELS_TIMEOUT_MS = 20_000;
 
 async function discoverOpenCodeModels(): Promise<AgentModel[]> {
-  const { stdout } = await execFileAsync(opencodeCommand(), ["models"], {
-    encoding: "utf8",
-    timeout: OPENCODE_MODELS_TIMEOUT_MS,
+  const stdout = await readOpenCodeJson(["models", "--verbose"], {
+    timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
   });
-  return parseOpenCodeModelsOutput(stdout);
+  return parseOpenCodeVerboseModelsOutput(stdout);
 }
 
 function missingOpenCodeExecutableError(error: unknown): Error | null {
@@ -303,16 +342,7 @@ export async function validateOpenCodeModel(model: string): Promise<string> {
 }
 
 function isReasoningEffort(value: unknown): value is ProviderReasoningEffort {
-  return (
-    value === "none" ||
-    value === "minimal" ||
-    value === "low" ||
-    value === "medium" ||
-    value === "high" ||
-    value === "xhigh" ||
-    value === "max" ||
-    value === "ultra"
-  );
+  return typeof value === "string" && REASONING_EFFORTS.some((effort) => effort === value);
 }
 
 function cursorModelFamily(id: string): { family: string; effort?: string } {
@@ -323,6 +353,101 @@ function cursorModelFamily(id: string): { family: string; effort?: string } {
         ...(match[1] ? { effort: match[1] === "extra-high" ? "xhigh" : match[1] } : {}),
       }
     : { family: id };
+}
+
+function cursorSelection(model: string | undefined, models: AgentModel[]) {
+  const selected =
+    model && model !== DEFAULT_CURSOR_MODEL ? model : pickCursorNormalModelId(models);
+  if (!selected || selected === "auto") return undefined;
+  const bracket = /^([^[]+)\[([^\]]*)\]$/.exec(selected);
+  const base = bracket?.[1] ?? selected;
+  const parameters = bracket
+    ? (bracket[2] ?? "")
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean)
+    : [];
+  let family = cursorModelFamily(base).family;
+  const fast = parameters.find((part) => part.startsWith("fast="));
+  if (fast === "fast=true" && !family.endsWith("-fast")) family += "-fast";
+  if (fast === "fast=false" && family.endsWith("-fast")) family = family.slice(0, -5);
+  const aliases = models.filter((candidate) => cursorModelFamily(candidate.id).family === family);
+  return {
+    bracket,
+    base,
+    parameters,
+    aliases,
+    reasoningEfforts: orderedEfforts(
+      aliases.flatMap((candidate) => {
+        const effort = cursorModelFamily(candidate.id).effort;
+        return effort ? [effort] : [];
+      }),
+    ),
+  };
+}
+
+async function claudeCatalog(includeCustom = false): Promise<AgentModelCatalog> {
+  const models = listClaudeModels();
+  try {
+    const capabilities = await discoverClaudeModelCapabilities();
+    const projected = models.map((model) => {
+      const row = capabilities.find(
+        (candidate) => candidate.value === model.id || candidate.displayName === model.label,
+      );
+      return {
+        ...model,
+        ...(row ? { reasoningEfforts: orderedEfforts(row.supportedEffortLevels) } : {}),
+      };
+    });
+    for (const row of includeCustom ? capabilities : []) {
+      for (const id of [row.value, row.resolvedModel]) {
+        if (id && !projected.some((model) => model.id === id))
+          projected.push({
+            id,
+            label: row.displayName,
+            reasoningEfforts: orderedEfforts(row.supportedEffortLevels),
+          });
+      }
+    }
+    return {
+      models: projected,
+      defaultReasoningEfforts:
+        projected.find((model) => model.id === DEFAULT_CLAUDE_MODEL)?.reasoningEfforts ?? [],
+    };
+  } catch {
+    return {
+      models,
+      defaultReasoningEfforts: [],
+      reasoningError: "Claude model capabilities unavailable",
+    };
+  }
+}
+
+export async function listAgentModelCatalog(
+  agent: AgentName,
+  opts?: { codexHomePath?: string },
+): Promise<AgentModelCatalog> {
+  switch (agent) {
+    case "claude":
+      return claudeCatalog();
+    case "codex":
+      return {
+        models: opts?.codexHomePath ? await listCodexModels(opts.codexHomePath) : [],
+        defaultReasoningEfforts: CODEX_COMPATIBILITY_EFFORTS,
+      };
+    case "cursor": {
+      const models = await listCursorModels();
+      return {
+        models: models.map((model) => ({
+          ...model,
+          reasoningEfforts: cursorSelection(model.id, models)?.reasoningEfforts ?? [],
+        })),
+        defaultReasoningEfforts: cursorSelection(undefined, models)?.reasoningEfforts ?? [],
+      };
+    }
+    case "opencode":
+      return { models: await listOpenCodeModels(), defaultReasoningEfforts: [] };
+  }
 }
 
 export async function resolveAgentReasoningEffort(
@@ -339,39 +464,32 @@ export async function resolveAgentReasoningEffort(
       `${agent} reasoningEffort "${reasoningEffort}" is not available${model ? ` for model "${model}"` : ""}`,
     );
   switch (agent) {
-    case "claude":
-      if (!["low", "medium", "high", "xhigh", "max"].includes(reasoningEffort)) throw unsupported();
+    case "claude": {
+      const catalog = await claudeCatalog(true);
+      const selected = catalog.models.find(
+        (candidate) => candidate.id === (model ?? DEFAULT_CLAUDE_MODEL),
+      );
+      if (catalog.reasoningError || selected?.reasoningEfforts === undefined)
+        throw new AgentReasoningEffortError("Claude model capabilities unavailable");
+      if (!selected.reasoningEfforts.includes(reasoningEffort)) throw unsupported();
       return { ...(model ? { model } : {}), reasoningEffort };
+    }
     case "codex": {
       const models = opts?.codexHomePath ? await listCodexModels(opts.codexHomePath, true) : [];
-      const supported = models.find((candidate) => candidate.id === model)?.reasoningEfforts ?? [
-        "low",
-        "medium",
-        "high",
-      ];
+      const supported =
+        models.find((candidate) => candidate.id === model)?.reasoningEfforts ??
+        CODEX_COMPATIBILITY_EFFORTS;
       if (!supported.includes(reasoningEffort)) throw unsupported();
       return { ...(model ? { model } : {}), reasoningEffort };
     }
     case "cursor": {
       const models = await listCursorModels();
-      const selected =
-        model && model !== DEFAULT_CURSOR_MODEL ? model : pickCursorNormalModelId(models);
-      if (!selected || selected === "auto") throw unsupported();
-      const bracket = /^([^[]+)\[([^\]]*)\]$/.exec(selected);
-      const base = bracket?.[1] ?? selected;
-      const parameters = bracket
-        ? (bracket[2] ?? "")
-            .split(",")
-            .map((part) => part.trim())
-            .filter(Boolean)
-        : [];
-      let family = cursorModelFamily(base).family;
-      const fast = parameters.find((part) => part.startsWith("fast="));
-      if (fast === "fast=true" && !family.endsWith("-fast")) family += "-fast";
-      if (fast === "fast=false" && family.endsWith("-fast")) family = family.slice(0, -5);
-      const alias = models.find((candidate) => {
+      const selection = cursorSelection(model, models);
+      if (!selection) throw unsupported();
+      const { bracket, base, parameters, aliases } = selection;
+      const alias = aliases.find((candidate) => {
         const parsed = cursorModelFamily(candidate.id);
-        return parsed.family === family && parsed.effort === reasoningEffort;
+        return parsed.effort === reasoningEffort;
       });
       if (!alias) throw unsupported();
       return {
@@ -388,10 +506,7 @@ export async function resolveAgentReasoningEffort(
         );
       let models: AgentModel[];
       try {
-        const stdout = await readOpenCodeJson(["models", "--verbose"], {
-          timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
-        });
-        models = parseOpenCodeVerboseModelsOutput(stdout);
+        models = await discoverOpenCodeModels();
       } catch (error) {
         const missingExecutable = missingOpenCodeExecutableError(error);
         throw new AgentReasoningEffortError(
@@ -413,14 +528,5 @@ export async function listAgentModels(
   agent: AgentName,
   opts?: { codexHomePath?: string },
 ): Promise<AgentModel[]> {
-  switch (agent) {
-    case "claude":
-      return listClaudeModels();
-    case "codex":
-      return opts?.codexHomePath ? listCodexModels(opts.codexHomePath) : [];
-    case "cursor":
-      return listCursorModels();
-    case "opencode":
-      return listOpenCodeModels();
-  }
+  return (await listAgentModelCatalog(agent, opts)).models;
 }

@@ -4,7 +4,7 @@
 
 - `GET /info` — `lifecycleInstanceId`: process identity; `v2/src/session-lifecycle.ts`.
 - `GET /headroom`
-- `GET /models`
+- `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /user-actions`
 - `GET /deploy/versions`
 - `GET /deploy/switch/status`
@@ -26,7 +26,7 @@
 - `POST /projects/disconnect`
 - `GET /backlog/available`
 - `GET /projects/:id/slash-commands`
-- `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, worktree}`
+- `GET /projects/:id/spawn-defaults?agent=<name>` — `{model, reasoningEffort, worktree}`; unset effort is `null`.
 - `GET /projects/:id/branches/exists?name=<branch>`
 - `POST /projects/:id/preflight-batches`
 - `POST /projects/:id/preflight`
@@ -57,8 +57,8 @@
 - `POST /sessions/:id/kill`
 - `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
-- `POST /sessions/:id/handoff` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
-- `POST /sessions/:id/respawn` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
+- `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
+- `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/switch-auth`
 - `GET /sessions/:id/todo`
 - `POST /sessions/:id/todo` — `409 todo_ledger_empty|todo_open_work|todo_transition_conflict`. See [todo](commands.md#todo)
