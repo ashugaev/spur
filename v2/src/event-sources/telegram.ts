@@ -54,7 +54,8 @@ const TELEGRAM_COMMANDS = [
 
 interface TelegramTextMessage {
   message_id: number;
-  message_thread_id?: number;
+  message_thread_id?: number | undefined;
+  is_topic_message?: true;
   text?: string;
   chat: {
     id: number;
@@ -99,7 +100,9 @@ interface TelegramCallbackContext {
     data?: string;
     message?: {
       message_id?: number;
-      message_thread_id?: number;
+      date?: number;
+      message_thread_id?: number | undefined;
+      is_topic_message?: true;
       text?: string;
       chat: {
         id: number;
@@ -327,6 +330,13 @@ function peekPendingSpawn(
   );
   if (!pending) return null;
   return pending.expiresAt >= Date.now() ? pending : "expired";
+}
+
+function telegramMessageThreadId(
+  message: Pick<TelegramTextMessage, "chat" | "message_thread_id" | "is_topic_message">,
+  candidate = message.message_thread_id,
+): number | undefined {
+  return message.chat.id < 0 && message.is_topic_message !== true ? undefined : candidate;
 }
 
 function isAllowed(
@@ -608,9 +618,8 @@ async function editOrReply(
 }
 
 /**
- * The new session took over a group thread. The old one loses its reply target
- * there (its next send falls back to the configured chat and opens its own
- * topic) and its pending button offers in that chat die.
+ * Reassign the group's plain-message binding and retire displaced outbound
+ * target/offers. Group-main recorded replies still reach their sender.
  */
 async function detachDisplacedSession(
   runtime: TelegramRuntime,
@@ -635,7 +644,9 @@ async function detachDisplacedSession(
     const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
       formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
     await ctx.reply(
-      `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
+      messageThreadId === undefined
+        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
+        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
     );
   } catch (error) {
     logPersistError(deps, error);
@@ -672,7 +683,7 @@ async function bindSpawnedSession(
       );
       return;
     }
-    // A group thread holds one agent; a private chat holds many.
+    // Plain messages follow the binding; group-main replies can reach other senders.
     const key = telegramBindingKey(chatId, messageThreadId);
     if (chatId < 0 && !runtime.bindings.has(key)) mergePersistedBindings(runtime);
     const displacedId = chatId < 0 ? runtime.bindings.get(key)?.sessionId : undefined;
@@ -836,7 +847,9 @@ async function handleTelegramCallback(
 ): Promise<void> {
   const query = ctx.callbackQuery;
   const data = query?.data;
-  const message = query?.message;
+  const message = query?.message
+    ? { ...query.message, message_thread_id: telegramMessageThreadId(query.message) }
+    : undefined;
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!data || !message) return;
@@ -1081,7 +1094,10 @@ async function handleAgentChoiceCallback(
   }
   // The clicked message is the truth about the thread: an offer sent before a
   // forum topic existed carries none, and a stale one would strand the reply.
-  const messageThreadId = message.message_thread_id ?? choice.messageThreadId;
+  const messageThreadId =
+    message.date === 0
+      ? choice.messageThreadId
+      : telegramMessageThreadId(message, message.message_thread_id ?? choice.messageThreadId);
   const clickMessage: TelegramTextMessage = {
     message_id: message.message_id ?? 0,
     ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
@@ -1101,7 +1117,9 @@ async function handleTelegramText(
   ctx: TelegramTextContext,
   runtime: TelegramRuntime,
 ): Promise<void> {
-  const message = ctx.message;
+  const message = ctx.message
+    ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
+    : undefined;
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!message?.text || !message.text.trim()) return;
@@ -1240,13 +1258,12 @@ async function routeTelegramPrompt(
   // doc comment above and spec revision 2 G2).
   const hasAwaitingProject = peekedSpawn !== null;
 
-  // In a private chat a reply to a bot message belongs to the session that sent
-  // it, whatever the chat is bound to. Unlike the binding it never unbinds or
-  // auto-spawns.
+  // Private/group-main bot-message replies reach their sender without
+  // changing bindings or auto-spawning.
   const repliedTo = message.reply_to_message?.message_id;
-  // Only a private chat routes by reply: a group thread belongs to its binding.
+  // Forum topics retain their binding, including after another session takes over.
   const ownerId =
-    repliedTo === undefined || message.chat.id < 0
+    repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
       ? null
       : findTelegramMessageSession(
           deps.dataDir,
@@ -1596,7 +1613,9 @@ async function handleTelegramVoice(
 ): Promise<void> {
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
-  const message = ctx.message;
+  const message = ctx.message
+    ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
+    : undefined;
   if (!message?.voice) return;
   const from = message.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;
