@@ -31,7 +31,7 @@ const rows = [
     supportsEffort: true,
     supportedEffortLevels: ["high", "max"],
   },
-  { value: "haiku", displayName: "Haiku", supportsEffort: false },
+  { value: "haiku", displayName: "Haiku" },
 ];
 
 beforeEach(() => {
@@ -44,6 +44,25 @@ afterEach(() => {
 });
 
 describe("Claude initialize model capabilities", () => {
+  it("accepts native unsupported rows without optional effort metadata", () => {
+    expect(parseClaudeModelCapabilities(rows)).toEqual([
+      rows[0],
+      { value: "haiku", displayName: "Haiku", supportsEffort: false, supportedEffortLevels: [] },
+    ]);
+  });
+  it("treats an older catalog without any effort metadata as unavailable", () => {
+    expect(() =>
+      parseClaudeModelCapabilities([{ value: "sonnet", displayName: "Sonnet" }]),
+    ).toThrow("capabilities unavailable");
+  });
+  it("rejects a present malformed effort flag", () => {
+    expect(() =>
+      parseClaudeModelCapabilities([
+        ...rows,
+        { value: "custom", displayName: "Custom", supportsEffort: "false" },
+      ]),
+    ).toThrow("Malformed");
+  });
   it("discovers without a user turn, deduplicates and cleans its child/cwd before resolving", async () => {
     const child = nativeChild();
     let input = "";
@@ -97,7 +116,10 @@ describe("Claude initialize model capabilities", () => {
     child.stdout.write(response.slice(0, 17));
     child.stdout.write(response.slice(17));
     const [models, concurrent] = await Promise.all([first, second]);
-    expect(models).toEqual([rows[0], { ...rows[1], supportedEffortLevels: [] }]);
+    expect(models).toEqual([
+      rows[0],
+      { ...rows[1], supportsEffort: false, supportedEffortLevels: [] },
+    ]);
     expect(concurrent).toEqual(models);
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     await expect(access(options.cwd)).rejects.toThrow();

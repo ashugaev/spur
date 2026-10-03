@@ -50,13 +50,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 export function parseClaudeModelCapabilities(value: unknown): ClaudeModelCapability[] {
   if (!Array.isArray(value)) throw new Error("Claude model capabilities unavailable");
-  return value.map((row: unknown) => {
+  const models = value.map((row: unknown) => {
     if (
       !isObject(row) ||
       typeof row["value"] !== "string" ||
       !row["value"] ||
       typeof row["displayName"] !== "string" ||
-      typeof row["supportsEffort"] !== "boolean" ||
+      (row["supportsEffort"] !== undefined && typeof row["supportsEffort"] !== "boolean") ||
       (row["resolvedModel"] !== undefined && typeof row["resolvedModel"] !== "string") ||
       (row["supportsEffort"] &&
         (!Array.isArray(row["supportedEffortLevels"]) ||
@@ -66,13 +66,16 @@ export function parseClaudeModelCapabilities(value: unknown): ClaudeModelCapabil
     return {
       value: row["value"],
       displayName: row["displayName"],
-      supportsEffort: row["supportsEffort"],
+      supportsEffort: row["supportsEffort"] === true,
       ...(typeof row["resolvedModel"] === "string" ? { resolvedModel: row["resolvedModel"] } : {}),
       supportedEffortLevels: row["supportsEffort"]
         ? (row["supportedEffortLevels"] as string[])
         : [],
     };
   });
+  if (!value.some((row: unknown) => isObject(row) && typeof row["supportsEffort"] === "boolean"))
+    throw new Error("Claude model capabilities unavailable");
+  return models;
 }
 
 async function probeClaudeModelCapabilities(command: string): Promise<ClaudeModelCapability[]> {
