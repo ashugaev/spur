@@ -454,15 +454,12 @@ describe("runSpawnPreflight", () => {
     ).rejects.toBe(stagingError);
 
     expect(mockExecFileAsync).not.toHaveBeenCalled();
-    expect(mockRm).toHaveBeenCalledWith(
-      expect.stringMatching(/spur-preflight-[^/]+$/),
-      {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 100,
-      },
-    );
+    expect(mockRm).toHaveBeenCalledWith(expect.stringMatching(/spur-preflight-[^/]+$/), {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   it("appends configured codex args to codex preflight", async () => {
