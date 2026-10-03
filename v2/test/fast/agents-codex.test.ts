@@ -527,9 +527,9 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     await ensureCodexHooksConfig("/session/tool");
 
     expect(mockCp).toHaveBeenCalledWith(
-      expect.stringContaining("agents"),
-      expect.stringContaining("agents"),
-      expect.objectContaining({ recursive: true }),
+      "/home/testuser/.codex/agents",
+      "/session/tool/codex-home/agents",
+      { recursive: true, force: true },
     );
   });
 
