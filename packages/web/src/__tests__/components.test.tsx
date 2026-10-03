@@ -1963,6 +1963,9 @@ describe("Dashboard", () => {
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
       });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn", exact: true })).toBeEnabled();
+      });
       fireEvent.keyDown(prompt, keydown);
 
       await waitFor(() => {
