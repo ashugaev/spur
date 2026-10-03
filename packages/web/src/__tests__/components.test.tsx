@@ -337,6 +337,9 @@ describe("Dashboard", () => {
       );
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
