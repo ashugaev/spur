@@ -167,14 +167,6 @@ test.describe("Reasoning selector browser intent", () => {
       await expect(select.locator("option").first()).toHaveText(/project: high/i);
       expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
     });
-    test(`${surface}: changed current model blocks unavailable capabilities`, async ({ page }) => {
-      await open(page, surface, "claude", "medium", true);
-      await page.getByRole("button", { name: `${surface} model` }).click();
-      await page.getByRole("menuitem", { name: /Other model/ }).click();
-      await expect(
-        page.getByRole("button", { name: surface === "Respawn" ? /^respawn$/i : /^handoff$/i }),
-      ).toBeDisabled();
-    });
   }
 
   for (const surface of ["Respawn", "Handoff"] as const) {
@@ -201,6 +193,14 @@ test.describe("Reasoning selector browser intent", () => {
       await expect(select).toBeDisabled();
       await expect(select.locator("option")).toHaveText("Reasoning · Unavailable");
       expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+    });
+    test(`${surface}: changed current model blocks unavailable capabilities`, async ({ page }) => {
+      await open(page, surface, "claude", "medium", true);
+      await page.getByRole("button", { name: `${surface} model` }).click();
+      await page.getByRole("menuitem", { name: /Other model/ }).click();
+      await expect(
+        page.getByRole("button", { name: new RegExp(`^${surface}$`, "i") }),
+      ).toBeDisabled();
     });
   }
 
