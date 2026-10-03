@@ -77,7 +77,7 @@ projects:
         source: gh
         event: github:approved
         send:
-          prompt: "Run $manager and $github. Read .agents/skills/github/references/review-contract.md owner gate. Explicitly recheck current lane receipts/affirmations, paginated review history, required checks and blocking threads on active PR. Resume authorized work after gate passes; leave merge to human."
+          prompt: "Run $manager and $github. Resume user-authorized review workflow with initial caller-supplied trusted external contract path/digest and receipt root; missing trust/query authority blocks. Apply owner gate to current receipts, paginated reviews, required checks and blocking threads. Correlated affirmation replies resume existing invocation. Continue authorized work after gate; human merges."
       gh-changes-requested:
         source: gh
         event: github:changes_requested
