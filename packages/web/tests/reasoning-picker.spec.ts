@@ -61,6 +61,7 @@ async function open(
   agent: AgentName = "claude",
   current?: ProviderReasoningEffort,
   capabilityError = false,
+  chooseHandoffTarget = true,
 ) {
   const session = (surface === "Respawn" ? makeCompletedSession : makeWorkingSession)({
     id: "reasoning-source",
@@ -113,6 +114,8 @@ async function open(
   } else if (surface === "Desk spawn") {
     await page.getByRole("combobox", { name: "Desk spawn agent" }).selectOption(agent);
     await page.getByRole("textbox", { name: "Desk agent prompt" }).fill("Verify reasoning");
+  } else if (surface === "Handoff" && chooseHandoffTarget) {
+    await page.getByRole("combobox", { name: "Handoff agent" }).selectOption(agent);
   }
   const select = page.getByRole("combobox", { name: `${surface} reasoning` });
   await expect(select).toBeVisible();
@@ -143,6 +146,14 @@ async function submit(page: Page, surface: Surface) {
 }
 
 test.describe("Reasoning selector browser intent", () => {
+  test("Handoff: initial different-agent target inherits Default without source carry", async ({
+    page,
+  }) => {
+    const select = await open(page, "Handoff", "claude", "medium", false, false);
+    await expect(page.getByRole("combobox", { name: "Handoff agent" })).toHaveValue("codex");
+    await expect(select).toHaveValue("default");
+    expect(await submit(page, "Handoff")).not.toHaveProperty("reasoningEffort");
+  });
   for (const surface of surfaces) {
     test(`${surface}: success freezes reasoning until composer closes`, async ({ page }) => {
       const select = await open(page, surface);
@@ -251,20 +262,32 @@ test.describe("Reasoning selector browser intent", () => {
         else expect(payload).toHaveProperty("agent", agent);
       });
     }
-    test(`${surface}: live project Default stays omitted`, async ({ page }) => {
+    test(`${surface}: ${surface === "Handoff" ? "source-agent Default clears override" : "live project Default stays omitted"}`, async ({
+      page,
+    }) => {
       const select = await open(page, surface);
       await expect(select).toHaveValue("default");
       await expect(select.locator("option").first()).toHaveText(/project: high/i);
-      expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+      const body = await submit(page, surface);
+      if (surface === "Handoff") expect(body.reasoningEffort).toBeNull();
+      else expect(body).not.toHaveProperty("reasoningEffort");
     });
   }
 
   for (const surface of ["Respawn", "Handoff"] as const) {
-    test(`${surface}: untouched current is omitted`, async ({ page }) => {
+    test(`${surface}: ${surface === "Handoff" ? "source agent selection clears former override" : "untouched current is omitted"}`, async ({
+      page,
+    }) => {
       const select = await open(page, surface, "claude", "medium");
-      await expect(select).toHaveValue("medium");
-      await expect(select.locator("option:checked")).toHaveText("Reasoning · Medium · current");
-      expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+      if (surface === "Handoff") {
+        await expect(select).toHaveValue("default");
+        await expect(select.locator("option").filter({ hasText: /current/ })).toHaveCount(0);
+        expect(await submit(page, surface)).toHaveProperty("reasoningEffort", null);
+      } else {
+        await expect(select).toHaveValue("medium");
+        await expect(select.locator("option:checked")).toHaveText("Reasoning · Medium · current");
+        expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+      }
     });
     test(`${surface}: Default deliberately clears current`, async ({ page }) => {
       const select = await open(page, surface, "claude", "medium");
@@ -278,19 +301,27 @@ test.describe("Reasoning selector browser intent", () => {
       await expect(select.locator("option").filter({ hasText: /current/ })).toHaveCount(0);
       expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
     });
-    test(`${surface}: unchanged current survives unavailable capabilities`, async ({ page }) => {
+    test(`${surface}: ${surface === "Handoff" ? "source agent Default remains usable on capability error" : "unchanged current survives unavailable capabilities"}`, async ({
+      page,
+    }) => {
       const select = await open(page, surface, "claude", "medium", true);
       await expect(select).toBeDisabled();
       await expect(select.locator("option")).toHaveText("Reasoning · Unavailable");
-      expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+      const body = await submit(page, surface);
+      if (surface === "Handoff") expect(body.reasoningEffort).toBeNull();
+      else expect(body).not.toHaveProperty("reasoningEffort");
     });
-    test(`${surface}: changed current model blocks unavailable capabilities`, async ({ page }) => {
+    test(`${surface}: ${surface === "Handoff" ? "cleared Default permits changed model on capability error" : "changed current model blocks unavailable capabilities"}`, async ({
+      page,
+    }) => {
       await open(page, surface, "claude", "medium", true);
       await page.getByRole("button", { name: `${surface} model` }).click();
       await page.getByRole("menuitem", { name: /Other model/ }).click();
-      await expect(
-        page.getByRole("button", { name: new RegExp(`^${surface}$`, "i") }),
-      ).toBeDisabled();
+      const submitButton = page
+        .getByRole("dialog")
+        .getByRole("button", { name: new RegExp(`^${surface}$`, "i") });
+      if (surface === "Handoff") await expect(submitButton).toBeEnabled();
+      else await expect(submitButton).toBeDisabled();
     });
   }
 
@@ -365,7 +396,7 @@ test.describe("Reasoning selector browser intent", () => {
     await expect(page.getByText("OpenCode needs a model for reasoning levels")).toBeVisible();
   });
 
-  for (const surface of ["Respawn", "Handoff"] as const) {
+  for (const surface of ["Respawn"] as const) {
     test(`${surface}: unsupported current resets clear`, async ({ page }) => {
       const select = await open(page, surface, "claude", "max");
       await expect(select).toHaveValue("default");
@@ -375,6 +406,15 @@ test.describe("Reasoning selector browser intent", () => {
       expect(await submit(page, surface)).toHaveProperty("reasoningEffort", null);
     });
   }
+
+  test("Handoff: source-agent Default clears even an unsupported old override", async ({
+    page,
+  }) => {
+    const select = await open(page, "Handoff", "claude", "max");
+    await expect(select).toHaveValue("default");
+    await expect(select.locator("option").filter({ hasText: /current/ })).toHaveCount(0);
+    expect(await submit(page, "Handoff")).toHaveProperty("reasoningEffort", null);
+  });
 
   test("loading and stale previous-agent response cannot overwrite options", async ({ page }) => {
     await open(page, "Spawn");
