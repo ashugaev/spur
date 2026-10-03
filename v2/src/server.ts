@@ -2208,15 +2208,14 @@ export async function startServer(
     });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(service.config.server.port, service.config.server.host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
   try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(service.config.server.port, service.config.server.host, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
     await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

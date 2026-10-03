@@ -16108,6 +16108,7 @@ describe("SessionService", () => {
         await vi.advanceTimersByTimeAsync(2_000);
         expect((await service.get("api-1")).state).toBe("working");
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
         expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["please continue"]);
       }
       expect(readCodexRolloutStateMock.mock.calls.length).toBeGreaterThan(3);
