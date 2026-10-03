@@ -9,6 +9,12 @@ GITHUB OPERATIONS VIA gh
 
 ISSUE PRIORITY
 
+  Triage created/reopened issues and every open worker candidate from current body/comments, relevant source/docs, and reproduction or concrete evidence.
+  Compare expected vs actual supported behavior; stale labels and report wording do not prove defects.
+  Classify bug: broken supported behavior; enhancement: new or changed behavior. Apply bug/enhancement labels; mixed reports get both.
+  Preserve unrelated labels; remove type labels only when evidence disproves classification.
+  Decide: confirmed actionable bug, feature awaiting human, needs evidence, or evidenced closure.
+  Keep uncertain reports open and ineligible for automatic work; missing reproduction alone does not justify closure.
   Assign exactly one label: priority:critical, priority:medium, priority:low.
   Judge body/comments by impact, scope, and workaround; never title, age, or effort alone.
   critical  Reported secret exposure, unrecoverable data loss, or outage blocking core workflows across users without safe workaround.
@@ -17,15 +23,33 @@ ISSUE PRIORITY
   Promote enhancements only with documented measurable core blockage meeting critical/medium criteria.
   Keep uncertainty low until impact evidence supports promotion.
   Keep valid priority unless new evidence changes classification.
-  Triage newly created/reopened issues in same workflow; triage missing/conflicting labels before worker selection.
   Read current state before mutation; skip closed issues.
-  Preserve non-priority labels; remove competing priority labels; verify exactly one remains.
-  Leave failed classification/write ineligible for automatic spawn.
+  Remove competing priority labels; verify exactly one remains and type labels match evidence.
+  Require verified classification/labels for spawn; comment only on classification changes.
 
   LABELS
     priority:critical  B60205  Secret exposure, unrecoverable loss, or core outage without workaround
     priority:medium    FBCA04  Workflow failure or measured degradation with scoped impact or workaround
     priority:low       808080  Docs, enhancements, cleanup, or nuisance without demonstrated workflow impact
+
+ISSUE DISPOSITION
+
+  Close only with evidence: duplicate/canonical report, already fixed/implemented, intended supported behavior, obsolete report, or rejected unsupported/out-of-scope proposal with concrete costs/impact.
+  Keep valid low-impact bugs open with priority:low; low priority alone does not justify rejection.
+  Keep valid enhancements open for human selection; permit evidenced closure for redundant/implemented/rejected enhancements.
+  Recheck current issue state; post concise reason/evidence and canonical issue/doc link before closing.
+  Require successful closure comment and label writes.
+  Use completed for existing resolution, --duplicate-of for duplicates, "not planned" for invalid/rejected proposals.
+
+ISSUE WORKERS
+
+  Repeat ISSUE PRIORITY and ISSUE DISPOSITION against current report before selecting work and before worker edits.
+  Auto-select only confirmed actionable bugs labeled bug with exactly one priority:critical or priority:medium; critical first.
+  Accept feature approval only from explicit human task/spawn request naming issue and feature scope.
+  Recheck approval for withdrawal or scope changes; labels, priority, capacity, or assignment grant none.
+  Constrain mixed-report automatic work to verified bug portion; split feature backlog or state separate human-owned feature scope.
+  Preserve live-session dedup; recheck state, evidence, type, priority, and scope immediately before spawn.
+  Skip closed, uncertain, downgraded, or failed-write candidates; leave slots empty without eligible bugs.
 
 CLOSE-OUT GATE, mandatory after any code change
 
