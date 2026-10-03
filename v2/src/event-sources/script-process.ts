@@ -77,12 +77,12 @@ export function runScriptProcess(request: ScriptProcessRequest): Promise<ScriptP
     child.stderr.on("data", (chunk: Buffer) => {
       stderrTail = Buffer.concat([stderrTail, chunk]).subarray(-STDERR_LIMIT);
     });
-    child.on("error", () => {
+    child.once("error", () => {
       reason ??= "spawn";
     });
     // Kill descendants even when the leader exits before its inherited pipes close.
-    child.on("exit", killGroup);
-    child.on("close", (exitCode, signal) => {
+    child.once("exit", killGroup);
+    child.once("close", (exitCode, signal) => {
       clearTimeout(timer);
       request.signal.removeEventListener("abort", abort);
       killGroup();
