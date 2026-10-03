@@ -79,7 +79,10 @@ async function open(
           agent,
           defaultReasoningEfforts: [],
           reasoningError: "Capabilities unavailable",
-          models: [{ id: modelId(agent), label: "Reasoning model", isDefault: true }],
+          models: [
+            { id: modelId(agent), label: "Reasoning model", isDefault: true },
+            { id: "other-model", label: "Other model" },
+          ],
         },
       }),
     );
@@ -163,6 +166,14 @@ test.describe("Reasoning selector browser intent", () => {
       await expect(select).toHaveValue("default");
       await expect(select.locator("option").first()).toHaveText(/project: high/i);
       expect(await submit(page, surface)).not.toHaveProperty("reasoningEffort");
+    });
+    test(`${surface}: changed current model blocks unavailable capabilities`, async ({ page }) => {
+      await open(page, surface, "claude", "medium", true);
+      await page.getByRole("button", { name: `${surface} model` }).click();
+      await page.getByRole("menuitem", { name: /Other model/ }).click();
+      await expect(
+        page.getByRole("button", { name: surface === "Respawn" ? /^respawn$/i : /^handoff$/i }),
+      ).toBeDisabled();
     });
   }
 
