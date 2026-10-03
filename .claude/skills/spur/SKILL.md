@@ -20,7 +20,7 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; in a private chat a user reply to a bot message reaches the agent that sent it. Contract: `docs/commands.md#source-reply`.
+  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`. Reply routing: `docs/configuration.md#telegram-binding`; command: `docs/commands.md#source-reply`.
   Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -41,9 +41,10 @@ DOCS
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Daemon HTTP routes and pre-flight batch allocation: docs/daemon-api.md
+  Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
   Config fields: docs/configuration.md
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
+  Automatic updates and retry policy: docs/configuration.md#auto-update
 
 EDITING THIS FILE
 

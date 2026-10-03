@@ -30,6 +30,7 @@ vi.mock("@/components/DirectTerminal", () => ({
 function session(id: string, title: string, tags: string[]) {
   return {
     id,
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     project: "api",
     agent: "claude",
     prompt: "prompt",
@@ -50,6 +51,7 @@ function session(id: string, title: string, tags: string[]) {
 }
 
 const sessionsResponse = {
+  lifecycleInstanceId: "test-instance",
   projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
   sessions: [
     session("api-bug", "Bug session", ["bug"]),

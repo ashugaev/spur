@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { readGitDescribedVersion } from "../../src/version.js";
+import { readGitDescribedVersion, resolvePackageVersion } from "../../src/version.js";
 
 describe("readGitDescribedVersion (real git)", () => {
   let repo: string;
@@ -38,6 +38,25 @@ describe("readGitDescribedVersion (real git)", () => {
     execFileSync("git", ["tag", "v1.2.3"], { cwd: repo });
 
     expect(readGitDescribedVersion(pathToFileURL(`${repo}/`))).toBe("1.2.3");
+  });
+
+  it("resolves a source placeholder through git while preserving published package versions", async () => {
+    await commit("release commit");
+    execFileSync("git", ["tag", "v1.2.3"], { cwd: repo });
+
+    expect(resolvePackageVersion("0.0.0-managed", pathToFileURL(`${repo}/`))).toBe("1.2.3");
+    expect(resolvePackageVersion("2.0.0", pathToFileURL(`${repo}/`))).toBe("2.0.0");
+  });
+
+  it("normalizes a packed placeholder without borrowing an enclosing repo version", async () => {
+    await commit("release commit");
+    execFileSync("git", ["tag", "v9.9.9"], { cwd: repo });
+    const scopeRoot = join(repo, "node_modules", "@shugaev");
+    await mkdir(scopeRoot, { recursive: true });
+
+    expect(resolvePackageVersion("0.0.0-managed", pathToFileURL(`${scopeRoot}/`))).toBe(
+      "0.0.0-dev",
+    );
   });
 
   it("reports <tag>-<commits>-g<sha> past a release, not the bare tag", async () => {

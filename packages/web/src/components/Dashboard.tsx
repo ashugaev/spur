@@ -60,6 +60,7 @@ import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
+import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
 import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
@@ -238,13 +239,6 @@ function sameDeskActiveSessions(
       candidate.status !== "killed" &&
       candidate.status !== "completed",
   );
-}
-
-function completedIdsFromResponse(value: unknown): string[] {
-  if (typeof value !== "object" || value === null || !("completedIds" in value)) return [];
-  const completedIds = (value as { completedIds?: unknown }).completedIds;
-  if (!Array.isArray(completedIds)) return [];
-  return completedIds.filter((id): id is string => typeof id === "string");
 }
 
 function BacklogZone({
@@ -1063,12 +1057,13 @@ export function Dashboard() {
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
+  const [openPrActionBusy, setOpenPrActionBusy] = useState<typeof openPrAction>(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     session: DashboardSession;
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
-  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
+  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] =
+    useState<typeof prCheckUnavailable>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -1243,6 +1238,9 @@ export function Dashboard() {
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
+  const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const [lifecycleVersion, setLifecycleVersion] = useState(0);
+  const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
     data,
     isPending,
@@ -1250,15 +1248,34 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/sessions", { signal });
+      if (signal.aborted) throw new Error("Session read aborted");
       if (!response.ok) throw new Error(`sessions ${response.status}`);
-      return (await response.json()) as SpurSessionsResponse;
+      const result = (await response.json()) as SpurSessionsResponse;
+      if (signal.aborted) throw new Error("Session read aborted");
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) {
+        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+        if (current) return current;
+        throw new Error("Session read superseded");
+      }
+      publishTransitions();
+      return { ...result, sessions: accepted };
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
     refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
+  const effectiveRawSessions = useMemo(
+    () => lifecycleRef.current.project(rawSessions),
+    [lifecycleVersion, rawSessions],
+  );
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
   // Single shared catalog source (react-query key ["tag-catalog"]) so the
@@ -1319,16 +1336,16 @@ export function Dashboard() {
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const projectNameMap = useMemo(
-    () => buildSessionProjectLabelMap(projects, rawSessions),
-    [projects, rawSessions],
+    () => buildSessionProjectLabelMap(projects, effectiveRawSessions),
+    [effectiveRawSessions, projects],
   );
 
   const allSessions = useMemo(
     () =>
-      rawSessions.map((session) =>
+      effectiveRawSessions.map((session) =>
         toDashboardSession(session, projectNameMap.get(session.project)),
       ),
-    [projectNameMap, rawSessions],
+    [effectiveRawSessions, projectNameMap],
   );
 
   const projectSessions = useMemo(
@@ -1769,18 +1786,21 @@ export function Dashboard() {
 
   const markSessionOpened = useCallback(
     async (sessionId: string) => {
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
         method: "POST",
         cache: "no-store",
       });
       if (!response.ok) throw new Error(`opened ${response.status}`);
       const openedSession = (await response.json()) as SpurSessionView;
+      const accepted = lifecycleRef.current.acceptUpdate(openedSession, read);
+      if (!accepted) return;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         if (!current) return current;
         return {
           ...current,
           sessions: current.sessions.map((session) =>
-            session.id === openedSession.id ? openedSession : session,
+            session.id === accepted.id ? accepted : session,
           ),
         };
       });
@@ -1976,6 +1996,7 @@ export function Dashboard() {
         preflightBatchId: spawnPreflightBatchIdRef.current,
       });
 
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1986,17 +2007,20 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      const accepted = lifecycleRef.current.acceptUpdate(session, read);
       clearSpawnDraft();
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
-        );
-        return {
-          ...(current ?? {}),
-          sessions: [session, ...currentSessions],
-          projects: current?.projects ?? [],
-        };
-      });
+      if (accepted)
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+          const currentSessions = (current?.sessions ?? []).filter(
+            (existingSession) => existingSession.id !== accepted.id,
+          );
+          return {
+            ...(current ?? {}),
+            lifecycleInstanceId: current?.lifecycleInstanceId ?? accepted.lifecycle.instanceId,
+            sessions: [accepted, ...currentSessions],
+            projects: current?.projects ?? [],
+          };
+        });
       setSpawnPrompt("");
       setSpawnModel(null);
       setSpawnSessionMode(null);
@@ -2163,11 +2187,14 @@ export function Dashboard() {
         throw new Error(payload?.error ?? `Failed to update project (${response.status})`);
       }
       const updated = (await response.json()) as UpdateProjectResponse;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => ({
-        ...current,
-        sessions: current?.sessions ?? [],
-        projects: updated.projects,
-      }));
+      queryClient.setQueryData<SpurSessionsResponse>(
+        sessionsQueryKey,
+        (current) =>
+          current && {
+            ...current,
+            projects: updated.projects,
+          },
+      );
       setEditingProject(null);
       setProjectActionError(null);
     } catch (updateError) {
@@ -2237,42 +2264,94 @@ export function Dashboard() {
     [tagCatalog, handleApplyTags],
   );
 
-  const handleRestoreSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+  const reserveTransitions = (
+    sessions: readonly SpurSessionView[],
+    action: "complete" | "restore",
+  ) => {
+    const owner = lifecycleRef.current.reserve(sessions, action);
+    publishTransitions();
+    return owner;
+  };
 
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "running",
-                state: "working",
-                runtimeAlive: true,
-              }
-            : currentSession,
-        ),
-      };
-    });
+  const reconcileAttempt = async (owner: LifecycleIntent) => {
+    if (!lifecycleRef.current.isCurrent(owner)) return;
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+    const read = lifecycleRef.current.beginRead();
+    try {
+      const response = await fetch("/api/sessions", { cache: "no-store" });
+      if (!response.ok)
+        throw new Error(await readApiErrorMessage(response, "Failed to reconcile Spur session"));
+      const result = (await response.json()) as SpurSessionsResponse;
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, {
+        ...result,
+        sessions: accepted,
+      });
+    } catch (error) {
+      if (!lifecycleRef.current.isCurrent(owner)) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+    }
+    publishTransitions();
+  };
+
+  const handleRestoreSession = async (session: DashboardSession) => {
+    const source = rawSessions.find((candidate) => candidate.id === session.id);
+    if (!source) return;
+    const owner = reserveTransitions([source], "restore");
+    if (!owner) return;
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
 
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operationId: owner.operationId }),
       });
+      const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner);
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to restore Spur session"));
+      }
+      const restored = payload as SpurSessionView;
+      await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+      const accepted = lifecycleRef.current.acceptMutation(restored, owner);
+      if (accepted) {
+        queryClient.setQueryData<SpurSessionsResponse>(
+          sessionsQueryKey,
+          (current) =>
+            current && {
+              ...current,
+              sessions: [...current.sessions.filter((row) => row.id !== session.id), accepted],
+            },
+        );
+        publishTransitions();
       }
     } catch (restoreError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
+      await reconcileAttempt(owner);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
@@ -2285,7 +2364,15 @@ export function Dashboard() {
     },
   ): Promise<boolean> => {
     const prAction = options?.prAction;
-    const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
+    const activeDeskSessions = sameDeskActiveSessions(
+      rawSessions.map((row) => toDashboardSession(row, projectNameMap.get(row.project))),
+      session,
+    );
+    if (
+      lifecycleRef.current.pending(session.id) ||
+      activeDeskSessions.some((candidate) => lifecycleRef.current.pending(candidate.id))
+    )
+      return false;
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
     ).length;
@@ -2299,29 +2386,16 @@ export function Dashboard() {
       if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
+    const owner = reserveTransitions(
+      rawSessions.filter((row) => activeDeskIds.has(row.id)),
+      "complete",
+    );
+    if (!owner) return false;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          activeDeskIds.has(currentSession.id)
-            ? {
-                ...currentSession,
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              }
-            : currentSession,
-        ),
-      };
-    });
 
     try {
       const body = {
+        operationId: owner.operationId,
         scope: "desk",
         ...(prAction ? { prAction } : {}),
         ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
@@ -2332,20 +2406,29 @@ export function Dashboard() {
         body: JSON.stringify(body),
       });
       const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       if (!response.ok) {
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner);
+          return false;
+        }
         if (isOpenPrActionRequiredPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
           // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
           return false;
         }
         if (isGithubPrCheckUnavailablePayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
           // The two PR dialogs are alternatives for one complete attempt. Leaving
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
@@ -2355,67 +2438,50 @@ export function Dashboard() {
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      const completedIds = completedIdsFromResponse(payload);
-      if (completedIds.length > 0) {
-        const completedIdSet = new Set(completedIds);
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-          if (!current) return current;
-          return {
-            ...current,
-            sessions: current.sessions.map((currentSession) =>
-              completedIdSet.has(currentSession.id)
-                ? {
-                    ...currentSession,
-                    status: "completed",
-                    state: "stopped",
-                    runtimeAlive: false,
-                    tmuxSession: null,
-                  }
-                : currentSession,
-            ),
-          };
-        });
-      }
-      return true;
+      await reconcileAttempt(owner);
+      return lifecycleRef.current.isCurrent(owner);
     } catch (completeError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
+      await reconcileAttempt(owner);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
   const handleOpenPrAction = async (prAction: OpenPrAction) => {
     if (!openPrAction) return;
-    setOpenPrActionBusy(true);
+    const dialog = openPrAction;
+    setOpenPrActionBusy(dialog);
     try {
       // Clear only on a real completion: a second failure re-opens a dialog,
       // and dismissing it here would drop the user back to a bare row.
-      if (await handleCompleteSession(openPrAction.session, { prAction, retry: true })) {
-        setOpenPrAction(null);
+      if (await handleCompleteSession(dialog.session, { prAction, retry: true })) {
+        setOpenPrAction((current) => (current === dialog ? null : current));
       }
     } catch {
       // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
-      setOpenPrActionBusy(false);
+      setOpenPrActionBusy((current) => (current === dialog ? null : current));
     }
   };
 
   const handlePrCheckUnavailable = async (options: { skipPrCheck?: true }) => {
     if (!prCheckUnavailable) return;
-    setPrCheckUnavailableBusy(true);
+    const dialog = prCheckUnavailable;
+    setPrCheckUnavailableBusy(dialog);
     try {
-      if (await handleCompleteSession(prCheckUnavailable.session, { ...options, retry: true })) {
-        setPrCheckUnavailable(null);
+      if (await handleCompleteSession(dialog.session, { ...options, retry: true })) {
+        setPrCheckUnavailable((current) => (current === dialog ? null : current));
       }
     } catch {
       // handleCompleteSession already toasted. Keep the dialog open so Skip
       // stays reachable instead of dropping the user back to a bare row.
     } finally {
-      setPrCheckUnavailableBusy(false);
+      setPrCheckUnavailableBusy((current) => (current === dialog ? null : current));
     }
   };
 
@@ -3054,7 +3120,7 @@ export function Dashboard() {
           ) : null}
           {openPrAction ? (
             <OpenPrActionDialog
-              busy={openPrActionBusy}
+              busy={openPrActionBusy === openPrAction}
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
@@ -3062,7 +3128,7 @@ export function Dashboard() {
           ) : null}
           {prCheckUnavailable ? (
             <GithubRateLimitDialog
-              busy={prCheckUnavailableBusy}
+              busy={prCheckUnavailableBusy === prCheckUnavailable}
               onCancel={() => setPrCheckUnavailable(null)}
               onRetry={() => void handlePrCheckUnavailable({})}
               onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}

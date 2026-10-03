@@ -2,7 +2,7 @@
 
 > Scope: route names only, one method + full path per line, every line `git grep`-able verbatim. Payload/status-code contracts: `v2/src/server.ts`. CLI usage: [commands.md](commands.md). Default `127.0.0.1:4310`.
 
-- `GET /info`
+- `GET /info` — `lifecycleInstanceId`: process identity; `v2/src/session-lifecycle.ts`.
 - `GET /headroom`
 - `GET /models`
 - `GET /user-actions`
@@ -33,12 +33,12 @@
 
 ## Session routes
 
-- `GET /sessions`
+- `GET /sessions` — array body; producing `x-spur-lifecycle-instance-id` header, per-row `lifecycle`; `v2/src/session-lifecycle.ts`.
 - `POST /sessions` — optional `reasoningEffort` overrides project default; provider/model validation in `v2/src/session-service.ts`.
 - `POST /sessions/background`
 - `POST /shepherd/spawn`
 - `POST /sidecars/sweep` — body `{ reap?: boolean }`, default `false`. Always `200`. Response `{ supported, leaked, reaped }`: `supported` is `false` when the process table or procfs is unreadable, in which case `leaked` and `reaped` are both `[]`. Each `leaked` row carries `kind: "worktree-tree" | "orphan-daemon"`; a `worktree-tree` row's `reapable` reflects proven Spur provenance and carries `rootPid`, `pgid`, `ageSeconds`, `worktreePath`, `args`, `sidecarName`, `tree` (descendant pids, root first), `treeRssKb`; an `orphan-daemon` row is always `reapable: false` and carries `configPath`/`cliEntryPath` instead of a `sidecarName`, plus `port: number | null` and `liveness: "serving" | "not-serving" | "unknown"`. `reap: true` signals only `reapable` rows — never an `orphan-daemon` row, serving or not — and populates `reaped`, one entry per `reapable` leaked tree it signaled: `{ sessionName, panePid, survivors, blindKill }` — `survivors` is the pids still alive after the SIGKILL confirmation window, and `blindKill` is `true` when tmux was killed with no verified process-tree signal (no pane pid, or an unusable snapshot, and no identity fallback confirmed a reap either) — a `survivors: []` alongside `blindKill: true` is not proof anything died, only that nothing was checked. See [Sidecars](commands.md#sidecars)
-- `GET /sessions/:id`
+- `GET /sessions/:id` — current row plus ephemeral `lifecycle` receipt; `v2/src/session-lifecycle.ts`.
 - `GET /sessions/:id/slash-commands`
 - `GET /sessions/:id/conversation`
 - `GET /sessions/:id/user-actions`
@@ -52,11 +52,11 @@
 - `POST /sessions/:id/source-reply`
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
-- `POST /sessions/:id/complete`
+- `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
-- `POST /sessions/:id/restore`
-- `POST /sessions/:id/reopen`
+- `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
 - `POST /sessions/:id/respawn` — optional `reasoningEffort`; same-agent override inherited, agent switch drops it.
 - `POST /sessions/:id/switch-auth`

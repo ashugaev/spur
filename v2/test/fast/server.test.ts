@@ -908,6 +908,7 @@ describe("startServer", () => {
       calls.push(options);
       return [
         {
+          lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
           id: "demo-done",
           project: "demo",
           agent: "claude",
@@ -1092,6 +1093,7 @@ describe("startServer", () => {
     ) {
       clearPort = request?.clearPort;
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1275,6 +1277,7 @@ describe("startServer", () => {
     const originalStopSidecar = SessionService.prototype.stopSidecar;
     SessionService.prototype.stopSidecar = async function mockStopSidecar() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1997,6 +2000,7 @@ describe("startServer", () => {
     const spawnInBackground = SessionService.prototype.spawnInBackground;
     SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2125,6 +2129,7 @@ describe("startServer", () => {
     SessionService.prototype.scheduleWake = async function mockScheduleWake(_sessionId, request) {
       scheduleRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2160,6 +2165,7 @@ describe("startServer", () => {
     };
     SessionService.prototype.cancelWake = async function mockCancelWake() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2279,6 +2285,7 @@ describe("startServer", () => {
     ) {
       updateRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2377,6 +2384,7 @@ describe("startServer", () => {
     SessionService.prototype.dispatchWake = async function mockDispatchWake(_sessionId, request) {
       dispatchRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2458,6 +2466,7 @@ describe("startServer", () => {
     );
 
     const view: SessionView = {
+      lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
       id: "demo-1",
       project: "demo",
       agent: "claude",
@@ -2488,6 +2497,7 @@ describe("startServer", () => {
     SessionService.prototype.completeDesk = async function mockCompleteDesk(sessionId: string) {
       calls.push(`desk:${sessionId}`);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         completedIds: [sessionId],
       };
     };
@@ -3146,6 +3156,7 @@ describe("startServer", () => {
     const originalSelfDestruct = SessionService.prototype.selfDestruct;
     SessionService.prototype.selfDestruct = async function mockSelfDestruct(sessionId: string) {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: sessionId,
         project: "demo",
         agent: "claude",

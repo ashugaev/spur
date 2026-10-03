@@ -15,7 +15,12 @@ export const DEFAULT_DAEMON_PORT = 4_310;
 
 export type ServiceId = "daemon" | "web";
 
-export type ProbeReason = "connection-refused" | "http-error" | "timeout" | "unknown";
+export type ProbeReason =
+  | "connection-refused"
+  | "http-error"
+  | "identity-mismatch"
+  | "timeout"
+  | "unknown";
 
 export type ProbeResult = { ok: true } | { ok: false; reason: ProbeReason };
 
@@ -178,15 +183,19 @@ export type JsonFetchLike = (
   init: { signal: AbortSignal },
 ) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
 
-function isVersionBody(value: unknown): value is { version: string } {
+function isInfoBody(value: unknown): value is { version: string; pid?: number } {
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as { version?: unknown }).version === "string"
+    typeof (value as { version?: unknown }).version === "string" &&
+    ((value as { pid?: unknown }).pid === undefined ||
+      typeof (value as { pid?: unknown }).pid === "number")
   );
 }
 
-export type ProbeInfoResult = { ok: true; version: string } | { ok: false; reason: ProbeReason };
+export type ProbeInfoResult =
+  | { ok: true; version: string; pid?: number }
+  | { ok: false; reason: ProbeReason };
 
 // F8 version-drift probe: fetches a target's JSON body (daemon `/info`) with
 // the same hard timeout as `probeWith`, and the same discriminated
@@ -201,9 +210,10 @@ export async function probeInfoWith(
     const response = await fetchLike(target.url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
     if (!response.ok) return { ok: false, reason: "http-error" };
     const body: unknown = await response.json();
-    return isVersionBody(body)
+    if (!isInfoBody(body)) return { ok: false, reason: "unknown" };
+    return body.pid === undefined
       ? { ok: true, version: body.version }
-      : { ok: false, reason: "unknown" };
+      : { ok: true, version: body.version, pid: body.pid };
   } catch (error) {
     return { ok: false, reason: classifyTransportError(error) };
   }
@@ -213,6 +223,21 @@ const realJsonFetch: JsonFetchLike = (url, init) => fetch(url, init);
 
 export function probeInfo(target: ProbeTarget): Promise<ProbeInfoResult> {
   return probeInfoWith(realJsonFetch, target);
+}
+
+export async function probeDaemonIdentity(
+  target: ProbeTarget,
+  expected: { version: string; pid: number | undefined },
+): Promise<ProbeResult> {
+  const result = await probeInfo(target);
+  if (!result.ok) return result;
+  if (result.version !== expected.version) {
+    return { ok: false, reason: "identity-mismatch" };
+  }
+  if (expected.pid === undefined || expected.pid <= 0 || result.pid !== expected.pid) {
+    return { ok: false, reason: "identity-mismatch" };
+  }
+  return { ok: true };
 }
 
 function isHeadroomBody(value: unknown): value is HeadroomReport {
@@ -286,5 +311,26 @@ export async function unitStateWith(scope: SystemdScope, unit: string): Promise<
     return parseUnitState(stdout.toString());
   } catch {
     return "unknown";
+  }
+}
+
+export async function unitMainPidWith(
+  scope: SystemdScope,
+  unit: string,
+): Promise<number | undefined> {
+  const [, ...scopeArgs] = scope.ctl;
+  try {
+    const { stdout } = await execFileAsync("systemctl", [
+      ...scopeArgs,
+      "show",
+      unit,
+      "-p",
+      "MainPID",
+      "--value",
+    ]);
+    const pid = Number(stdout.toString().trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
   }
 }
