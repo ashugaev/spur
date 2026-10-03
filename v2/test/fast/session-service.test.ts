@@ -1500,6 +1500,10 @@ describe("SessionService", () => {
       await service.settleBackgroundSpawns();
       const reap = await import("../../src/sidecars/reap.js");
       const identityProbe = vi.spyOn(reap, "readProcessStarttime").mockResolvedValue(123);
+      const processTree = await import("../../src/process-tree.js");
+      const ownershipProbe = vi
+        .spyOn(processTree, "classifyProcessOwnership")
+        .mockResolvedValue("owned");
       const owner = sessionRecord({
         id: "api-1",
         sidecarNames: ["dev", "daemon"],
@@ -1540,7 +1544,7 @@ describe("SessionService", () => {
         if (!current) throw new Error("Missing owner fixture");
         return internals.sidecarViews(current, config.projects.api);
       };
-      return { service, sessions, owner, internals, views, config, identityProbe };
+      return { service, sessions, owner, internals, views, config, identityProbe, ownershipProbe };
     }
 
     function nextObservation() {
@@ -1655,6 +1659,81 @@ describe("SessionService", () => {
         sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 124 } },
       });
       expect((await views())[0]).not.toHaveProperty("url");
+      service.dispose();
+    });
+
+    it("rejects cached ancestry when the root or listener identity changes", async () => {
+      const { service, views, sessions, owner, identityProbe, ownershipProbe } = await setup();
+      let rootStarttime = 123;
+      let listenerStarttime = 456;
+      identityProbe.mockImplementation(async (pid) =>
+        pid === 100 ? rootStarttime : listenerStarttime,
+      );
+      expect((await views())[0]).toHaveProperty("url");
+      rootStarttime = 124;
+      sessions.set(owner.id, {
+        ...owner,
+        sidecarProcs: { dev: { pid: 100, pgid: 100, starttime: 124 } },
+      });
+      expect((await views())[0]).not.toHaveProperty("url");
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(1);
+      nextObservation();
+      expect((await views())[0]).toHaveProperty("url");
+      listenerStarttime = 457;
+      expect((await views())[0]).not.toHaveProperty("url");
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(2);
+      nextObservation();
+      expect((await views())[0]).toHaveProperty("url");
+      ownershipProbe.mockResolvedValue("foreign");
+      expect((await views())[0]).not.toHaveProperty("url");
+      expect(snapshotListenersMock).toHaveBeenCalledTimes(3);
+      service.dispose();
+    });
+
+    it("retains a shared sidecar when a sibling starts during an earlier teardown signal", async () => {
+      const { service, sessions, owner, internals, views, config } = await setup();
+      const sidecars = config.projects.api.sidecars as AppConfig["projects"][string]["sidecars"];
+      const daemonPort = sidecars.daemon?.ports?.tcp;
+      if (!daemonPort) throw new Error("Missing daemon port fixture");
+      daemonPort.url = "https://daemon.example.com/{port}";
+      const claimed = {
+        ...owner,
+        sidecarProcs: {
+          ...owner.sidecarProcs,
+          daemon: { pid: 100, pgid: 100, starttime: 123 },
+        },
+      };
+      sessions.set(owner.id, claimed);
+      snapshotListenersMock.mockResolvedValue({
+        ok: true,
+        byPort: new Map([
+          [3000, new Set([101])],
+          [4000, new Set([101])],
+        ]),
+      });
+      expect((await views())[1]).toHaveProperty("url", "https://daemon.example.com/4000");
+      const entered = signal();
+      const release = signal();
+      killTmuxSessionMock.mockImplementation(async (name) => {
+        if (name === "api-1--dev") {
+          entered.resolve();
+          await release.promise;
+        }
+      });
+      const teardown = internals.teardownSessionSidecars(claimed);
+      await entered.promise;
+      sessions.set(
+        "api-2",
+        sessionRecord({ id: "api-2", workspaceId: owner.id, sidecarNames: ["daemon"] }),
+      );
+      release.resolve();
+      await teardown;
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
+      expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
+      expect(sessions.get(owner.id)?.sidecarProcs?.daemon).toEqual(claimed.sidecarProcs.daemon);
+      expect(
+        (await service.get("api-2")).sidecars.find((view) => view.name === "daemon")?.url,
+      ).toBe("https://daemon.example.com/4000");
       service.dispose();
     });
 

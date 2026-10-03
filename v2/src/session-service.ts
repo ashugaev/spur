@@ -208,7 +208,7 @@ import {
   snapshotListeners,
   type ListenerSnapshot,
 } from "./port-probe.js";
-import { readProcessCwd } from "./process-tree.js";
+import { classifyProcessOwnership, readProcessCwd } from "./process-tree.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   closeTelegramTopic,
@@ -1201,6 +1201,7 @@ interface SidecarEndpointEntry {
 interface SidecarObservation {
   listeners: ListenerSnapshot;
   processes: ProcSnapshot;
+  starttimes: ReadonlyMap<number, number | null>;
   revision: number;
 }
 
@@ -9381,15 +9382,39 @@ export class SessionService {
       else if (!entry.blocked && !this.sidecarEndpointSignature(owner, name, sidecar))
         this.sidecarEndpoints.delete(key);
     }
-    const run = Promise.all([snapshotListeners(), snapshotProcesses()]).then(
-      ([listeners, processes]) => {
-        const value = { listeners, processes, revision };
-        if (!this.deliveryStopped && revision === this.sidecarObservationRevision) {
-          this.sidecarObservation = { value, completedAt: Date.now() };
-        }
-        return value;
-      },
-    );
+    const rootPids = new Set<number>();
+    const urlPorts = new Set<number>();
+    for (const session of listSessions(this.config.dataDir)) {
+      const project = this.resolveProjectForSession(session);
+      for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
+        const sidecar = project?.sidecars[name];
+        const link = sidecar ? this.resolveSidecarUrlLink(session, name, sidecar) : undefined;
+        if (!link) continue;
+        rootPids.add(identity.pid);
+        urlPorts.add(link.reservedPort);
+      }
+    }
+    const run = Promise.all(
+      [...rootPids].map(async (pid) => [pid, await readProcessStarttime(pid)] as const),
+    ).then(async (roots) => {
+      const starttimes = new Map(roots);
+      const [listeners, processes] = await Promise.all([snapshotListeners(), snapshotProcesses()]);
+      if (listeners.ok) {
+        const listenerPids = new Set(
+          [...urlPorts].flatMap((port) => [...(listeners.byPort.get(port) ?? [])]),
+        );
+        await Promise.all(
+          [...listenerPids].map(async (pid) => {
+            if (!starttimes.has(pid)) starttimes.set(pid, await readProcessStarttime(pid));
+          }),
+        );
+      }
+      const value = { listeners, processes, starttimes, revision };
+      if (!this.deliveryStopped && revision === this.sidecarObservationRevision) {
+        this.sidecarObservation = { value, completedAt: Date.now() };
+      }
+      return value;
+    });
     this.sidecarObservationRun = run;
     void run.finally(() => {
       if (this.sidecarObservationRun === run) this.sidecarObservationRun = undefined;
@@ -9499,16 +9524,21 @@ export class SessionService {
       }
       if (entry.blocked || observation.revision !== this.sidecarObservationRevision) continue;
       const starttime = await readProcessStarttime(identity.pid);
+      const observedRootStarttime = observation.starttimes.get(identity.pid);
       const rootGone = observation.processes.ok && !observation.processes.byPid.has(identity.pid);
       if (
         rootGone ||
         (starttime !== null && starttime !== identity.starttime) ||
+        (observedRootStarttime !== undefined &&
+          observedRootStarttime !== null &&
+          observedRootStarttime !== identity.starttime) ||
         (initial.starttime !== null && initial.starttime !== identity.starttime) ||
         (observation.listeners.ok && !observation.listeners.byPort.has(link.reservedPort))
       ) {
         delete entry.url;
       } else if (
         initial.starttime === identity.starttime &&
+        observedRootStarttime === identity.starttime &&
         starttime !== null &&
         observation.processes.ok &&
         observation.listeners.ok
@@ -9524,9 +9554,32 @@ export class SessionService {
         ) {
           delete entry.url;
         } else if (owned) {
+          const ownerships = await Promise.all(
+            [...pids]
+              .filter((pid) => tree.has(pid))
+              .map(async (pid) => {
+                const observed = observation.starttimes.get(pid);
+                const current = await readProcessStarttime(pid);
+                if (observed === undefined || observed === null || current === null) return "unknown";
+                if (observed !== current) return "foreign";
+                const ownership = await classifyProcessOwnership(pid, identity.pid);
+                if (ownership !== "owned") return ownership;
+                const confirmed = await readProcessStarttime(pid);
+                return confirmed === observed
+                  ? "owned"
+                  : confirmed === null
+                    ? "unknown"
+                    : "foreign";
+              }),
+          );
           const confirmed = await readProcessStarttime(identity.pid);
-          if (confirmed === identity.starttime) entry.url = link.linkUrl;
-          else if (confirmed !== null) delete entry.url;
+          if (confirmed === identity.starttime && ownerships.includes("owned"))
+            entry.url = link.linkUrl;
+          else if (
+            (confirmed !== null && confirmed !== identity.starttime) ||
+            ownerships.every((ownership) => ownership === "foreign")
+          )
+            delete entry.url;
         }
       }
       if (entry.url) {
@@ -15573,6 +15626,16 @@ export class SessionService {
     // Select retention first, then retire the entire batch before any signal await.
     for (const { ownerId, scName } of selected) this.invalidateSidecarEndpoint(ownerId, scName);
     for (const { ownerId, scName } of selected) {
+      const sidecar = project?.sidecars[scName];
+      if (
+        sidecar &&
+        !sidecar.mcp &&
+        ((await this.workspaceRetainsResources(session, session.id)) ||
+          this.hasRunningWorkspaceMembers(session))
+      ) {
+        this.allowSidecarEndpoint(ownerId, scName);
+        continue;
+      }
       const record = readSession(this.config.dataDir, ownerId);
       const identity = record?.sidecarProcs?.[scName];
       const fallback =
