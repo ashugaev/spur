@@ -500,7 +500,7 @@ export function buildCodexPlan(
   );
   if (options?.startupImagePaths?.length) {
     return {
-      launchCommand: prompt.trim() ? `${command} ${shellEscape(prompt)}` : command,
+      launchCommand: prompt.trim() ? `${command} -- ${shellEscape(prompt)}` : command,
       initialMessage: "",
       readyMarkers: ["OpenAI Codex", "›"],
     };
