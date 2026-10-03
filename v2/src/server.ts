@@ -2,6 +2,11 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { URL } from "node:url";
+import {
+  lifecycleErrorReceipt,
+  parseLifecycleOperationId,
+  SessionLifecycleError,
+} from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
 import { listAgentModels } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
@@ -81,6 +86,7 @@ import {
   type ConnectProjectConfigRequest,
   type CreateProjectRequest,
   type DisconnectProjectConfigRequest,
+  type SessionLifecycleSnapshot,
   type KillSessionRequest,
   type OpenPrAction,
   type PreflightRequest,
@@ -280,7 +286,11 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   }
 }
 
+const lifecycleErrors = new WeakMap<ServerResponse, SessionLifecycleSnapshot>();
+
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+  const lifecycle = lifecycleErrors.get(response);
+  if (lifecycle && isRecord(payload)) payload = { ...payload, lifecycle };
   // Compact, not pretty-printed: the listing payloads run to megabytes and the
   // 2-space indent was ~10% of every one of them, re-serialized on each poll.
   const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
@@ -439,7 +449,9 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
+    ...(operationId ? { operationId } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
@@ -509,7 +521,9 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
+    ...(operationId ? { operationId } : {}),
     ...(raw["force"] === true ? { force: true } : {}),
     ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
   };
@@ -1131,7 +1145,9 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        sendJson(response, 200, await service.list({ includeCompleted, view }));
+        const sessions = await service.list({ includeCompleted, view });
+        response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
+        sendJson(response, 200, sessions);
         return;
       }
 
@@ -1866,14 +1882,34 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid restore request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.restore(restoreSessionId, body));
         return;
       }
 
       const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
       if (method === "POST" && reopenSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid reopen request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
@@ -2006,6 +2042,16 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
+      const lifecycle = lifecycleErrorReceipt(error);
+      if (lifecycle) lifecycleErrors.set(response, lifecycle);
+      if (error instanceof SessionLifecycleError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { error: message, ...error.payload },
+        });
+        return;
+      }
       if (error instanceof AutoPingError) {
         failRequest(response, error.status, message, {
           method,
@@ -2162,15 +2208,14 @@ export async function startServer(
     });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(service.config.server.port, service.config.server.host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
   try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(service.config.server.port, service.config.server.host, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
     await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

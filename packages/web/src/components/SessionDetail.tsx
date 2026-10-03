@@ -96,6 +96,7 @@ import {
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
 import { usePoll } from "@/hooks/usePoll";
+import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -1613,7 +1614,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [busyRequestAction, setBusyAction] = useState<string | null>(null);
+  const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const rawSessionRef = useRef<SpurSessionView | null>(null);
+  const lifecycleActionRef = useRef<LifecycleIntent | null>(null);
+  const lifecycleReconcileRef = useRef<LifecycleIntent | null>(null);
+  const busyAction = lifecycleRef.current.pending(sessionId) ?? busyRequestAction;
   const [openPrAction, setOpenPrAction] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1760,17 +1766,36 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [dismissToast]);
 
   useEffect(() => {
+    lifecycleRef.current = new SessionLifecycleConsumer();
+    rawSessionRef.current = null;
+    lifecycleActionRef.current = null;
+    lifecycleReconcileRef.current = null;
+    setBusyAction(null);
     setSession((current) => (current?.id === sessionId ? current : null));
     sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
     setError(null);
     setConversation(null);
     setFromIndex(null);
     dismissLoadErrorToast();
+    return () => {
+      loadRequestIdRef.current += 1;
+      lifecycleRef.current = new SessionLifecycleConsumer();
+      lifecycleActionRef.current = null;
+      lifecycleReconcileRef.current = null;
+    };
   }, [dismissLoadErrorToast, sessionId]);
 
-  const applySessionUpdate = useCallback((next: DashboardSession) => {
-    loadRequestIdRef.current += 1;
-    setSession(next);
+  const publishLifecycleSession = useCallback((row: SpurSessionView) => {
+    rawSessionRef.current = row;
+    const projected = lifecycleRef.current.project([row])[0];
+    if (projected) setSession(toDashboardSession(projected));
+    const owner = lifecycleActionRef.current;
+    if (owner && !lifecycleRef.current.isCurrent(owner)) {
+      lifecycleActionRef.current = null;
+      setBusyAction(null);
+    } else if (owner && !lifecycleRef.current.pending(row.id)) {
+      setBusyAction(null);
+    }
   }, []);
 
   const fetchSession = useCallback(
@@ -1778,29 +1803,66 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const requestedSessionId = sessionId;
       const requestId = loadRequestIdRef.current + 1;
       loadRequestIdRef.current = requestId;
+      const consumer = lifecycleRef.current;
+      const read = consumer.beginRead();
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
           cache: "no-store",
           signal,
         });
         if (
+          signal.aborted ||
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
           return;
         }
         if (!response.ok) {
+          if (response.status === 404) {
+            const baseline = await fetch("/api/runtime/info", { cache: "no-store", signal });
+            if (
+              signal.aborted ||
+              requestId !== loadRequestIdRef.current ||
+              currentSessionIdRef.current !== requestedSessionId
+            )
+              return;
+            if (baseline.ok) {
+              const info = (await baseline.json()) as { lifecycleInstanceId?: string };
+              if (
+                signal.aborted ||
+                requestId !== loadRequestIdRef.current ||
+                currentSessionIdRef.current !== requestedSessionId
+              )
+                return;
+              if (info.lifecycleInstanceId && consumer.accept(info.lifecycleInstanceId, [], read)) {
+                rawSessionRef.current = null;
+                sessionRef.current = null;
+                lifecycleActionRef.current = null;
+                lifecycleReconcileRef.current = null;
+                setBusyAction(null);
+                setSession(null);
+              }
+            }
+          }
           throw new Error(await readApiErrorMessage(response, "Failed to load session"));
         }
         const payload = (await response.json()) as SpurSessionView;
         if (
+          signal.aborted ||
           requestId !== loadRequestIdRef.current ||
           currentSessionIdRef.current !== requestedSessionId
         ) {
           return;
         }
-        const nextSession = toDashboardSession(payload);
-        setSession(nextSession);
+        if (!payload.lifecycle) throw new Error("Invalid session lifecycle snapshot");
+        const accepted = consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0];
+        if (!accepted) return;
+        const reconciling = lifecycleReconcileRef.current;
+        if (reconciling && accepted === payload) {
+          consumer.releaseUnmatched(reconciling);
+          lifecycleReconcileRef.current = null;
+        }
+        publishLifecycleSession(accepted);
         setError(null);
         dismissLoadErrorToast();
       } catch (loadError) {
@@ -1823,9 +1885,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         lastLoadErrorToastRef.current = { id, message };
       }
     },
-    [dismissLoadErrorToast, sessionId, showErrorToast],
+    [dismissLoadErrorToast, publishLifecycleSession, sessionId, showErrorToast],
   );
   const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
+  const applySessionUpdate = useCallback(() => {
+    void loadSession();
+  }, [loadSession]);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1985,6 +2050,52 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
+    const lifecycleAction = action === "complete" || action === "restore" || action === "reopen";
+    const consumer = lifecycleRef.current;
+    let owner: LifecycleIntent | null = null;
+    if (lifecycleAction) {
+      if (consumer.pending(sessionId)) return false;
+      if (!consumer.instanceId) {
+        const read = consumer.beginRead();
+        const requestedSessionId = sessionId;
+        try {
+          const response = await fetch("/api/runtime/info", { cache: "no-store" });
+          if (!response.ok)
+            throw new Error(await readApiErrorMessage(response, "Failed to load runtime info"));
+          const info = (await response.json()) as { lifecycleInstanceId?: string };
+          if (
+            currentSessionIdRef.current !== requestedSessionId ||
+            consumer !== lifecycleRef.current ||
+            !info.lifecycleInstanceId ||
+            !consumer.accept(info.lifecycleInstanceId, [], read)
+          )
+            return false;
+          await loadSession();
+        } catch (baselineError) {
+          if (
+            currentSessionIdRef.current === requestedSessionId &&
+            consumer === lifecycleRef.current &&
+            read.generation === consumer.generation
+          ) {
+            showErrorToast(errorMessage(baselineError, "Failed to load runtime info"));
+          }
+          return false;
+        }
+      }
+      const raw = rawSessionRef.current;
+      if (!raw || consumer !== lifecycleRef.current) return false;
+      owner = consumer.reserve([raw], action);
+      if (!owner) return false;
+      lifecycleActionRef.current = owner;
+      loadRequestIdRef.current += 1;
+      publishLifecycleSession(raw);
+    }
+    const isCurrentAction = () =>
+      currentSessionIdRef.current === sessionId &&
+      (!owner ||
+        (consumer === lifecycleRef.current &&
+          consumer.isCurrent(owner) &&
+          lifecycleActionRef.current === owner));
     if (
       action === "kill" &&
       !options.skipKillConfirm &&
@@ -1995,12 +2106,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
     setBusyAction(action);
     try {
+      const requestBody = owner ? { ...body, operationId: owner.operationId } : body;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
-        headers: body ? { "content-type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
+        headers: requestBody ? { "content-type": "application/json" } : undefined,
+        body: requestBody ? JSON.stringify(requestBody) : undefined,
       });
+      if (!isCurrentAction()) return false;
       const payload = await readResponsePayload(response);
+      if (!isCurrentAction()) return false;
       if (!response.ok) {
         if (
           (action === "complete" || action === "kill") &&
@@ -2023,6 +2137,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
       }
+      if (
+        owner &&
+        payload !== null &&
+        typeof payload === "object" &&
+        "id" in payload &&
+        payload.id === sessionId
+      ) {
+        const accepted = consumer.acceptMutation(payload as SpurSessionView, owner);
+        if (accepted) publishLifecycleSession(accepted);
+      }
       if (action === "send") {
         const submittedMessage =
           body && typeof body["message"] === "string" ? body["message"].trim() : "";
@@ -2042,17 +2166,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         showQueuedAheadToast(payload);
       }
-      await loadSession();
+      if (!owner) await loadSession();
       return true;
     } catch (actionError) {
+      if (!isCurrentAction()) return false;
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
       // The server may have already moved (e.g. reopen's rollback flips the
       // record back to completed on a failed restore) — refetch so the page
       // never shows a stale view after a failed action.
-      await loadSession();
+      if (!owner) await loadSession();
       return false;
     } finally {
-      setBusyAction(null);
+      if (isCurrentAction()) {
+        if (owner) {
+          lifecycleReconcileRef.current = owner;
+          await loadSession();
+          if (isCurrentAction() && rawSessionRef.current)
+            publishLifecycleSession(rawSessionRef.current);
+        }
+        if (isCurrentAction()) setBusyAction(null);
+      }
     }
   };
 
@@ -2199,7 +2332,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
       }
       const data = (await response.json()) as SpurSessionView;
-      setSession(toDashboardSession(data));
+      const accepted = lifecycleRef.current.acceptUpdate(data);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSwitchAuthOpen(false);
     } catch (switchAuthErr) {
       setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
@@ -2337,7 +2472,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         );
       }
       const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
-      setSession(toDashboardSession(payload));
+      const accepted = lifecycleRef.current.acceptUpdate(payload);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
       if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
@@ -2495,7 +2632,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           throw new Error(await readApiErrorMessage(response, "Failed to update title"));
         }
         const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
-        applySessionUpdate(toDashboardSession(payload));
+        const accepted = lifecycleRef.current.acceptUpdate(payload);
+        if (accepted && accepted.id === currentSessionIdRef.current)
+          publishLifecycleSession(accepted);
         setTitleEditing(false);
         setTitleDraft("");
       } catch (titleError) {
@@ -2504,7 +2643,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         setTitleSaving(false);
       }
     },
-    [session, sessionId, titleSaving, showErrorToast, applySessionUpdate],
+    [session, sessionId, titleSaving, showErrorToast, publishLifecycleSession],
   );
   const saveTitleDraft = useCallback(() => {
     const trimmed = titleDraft.trim();

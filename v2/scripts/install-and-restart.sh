@@ -258,6 +258,29 @@ if command -v "${systemctl_cmd[0]}" >/dev/null 2>&1; then
   "${systemctl_cmd[@]}" restart spur-daemon.service spur-web.service
   restart_rc=$?
   echo "$(date -u +%FT%TZ) install-and-restart systemctl restart rc=$restart_rc"
+  if [ "$restart_rc" -eq 0 ]; then
+    node --input-type=module - "$SCRIPT_DIR/.." <<'NODE'
+import { pathToFileURL } from 'node:url';
+import { setTimeout } from 'node:timers/promises';
+const root = process.argv[2];
+const { createRealUpdateDeps } = await import(pathToFileURL(`${root}/dist/update.js`));
+const deps = createRealUpdateDeps(`${root}/dist/cli.js`);
+process.exitCode = 1;
+for (let attempt = 0; attempt < 60; attempt += 1) {
+  const results = await Promise.all([
+    deps.probe({ id: 'daemon', url: `http://127.0.0.1:${deps.readDaemonPort()}/info` }),
+    deps.probe({ id: 'web', url: `http://127.0.0.1:${deps.readWebPort()}/` }),
+  ]);
+  if (results.every(result => result.ok)) {
+    process.exitCode = 0;
+    break;
+  }
+  await setTimeout(1000);
+}
+NODE
+    restart_rc=$?
+    echo "$(date -u +%FT%TZ) install-and-restart health check rc=$restart_rc"
+  fi
   # This branch has no rollback at all, so a failed restart always leaves the
   # host on the newly installed version.
   if [ "$restart_rc" -ne 0 ]; then

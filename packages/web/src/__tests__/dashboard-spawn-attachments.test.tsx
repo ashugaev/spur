@@ -33,6 +33,7 @@ function pendingRead() {
 }
 
 const spawnedSession: SpurSessionView = {
+  lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
   id: "spawned",
   project: "demo",
   agent: "claude",
@@ -66,6 +67,7 @@ describe("Dashboard spawn photo preparation", () => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions")
         return Response.json({
+          lifecycleInstanceId: "test-instance",
           projects: [
             { id: "demo", name: "Demo", configured: true, prefix: "demo", path: "/repo/demo" },
           ],
@@ -74,6 +76,9 @@ describe("Dashboard spawn photo preparation", () => {
       if (url.startsWith("/api/models"))
         return Response.json({ models: [{ id: "sonnet", label: "Sonnet" }] });
       if (url.includes("spawn-defaults")) return Response.json({ model: null, worktree: false });
+      if (url === "/api/projects/demo/preflight-batches")
+        return Response.json({ preflightBatchId: "photo-test-batch" });
+      if (url === "/api/preflight") return Response.json({ branch: null });
       if (url === "/api/spawn") {
         requests.push(init ?? {});
         if (spawnResponse) return spawnResponse;

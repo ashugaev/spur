@@ -2,12 +2,32 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseRestoreSessionRequest, startServer } from "../../src/server.js";
+import {
+  parseCompleteSessionRequest,
+  parseRestoreSessionRequest,
+  startServer,
+} from "../../src/server.js";
+import {
+  annotateLifecycleError,
+  SessionLifecycleError,
+  SessionLifecycleRegister,
+} from "../../src/session-lifecycle.js";
 import { SessionService } from "../../src/session-service.js";
 import type { SessionView } from "../../src/types.js";
 import { findFreePort } from "../helpers/common.js";
 
 describe("parseRestoreSessionRequest", () => {
+  it.each([parseCompleteSessionRequest, parseRestoreSessionRequest])(
+    "validates operation IDs before forwarding",
+    (parse) => {
+      expect(parse({ operationId: "client-operation" })).toEqual({
+        operationId: "client-operation",
+      });
+      for (const operationId of [null, 4, "", " padded", "x".repeat(129)]) {
+        expect(() => parse({ operationId })).toThrow("operationId");
+      }
+    },
+  );
   it("defaults to {} on an absent or non-object body", () => {
     expect(parseRestoreSessionRequest(undefined)).toEqual({});
     expect(parseRestoreSessionRequest(null)).toEqual({});
@@ -64,6 +84,95 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
       await server.stop();
     }
   }
+
+  it("forwards IDs to complete, restore, and reopen and rejects malformed IDs before execution", async () => {
+    const restore = SessionService.prototype.restore;
+    const reopen = SessionService.prototype.reopen;
+    const complete = SessionService.prototype.complete;
+    const calls: unknown[] = [];
+    const mock: typeof restore = async (id, request) => {
+      calls.push(request);
+      return { id } as SessionView;
+    };
+    SessionService.prototype.restore = mock;
+    SessionService.prototype.reopen = mock;
+    SessionService.prototype.complete = mock;
+    try {
+      await withServer(async (port) => {
+        for (const action of ["complete", "restore", "reopen"]) {
+          const valid = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/${action}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ operationId: action }),
+          });
+          expect(valid.status).toBe(200);
+          const invalid = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/${action}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ operationId: " invalid " }),
+          });
+          expect(invalid.status).toBe(400);
+        }
+        expect(calls).toEqual([
+          { operationId: "complete" },
+          { operationId: "restore" },
+          { operationId: "reopen" },
+        ]);
+      });
+    } finally {
+      SessionService.prototype.restore = restore;
+      SessionService.prototype.reopen = reopen;
+      SessionService.prototype.complete = complete;
+    }
+  });
+
+  it("attaches producing identity to an empty list", async () => {
+    await withServer(async (port) => {
+      const info = (await (await fetch(`http://127.0.0.1:${port}/info`)).json()) as {
+        lifecycleInstanceId: string;
+      };
+      const response = await fetch(`http://127.0.0.1:${port}/sessions?view=dashboard`);
+      expect(response.headers.get("x-spur-lifecycle-instance-id")).toBe(info.lifecycleInstanceId);
+      expect(await response.json()).toEqual([]);
+    });
+  });
+
+  it("preserves the captured settled receipt on delivery 503 while a newer owner exists", async () => {
+    const original = SessionService.prototype.restore;
+    const register = new SessionLifecycleRegister();
+    const owner = register.begin("restore", ["demo-1"], "old");
+    const settled = register.settle(
+      owner,
+      true,
+      () => "succeeded",
+      () => true,
+    );
+    const newer = register.begin("reopen", ["demo-1"], "new");
+    SessionService.prototype.restore = async () => {
+      const error = new SessionLifecycleError("Delivery changed", 503, {
+        code: "session_lifecycle_snapshot_changed",
+        lifecycle: newer,
+      });
+      annotateLifecycleError(error, settled);
+      throw error;
+    };
+    try {
+      await withServer(async (port) => {
+        const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
+          method: "POST",
+        });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({
+          error: "Delivery changed",
+          code: "session_lifecycle_snapshot_changed",
+          lifecycle: settled,
+        });
+        expect(register.snapshot("demo-1")).toBe(newer);
+      });
+    } finally {
+      SessionService.prototype.restore = original;
+    }
+  });
 
   it("passes {force:true} from the restore body through to service.restore", async () => {
     const originalRestore = SessionService.prototype.restore;

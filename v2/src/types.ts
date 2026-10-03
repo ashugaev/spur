@@ -1194,6 +1194,16 @@ export function isTerminalSessionStatus(
   return status === "completed" || status === "killed";
 }
 
+export function hasRetainedSessionError(
+  session: Pick<SessionRecord, "status" | "error">,
+  state?: SessionState,
+): boolean {
+  return (
+    !isTerminalSessionStatus(session.status) &&
+    (session.status === "errored" || Boolean(session.error?.trim()) || state === "error")
+  );
+}
+
 // respawn()'s own gate. One definition consumed by the hint builders in
 // session-service.ts and cli.ts so a hint can never name respawn for a
 // status respawn's own throw would reject.
@@ -1227,6 +1237,24 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  lifecycle: SessionLifecycleSnapshot;
+}
+
+export type LifecycleAction = "complete" | "restore" | "reopen";
+export type LifecyclePhase = "pending" | "succeeded" | "failed";
+
+export interface LifecycleOperation {
+  operationId: string;
+  action: LifecycleAction;
+  phase: LifecyclePhase;
+  targetIds: string[];
+  outcomes: { sessionId: string; phase: "succeeded" | "failed" }[];
+}
+
+export interface SessionLifecycleSnapshot {
+  instanceId: string;
+  revision: number;
+  operation: LifecycleOperation | null;
 }
 
 export interface SidecarPortView {
@@ -1261,6 +1289,7 @@ export interface SessionView extends Omit<
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
 > {
+  lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1310,6 +1339,7 @@ export type DashboardOmittedField =
   | "preflightTokenUsage";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1512,6 +1542,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  operationId?: string;
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
@@ -1613,6 +1644,7 @@ export interface KillSessionRequest {
 // assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
+  operationId?: string;
   force?: boolean;
   overrideTokenBudget?: boolean;
 }
@@ -1762,6 +1794,7 @@ export interface ProjectConfigMutationResponse {
 }
 
 export interface RuntimeInfo {
+  lifecycleInstanceId: string;
   ok: true;
   apiVersion: number;
   version: string;

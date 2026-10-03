@@ -262,7 +262,11 @@ export function isActive(ctl: string[], unit: string): boolean {
 }
 
 export function resolveSystemdScope(home: string): SystemdScope {
-  const userUnitDir = join(home, ".config", "systemd", "user");
+  const userUnitDir = join(
+    process.env["XDG_CONFIG_HOME"] || join(home, ".config"),
+    "systemd",
+    "user",
+  );
   if (existsSync(join(userUnitDir, "spur-daemon.service"))) {
     return {
       kind: "user",

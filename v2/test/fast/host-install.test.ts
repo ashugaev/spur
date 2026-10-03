@@ -988,6 +988,22 @@ describe("checkHostSkillSymlinks", () => {
 });
 
 describe("resolveSystemdScope", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([undefined, "", "xdg"])("resolves user units with XDG_CONFIG_HOME=%s", async (xdg) => {
+    const home = await mkdtemp(join(tmpdir(), "spur-systemd-scope-"));
+    const configHome = join(home, xdg || ".config");
+    vi.stubEnv("XDG_CONFIG_HOME", xdg ? configHome : xdg);
+    const unitDir = join(configHome, "systemd", "user");
+    try {
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n");
+      expect(resolveSystemdScope(home)).toMatchObject({ kind: "user", unitDir });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("never reports system scope for a home that differs from the real account home", () => {
     // Regression guard: a caller running under a test's overridden `$HOME`
     // (where `home` defaults to `homedir()`, itself driven by `$HOME`) must

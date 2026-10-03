@@ -423,4 +423,32 @@ grep -q 'npm-init: spur-daemon active=1 spur-web active=1' "$OUT_FILE" ||
 
 echo "npm-init.test.sh: slow-readiness scenario OK"
 
+# A reachable stale daemon must never satisfy the install readiness gate.
+read -r home_kv bin_kv pkg_kv < <(setup_scenario stale-daemon)
+FAKE_HOME="${home_kv#HOME=}"
+FAKE_BIN="${bin_kv#BIN=}"
+PKG_ROOT="${pkg_kv#PKG=}"
+cat >"$FAKE_BIN/node" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--input-type=module" ]; then exit 1; fi
+exit 0
+EOF
+cat >"$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+echo 200
+EOF
+cat >"$FAKE_BIN/sleep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$FAKE_BIN/node" "$FAKE_BIN/curl" "$FAKE_BIN/sleep"
+OUT_FILE="$WORK_DIR/stale-daemon-output.log"
+if HOME="$FAKE_HOME" PATH="$FAKE_BIN:/usr/bin:/bin" \
+  bash "$PKG_ROOT/scripts/npm-init.sh" --no-tailscale >"$OUT_FILE" 2>&1; then
+  fail "npm-init.sh accepted a daemon whose identity check failed"
+fi
+grep -q 'one or more units failed to start' "$OUT_FILE" ||
+  fail "npm-init.sh did not report failed readiness"
+echo "npm-init.test.sh: stale-daemon scenario OK"
+
 echo "npm-init.test.sh: OK"

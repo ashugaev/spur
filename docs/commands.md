@@ -34,17 +34,19 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart` refuse a non-default `--config` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`). Auto-start forks a detached daemon unless `$SPUR_SESSION`/`$SPUR_SIDECAR_NAME` is set or `$SPUR_DISABLE_AUTOSTART=1`. Registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
 
 ## init
 
 `spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
 
+## update
+
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
+
 ## spawn
 
-```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]
-```
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
 
 Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
 
@@ -107,7 +109,7 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`); in a private chat a user reply to it routes back to this session. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Binding rules and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`). Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Reply routing, binding and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 
 ## Sidecars
 
