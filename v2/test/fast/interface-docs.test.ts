@@ -44,7 +44,10 @@ describe("published interface contracts", () => {
     expect(configuration).toContain("session.token_budget.unenforced");
     expect(configuration).toContain("session.token_budget.teardown_failed");
     expect(configuration).toContain("session.wake.token_budget_blocked");
-    expect(configuration).toContain("cron|github|github-ci|gitlab|jira|sentry|service|telegram");
+    expect(configuration).toContain(
+      "cron|script|github|github-ci|gitlab|jira|sentry|service|telegram",
+    );
+    expect(configuration).toContain("script:item.new");
     expect(configuration).toMatch(
       /github-ci[^\n]*no auto-ping controls|no auto-ping controls[^\n]*github-ci/,
     );
