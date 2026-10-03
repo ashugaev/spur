@@ -16722,7 +16722,6 @@ export class SessionService {
         await this.retainLaunchedError(currentRetentionCandidate, error);
         throw error;
       }
-      persistedLaunchCommand = baseLaunchCommand;
       freshOpenCodeRecord = currentRetentionCandidate;
     };
 
@@ -16875,18 +16874,7 @@ export class SessionService {
           agentSessionId: sessionWithAgentId.agentSessionId ?? null,
         },
       });
-      const recoveryPaneTarget = {
-        id: session.id,
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: persistedLaunchCommand,
-        worktreePath: session.worktreePath,
-        ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
-      };
-      if (session.agent === "opencode") {
-        // The launch command delivered the recovery context, and persistence
-        // was verified against the newly bound native session above.
-      } else if (session.agent === "codex") {
+      if (session.agent === "codex") {
         // codex's rollout-based ack lags a resume enough that waiting on it
         // here would reproduce the exact bug f79fb970f fixed for restore(): a
         // healthy pane torn down because the ack scan, not the send, timed
@@ -16898,12 +16886,20 @@ export class SessionService {
           agent: session.agent,
         });
         this.recordPaneWrite(session, writeStartedAt);
-      } else {
+      } else if (session.agent !== "opencode") {
         // freshLaunch:true mirrors restore()'s equivalent call: it selects the
         // agent's launch-tuned ack pacing and — for agents with launch-send
         // pacing of their own (claude) — lets an ack that never confirms on a
         // live pane resolve as "submit_unconfirmed" instead of throwing and
         // tearing down an otherwise-healthy relaunch.
+        const recoveryPaneTarget = {
+          id: session.id,
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: persistedLaunchCommand,
+          worktreePath: session.worktreePath,
+          ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+        };
         const contextSendOutcome = await this.sendAgentMessage(
           recoveryPaneTarget,
           recoveryContextMessage,
