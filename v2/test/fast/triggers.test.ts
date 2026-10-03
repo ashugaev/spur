@@ -10,6 +10,7 @@ import type {
   ReviewSignalRefreshResult,
 } from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
+import { normalizeSlotLinks } from "../../src/session-slots.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
@@ -4968,6 +4969,79 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
+
+  it.each(["", "https://example.com/issues/1"])(
+    "spawns script items through real slot normalization with url=%s",
+    async (url) => {
+      const normalized: ReturnType<typeof normalizeSlotLinks>[] = [];
+      const spawnMock = vi.fn(
+        async (request: { slots?: { links?: { label: string; url: string }[] } }) => {
+          normalized.push(normalizeSlotLinks(request.slots?.links));
+          return { id: "api-9" };
+        },
+      );
+      useWorkItemLifecycleStore();
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: {
+          dataDir: DATA_DIR,
+          projects: {
+            api: {
+              sources: { check: { type: "script" } },
+              triggers: {
+                handle: {
+                  source: "check",
+                  event: "script:item.new",
+                  spawn: { blocks: [{ prompt: "{{branch}} {{id}}" }], autoComplete: true },
+                },
+              },
+            },
+          },
+        } as never,
+        bus,
+        sessionService: { spawn: spawnMock } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit({
+          name: "script:item.new",
+          occurrenceId: "script-occurrence",
+          projectId: "api",
+          sourceId: "check",
+          data: {
+            id: "a",
+            title: "Failure",
+            branch: "main",
+            url,
+            number: 0,
+            repo: "script:check",
+            externalId: "script:check#a",
+          },
+        });
+        await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "main a",
+          ...(url ? { slots: { links: [{ label: "pr", url }] } } : {}),
+        });
+        expect(normalized[0]).toEqual(url ? [{ label: "pr", url }] : []);
+        expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+          DATA_DIR,
+          "api",
+          "check",
+          expect.objectContaining({
+            externalId: "script:check#a",
+            state: "running",
+            sessionId: "api-9",
+            autoComplete: true,
+          }),
+        );
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
 
   it("suppresses duplicate work-item events once a pending claim exists", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });

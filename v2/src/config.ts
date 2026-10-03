@@ -2,12 +2,15 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir, totalmem } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { Cron } from "croner";
+import { deriveMinimumIntervalMs } from "./event-sources/cron.js";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
   GITHUB_PR_OCCURRENCE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
+  SCRIPT_ITEM_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
@@ -31,6 +34,7 @@ import {
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
+  type ScriptSourceConfig,
   type SessionModeConfig,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
@@ -628,6 +632,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "cron") {
     return ["cron:tick"];
   }
+  if (source.type === "script") {
+    return [SCRIPT_ITEM_NEW_EVENT];
+  }
   if (source.type === "sentry") {
     return [SENTRY_ISSUE_NEW_EVENT];
   }
@@ -670,6 +677,78 @@ function parseCronSource(
     type: "cron",
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     schedule: asString(raw["schedule"], `${label}.schedule`),
+  };
+}
+
+function parseScriptSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+  cwd: string,
+): ScriptSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const value = raw["command"];
+  const command = typeof value === "string" ? [value] : value;
+  if (
+    !Array.isArray(command) ||
+    command.length === 0 ||
+    command.some(
+      (arg: unknown) => typeof arg !== "string" || arg.length === 0 || arg.includes("\0"),
+    )
+  ) {
+    throw new Error(`${label}.command must be a non-empty executable string or string array`);
+  }
+  const schedule = asString(raw["schedule"], `${label}.schedule`);
+  let cron: Cron | undefined;
+  try {
+    cron = new Cron(schedule, { paused: true });
+    if (deriveMinimumIntervalMs(cron, schedule) < 60_000) {
+      throw new Error("minimum interval must be at least 60000 ms");
+    }
+  } catch (error) {
+    throw new Error(
+      `${label}.schedule: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  } finally {
+    cron?.stop();
+  }
+  const timeoutMs = raw["timeoutMs"] === undefined ? 60_000 : raw["timeoutMs"];
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > 2_147_483_647
+  ) {
+    throw new Error(`${label}.timeoutMs must be an integer from 1 to 2147483647`);
+  }
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(
+    raw["env"] === undefined ? {} : asObject(raw["env"], `${label}.env`),
+  )) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key.startsWith("SPUR_")) {
+      throw new Error(`${label}.env.${key} uses an invalid or reserved environment name`);
+    }
+    if (typeof value !== "string") throw new Error(`${label}.env.${key} must be a string`);
+    const text = value;
+    const resolvedValue = text.replace(ENV_VAR_RE, (_, name: string) => {
+      const resolved = readEnvValue(name, projectEnv);
+      if (resolved === undefined) throw new Error(`${label}.env.${key}: unresolved ${name}`);
+      return resolved;
+    });
+    if (resolvedValue.includes("\0")) throw new Error(`${label}.env.${key} contains a null byte`);
+    Object.defineProperty(env, key, { value: resolvedValue, enumerable: true });
+  }
+  return {
+    type: "script",
+    command: command as string[],
+    schedule,
+    timeoutMs,
+    cwd,
+    env,
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
   };
 }
 
@@ -1036,6 +1115,7 @@ function parseSource(
   sourceId: string,
   value: unknown,
   projectEnv: Record<string, string>,
+  projectPath: string,
 ): SourceConfig {
   if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
@@ -1048,6 +1128,9 @@ function parseSource(
   const type = asString(raw["type"], `${label}.type`);
   if (type === "cron") {
     return parseCronSource(projectId, sourceId, raw);
+  }
+  if (type === "script") {
+    return parseScriptSource(projectId, sourceId, raw, projectEnv, projectPath);
   }
   if (type === "github" || type === "gitlab") {
     return parseReviewSource(type, projectId, sourceId, raw);
@@ -1462,6 +1545,9 @@ function parseTrigger(
   const spawnDeskGroup = asOptionalBoolean(raw["spawnDeskGroup"], `${label}.spawnDeskGroup`);
 
   if (hasSend) {
+    if (sourceConfig.type === "script") {
+      throw new Error(`${label}.send is unsupported for script sources; use spawn`);
+    }
     if (spawnDeskGroup !== undefined) {
       throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
     }
@@ -1583,7 +1669,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
-    sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
+    sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv, path);
   }
   const backlogRaw = raw["backlog"] ? asObject(raw["backlog"], `${label}.backlog`) : {};
   const backlog: Record<string, BacklogConfig> = {};

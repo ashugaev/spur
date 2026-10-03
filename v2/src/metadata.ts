@@ -79,6 +79,10 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+export function scriptSourceStateDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "script", projectId, sourceId);
+}
+
 function availableBacklogFilePath(dataDir: string, projectId: string, backlogId: string): string {
   return join(dataDir, "source-state", "available-backlog", projectId, `${backlogId}.json`);
 }
