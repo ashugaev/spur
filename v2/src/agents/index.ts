@@ -745,29 +745,97 @@ export async function buildAgentRestorePlan(
 }
 
 export function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
-  const trimmed = launchCommand.trim();
-  if (!trimmed) {
-    return fallbackBinary;
-  }
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-      continue;
-    }
-    if (token.startsWith("'")) {
-      const closing = token.indexOf("'", 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+  let index = 0;
+  while (index < launchCommand.length) {
+    while (/\s/.test(launchCommand[index] ?? "")) index += 1;
+    if (index >= launchCommand.length) break;
+
+    let value = "";
+    let quote: "single" | "double" | null = null;
+    let wordStarted = false;
+    let assignmentPrefixValid = true;
+    let assignmentNameLength = 0;
+    let assignment = false;
+
+    while (index < launchCommand.length) {
+      const char = launchCommand[index] ?? "";
+      if (quote === null && /\s/.test(char)) break;
+      wordStarted = true;
+
+      if (quote === "single") {
+        if (char === "'") quote = null;
+        else value += char;
+        index += 1;
+        continue;
       }
-    }
-    if (token.startsWith('"')) {
-      const closing = token.indexOf('"', 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+
+      if (quote === "double") {
+        if (char === '"') {
+          quote = null;
+          index += 1;
+          continue;
+        }
+        if (char === "\\") {
+          const next = launchCommand[index + 1];
+          if (next === undefined) return fallbackBinary;
+          if (next === "\n") {
+            index += 2;
+            continue;
+          }
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
+            value += next;
+            index += 2;
+            continue;
+          }
+          value += `\\${next}`;
+          index += 2;
+          continue;
+        }
+        value += char;
+        index += 1;
+        continue;
       }
+
+      if (char === "'") {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "single";
+        index += 1;
+        continue;
+      }
+      if (char === '"') {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "double";
+        index += 1;
+        continue;
+      }
+      if (char === "\\") {
+        const next = launchCommand[index + 1];
+        if (next === undefined) return fallbackBinary;
+        if (!assignment) assignmentPrefixValid = false;
+        if (next !== "\n") value += next;
+        index += 2;
+        continue;
+      }
+      if (char === "=" && !assignment) {
+        assignment = assignmentPrefixValid && assignmentNameLength > 0;
+        value += char;
+        index += 1;
+        continue;
+      }
+      if (!assignment) {
+        const validNameChar =
+          assignmentNameLength === 0 ? /[A-Za-z_]/.test(char) : /[A-Za-z0-9_]/.test(char);
+        if (!validNameChar) assignmentPrefixValid = false;
+        assignmentNameLength += 1;
+      }
+      value += char;
+      index += 1;
     }
-    return token;
+
+    if (!wordStarted || quote !== null) return fallbackBinary;
+    if (!assignment) return value || fallbackBinary;
   }
+
   return fallbackBinary;
 }
 
