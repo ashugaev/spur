@@ -11,11 +11,13 @@ vi.mock("@/components/ModelReasoningField", () => ({
     ariaLabel,
     onReasoningChange,
     lifecycle,
+    submitting,
   }: {
     reasoningLabel: string;
     ariaLabel: string;
     onReasoningChange: (intent: ReasoningIntent) => void;
     lifecycle?: boolean;
+    submitting?: boolean;
   }) => (
     <>
       <select aria-label={ariaLabel}>
@@ -23,6 +25,7 @@ vi.mock("@/components/ModelReasoningField", () => ({
       </select>
       <select
         aria-label={reasoningLabel}
+        disabled={submitting}
         onChange={(event) =>
           onReasoningChange(
             event.target.value === "default"
@@ -299,6 +302,15 @@ describe("SpawnModal", () => {
     fireEvent.click(document.querySelector(".fixed.inset-0") as Element);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it.each([spawnMode, respawnMode, deskMode])(
+    "freezes reasoning while the %s composer submits",
+    (mode) => {
+      renderModal(mode, { submitting: true, submitDisabled: true });
+      const select = screen.getByRole("combobox", { name: /reasoning/i });
+      expect(select).toBeDisabled();
+    },
+  );
 
   it("shows a spinner and accessible verb on the submit button while submitting", () => {
     renderModal(deskMode, { submitting: true, submitDisabled: true });

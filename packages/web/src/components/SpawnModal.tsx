@@ -170,11 +170,13 @@ function ModeFields({
   agent,
   onAgentChange,
   agentAriaLabel,
+  submitting,
 }: {
   mode: SpawnModalMode;
   agent: AgentName;
   onAgentChange: (next: AgentName) => void;
   agentAriaLabel: string;
+  submitting: boolean;
 }) {
   if (mode.kind === "spawn") {
     return (
@@ -196,6 +198,7 @@ function ModeFields({
           <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
           <div className="contents">
             <ModelReasoningField
+              submitting={submitting}
               agent={agent}
               ariaLabel="Spawn model"
               carry={mode.model.carry}
@@ -284,6 +287,7 @@ function ModeFields({
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
         <div className="contents">
           <ModelReasoningField
+            submitting={submitting}
             agent={agent}
             ariaLabel="Respawn model"
             carry={mode.model.carry}
@@ -308,6 +312,7 @@ function ModeFields({
         <AgentSelect ariaLabel={agentAriaLabel} onChange={onAgentChange} value={agent} />
         <div className="contents">
           <ModelReasoningField
+            submitting={submitting}
             agent={agent}
             ariaLabel="Desk spawn model"
             carry={mode.model.carry}
@@ -420,6 +425,7 @@ export function SpawnModal({
                 agentAriaLabel={agentAriaLabel}
                 mode={mode}
                 onAgentChange={onAgentChange}
+                submitting={submitting}
               />
             </div>
           </div>

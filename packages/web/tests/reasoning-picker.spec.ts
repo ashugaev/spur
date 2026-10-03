@@ -144,6 +144,94 @@ async function submit(page: Page, surface: Surface) {
 
 test.describe("Reasoning selector browser intent", () => {
   for (const surface of surfaces) {
+    test(`${surface}: success freezes reasoning until composer closes`, async ({ page }) => {
+      const select = await open(page, surface);
+      await select.selectOption("high");
+      const endpoint =
+        surface === "Respawn"
+          ? "/api/sessions/reasoning-source/respawn"
+          : surface === "Handoff"
+            ? "/api/sessions/reasoning-source/handoff"
+            : "/api/spawn";
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route(`**${endpoint}`, async (route) => {
+        await held;
+        await route.fulfill({
+          status: 201,
+          json: makeWorkingSession({
+            id: "reasoning-source",
+            project: "reasoning-project",
+            agent: "claude",
+            model: modelId("claude"),
+            reasoningEffort: "high",
+          }),
+        });
+      });
+      const requested = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === endpoint && request.method() === "POST",
+      );
+      await page
+        .getByRole("dialog")
+        .getByRole("button", {
+          name:
+            surface === "Respawn"
+              ? /^respawn$/i
+              : surface === "Handoff"
+                ? /^handoff$/i
+                : /^spawn$/i,
+        })
+        .click();
+      expect((await requested).postDataJSON().reasoningEffort).toBe("high");
+      await expect(select).toBeDisabled();
+      await expect(select).toHaveValue("high");
+      release();
+      await expect(select).not.toBeVisible();
+    });
+    test(`${surface}: pending submission freezes reasoning and failure restores it`, async ({
+      page,
+    }) => {
+      const select = await open(page, surface);
+      await select.selectOption("high");
+      const endpoint =
+        surface === "Respawn"
+          ? "/api/sessions/reasoning-source/respawn"
+          : surface === "Handoff"
+            ? "/api/sessions/reasoning-source/handoff"
+            : "/api/spawn";
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route(`**${endpoint}`, async (route) => {
+        await held;
+        await route.fulfill({ status: 400, json: { error: "Test request failed" } });
+      });
+      const requested = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === endpoint && request.method() === "POST",
+      );
+      await page
+        .getByRole("dialog")
+        .getByRole("button", {
+          name:
+            surface === "Respawn"
+              ? /^respawn$/i
+              : surface === "Handoff"
+                ? /^handoff$/i
+                : /^spawn$/i,
+        })
+        .click();
+      expect((await requested).postDataJSON().reasoningEffort).toBe("high");
+      await expect(select).toBeDisabled();
+      await expect(select).toHaveValue("high");
+      release();
+      await expect(select).toBeEnabled();
+      await expect(select).toHaveValue("high");
+    });
+  }
+  for (const surface of surfaces) {
     for (const agent of agents) {
       test(`${surface} ${agent}: advertised levels and explicit request`, async ({ page }) => {
         const select = await open(page, surface, agent);

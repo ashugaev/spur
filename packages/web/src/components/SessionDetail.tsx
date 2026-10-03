@@ -4245,6 +4245,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     />
                     <div className="contents">
                       <ModelReasoningField
+                        submitting={busyAction === "handoff"}
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
                         carry={{ agent: session.agent, model: session.model }}

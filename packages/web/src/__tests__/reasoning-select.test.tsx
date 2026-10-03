@@ -22,6 +22,19 @@ const props = {
 };
 
 describe("ReasoningSelect", () => {
+  it("freezes the selected value while submitting and restores control afterward", () => {
+    const { rerender } = render(<ReasoningSelect {...props} />);
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("high");
+    expect(select.disabled).toBe(false);
+    rerender(<ReasoningSelect {...props} submitting />);
+    expect(select.disabled).toBe(true);
+    expect(select.value).toBe("high");
+    expect(screen.queryByText("This model has no reasoning levels")).toBeNull();
+    rerender(<ReasoningSelect {...props} submitting={false} />);
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("high");
+  });
   it("shows carried value and sends clear rather than project level on Default", () => {
     const onChange = vi.fn();
     render(<ReasoningSelect {...props} onChange={onChange} />);

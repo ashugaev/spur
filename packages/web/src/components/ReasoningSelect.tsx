@@ -15,6 +15,7 @@ export function ReasoningSelect({
   lifecycle,
   projectEffort,
   onChange,
+  submitting = false,
 }: {
   label: string;
   intent: ReasoningIntent;
@@ -25,6 +26,7 @@ export function ReasoningSelect({
   lifecycle: boolean;
   projectEffort?: ProviderReasoningEffort | null;
   onChange: (intent: ReasoningIntent) => void;
+  submitting?: boolean;
 }) {
   if (loading)
     return (
@@ -48,7 +50,7 @@ export function ReasoningSelect({
       <select
         aria-label={label}
         className={INPUT_CLASS}
-        disabled={disabled}
+        disabled={disabled || submitting}
         value={disabled ? "default" : value}
         onChange={(event) => {
           const level = levels?.find((entry) => entry === event.target.value);

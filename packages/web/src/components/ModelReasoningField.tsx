@@ -11,6 +11,7 @@ import type { ReasoningIntent } from "@/lib/reasoning-effort";
 import type { ProviderReasoningEffort } from "@/lib/types";
 
 interface Props extends Omit<ModelSelectProps, "onResolvedChange"> {
+  submitting?: boolean;
   onValidityChange: ModelSelectProps["onResolvedChange"];
   reasoningIntent: ReasoningIntent;
   onReasoningChange: (intent: ReasoningIntent) => void;
@@ -26,6 +27,7 @@ export function ModelReasoningField({
   lifecycle = false,
   projectReasoningEffort,
   onValidityChange,
+  submitting = false,
   ...modelProps
 }: Props) {
   const [catalog, setCatalog] = useState<ModelCatalogState | null>(null);
@@ -106,6 +108,7 @@ export function ModelReasoningField({
         />
       </div>
       <ReasoningSelect
+        submitting={submitting}
         label={reasoningLabel}
         intent={reasoningIntent}
         levels={current?.levels}
