@@ -41,10 +41,7 @@ import {
 import {
   isWorkItemClaimStale,
   isWorkItemMemberDue,
-  isWorkItemMemberExhausted,
   WORK_ITEM_RETRY_INTERVAL_MS,
-  WORK_ITEM_RETRY_MAX_ATTEMPTS,
-  WORK_ITEM_RETRY_MAX_DEFERRALS,
   type WorkItemRecordBase,
 } from "./work-item-retry.js";
 import type { EventBus } from "./event-bus.js";
@@ -297,7 +294,7 @@ function settledMember(
     replacesSessionId: _replaces,
     ...rest
   } = member;
-  return { ...rest, state, sessionId };
+  return { ...rest, state, sessionId, startedAt: new Date().toISOString() };
 }
 
 // Reads the record, decides which blocks to spawn, and writes every planned
@@ -340,7 +337,8 @@ function claimWorkItemBlocks(
   const retryOnly =
     !consumesLegacy &&
     own.length > 0 &&
-    blocks.some((_, blockIndex) => isRetryable(own.find((m) => m.blockIndex === blockIndex)));
+    (own.some((member) => member.endedReason !== undefined) ||
+      blocks.some((_, blockIndex) => isRetryable(own.find((m) => m.blockIndex === blockIndex))));
   for (const [blockIndex, block] of blocks.entries()) {
     const existing = consumesLegacy
       ? legacy
@@ -548,10 +546,13 @@ interface FoundWorkItemSession {
 }
 
 // A session tagged with this exact trigger block that still stands for it.
+// With `discardErrored`, errored records of the block are discarded when none
+// stands (the pre-spawn scan: they are about to be replaced).
 async function findTaggedWorkItemSession(
   ctx: WorkItemClaimContext,
   service: SessionService,
   blockIndex: number,
+  discardErrored = false,
 ): Promise<FoundWorkItemSession | undefined> {
   const tagged = listSessions(ctx.dataDir).filter(
     (session) =>
@@ -561,11 +562,30 @@ async function findTaggedWorkItemSession(
       session.triggerOrigin.externalId === ctx.workItem.externalId &&
       session.triggerOrigin.blockIndex === blockIndex,
   );
+  const erroredIds: string[] = [];
   for (const session of tagged) {
     const view = await getWorkItemSessionIfPresent(service, session.id);
     if (!view) continue;
     const outcome = classifyWorkItemOwner(view);
     if (outcome !== "replace") return { sessionId: session.id, outcome };
+    if (view.status === "errored") erroredIds.push(session.id);
+  }
+  if (discardErrored) {
+    for (const sessionId of erroredIds) {
+      try {
+        await service.discardFailedSpawn(sessionId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logTriggerEvent(ctx.dataDir, "trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: ctx.projectId,
+          sourceId: ctx.sourceId,
+          triggerId: ctx.triggerId,
+          message: `Could not discard failed spawn ${sessionId}: ${message}`,
+        });
+      }
+    }
   }
   return undefined;
 }
@@ -643,7 +663,7 @@ async function adoptExistingWorkItemSessions(
       legacyBlocks.push(entry);
       continue;
     }
-    const tagged = await findTaggedWorkItemSession(ctx, service, entry.blockIndex);
+    const tagged = await findTaggedWorkItemSession(ctx, service, entry.blockIndex, true);
     if (tagged) found.set(entry.blockIndex, tagged);
   }
   if (legacyBlocks.length > 0) {
@@ -713,17 +733,17 @@ async function endDeskRetryWithoutLiveAnchor(
       return {
         ...rest,
         state: "failed",
-        attempts: WORK_ITEM_RETRY_MAX_ATTEMPTS,
+        endedReason: "anchor_not_live",
         error: "desk anchor is not live",
       };
     });
-    logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_exhausted", {
+    logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_ended", {
       level: "info",
       sessionId: anchor.sessionId,
       projectId: ctx.projectId,
       sourceId: ctx.sourceId,
       triggerId: ctx.triggerId,
-      message: `trigger.spawn.retry_exhausted for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
+      message: `trigger.spawn.retry_ended for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
       details: {
         externalId: ctx.workItem.externalId,
         blockIndex: entry.blockIndex,
@@ -756,14 +776,9 @@ function recordWorkItemSpawnFailure(
     };
   });
   if (!member) return;
-  const exhausted = isWorkItemMemberExhausted(member);
-  const event = exhausted
-    ? "trigger.spawn.retry_exhausted"
-    : denied
-      ? "trigger.spawn.retry_deferred"
-      : "trigger.spawn.retry_scheduled";
+  const event = denied ? "trigger.spawn.retry_deferred" : "trigger.spawn.retry_scheduled";
   logTriggerEvent(ctx.dataDir, event, {
-    level: exhausted ? "warn" : "info",
+    level: "info",
     projectId: ctx.projectId,
     sourceId: ctx.sourceId,
     triggerId: ctx.triggerId,
@@ -773,9 +788,7 @@ function recordWorkItemSpawnFailure(
       blockIndex: entry.blockIndex,
       attempts: member.attempts,
       deferrals: member.deferrals,
-      ...(exhausted
-        ? { cause: member.deferrals >= WORK_ITEM_RETRY_MAX_DEFERRALS ? "deferrals" : "attempts" }
-        : { nextRetryAt }),
+      nextRetryAt,
       ...(denied ? { reason: error.reason } : {}),
     },
   });
@@ -1025,8 +1038,12 @@ async function runWorkItemAutoCompleteTrigger(
     if (lifecycle.state !== "running" || !lifecycle.autoComplete) {
       continue;
     }
-    const createdAt = Date.parse(lifecycle.createdAt);
-    if (!Number.isFinite(createdAt)) {
+    // Age counts from the owner's spawn result; legacy members have none.
+    const owner = lifecycle.members.find(
+      (member) => member.state === "running" && member.sessionId === lifecycle.sessionId,
+    );
+    const startedAt = Date.parse(owner?.startedAt ?? lifecycle.createdAt);
+    if (!Number.isFinite(startedAt)) {
       deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
       logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
         level: "info",
@@ -1042,7 +1059,7 @@ async function runWorkItemAutoCompleteTrigger(
       continue;
     }
 
-    if (now - createdAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
+    if (now - startedAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
       continue;
     }
 

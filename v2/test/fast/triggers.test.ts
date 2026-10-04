@@ -5657,9 +5657,9 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
-    it("stops retrying after 24 attempts", async () => {
+    it("keeps retrying past 24 failed attempts every 45 minutes", async () => {
       const records = useWorkItemLifecycleStore([
-        workItemLifecycle([failedMember({ attempts: 23 })]),
+        workItemLifecycle([failedMember({ attempts: 30 })]),
       ]);
       const spawnMock = vi.fn().mockRejectedValue(new Error("still broken"));
       const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
@@ -5669,24 +5669,29 @@ describe("startConfiguredTriggers", () => {
       try {
         bus.emit(workItemEvent());
         await vi.waitFor(() => {
-          expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+          expect(eventsOf("trigger.spawn.retry_scheduled")).toHaveLength(1);
         });
-        expect(memberOf(records)).toMatchObject({ state: "failed", attempts: 24 });
         expect(spawnMock).toHaveBeenCalledTimes(1);
+        const failed = memberOf(records);
+        expect(failed).toMatchObject({ state: "failed", attempts: 31 });
+        const retryAt = Date.parse(failed?.nextRetryAt ?? "");
+        expect(retryAt - Date.now()).toBeGreaterThan(WORK_ITEM_RETRY_INTERVAL_MS - 5_000);
 
-        vi.setSystemTime(Date.now() + 24 * 60 * MINUTE);
+        vi.setSystemTime(retryAt);
         bus.emit(workItemEvent());
-        await vi.advanceTimersByTimeAsync(0);
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(2);
+        });
+        expect(memberOf(records)).toMatchObject({ attempts: 32 });
+        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(0);
       } finally {
         await controller.stop();
       }
     });
 
-    it("stops after 96 deferrals", async () => {
+    it("keeps deferring past 96 admission denials", async () => {
       const records = useWorkItemLifecycleStore([
-        workItemLifecycle([failedMember({ attempts: 0, deferrals: 95 })]),
+        workItemLifecycle([failedMember({ attempts: 0, deferrals: 100 })]),
       ]);
       const spawnMock = vi.fn();
       const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
@@ -5698,24 +5703,21 @@ describe("startConfiguredTriggers", () => {
       try {
         bus.emit(workItemEvent());
         await vi.waitFor(() => {
-          expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+          expect(eventsOf("trigger.spawn.retry_deferred")).toHaveLength(1);
         });
-        expect(eventsOf("trigger.spawn.retry_exhausted")[0]?.details).toMatchObject({
-          cause: "deferrals",
-        });
-        expect(memberOf(records)).toMatchObject({ attempts: 0, deferrals: 96 });
-
-        vi.setSystemTime(Date.now() + 24 * 60 * MINUTE);
-        bus.emit(workItemEvent());
-        await vi.advanceTimersByTimeAsync(0);
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+        const deferred = memberOf(records);
+        expect(deferred).toMatchObject({ attempts: 0, deferrals: 101 });
+        expect(Date.parse(deferred?.nextRetryAt ?? "") - Date.now()).toBeGreaterThan(
+          WORK_ITEM_RETRY_INTERVAL_MS - 5_000,
+        );
+        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(0);
       } finally {
         await controller.stop();
       }
     });
 
     const WORKING = { status: "running", state: "working", workspaceExists: true };
+    const WAITING = { status: "running", state: "waiting", workspaceExists: true };
 
     it("retries only the missing desk member and keeps the anchor as owner", async () => {
       const records = useWorkItemLifecycleStore();
@@ -6181,45 +6183,49 @@ describe("startConfiguredTriggers", () => {
       { label: "killed", session: { status: "killed", state: "killed" } },
       { label: "stopped", session: { status: "stopped", state: "stopped" } },
       { label: "completed", session: { status: "completed", state: "waiting" } },
-    ])(
-      "does not retry desk members or respawn the anchor when the anchor is $label",
-      async ({ session }) => {
-        const records = useWorkItemLifecycleStore([
-          workItemLifecycle([
-            workItemMember({ blockIndex: 0, state: "running", sessionId: "api-1" }),
-            failedMember({ blockIndex: 1 }),
-          ]),
-        ]);
-        const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
-        const getMock = vi
-          .fn()
-          .mockResolvedValue({ id: "api-1", workspaceExists: true, ...session });
-        const { bus, controller } = await startTriggers(deskConfig(), {
-          spawn: spawnMock,
-          get: getMock,
-        });
+    ])("ends desk retries once the anchor is not live ($label)", async ({ session }) => {
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle([
+          workItemMember({ blockIndex: 0, state: "running", sessionId: "api-1" }),
+          failedMember({ blockIndex: 1 }),
+        ]),
+      ]);
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", workspaceExists: true, ...session });
+      const { bus, controller } = await startTriggers(deskConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
 
-        try {
-          bus.emit(workItemEvent());
-          await vi.waitFor(() => {
-            expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
-          });
-          expect(spawnMock).not.toHaveBeenCalled();
-          expect(eventsOf("trigger.spawn.retry_exhausted")[0]?.details).toMatchObject({
-            blockIndex: 1,
-            cause: "anchor_not_live",
-          });
-          expect(memberOf(records, 0)).toMatchObject({ state: "running", sessionId: "api-1" });
-          expect(memberOf(records, 1)).toMatchObject({ state: "failed" });
-          const record = records.get("acme/api#42");
-          expect(
-            isWorkItemRecordDue(record as WorkItemLifecycleRecord, Date.now() + 100 * 60 * MINUTE),
-          ).toBe(false);
-        } finally {
-          await controller.stop();
-        }
-      },
-    );
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(eventsOf("trigger.spawn.retry_ended")).toHaveLength(1);
+        });
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(eventsOf("trigger.spawn.retry_ended")[0]?.details).toMatchObject({
+          blockIndex: 1,
+          cause: "anchor_not_live",
+        });
+        expect(memberOf(records, 0)).toMatchObject({ state: "running", sessionId: "api-1" });
+        expect(memberOf(records, 1)).toMatchObject({
+          state: "failed",
+          endedReason: "anchor_not_live",
+        });
+        expect(memberOf(records, 1)).not.toHaveProperty("nextRetryAt");
+        vi.setSystemTime(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS);
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(eventsOf("trigger.spawn.retry_ended")).toHaveLength(1);
+        const record = records.get("acme/api#42");
+        expect(
+          isWorkItemRecordDue(record as WorkItemLifecycleRecord, Date.now() + 100 * 60 * MINUTE),
+        ).toBe(false);
+      } finally {
+        await controller.stop();
+      }
+    });
 
     it("lets the current trigger take over a due member of a renamed trigger", async () => {
       const records = useWorkItemLifecycleStore([
@@ -6254,6 +6260,94 @@ describe("startConfiguredTriggers", () => {
           ["pick-up", "running"],
         ]);
         expect(eventsOf("trigger.spawn.suppressed")).toHaveLength(0);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("auto-complete min age counts from the spawn result", async () => {
+      useWorkItemLifecycleStore();
+      const spawnMock = vi.fn().mockImplementation(async () => {
+        vi.setSystemTime(Date.now() + 6 * MINUTE);
+        return { id: "api-10" };
+      });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-10", ...WAITING });
+      const completeMock = vi.fn().mockResolvedValue(undefined);
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+        complete: completeMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        await vi.advanceTimersByTimeAsync(4 * MINUTE);
+        expect(completeMock).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(MINUTE + 30_000);
+        expect(completeMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("discards the previous errored spawn before replacing a member", async () => {
+      const records = useWorkItemLifecycleStore();
+      const discardMock = vi.fn().mockResolvedValue(undefined);
+      const spawnMock = vi.fn().mockRejectedValue(new Error("post-record failure"));
+      const erroredIds = ["api-1", "api-2", "api-3"];
+      const getMock = vi
+        .fn()
+        .mockImplementation(async (id: string) => ({ id, status: "errored", state: "error" }));
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+        discardFailedSpawn: discardMock,
+      });
+
+      try {
+        for (const [attempt, id] of erroredIds.entries()) {
+          listSessionsMock.mockReturnValue(
+            attempt === 0 ? [] : [taggedSession(erroredIds[attempt - 1] ?? "")],
+          );
+          if (attempt > 0) {
+            vi.setSystemTime(Date.parse(memberOf(records)?.nextRetryAt ?? ""));
+          }
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(spawnMock).toHaveBeenCalledTimes(attempt + 1);
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(discardMock).toHaveBeenCalledTimes(attempt);
+          void id;
+        }
+        expect(discardMock.mock.calls.map(([id]) => id)).toEqual(["api-1", "api-2"]);
+        expect(eventsOf("trigger.spawn.discard_failed")).toHaveLength(0);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("logs discard_failed and still spawns when the discard throws", async () => {
+      useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
+      listSessionsMock.mockReturnValue([taggedSession("api-1")]);
+      const discardMock = vi.fn().mockRejectedValue(new Error("archive failed"));
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", status: "errored", state: "error" });
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+        discardFailedSpawn: discardMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        expect(eventsOf("trigger.spawn.discard_failed")).toHaveLength(1);
       } finally {
         await controller.stop();
       }

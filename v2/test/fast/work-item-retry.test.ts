@@ -7,8 +7,6 @@ import {
   isWorkItemRecordDue,
   isWorkItemRecordEmitDue,
   WORK_ITEM_RETRY_INTERVAL_MS,
-  WORK_ITEM_RETRY_MAX_ATTEMPTS,
-  WORK_ITEM_RETRY_MAX_DEFERRALS,
 } from "../../src/work-item-retry.js";
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
@@ -46,22 +44,15 @@ describe("isWorkItemMemberDue", () => {
     expect(isWorkItemMemberDue(member({}), NOW)).toBe(true);
   });
 
-  it("is not due when attempts or deferrals are exhausted", () => {
-    expect(isWorkItemMemberDue(member({ attempts: WORK_ITEM_RETRY_MAX_ATTEMPTS }), NOW)).toBe(
-      false,
-    );
-    expect(isWorkItemMemberDue(member({ attempts: WORK_ITEM_RETRY_MAX_ATTEMPTS - 1 }), NOW)).toBe(
-      true,
-    );
-    expect(isWorkItemMemberDue(member({ deferrals: WORK_ITEM_RETRY_MAX_DEFERRALS }), NOW)).toBe(
-      false,
-    );
+  it("has no attempt or deferral cap", () => {
+    expect(isWorkItemMemberDue(member({ attempts: 1000, deferrals: 1000 }), NOW)).toBe(true);
     expect(
-      isWorkItemMemberDue(
-        member({ state: "spawning", attempts: WORK_ITEM_RETRY_MAX_ATTEMPTS }),
-        NOW,
-      ),
-    ).toBe(false);
+      isWorkItemMemberDue(member({ state: "spawning", attempts: 1000, claimedAt: iso(-1e9) }), NOW),
+    ).toBe(true);
+  });
+
+  it("is never due once ended", () => {
+    expect(isWorkItemMemberDue(member({ endedReason: "anchor_not_live" }), NOW)).toBe(false);
   });
 
   it("is due for a stale spawning claim only", () => {

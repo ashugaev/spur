@@ -626,6 +626,7 @@ function parseWorkItemMember(raw: unknown): WorkItemMember | null {
   const nextRetryAt = optionalString(raw.nextRetryAt);
   const error = optionalString(raw.error);
   const replacesSessionId = optionalString(raw.replacesSessionId);
+  const startedAt = optionalString(raw.startedAt);
   return {
     ...(triggerId !== undefined ? { triggerId } : {}),
     blockIndex,
@@ -637,6 +638,8 @@ function parseWorkItemMember(raw: unknown): WorkItemMember | null {
     ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(raw.endedReason === "anchor_not_live" ? { endedReason: raw.endedReason } : {}),
   };
 }
 

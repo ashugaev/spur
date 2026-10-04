@@ -1,11 +1,6 @@
 import type { WorkItemEventData, WorkItemLifecycleRecord, WorkItemMember } from "./types.js";
 
 export const WORK_ITEM_RETRY_INTERVAL_MS = 45 * 60_000;
-// 24 failed attempts at one per interval is about 18 h.
-export const WORK_ITEM_RETRY_MAX_ATTEMPTS = 24;
-// Admission denials (memory guard, session cap) defer without spending an
-// attempt; 96 deferrals is about 72 h.
-export const WORK_ITEM_RETRY_MAX_DEFERRALS = 96;
 export const WORK_ITEM_RETRY_EMIT_CAP = 2;
 
 export type WorkItemRecordBase = WorkItemEventData & {
@@ -14,13 +9,6 @@ export type WorkItemRecordBase = WorkItemEventData & {
   lastRetryEmitAt?: string;
 };
 
-export function isWorkItemMemberExhausted(member: WorkItemMember): boolean {
-  return (
-    member.attempts >= WORK_ITEM_RETRY_MAX_ATTEMPTS ||
-    member.deferrals >= WORK_ITEM_RETRY_MAX_DEFERRALS
-  );
-}
-
 // A claim older than the interval is stale: the controller that wrote it
 // crashed or was abandoned by a reload before recording an outcome.
 export function isWorkItemClaimStale(member: WorkItemMember, nowMs: number): boolean {
@@ -28,7 +16,7 @@ export function isWorkItemClaimStale(member: WorkItemMember, nowMs: number): boo
 }
 
 export function isWorkItemMemberDue(member: WorkItemMember, nowMs: number): boolean {
-  if (isWorkItemMemberExhausted(member)) return false;
+  if (member.endedReason !== undefined) return false;
   if (member.state === "spawning") return isWorkItemClaimStale(member, nowMs);
   if (member.state === "failed") {
     return member.nextRetryAt === undefined || nowMs >= Date.parse(member.nextRetryAt);

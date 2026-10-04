@@ -238,19 +238,21 @@ describe("emitWorkItemBacklog", () => {
       expect(emit).toHaveBeenCalledTimes(1);
     });
 
-    it("does not retry an exhausted member", () => {
+    it("stops retrying when the item leaves the poll", () => {
       const { deps, emit } = makeDeps(true);
-      useLifecycles([
-        { externalId: "acme/api#1", members: [failedMember(undefined, { attempts: 24 })] },
-        { externalId: "acme/api#2", members: [failedMember(undefined, { deferrals: 96 })] },
-      ]);
+      useLifecycles([{ externalId: "acme/api#1", members: [failedMember(undefined)] }]);
+      const seen = new Set(["acme/api#1", "acme/api#2"]);
+      const others = [makeCandidate("acme/api", 2)];
 
-      emitWorkItemBacklog(deps, "work-item:new", new Set(["acme/api#1", "acme/api#2"]), [
-        makeCandidate("acme/api", 1),
-        makeCandidate("acme/api", 2),
-      ]);
-
+      emitWorkItemBacklog(deps, "work-item:new", seen, others);
+      vi.setSystemTime(NOW + 45 * MINUTE);
+      emitWorkItemBacklog(deps, "work-item:new", seen, others);
+      vi.setSystemTime(NOW + 90 * MINUTE);
+      emitWorkItemBacklog(deps, "work-item:new", seen, others);
       expect(emit).not.toHaveBeenCalled();
+
+      emitWorkItemBacklog(deps, "work-item:new", seen, [makeCandidate("acme/api", 1), ...others]);
+      expect(emittedIds(emit)).toEqual(["acme/api#1"]);
     });
 
     it("throttles unclaimed retry emits to one per 45 minutes and rotates slots", () => {

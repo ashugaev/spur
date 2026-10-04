@@ -241,6 +241,10 @@ export interface WorkItemMember {
   error?: string;
   /** Running owner a claimed member would replace; restored when the owner is still live. */
   replacesSessionId?: string;
+  /** Set once the member reached running or completed; auto-complete ages from it. */
+  startedAt?: string;
+  /** Terminal stop: the member is never retried again. */
+  endedReason?: "anchor_not_live";
 }
 
 interface WorkItemLifecycleBase extends WorkItemEventData {

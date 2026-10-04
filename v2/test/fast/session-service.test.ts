@@ -4417,6 +4417,22 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("keeps triggerOrigin on the errored record of a hard spawn failure", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin }),
+      ).rejects.toThrow();
+
+      expect(sessions.get("api-1")).toMatchObject({ status: "errored", triggerOrigin });
+      service.dispose();
+    });
+
     it("keeps triggerOrigin on a retained launched-error record", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();

@@ -241,6 +241,7 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  archiveSessions,
   recordTelegramMessages,
   writeTelegramOffer,
   readTelegramReplyTarget,
@@ -558,6 +559,7 @@ import {
   branchRefsExist,
   branchStatus,
   createWorktree,
+  deleteLocalBranch,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -10427,6 +10429,30 @@ export class SessionService {
     return loadProjectSuggestions(agent, project.path);
   }
 
+  // Cleans up what a hard spawn failure of a work-item trigger block left
+  // behind before a replacement spawns: the session's own local branch (named
+  // after its id, never reused) and the errored record. Untagged or non-errored
+  // records are not touched. The record is archived whatever the delete does.
+  async discardFailedSpawn(sessionId: string): Promise<void> {
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!record || record.status !== "errored" || !record.triggerOrigin) return;
+    if (record.branch === record.id) {
+      try {
+        await deleteLocalBranch(this.getProject(record.project).path, record.branch);
+      } catch (error) {
+        this.logEvent("trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Could not delete branch ${record.branch}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+    }
+    archiveSessions(this.config.dataDir, [record]);
+  }
+
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
     const project = this.getProject(projectId);
     const normalized = normalizeBranchName(name);
@@ -12038,6 +12064,7 @@ export class SessionService {
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
+          ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         };
         const killed = this.spawnWasKilled(sessionId);
         const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
