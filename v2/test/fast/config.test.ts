@@ -201,6 +201,48 @@ projects:
     );
   });
 
+  it("rejects a webhook bind on the daemon host and port", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects webhook wildcard overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  host: 0.0.0.0
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 0.0.0.0:8456",
+    );
+  });
+
   it("rejects webhook send triggers", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -1176,13 +1176,50 @@ function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): voi
   }
 }
 
-export function validateWebhookSourceBindings(projects: Record<string, ProjectConfig>): void {
+function webhookBindLabel(host: string, port: number): string {
+  return `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+}
+
+function normalizeBindHost(host: string): string {
+  if (isIP(host) !== 6 || host.includes("%")) return host;
+  return new URL(`http://[${host}]/`).hostname.slice(1, -1);
+}
+
+function bindHostsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = normalizeBindHost(left);
+  const normalizedRight = normalizeBindHost(right);
+  const leftVersion = isIP(normalizedLeft);
+  const rightVersion = isIP(normalizedRight);
+  if (leftVersion === 0 || rightVersion === 0) return normalizedLeft === normalizedRight;
+  if (leftVersion !== rightVersion) return false;
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft === "0.0.0.0" ||
+    normalizedRight === "0.0.0.0" ||
+    normalizedLeft === "::" ||
+    normalizedRight === "::"
+  );
+}
+
+export function validateWebhookSourceBindings(
+  projects: Record<string, ProjectConfig>,
+  daemonBind?: { host: string; port: number },
+): void {
   const owners = new Map<string, string>();
   for (const [projectId, project] of Object.entries(projects)) {
     for (const [sourceId, source] of Object.entries(project.sources)) {
       if (source.type !== "webhook") continue;
       const owner = `projects.${projectId}.sources.${sourceId}`;
-      const endpoint = `${isIP(source.host) === 6 ? `[${source.host}]` : source.host}:${source.port}`;
+      const endpoint = webhookBindLabel(source.host, source.port);
+      if (
+        daemonBind !== undefined &&
+        source.port === daemonBind.port &&
+        bindHostsOverlap(source.host, daemonBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps server bind ${webhookBindLabel(normalizeBindHost(daemonBind.host), daemonBind.port)}`,
+        );
+      }
       const existingOwner = owners.get(endpoint);
       if (existingOwner) {
         throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existingOwner}`);
@@ -2240,17 +2277,20 @@ function parseConfigFile(
     normalizedProjects[projectId] = parsedProject;
   }
   validateTelegramBotTokens(normalizedProjects);
-  validateWebhookSourceBindings(normalizedProjects);
+  const serverHost =
+    mode === "instance"
+      ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
+      : resolvedDefaults.serverHost;
+  const serverPort =
+    mode === "instance"
+      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
+      : resolvedDefaults.serverPort;
+  validateWebhookSourceBindings(normalizedProjects, { host: serverHost, port: serverPort });
 
   const tags = parseTags(root["tags"]);
 
   const projectsRootRaw =
     mode === "instance" ? asOptionalString(root["projectsRoot"], "projectsRoot") : undefined;
-
-  const serverPort =
-    mode === "instance"
-      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
-      : resolvedDefaults.serverPort;
 
   const dataDir =
     mode === "instance"
@@ -2268,10 +2308,7 @@ function parseConfigFile(
   return {
     configPath,
     server: {
-      host:
-        mode === "instance"
-          ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
-          : resolvedDefaults.serverHost,
+      host: serverHost,
       port: serverPort,
     },
     dataDir,
