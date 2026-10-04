@@ -1282,6 +1282,8 @@ export interface SidecarPortView {
 export interface SessionSidecarView {
   name: string;
   alive: boolean;
+  /** Configured URL with a live recorded launcher and reserved TCP listener. */
+  url?: string;
   ports: SidecarPortView[];
   tmuxSession: string;
   /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
@@ -1360,6 +1362,7 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
+  sidecars?: SessionSidecarView[];
   deskGroupMembers?: SessionDeskMember[];
   tokenUsageView?: SessionTokenUsageView;
   preflightTokenUsageView?: PreflightTokenUsageView;

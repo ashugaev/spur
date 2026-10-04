@@ -1831,17 +1831,14 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("shows an open link for the isolated UI sidecar", async () => {
+  it("shows ready sidecar Open from projected API without tmux, Terminal or duplicate slot", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
         return new Response(
           JSON.stringify({
             ...sessionFixture(),
-            sidecars: [{ name: "isolated-ui", alive: true }],
-            slots: {
-              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
-            },
+            sidecars: [{ name: "isolated-ui", alive: false, url: "http://example.com:5601" }],
           }),
           { status: 200 },
         );
@@ -1860,9 +1857,14 @@ describe("SessionDetail voice input", () => {
         "http://example.com:5601",
       );
     });
+    const sidecarRow = screen.getByText("isolated-ui").closest("div")?.parentElement;
+    expect(
+      within(sidecarRow as HTMLElement).queryByRole("button", { name: "Terminal" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "isolated-ui" })).not.toBeInTheDocument();
   });
 
-  it("does not render an Open link when no slot link matches the sidecar name", async () => {
+  it("does not render sidecar Open from a stale same-name slot and preserves the slot", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -1871,7 +1873,7 @@ describe("SessionDetail voice input", () => {
             ...sessionFixture(),
             sidecars: [{ name: "isolated-daemon", alive: true }],
             slots: {
-              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
+              links: [{ label: "isolated-daemon", url: "http://example.com:5601" }],
             },
           }),
           { status: 200 },
@@ -1886,7 +1888,10 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("isolated-daemon")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "isolated-daemon" })).toHaveAttribute(
+        "href",
+        "http://example.com:5601",
+      );
     });
     expect(screen.queryByRole("link", { name: "Open" })).not.toBeInTheDocument();
   });
@@ -1898,10 +1903,7 @@ describe("SessionDetail voice input", () => {
         return new Response(
           JSON.stringify({
             ...sessionFixture(),
-            sidecars: [{ name: "isolated-ui", alive: true }],
-            slots: {
-              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
-            },
+            sidecars: [{ name: "isolated-ui", alive: true, url: "http://example.com:5601" }],
           }),
           { status: 200 },
         );
