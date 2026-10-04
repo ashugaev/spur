@@ -1107,18 +1107,17 @@ describe("OpenCode adapter", () => {
         });
       // Native shape: no id inside data.
       insert.run("msg_a", "ses_1", 100, assistant({ input: 10, output: 5 }));
-      // Embedded id wins over the column: same embedded id counts once.
-      insert.run(
-        "msg_b",
-        "ses_1",
-        200,
+      // Embedded id wins over the column: rows with different column ids but
+      // the same embedded id count once.
+      const embedded = (tokens: { input: number; output: number }): string =>
         JSON.stringify({
           id: "msg_embedded",
           role: "assistant",
           time: { completed: 2 },
-          tokens: { input: 7, output: 3, reasoning: 0, cache: { read: 0, write: 0 } },
-        }),
-      );
+          tokens: { ...tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+        });
+      insert.run("msg_b", "ses_1", 200, embedded({ input: 7, output: 3 }));
+      insert.run("msg_c", "ses_1", 300, embedded({ input: 100, output: 50 }));
       database.close();
       vi.stubEnv("XDG_DATA_HOME", dataHome);
       try {
