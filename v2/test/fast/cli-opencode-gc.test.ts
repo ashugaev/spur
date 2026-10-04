@@ -21,6 +21,7 @@ const SESSION: OpenCodeGcSessionResult = {
   directory: "/w/a",
   canonicalDirectory: "/w/a",
   directoryState: "resolved",
+  deleteCwd: "/w/a",
   updatedAt: "2026-08-01T00:00:00.000Z",
   ageDays: 40.5,
   recordIds: ["spur-a"],
@@ -45,7 +46,7 @@ function report(overrides: Partial<OpenCodeGcReport> = {}): OpenCodeGcReport {
     olderThanDays: 14,
     statuses: ["completed", "killed"],
     enumeration: {
-      directories: ["/home/alek/projects/ao"],
+      directories: ["/repo/project"],
       directoriesFailed: 0,
       listedCount: 279,
       limit: 100_000,
@@ -129,7 +130,7 @@ describe("renderOpenCodeGcResult", () => {
 
     expect(listed).toContain("from 1 candidate directory");
     expect(listed).toContain("project-scoped by its cwd");
-    expect(listed).toContain("listed  /home/alek/projects/ao");
+    expect(listed).toContain("listed  /repo/project");
     expect(blind).toContain("from 0 candidate directories");
     expect(blind).toContain("No candidate directory");
     expect(blind).toContain("Nothing to collect.");

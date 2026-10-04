@@ -44,7 +44,13 @@ function record(overrides: Partial<SessionRecord> & { id: string }): SessionReco
 }
 
 function storeSession(overrides: Partial<OpenCodeStoreSession> = {}): OpenCodeStoreSession {
-  return { id: STORE_ID, directory: "/worktrees/sp/spur-d704", updated: OLD, ...overrides };
+  return {
+    id: STORE_ID,
+    directory: "/worktrees/sp/spur-d704",
+    listedFrom: "/worktrees/sp/listed",
+    updated: OLD,
+    ...overrides,
+  };
 }
 
 /** Every path resolves to itself: the default for fixtures not about paths. */
@@ -329,6 +335,8 @@ describe("gone-directory reclaim (section 9)", () => {
     expect(result.sessions.map((entry) => entry.id)).toEqual([STORE_ID]);
     expect(result.sessions[0]?.directoryState).toBe("gone");
     expect(result.sessions[0]?.canonicalDirectory).toBe(GONE_DIR);
+    // The delete cwd is the listing directory: GONE_DIR cannot be spawned in.
+    expect(result.sessions[0]?.deleteCwd).toBe("/worktrees/sp/listed");
   });
 
   it("AC14 every errno other than ENOENT keeps failing closed, ENOENT alone opens", async () => {

@@ -61,6 +61,8 @@ export interface OpenCodeStoreSession {
   directory: string;
   /** Top-level epoch millis. NOT the nested `time.updated` of `export`. */
   updated: number;
+  /** The candidate directory the listing ran from. Resolves, same project. */
+  listedFrom: string;
 }
 
 export type OpenCodeGcSkipReason =
@@ -111,6 +113,8 @@ export interface OpenCodeGcSessionEntry {
   canonicalDirectory: string;
   /** "gone" selections rest on the 9.2.1 fallback, not on a resolved path. */
   directoryState: "resolved" | "gone";
+  /** `session delete` cwd. Must exist: a gone `directory` would fail spawn. */
+  deleteCwd: string;
   updatedAt: string;
   ageDays: number;
   /** Rule-(a) matches. Never empty — an empty array means (c) authorized. */
@@ -291,7 +295,10 @@ export interface ExecuteOpenCodeGcOptions {
 // Parsing and canonicalization (pure)
 // ---------------------------------------------------------------------------
 
-export function parseOpenCodeStoreSessions(stdout: string): OpenCodeStoreSession[] {
+export function parseOpenCodeStoreSessions(
+  stdout: string,
+  listedFrom: string,
+): OpenCodeStoreSession[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -312,6 +319,7 @@ export function parseOpenCodeStoreSessions(stdout: string): OpenCodeStoreSession
     sessions.push({
       id,
       directory,
+      listedFrom,
       updated: typeof updated === "number" && Number.isFinite(updated) ? updated : 0,
     });
   }
@@ -703,6 +711,7 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
       directory: session.directory,
       canonicalDirectory,
       directoryState,
+      deleteCwd: directoryState === "gone" ? session.listedFrom : canonicalDirectory,
       updatedAt: new Date(session.updated).toISOString(),
       ageDays,
       recordIds: direct.map((record) => record.id),
@@ -820,7 +829,7 @@ export async function executeOpenCodeGc(
       continue;
     }
     try {
-      await deps.deleteSession(entry.id, entry.canonicalDirectory);
+      await deps.deleteSession(entry.id, entry.deleteCwd);
       deletedCount += 1;
       sessions.push({ ...entry, deleted: true });
     } catch (error) {
@@ -1065,7 +1074,7 @@ export async function collectOpenCodeGcPlan(
   let listTruncated = false;
   for (const directory of directories) {
     try {
-      const listed = parseOpenCodeStoreSessions(await deps.listStoreSessions(directory));
+      const listed = parseOpenCodeStoreSessions(await deps.listStoreSessions(directory), directory);
       // Judge the -n cap per call: a merged total across directories can
       // legitimately exceed one call's limit.
       if (listed.length >= OPENCODE_STORE_LIST_LIMIT) listTruncated = true;
@@ -1181,7 +1190,12 @@ export async function recheckSessionDirectory(
     else byWorkspaceId.set(workspaceId, [record]);
   }
   const verdict = evaluateSessionProtection({
-    session: { id: entry.id, directory: entry.directory, updated: 0 },
+    session: {
+      id: entry.id,
+      directory: entry.directory,
+      listedFrom: entry.deleteCwd,
+      updated: 0,
+    },
     records,
     byAgentSessionId,
     byWorkspaceId,
@@ -1296,7 +1310,7 @@ export function createOpenCodeGcDeps(
   const env = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ logLevel: config.opencodeGc.logLevel }) };
   // Explicit cwd, never inherited: a daemon-side spawn with no cwd inherits
   // the daemon's $HOME, the pattern behind ~692k `creating instance
-  // directory=/home/alek` lines. worktreeDir is Spur-owned, stable, and not
+  // directory=~` lines. worktreeDir is Spur-owned, stable, and not
   // any session's worktree. Used for the store-global calls only — `db path`
   // and `db VACUUM` ignore cwd. The listing and the per-session delete are
   // project-scoped and carry their own directory instead.

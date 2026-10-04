@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { open, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
@@ -36,6 +38,7 @@ function planFixture(overrides: Partial<OpenCodeGcPlan> = {}): OpenCodeGcPlan {
         directory: "/w/a",
         canonicalDirectory: "/w/a",
         directoryState: "resolved",
+        deleteCwd: "/w/a",
         updatedAt: "2026-08-01T00:00:00.000Z",
         ageDays: 40,
         recordIds: ["spur-a"],
@@ -150,6 +153,8 @@ describe("executeOpenCodeGc dry run (AC1)", () => {
 
 describe("AC17 delete-time directory re-check (TOCTOU)", () => {
   const GONE_DIR = "/worktrees/assistant/ass-91e4";
+  /** The candidate directory the listing ran from: exists, same project. */
+  const LISTED_DIR = tmpdir();
   const LINK = "/worktrees/sp/spur-link";
 
   /**
@@ -178,6 +183,7 @@ describe("AC17 delete-time directory re-check (TOCTOU)", () => {
           directory: GONE_DIR,
           canonicalDirectory: GONE_DIR,
           directoryState: "gone",
+          deleteCwd: LISTED_DIR,
           updatedAt: "2026-08-01T00:00:00.000Z",
           ageDays: 40,
           recordIds: ["spur-a"],
@@ -248,7 +254,10 @@ describe("AC17 delete-time directory re-check (TOCTOU)", () => {
       vacuum: false,
     });
 
-    expect(deps.deleteSession).toHaveBeenCalledWith("ses_a", GONE_DIR);
+    expect(deps.deleteSession).toHaveBeenCalledWith("ses_a", LISTED_DIR);
+    // execFile ENOENTs on a missing cwd, so the cwd must exist.
+    expect(existsSync(LISTED_DIR)).toBe(true);
+    expect(existsSync(GONE_DIR)).toBe(false);
     expect(report.totals.sessionsDeleted).toBe(1);
   });
 
@@ -399,6 +408,7 @@ describe("execute-time freshness re-read", () => {
           directory: "/w/a",
           canonicalDirectory: "/w/a",
           directoryState: "resolved",
+          deleteCwd: "/w/a",
           updatedAt: "2026-08-01T00:00:00.000Z",
           ageDays: 40,
           recordIds: ["spur-a"],
@@ -408,6 +418,7 @@ describe("execute-time freshness re-read", () => {
           directory: "/w/b",
           canonicalDirectory: "/w/b",
           directoryState: "resolved",
+          deleteCwd: "/w/b",
           updatedAt: "2026-08-01T00:00:00.000Z",
           ageDays: 40,
           recordIds: ["spur-b"],
