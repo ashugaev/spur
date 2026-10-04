@@ -2,7 +2,11 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runScriptProcess } from "../../src/event-sources/script-process.js";
+import {
+  runScriptProcess,
+  type ScriptProcessResult,
+} from "../../src/event-sources/script-process.js";
+import { scriptSourceModule } from "../../src/event-sources/script.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -45,6 +49,92 @@ async function assertDead(pid: number) {
 }
 
 describe("script process", () => {
+  it.each(["timeout", "abort", "output_limit"] as const)(
+    "settles %s while escaped descendants hold inherited pipes",
+    async (action) => {
+      const { cwd, request, controller } = await fixture(
+        'setsid sh -c \'printf "%s" "$$" > escaped.pid; exec sleep 30\' &\nprintf "%s" "$$" > leader.pid\n' +
+          (action === "output_limit"
+            ? "while [ ! -s escaped.pid ]; do sleep 0.01; done\nhead -c 2097152 /dev/zero\n"
+            : "") +
+          "wait",
+      );
+      let result: ScriptProcessResult | undefined;
+      const pending = runScriptProcess({
+        ...request,
+        timeoutMs: action === "timeout" ? 300 : 2000,
+      }).then((value) => {
+        result = value;
+        return value;
+      });
+      let escapedPid: number | undefined;
+      try {
+        await vi.waitFor(async () => {
+          const pid = await readFile(join(cwd, "escaped.pid"), "utf8");
+          expect(pid).toMatch(/^[1-9]\d*$/);
+          escapedPid = Number(pid);
+        });
+        if (action === "abort") controller.abort();
+        await vi.waitFor(
+          () =>
+            expect(result).toMatchObject(
+              action === "abort" ? { status: "aborted" } : { status: "failed", reason: action },
+            ),
+          { timeout: 1000 },
+        );
+        await assertDead(Number(await readFile(join(cwd, "leader.pid"), "utf8")));
+      } finally {
+        if (escapedPid !== undefined) process.kill(escapedPid, "SIGKILL");
+        await pending;
+      }
+    },
+  );
+
+  it("stops script source without waiting for escaped descendants to close pipes", async () => {
+    const { cwd, request } = await fixture(
+      'setsid sh -c \'printf "%s" "$$" > escaped.pid; exec sleep 30\' &\nwait',
+    );
+    const emit = vi.fn();
+    const handle = await scriptSourceModule.start({
+      sourceId: "check",
+      projectId: "api",
+      dataDir: cwd,
+      config: {
+        type: "script",
+        command: request.command,
+        cwd,
+        env: {},
+        schedule: "* * * * *",
+        timeoutMs: 2000,
+        emitExisting: true,
+        runOnStart: true,
+      },
+      emit,
+      signal: request.signal,
+      logger: {},
+      resolveWebBaseUrl: async () => null,
+    });
+    let escapedPid: number | undefined;
+    let stopped = false;
+    let stopping: Promise<void> | undefined;
+    try {
+      handle.runOnStart?.();
+      await vi.waitFor(async () => {
+        const pid = await readFile(join(cwd, "escaped.pid"), "utf8");
+        expect(pid).toMatch(/^[1-9]\d*$/);
+        escapedPid = Number(pid);
+      });
+      stopping = Promise.resolve(handle.stop()).then(() => {
+        stopped = true;
+      });
+      await vi.waitFor(() => expect(stopped).toBe(true), { timeout: 1000 });
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      if (escapedPid !== undefined) process.kill(escapedPid, "SIGKILL");
+      await (stopping ?? handle.stop());
+    }
+  });
+
   it("runs relative argv executable with exact stdout and closed stdin", async () => {
     const { request } = await fixture('read x || printf "[]"');
     expect(await runScriptProcess(request)).toMatchObject({ status: "ok", stdout: "[]" });

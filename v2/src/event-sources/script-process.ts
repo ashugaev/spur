@@ -58,20 +58,26 @@ export function runScriptProcess(request: ScriptProcessRequest): Promise<ScriptP
         // Process group already exited.
       }
     };
+    const terminate = (): void => {
+      killGroup();
+      // Escaped descendants can retain pipe writers after the leader is killed.
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
     const abort = (): void => {
       aborted = true;
-      killGroup();
+      terminate();
     };
     request.signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => {
       reason ??= "timeout";
-      killGroup();
+      terminate();
     }, request.timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > STDOUT_LIMIT) {
         reason ??= "output_limit";
-        killGroup();
+        terminate();
       } else stdout.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
