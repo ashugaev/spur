@@ -25,8 +25,52 @@ interface RateWindow {
   startedAt: number;
 }
 
+type RateWindowAdmission =
+  | { accepted: true }
+  | { accepted: false; reason: "exhausted" | "saturated"; retryAfter: number };
+
 type RequestMode = "normal" | "continue" | "unsupported";
 type BodyResult = { ok: true; body: Buffer } | { ok: false; status?: number };
+
+function admitRateWindow(windows: Map<string, RateWindow>, peer: string): RateWindowAdmission {
+  const now = Date.now();
+  let earliestExpiry = Number.POSITIVE_INFINITY;
+  for (const [key, window] of windows) {
+    const expiresAt = window.startedAt + WEBHOOK_RATE_WINDOW_MS;
+    if (expiresAt <= now) {
+      windows.delete(key);
+      continue;
+    }
+    earliestExpiry = Math.min(earliestExpiry, expiresAt);
+  }
+
+  const window = windows.get(peer);
+  if (window) {
+    if (window.count >= WEBHOOK_MAX_REQUESTS_PER_PEER) {
+      return {
+        accepted: false,
+        reason: "exhausted",
+        retryAfter: Math.max(
+          1,
+          Math.ceil((window.startedAt + WEBHOOK_RATE_WINDOW_MS - now) / 1_000),
+        ),
+      };
+    }
+    window.count += 1;
+    return { accepted: true };
+  }
+
+  if (windows.size >= WEBHOOK_MAX_TRACKED_PEERS) {
+    return {
+      accepted: false,
+      reason: "saturated",
+      retryAfter: Math.max(1, Math.ceil((earliestExpiry - now) / 1_000)),
+    };
+  }
+
+  windows.set(peer, { count: 1, startedAt: now });
+  return { accepted: true };
+}
 
 function headerValues(request: IncomingMessage, name: string): string[] {
   const values: string[] = [];
@@ -94,6 +138,7 @@ async function startWebhookSource(
   const bodyTimers = new Set<NodeJS.Timeout>();
   const responseTimers = new Set<NodeJS.Timeout>();
   const rateWindows = new Map<string, RateWindow>();
+  const failedRequestWindows = new Map<string, RateWindow>();
   const inFlightByPeer = new Map<string, number>();
   let inFlight = 0;
   let stopping = false;
@@ -149,27 +194,12 @@ async function startWebhookSource(
   function admit(
     peer: string,
   ): { accepted: true; release(): void } | { accepted: false; retryAfter?: number } {
-    const now = Date.now();
-    for (const [key, window] of rateWindows) {
-      if (now - window.startedAt >= WEBHOOK_RATE_WINDOW_MS) rateWindows.delete(key);
+    const rateAdmission = admitRateWindow(rateWindows, peer);
+    if (!rateAdmission.accepted) {
+      return rateAdmission.reason === "exhausted"
+        ? { accepted: false, retryAfter: rateAdmission.retryAfter }
+        : { accepted: false };
     }
-
-    let window = rateWindows.get(peer);
-    if (!window) {
-      if (rateWindows.size >= WEBHOOK_MAX_TRACKED_PEERS) return { accepted: false };
-      window = { count: 0, startedAt: now };
-      rateWindows.set(peer, window);
-    }
-    if (window.count >= WEBHOOK_MAX_REQUESTS_PER_PEER) {
-      return {
-        accepted: false,
-        retryAfter: Math.max(
-          1,
-          Math.ceil((WEBHOOK_RATE_WINDOW_MS - (now - window.startedAt)) / 1_000),
-        ),
-      };
-    }
-    window.count += 1;
 
     const peerInFlight = inFlightByPeer.get(peer) ?? 0;
     if (inFlight >= WEBHOOK_MAX_IN_FLIGHT || peerInFlight >= WEBHOOK_MAX_IN_FLIGHT_PER_PEER) {
@@ -258,8 +288,16 @@ async function startWebhookSource(
         closeResponse(request, response, 503);
         return;
       }
-      if (request.url !== deps.config.path || !authorizationMatches(request)) {
-        closeResponse(request, response, 404);
+      const pathMatches = request.url === deps.config.path;
+      const authorizationMatchesRequest = authorizationMatches(request);
+      if (!pathMatches || !authorizationMatchesRequest) {
+        const failedAdmission = admitRateWindow(failedRequestWindows, peer);
+        closeResponse(
+          request,
+          response,
+          failedAdmission.accepted ? 404 : 429,
+          failedAdmission.accepted ? {} : { "Retry-After": String(failedAdmission.retryAfter) },
+        );
         return;
       }
       admission = admit(peer);
@@ -387,6 +425,7 @@ async function startWebhookSource(
     for (const timer of responseTimers) clearTimeout(timer);
     responseTimers.clear();
     rateWindows.clear();
+    failedRequestWindows.clear();
     inFlightByPeer.clear();
     inFlight = 0;
     stopPromise = new Promise((resolve) => {

@@ -82,7 +82,11 @@ async function request(options: {
   body?: string | Buffer;
   headers?: Record<string, string | string[]>;
   localAddress?: string;
-}): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+}): Promise<{
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}> {
   const body = options.body ?? "{}";
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -101,11 +105,16 @@ async function request(options: {
         agent: false,
       },
       (response) => {
-        response.resume();
+        let responseBody = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          responseBody += chunk;
+        });
         response.once("end", () =>
           resolve({
             status: response.statusCode ?? 0,
             headers: response.headers,
+            body: responseBody,
           }),
         );
       },
@@ -370,18 +379,149 @@ describe("webhookSourceModule", () => {
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
   });
 
-  it("does not let unauthenticated misses spend authenticated peer quota", async () => {
-    const { port } = await startSource();
+  it("shares one failure window across invalid path and authorization classes", async () => {
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    const invalidRequests = [
+      { headers: { Authorization: [] } },
+      { headers: { Authorization: "Basic malformed" } },
+      { headers: { Authorization: ["Bearer duplicate-one", "Bearer duplicate-two"] } },
+      { headers: { Authorization: "Bearer wrong-secret-value" } },
+      { path: "/wrong", headers: { Authorization: `Bearer ${SECRET}` } },
+    ];
+
     for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
-      const response = await request({
-        port,
-        headers: { Authorization: "Bearer wrong-secret-value" },
-      });
-      expect(response.status).toBe(404);
+      const response = await request({ port, ...invalidRequests[count % invalidRequests.length] });
+      expect(response).toMatchObject({ status: 404, body: "" });
     }
 
-    await expect(request({ port })).resolves.toMatchObject({ status: 202 });
+    const limited = await request({
+      port,
+      headers: { Authorization: "Bearer wrong-secret-value" },
+    });
+    expect(limited).toMatchObject({ status: 429, body: "" });
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThanOrEqual(1);
+    expect(emit).not.toHaveBeenCalled();
   });
+
+  it("hashes a supplied authorization value even when the path is wrong", async () => {
+    const { port } = await startSource();
+    const createHashCalls = cryptoSpies.createHash.mock.calls.length;
+    const comparisonCalls = cryptoSpies.timingSafeEqual.mock.calls.length;
+
+    await expect(
+      request({
+        port,
+        path: "/wrong",
+        headers: { Authorization: "Bearer wrong-secret-value" },
+      }),
+    ).resolves.toMatchObject({ status: 404 });
+
+    expect(cryptoSpies.createHash).toHaveBeenCalledTimes(createHashCalls + 1);
+    expect(cryptoSpies.timingSafeEqual).toHaveBeenCalledTimes(comparisonCalls + 1);
+    const comparison = cryptoSpies.timingSafeEqual.mock.calls.at(-1);
+    expect(comparison).toBeDefined();
+    expect(Buffer.byteLength(comparison?.[0] ?? Buffer.alloc(0))).toBe(32);
+    expect(Buffer.byteLength(comparison?.[1] ?? Buffer.alloc(0))).toBe(32);
+  });
+
+  it("rejects an exhausted failure window before reading an expected body", async () => {
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await request({ port, headers: { Authorization: "Bearer wrong-secret-value" } });
+    }
+
+    const output = await rawRequest(
+      port,
+      "POST /hook HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-secret-value\r\nContent-Type: application/json\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n",
+    );
+
+    expect(output).toContain("429 Too Many Requests");
+    expect(output).toMatch(/Retry-After: [1-9]\d*/i);
+    expect(output).not.toContain("100 Continue");
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("keeps failure and authenticated peer windows independent", async () => {
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await request({ port, headers: { Authorization: "Bearer wrong-secret-value" } });
+    }
+    await expect(
+      request({ port, headers: { Authorization: "Bearer wrong-secret-value" } }),
+    ).resolves.toMatchObject({ status: 429 });
+
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await expect(request({ port })).resolves.toMatchObject({ status: 202 });
+    }
+    const limited = await request({ port });
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(emit).toHaveBeenCalledTimes(WEBHOOK_MAX_REQUESTS_PER_PEER);
+  });
+
+  it("reopens a failed-request window at the exact fixed boundary", async () => {
+    const now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const { port } = await startSource();
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await request({ port, headers: { Authorization: "Bearer wrong-secret-value" } });
+    }
+    await expect(
+      request({ port, headers: { Authorization: "Bearer wrong-secret-value" } }),
+    ).resolves.toMatchObject({ status: 429 });
+
+    vi.mocked(Date.now).mockReturnValue(now + WEBHOOK_RATE_WINDOW_MS);
+    await expect(
+      request({ port, headers: { Authorization: "Bearer wrong-secret-value" } }),
+    ).resolves.toMatchObject({ status: 404 });
+  });
+
+  it("fails closed at the failed-peer cap without eviction and lets valid traffic bypass", async () => {
+    const startedAt = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(startedAt);
+    const emit = vi.fn();
+    const { port } = await startSource({ emit });
+    const invalidHeaders = { Authorization: "Bearer wrong-secret-value" };
+    const seedPeer = "127.5.0.1";
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await request({ port, localAddress: seedPeer, headers: invalidHeaders });
+    }
+
+    for (let count = 1; count < WEBHOOK_MAX_TRACKED_PEERS; count += 1) {
+      vi.mocked(Date.now).mockReturnValue(startedAt + count);
+      const peer = `127.6.${Math.floor((count - 1) / 254)}.${((count - 1) % 254) + 1}`;
+      await expect(
+        request({ port, localAddress: peer, headers: invalidHeaders }),
+      ).resolves.toMatchObject({ status: 404 });
+    }
+
+    vi.mocked(Date.now).mockReturnValue(startedAt + 12_345);
+    const saturatedPeer = "127.7.0.1";
+    const saturated = await request({
+      port,
+      localAddress: saturatedPeer,
+      headers: invalidHeaders,
+    });
+    expect(saturated).toMatchObject({ status: 429, body: "" });
+    expect(saturated.headers["retry-after"]).toBe("48");
+
+    const retainedSeed = await request({ port, localAddress: seedPeer, headers: invalidHeaders });
+    expect(retainedSeed.status).toBe(429);
+    expect(retainedSeed.headers["retry-after"]).toBe("48");
+
+    await expect(request({ port, localAddress: saturatedPeer })).resolves.toMatchObject({
+      status: 202,
+    });
+    expect(emit).toHaveBeenCalledTimes(1);
+
+    vi.mocked(Date.now).mockReturnValue(startedAt + WEBHOOK_RATE_WINDOW_MS);
+    await expect(
+      request({ port, localAddress: "127.7.0.2", headers: invalidHeaders }),
+    ).resolves.toMatchObject({ status: 404 });
+  }, 30_000);
 
   it("caps concurrent requests per peer", async () => {
     const { port } = await startSource();
@@ -391,7 +531,9 @@ describe("webhookSourceModule", () => {
         sockets.push(await heldRequest(port));
       }
       await new Promise((resolve) => setTimeout(resolve, 20));
-      await expect(request({ port })).resolves.toMatchObject({ status: 429 });
+      const limited = await request({ port });
+      expect(limited.status).toBe(429);
+      expect(limited.headers["retry-after"]).toBeUndefined();
     } finally {
       for (const socket of sockets) socket.destroy();
     }
@@ -406,9 +548,9 @@ describe("webhookSourceModule", () => {
         sockets.push(await heldRequest(port, peer));
       }
       await new Promise((resolve) => setTimeout(resolve, 20));
-      await expect(request({ port, localAddress: "127.2.0.1" })).resolves.toMatchObject({
-        status: 429,
-      });
+      const limited = await request({ port, localAddress: "127.2.0.1" });
+      expect(limited.status).toBe(429);
+      expect(limited.headers["retry-after"]).toBeUndefined();
     } finally {
       for (const socket of sockets) socket.destroy();
     }
@@ -421,9 +563,9 @@ describe("webhookSourceModule", () => {
       const response = await request({ port, localAddress: peer });
       expect(response.status).toBe(202);
     }
-    await expect(request({ port, localAddress: "127.4.0.1" })).resolves.toMatchObject({
-      status: 429,
-    });
+    const limited = await request({ port, localAddress: "127.4.0.1" });
+    expect(limited.status).toBe(429);
+    expect(limited.headers["retry-after"]).toBeUndefined();
   }, 30_000);
 
   it("rejects occupied ports and releases its bind on idempotent stop", async () => {
@@ -431,9 +573,19 @@ describe("webhookSourceModule", () => {
     const first = await startSource({ port });
     await expect(startSource({ port })).rejects.toMatchObject({ code: "EADDRINUSE" });
 
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      await request({ port, headers: { Authorization: "Bearer wrong-secret-value" } });
+    }
+    await expect(
+      request({ port, headers: { Authorization: "Bearer wrong-secret-value" } }),
+    ).resolves.toMatchObject({ status: 429 });
+
     await first.handle.stop();
     await first.handle.stop();
     const replacement = await startSource({ port });
+    await expect(
+      request({ port, headers: { Authorization: "Bearer wrong-secret-value" } }),
+    ).resolves.toMatchObject({ status: 404 });
     await expect(request({ port })).resolves.toMatchObject({ status: 202 });
     await replacement.handle.stop();
   });
