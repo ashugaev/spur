@@ -74,8 +74,8 @@ function selectProjectFilter(name: string) {
   fireEvent.click(screen.getByRole("menuitemradio", { name }));
 }
 
-vi.mock("next/font/google", () => ({
-  JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
+vi.mock("next/font/local", () => ({
+  default: () => ({ variable: "--font-jetbrains-mono" }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
@@ -131,10 +131,12 @@ class MockMediaRecorder {
 
 function sessionsPayload() {
   return {
+    lifecycleInstanceId: "test-instance",
     projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" }],
     sessions: [
       {
         id: "api-a1",
+        lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
         project: "api",
         agent: "claude",
         prompt: "Fix auth",
@@ -301,6 +303,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({
@@ -333,6 +337,9 @@ describe("Dashboard", () => {
       );
     });
 
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn" })).toBeEnabled();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -652,6 +659,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -740,6 +748,7 @@ describe("Dashboard", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               sessionsPayload().sessions[0],
               {
@@ -791,6 +800,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -844,6 +854,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -884,6 +895,7 @@ describe("Dashboard", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               {
                 ...sessionsPayload().sessions[0],
@@ -972,6 +984,7 @@ describe("Dashboard", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [
               base,
               {
@@ -1207,6 +1220,7 @@ describe("Dashboard", () => {
 
   it("shows only daemon-configured projects in filter and spawn dropdowns", async () => {
     const sessionsData = {
+      lifecycleInstanceId: "test-instance",
       projects: [{ id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" }],
       sessions: [
         {
@@ -1259,6 +1273,7 @@ describe("Dashboard", () => {
           kind: "shepherd",
         },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: sessionsPayload().sessions,
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -1332,6 +1347,7 @@ describe("Dashboard", () => {
                 kind: "shepherd",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1947,6 +1963,9 @@ describe("Dashboard", () => {
       await waitFor(() => {
         expect(screen.getByRole("button", { name: "Spawn model" })).toHaveTextContent("Opus");
       });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn", exact: true })).toBeEnabled();
+      });
       fireEvent.keyDown(prompt, keydown);
 
       await waitFor(() => {
@@ -2173,6 +2192,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2207,6 +2227,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2245,6 +2266,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -2444,9 +2466,96 @@ describe("Dashboard", () => {
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Escape now");
   });
 
+  it.each(["replacement", "lost-response", "lost-allocation"] as const)(
+    "shares allocated batches through cancelled previews and %s",
+    async (outcome) => {
+      let allocate: (response: Response) => void = () => undefined;
+      const allocation = new Promise<Response>((resolve) => {
+        allocate = resolve;
+      });
+      let finishPreview: (response: Response) => void = () => undefined;
+      let failPreview: (error: Error) => void = () => undefined;
+      const preview = new Promise<Response>((resolve, reject) => {
+        finishPreview = resolve;
+        failPreview = reject;
+      });
+      const previewBodies: string[] = [];
+      let allocations = 0;
+      vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url.endsWith("/preflight-batches")) {
+          allocations += 1;
+          if (outcome === "lost-allocation" && allocations === 1)
+            throw new Error("Allocation response lost");
+          return allocation;
+        }
+        if (url === "/api/preflight") {
+          previewBodies.push(String(init?.body));
+          if (previewBodies.length === 1) return preview;
+          return new Response(
+            JSON.stringify({
+              branch: "feature/result",
+              ...(previewBodies.length === 3 ? { preflightBatchId: "recovered-batch" } : {}),
+              preflightTokenUsageView: {
+                status: previewBodies.length === 3 ? "partial" : "measured",
+                inputTokens: 80,
+                outputTokens: 20,
+                totalTokens: 100,
+                attemptCount: previewBodies.length === 3 ? 1 : 3,
+                unknownAttemptCount: 0,
+                providerIterationCount: 2,
+                byProvider: { claude: { totalTokens: 100 } },
+              },
+            }),
+          );
+        }
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/sessions") return new Response(JSON.stringify(sessionsPayload()));
+        if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
+        if (url.includes("/spawn-defaults"))
+          return new Response(JSON.stringify({ model: null, worktree: true }));
+        if (url.includes("/branches/exists"))
+          return new Response(JSON.stringify({ exists: false, remote: false, checkedOutAt: null }));
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      render(<Dashboard />);
+      fireEvent.click(await screen.findByRole("button", { name: "Spawn Session" }));
+      const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+      fireEvent.change(prompt, { target: { value: "First prompt" } });
+      await waitFor(() => expect(allocations).toBe(1));
+      fireEvent.change(prompt, { target: { value: "Supersede during allocation" } });
+      allocate(new Response(JSON.stringify({ preflightBatchId: "server-batch" })));
+      await waitFor(() => expect(previewBodies).toHaveLength(1));
+      expect(previewBodies[0]).toContain('"preflightBatchId":"server-batch"');
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("server-batch");
+      fireEvent.change(prompt, { target: { value: "Supersede paid preview" } });
+      if (outcome === "replacement")
+        finishPreview(
+          new Response(
+            JSON.stringify({ preflightBatchId: "replacement-batch", branch: "feature/stale" }),
+          ),
+        );
+      else failPreview(new Error("Response lost after paid work"));
+      await waitFor(() => expect(previewBodies).toHaveLength(2));
+      expect(previewBodies[1]).toContain(
+        `"preflightBatchId":"${outcome === "replacement" ? "replacement-batch" : "server-batch"}"`,
+      );
+      expect(allocations).toBe(outcome === "lost-allocation" ? 2 : 1);
+      expect(await screen.findByText("100", { exact: false })).toBeInTheDocument();
+      expect(screen.getByLabelText("branch name")).toHaveValue("feature/result");
+      fireEvent.change(prompt, { target: { value: "Recover corrupted batch" } });
+      expect(await screen.findByText("Pre-flight tokens: 100 · partial")).toBeInTheDocument();
+      expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain("recovered-batch");
+    },
+  );
+
   it("keeps a restored explicit branch when preflight suggests another branch", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "allocated-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
@@ -2509,6 +2618,8 @@ describe("Dashboard", () => {
   it("allows preflight to fill a branch after normalization clears explicit input", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "allocated-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
@@ -2697,6 +2808,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawnedSession = {
@@ -2786,6 +2898,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawned = {
@@ -2852,6 +2965,7 @@ describe("Dashboard", () => {
         { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
         { id: "sp", name: "Spur Core", configured: true, prefix: "sp", path: "/repo/sp" },
       ],
+      lifecycleInstanceId: "test-instance",
       sessions: [sessionsPayload().sessions[0]],
     };
     const spawned = {
@@ -3020,7 +3134,7 @@ describe("Dashboard", () => {
     fireEvent.click(spawnButton);
     fireEvent.click(spawnButton);
 
-    expect(spawnCalls).toBe(1);
+    await waitFor(() => expect(spawnCalls).toBe(1));
     expect(spawnButton).toBeDisabled();
 
     resolveSpawn?.(new Response(JSON.stringify(spawned), { status: 201 }));
@@ -3269,6 +3383,7 @@ describe("Dashboard", () => {
                 path: "/tmp/stub",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -3312,6 +3427,7 @@ describe("Dashboard", () => {
             },
           },
         ],
+        lifecycleInstanceId: "test-instance",
         sessions: [],
       };
     }

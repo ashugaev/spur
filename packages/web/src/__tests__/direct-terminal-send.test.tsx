@@ -58,11 +58,15 @@ const mockTerminal = {
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
 
 vi.mock("xterm", () => ({
-  Terminal: vi.fn(() => mockTerminal),
+  Terminal: vi.fn(function Terminal() {
+    return mockTerminal;
+  }),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: vi.fn(() => mockFit),
+  FitAddon: vi.fn(function FitAddon() {
+    return mockFit;
+  }),
 }));
 
 vi.mock("@/hooks/useVoiceInput", () => ({
@@ -90,7 +94,7 @@ vi.mock("@/components/VoiceInput", () => ({
     ) : null,
 }));
 
-const MockWebSocket = vi.fn(() => {
+const MockWebSocket = vi.fn(function MockWebSocket() {
   const ws: Record<string, unknown> = {
     readyState: 0,
     binaryType: "arraybuffer",

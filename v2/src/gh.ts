@@ -177,6 +177,12 @@ const POLL_CYCLE_RUN_MAX_IDLE_MS = 60 * 60_000;
 // on the live host) — an interval-sized window makes emission cadence
 // drift-dependent on the source's own tick.
 const GH_POLL_CYCLE_ROLLUP_MS = 900_000;
+// Slow-cycle threshold for the duration leg on gh.poll_cycle. ~1.2x the
+// observed zero-cost p99 of 843ms, above the 100-999ms jitter band, and just
+// under the observed slow-cycle floor of 1005ms. Selects ~0.9% of zero-cost
+// cycles in the measured sample. Deliberately not a config key, same
+// reasoning as GH_POLL_CYCLE_ROLLUP_MS above.
+const GH_POLL_CYCLE_SLOW_MS = 1_000;
 
 interface GhPollCycleRun {
   kind: GhPollCycleKind;
@@ -190,6 +196,8 @@ interface GhPollCycleRun {
   graphqlCost: number;
   bySubcommand: Map<string, number>;
   errors: number;
+  slowCycles: number;
+  maxCycleMs: number;
 }
 
 const pollCycleRuns = new Map<string, GhPollCycleRun>();
@@ -212,36 +220,47 @@ function emptyPollCycleRun(
     graphqlCost: 0,
     bySubcommand: new Map(),
     errors: 0,
+    slowCycles: 0,
+    maxCycleMs: 0,
   };
 }
 
 /**
  * Closes a run's current window: emits an aggregate only if the window spent
- * something (calls > 0, graphqlCost > 0, or a cycle in it threw) then resets
- * the accumulators and stamps a fresh windowStartedAtMs. A window that spent
- * nothing AND threw nothing emits nothing and leaves the run's counters
- * untouched, so they carry into the next window — this is what keeps PR
- * 729's idle-host suppression intact under rollup: window expiry alone must
- * never produce an event. Errors are in the gate, not just the payload —
- * NOT for a failing `gh` call itself: `noteGhInvocation` runs before the
- * call executes, so any `gh()` failure already sets calls > 0 and is
- * already covered by that leg. The `errors` leg covers a cycle whose task
- * throws before ever invoking `gh` (e.g. a local read failing while
- * building the poll's session list) — rare, but such a cycle would
- * otherwise be invisible: zero calls, zero cost, yet it did something that
- * failed and is worth surfacing once per window instead of silently.
+ * something (calls > 0, graphqlCost > 0, a cycle in it threw, or a cycle in
+ * it stalled) then resets the accumulators and stamps a fresh
+ * windowStartedAtMs. A window that spent nothing, threw nothing, AND never
+ * stalled emits nothing and leaves the run's counters untouched, so they
+ * carry into the next window — this is what keeps PR 729's idle-host
+ * suppression intact under rollup: window expiry alone must never produce an
+ * event. Errors are in the gate, not just the payload — NOT for a failing
+ * `gh` call itself: `noteGhInvocation` runs before the call executes, so any
+ * `gh()` failure already sets calls > 0 and is already covered by that leg.
+ * The `errors` leg covers a cycle whose task throws before ever invoking
+ * `gh` (e.g. a local read failing while building the poll's session list) —
+ * rare, but such a cycle would otherwise be invisible: zero calls, zero
+ * cost, yet it did something that failed and is worth surfacing once per
+ * window instead of silently. The duration leg (`slowCycles > 0`) covers a
+ * cycle that spent nothing and threw nothing but stalled (wall clock at or
+ * above GH_POLL_CYCLE_SLOW_MS) — also otherwise invisible under the
+ * cost-only gate.
  */
 function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number): void {
-  const spentSomething = run.calls > 0 || run.graphqlCost > 0 || run.errors > 0;
+  const spentSomething =
+    run.calls > 0 || run.graphqlCost > 0 || run.errors > 0 || run.slowCycles > 0;
   if (!spentSomething) {
     return;
   }
+  const slowClause =
+    run.slowCycles > 0
+      ? `, ${run.slowCycles} stalled >= ${GH_POLL_CYCLE_SLOW_MS}ms (max ${run.maxCycleMs}ms)`
+      : "";
   logSpurEvent(dataDir, {
     event: "gh.poll_cycle",
     level: "info",
     ...(run.projectId ? { projectId: run.projectId } : {}),
     ...(run.sourceId ? { sourceId: run.sourceId } : {}),
-    message: `gh invoked ${run.calls} times across ${run.cycles} ${run.kind} poll cycles`,
+    message: `gh invoked ${run.calls} times across ${run.cycles} ${run.kind} poll cycles${slowClause}`,
     details: {
       cycle: run.kind,
       windowMs: nowMs - run.windowStartedAtMs,
@@ -251,6 +270,8 @@ function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number):
       graphqlCost: run.graphqlCost,
       bySubcommand: Object.fromEntries(run.bySubcommand),
       ...(run.errors > 0 ? { errors: run.errors } : {}),
+      maxCycleMs: run.maxCycleMs,
+      ...(run.slowCycles > 0 ? { slowCycles: run.slowCycles } : {}),
     },
   });
   run.cycles = 0;
@@ -259,14 +280,16 @@ function flushPollCycleRun(dataDir: string, run: GhPollCycleRun, nowMs: number):
   run.graphqlCost = 0;
   run.bySubcommand = new Map();
   run.errors = 0;
+  run.slowCycles = 0;
+  run.maxCycleMs = 0;
   run.windowStartedAtMs = nowMs;
 }
 
 /**
  * Flushes and drops every run untouched for longer than the idle ceiling. A
- * paying window is flushed through the same zero-cost gate as any other close
- * (so its cost is never dropped); a zero-cost window emits nothing, matching
- * today's zeroCycleRuns idle-drop behavior.
+ * paying window is flushed through the same gate as any other close (so its
+ * cost is never dropped); a window that spent nothing, threw nothing, and
+ * never stalled emits nothing at the idle drop, same as at any other close.
  */
 function prunePollCycleRuns(nowMs: number): void {
   const dataDir = ghEventSinkDataDir;
@@ -436,10 +459,11 @@ function pollCycleKey(cycle: GhPollCycleContext): string {
  * cycle inside GH_POLL_CYCLE_ROLLUP_MS accumulates into that window without
  * writing anything; the first cycle at or past the window boundary closes it
  * through flushPollCycleRun, which emits one aggregate event summing the
- * window IF it spent something, or emits nothing and carries the counters
- * forward if the whole window was zero-cost. That gate is what keeps PR 729's
- * idle-host suppression intact under rollup — window expiry alone never
- * produces an event.
+ * window IF it spent something (calls, graphqlCost, errors, or a stalled
+ * cycle), or emits nothing and carries the counters forward if the whole
+ * window spent nothing, threw nothing, and never stalled. That gate is what
+ * keeps PR 729's idle-host suppression intact under rollup — window expiry
+ * alone never produces an event.
  */
 export async function runGhPollCycle<T>(
   input: { kind: GhPollCycleKind; projectId?: string; sourceId?: string },
@@ -514,6 +538,9 @@ export async function runGhPollCycle<T>(
         );
       }
       if (cycleFailed) existingRun.errors += 1;
+      const cycleMs = endedAtMs - cycle.startedAt;
+      existingRun.maxCycleMs = Math.max(existingRun.maxCycleMs, cycleMs);
+      if (cycleMs >= GH_POLL_CYCLE_SLOW_MS) existingRun.slowCycles += 1;
       if (dataDir && endedAtMs - existingRun.windowStartedAtMs >= GH_POLL_CYCLE_ROLLUP_MS) {
         flushPollCycleRun(dataDir, existingRun, endedAtMs);
       }

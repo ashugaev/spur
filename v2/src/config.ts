@@ -5,6 +5,8 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_PR_OCCURRENCE_KINDS,
+  JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
@@ -26,6 +28,7 @@ import {
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ProviderReasoningEffort,
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
@@ -217,6 +220,14 @@ function asOptionalPositiveInteger(value: unknown, label: string): number | unde
   return value;
 }
 
+function asOptionalInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -286,17 +297,39 @@ function parseProjectReasoningEffort(
   const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
   const effort: AgentReasoningEffortConfig = {};
   for (const [agent, entry] of Object.entries(raw)) {
-    if (agent !== "claude" && agent !== "codex") {
+    if (agent !== "claude" && agent !== "codex" && agent !== "cursor" && agent !== "opencode") {
       throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
     }
-    if (entry !== "low" && entry !== "medium" && entry !== "high") {
-      throw new Error(
-        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
-      );
-    }
-    effort[agent] = entry;
+    effort[agent] = parseReasoningEffort(
+      entry,
+      `projects.${projectId}.reasoningEffort.${agent}`,
+      agent,
+    );
   }
   return effort;
+}
+
+function parseReasoningEffort(
+  value: unknown,
+  label: string,
+  agent?: AgentName,
+): ProviderReasoningEffort {
+  if (
+    value !== "none" &&
+    value !== "minimal" &&
+    value !== "low" &&
+    value !== "medium" &&
+    value !== "high" &&
+    value !== "xhigh" &&
+    value !== "max" &&
+    value !== "ultra"
+  ) {
+    throw new Error(`${label} must be a recognized reasoning effort`);
+  }
+  if (agent === "claude" && (value === "none" || value === "minimal" || value === "ultra")) {
+    throw new Error(`${label} must be "low", "medium", "high", "xhigh", or "max" for Claude`);
+  }
+  return value;
 }
 
 function parseTriggerSpawnBlock(
@@ -310,6 +343,10 @@ function parseTriggerSpawnBlock(
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const model = asOptionalString(raw["model"], `${label}.model`);
+  const reasoningEffort =
+    raw["reasoningEffort"] === undefined
+      ? undefined
+      : parseReasoningEffort(raw["reasoningEffort"], `${label}.reasoningEffort`, agent);
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
@@ -330,6 +367,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
@@ -368,6 +406,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "reasoningEffort",
       "mode",
       "branch",
       "overrides",
@@ -631,11 +670,12 @@ function expectedEventsForSource(source: SourceConfig): string[] {
     return [TELEGRAM_MESSAGE_EVENT];
   }
   if (source.type === "jira") {
-    return [];
+    return source.query !== undefined ? [JIRA_WORK_ITEM_NEW_EVENT] : [];
   }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -696,6 +736,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? parseGitHubAdaptivePoll(raw["adaptivePoll"], label, intervalMs)
       : undefined;
+  const maxReviewBatchTargets =
+    provider === "github"
+      ? asOptionalPositiveInteger(raw["maxReviewBatchTargets"], `${label}.maxReviewBatchTargets`)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -704,6 +748,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(query !== undefined ? { query } : {}),
     ...(draft !== undefined ? { draft } : {}),
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
+    ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -754,14 +799,20 @@ function parseJiraSource(
   projectEnv: Record<string, string>,
 ): JiraSourceConfig {
   const label = `projects.${projectId}.sources.${sourceId}`;
+  const query = asOptionalString(raw["query"], `${label}.query`);
   return {
     type: "jira",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     baseUrl: asUrlString(
       resolveRequiredEnvString(raw["baseUrl"], `${label}.baseUrl`, projectEnv),
       `${label}.baseUrl`,
     ),
     email: resolveRequiredEnvString(raw["email"], `${label}.email`, projectEnv),
     token: resolveRequiredEnvString(raw["token"], `${label}.token`, projectEnv),
+    ...(query !== undefined ? { query } : {}),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    emitExisting: asOptionalBoolean(raw["emitExisting"], `${label}.emitExisting`) ?? false,
+    maxResults: asOptionalNumber(raw["maxResults"], `${label}.maxResults`) ?? 100,
   };
 }
 
@@ -790,6 +841,9 @@ function parseBacklog(
     );
   }
 
+  // `spawn` (used by some live configs to document Take-spawn prompts) is
+  // parsed and ignored here — no code path consumes it. See
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,
@@ -901,6 +955,70 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   };
 }
 
+/** Integer, or a `${VAR}` string resolving to one, so a chat id can stay out of a shared config. */
+/**
+ * Strict digits: `Number("")` is 0 and `Number("0x10")` is 16 — both would pass
+ * validation and fail later inside Telegram.
+ */
+function telegramIdToken(value: string, label: string): number {
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return parsed;
+}
+
+function resolveTelegramEnvValue(
+  raw: string,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+/** Integer, or a `${VAR}` string resolving to one, so an id stays out of a shared config. */
+function parseTelegramChatId(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalInteger(raw, label);
+  }
+  return telegramIdToken(resolveTelegramEnvValue(raw, label, projectEnv), label);
+}
+
+/**
+ * Integer array, or a `${VAR}` string resolving to a comma-separated list, so
+ * user and chat ids stay out of a shared config.
+ */
+function parseTelegramIdList(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number[] | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalIntegerArray(raw, label);
+  }
+  const ids = resolveTelegramEnvValue(raw, label, projectEnv)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => telegramIdToken(entry, label));
+  if (ids.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return ids;
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -913,8 +1031,20 @@ function parseTelegramSource(
   if (token === undefined) {
     throw new Error(`${label}.token could not be resolved from the environment`);
   }
-  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
-  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  const allowedUsers = parseTelegramIdList(
+    raw["allowedUsers"],
+    `${label}.allowedUsers`,
+    projectEnv,
+  );
+  const allowedChats = parseTelegramIdList(
+    raw["allowedChats"],
+    `${label}.allowedChats`,
+    projectEnv,
+  );
+  const chatId = parseTelegramChatId(raw["chatId"], `${label}.chatId`, projectEnv);
+  if (chatId !== undefined && allowedChats !== undefined && !allowedChats.includes(chatId)) {
+    throw new Error(`${label}.chatId must be listed in ${label}.allowedChats`);
+  }
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
@@ -925,6 +1055,7 @@ function parseTelegramSource(
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    ...(chatId !== undefined ? { chatId } : {}),
     autoSpawn,
   };
 }
@@ -1470,6 +1601,9 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const tokenBudget = asOptionalPositiveInteger(raw["tokenBudget"], `${label}.tokenBudget`);
+  const tokenBudgetWarnOnly =
+    asOptionalBoolean(raw["tokenBudgetWarnOnly"], `${label}.tokenBudgetWarnOnly`) ?? false;
   const staleAfterMinutes = asNonNegativeNumber(
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
@@ -1572,6 +1706,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    tokenBudgetWarnOnly,
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }
@@ -1806,6 +1942,57 @@ function parseOpenCodeGc(value: unknown): AppConfig["opencodeGc"] {
   };
 }
 
+// Measured over 640 anchor dirs holding 26.78 GB of agent-history artifacts
+// (99.6% of all session-artifact bytes): the 2 GiB / 500-file caps keep 9.64 GB
+// and reclaim 17.14 GB, while the 30d age prune contributes ~4% because 25.4 GB
+// of the mass is under a week old. The caps are the lever; age is cleanup.
+// `enabled: false` like sessionGc — a destructive default is never shipped.
+export const DEFAULT_ARTIFACT_RETENTION: AppConfig["artifactRetention"] = {
+  enabled: false,
+  olderThanDays: 30,
+  intervalMinutes: 360,
+  maxAnchorsPerSweep: 20,
+  maxBytesPerSession: 2 * 1024 * 1024 * 1024,
+  maxFilesPerSession: 500,
+};
+
+// Instance-only, same footgun as sessionGc/authRotation: parsed only when
+// mode === "instance", so a per-project artifactRetention block is silently
+// ignored (the daemon sweep and `spur artifacts-gc` both read the merged
+// instance config).
+function parseArtifactRetention(value: unknown): AppConfig["artifactRetention"] {
+  if (value === undefined) {
+    return DEFAULT_ARTIFACT_RETENTION;
+  }
+  const root = asObject(value, "artifactRetention");
+  return {
+    enabled:
+      asOptionalBoolean(root["enabled"], "artifactRetention.enabled") ??
+      DEFAULT_ARTIFACT_RETENTION.enabled,
+    olderThanDays:
+      asNonNegativeNumber(root["olderThanDays"], "artifactRetention.olderThanDays") ??
+      DEFAULT_ARTIFACT_RETENTION.olderThanDays,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "artifactRetention.intervalMinutes") ??
+      DEFAULT_ARTIFACT_RETENTION.intervalMinutes,
+    maxAnchorsPerSweep:
+      asOptionalPositiveInteger(
+        root["maxAnchorsPerSweep"],
+        "artifactRetention.maxAnchorsPerSweep",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxAnchorsPerSweep,
+    maxBytesPerSession:
+      asOptionalPositiveInteger(
+        root["maxBytesPerSession"],
+        "artifactRetention.maxBytesPerSession",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxBytesPerSession,
+    maxFilesPerSession:
+      asOptionalPositiveInteger(
+        root["maxFilesPerSession"],
+        "artifactRetention.maxFilesPerSession",
+      ) ?? DEFAULT_ARTIFACT_RETENTION.maxFilesPerSession,
+  };
+}
+
 // Ship enabled by default (unlike sessionGc): this reaper is a memory-safety
 // control that kills a restartable sidecar process, never a worktree or a
 // record, so the destructive-by-default caution sessionGc needs does not
@@ -1832,6 +2019,47 @@ function parseSidecarGc(value: unknown): AppConfig["sidecarGc"] {
     maxAgeWarnMinutes:
       asOptionalPositiveInteger(root["maxAgeWarnMinutes"], "sidecarGc.maxAgeWarnMinutes") ??
       DEFAULT_SIDECAR_GC.maxAgeWarnMinutes,
+  };
+}
+
+// Destructive (T2 profile/revision dirs, T3 build caches, npm per-key clean)
+// like sessionGc, so it ships off — installing this change changes no host
+// behavior until an operator opts in.
+export const DEFAULT_DISK_BUDGET: AppConfig["diskBudget"] = {
+  enabled: false,
+  intervalMinutes: 360,
+  warnAttributableGb: 60,
+  npmCacheMaxGb: 20,
+  buildCacheOlderThanDays: 14,
+  maxWorktreesPerSweep: 20,
+};
+
+// Instance-only, same footgun as sessionGc/sidecarGc/authRotation: parsed
+// only when mode === "instance", so a per-project diskBudget block is
+// silently ignored.
+function parseDiskBudget(value: unknown): AppConfig["diskBudget"] {
+  if (value === undefined) {
+    return DEFAULT_DISK_BUDGET;
+  }
+  const root = asObject(value, "diskBudget");
+  return {
+    enabled:
+      asOptionalBoolean(root["enabled"], "diskBudget.enabled") ?? DEFAULT_DISK_BUDGET.enabled,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "diskBudget.intervalMinutes") ??
+      DEFAULT_DISK_BUDGET.intervalMinutes,
+    warnAttributableGb:
+      asNonNegativeNumber(root["warnAttributableGb"], "diskBudget.warnAttributableGb") ??
+      DEFAULT_DISK_BUDGET.warnAttributableGb,
+    npmCacheMaxGb:
+      asNonNegativeNumber(root["npmCacheMaxGb"], "diskBudget.npmCacheMaxGb") ??
+      DEFAULT_DISK_BUDGET.npmCacheMaxGb,
+    buildCacheOlderThanDays:
+      asNonNegativeNumber(root["buildCacheOlderThanDays"], "diskBudget.buildCacheOlderThanDays") ??
+      DEFAULT_DISK_BUDGET.buildCacheOlderThanDays,
+    maxWorktreesPerSweep:
+      asOptionalPositiveInteger(root["maxWorktreesPerSweep"], "diskBudget.maxWorktreesPerSweep") ??
+      DEFAULT_DISK_BUDGET.maxWorktreesPerSweep,
   };
 }
 
@@ -2226,7 +2454,12 @@ function parseConfigFile(
       mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
     opencodeGc: mode === "instance" ? parseOpenCodeGc(root["opencodeGc"]) : DEFAULT_OPENCODE_GC,
+    artifactRetention:
+      mode === "instance"
+        ? parseArtifactRetention(root["artifactRetention"])
+        : DEFAULT_ARTIFACT_RETENTION,
     sidecarGc: mode === "instance" ? parseSidecarGc(root["sidecarGc"]) : DEFAULT_SIDECAR_GC,
+    diskBudget: mode === "instance" ? parseDiskBudget(root["diskBudget"]) : DEFAULT_DISK_BUDGET,
     admission: parseAdmission(root["admission"], mode),
     staleAfterMinutes:
       mode === "instance"
@@ -2318,6 +2551,29 @@ export function isSameInstanceConfigPath(a: string, b: string): boolean {
   return samePathOnDisk(a, b);
 }
 
+// Pure guard, no writes. Bootstrapping belongs to the default instance config
+// path alone: `ensureInstanceConfig` seeds a defaults template that claims
+// server.port 4310 and dataDir ~/.spur, so auto-creating it at an arbitrary
+// `--config` path turns a typo'd, stale, or unexpanded path into a silent
+// retarget at the production daemon, exit 0, with the notice printed only on
+// the run that created the file (issue #846). A non-default path is therefore
+// a caller assertion that the file already exists.
+// The default path stays exempt for the same reason it is exempt in
+// `assertConfigMayUseProdSlot`: refusing it would break first boot.
+// `SPUR_CONFIG` is explicit too — `resolveInstanceConfigPath` folds it in
+// before this check, so env and flag behave identically.
+export function assertInstanceConfigPathExists(input?: string): void {
+  const configPath = resolveInstanceConfigPath(input);
+  if (isDefaultInstanceConfigPath(configPath) || existsSync(configPath)) {
+    return;
+  }
+  throw new Error(
+    `Instance config ${configPath} does not exist. ` +
+      `Spur only bootstraps the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
+      `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
+  );
+}
+
 // Pure guard, no writes: `daemon start`/`stop`/`restart` (and any other
 // `startServer` caller) must neither bootstrap a prod-default config
 // template at an arbitrary path, nor bind or target the production slot
@@ -2347,13 +2603,7 @@ export function assertConfigMayUseProdSlot(input?: string): void {
   if (isDefaultInstanceConfigPath(configPath)) {
     return;
   }
-  if (!existsSync(configPath)) {
-    throw new Error(
-      `Instance config ${configPath} does not exist. ` +
-        `'daemon start'/'stop'/'restart' only bootstrap the default instance config (${DEFAULT_INSTANCE_CONFIG_PATH}); ` +
-        `create ${configPath} first, or omit --config/SPUR_CONFIG to use the default.`,
-    );
-  }
+  assertInstanceConfigPathExists(input);
   const result = loadInstanceConfigReadOnly(input);
   if (result.status !== "ok") {
     // Unparseable (or, unreachably here, absent): a config that cannot be
@@ -2381,6 +2631,10 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   if (existsSync(configPath)) {
     return { configPath, initialized: false };
   }
+  // Guard the seeding site itself, not each caller: `loadConfig` and every CLI
+  // command action reach bootstrap through here, so this is the only place
+  // that sees each attempt to create a config (#846).
+  assertInstanceConfigPathExists(input);
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
   return { configPath, initialized: true };

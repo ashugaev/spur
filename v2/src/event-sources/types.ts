@@ -6,10 +6,12 @@ import {
   type SessionRecord,
   type SourceConfig,
   type SourceType,
+  type TelegramSpawnOrigin,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
   name: string;
+  occurrenceId: string;
   projectId: string;
   sourceId: string;
   data?: T;
@@ -26,6 +28,8 @@ export interface SourceSessionListItem {
   agent: string;
   state: string;
   title?: string;
+  /** Present when a message sent to this session would be dropped (stopped, error, killed). */
+  inactive?: true;
 }
 
 export interface SourceSpawnSessionRequest {
@@ -34,6 +38,13 @@ export interface SourceSpawnSessionRequest {
   agent?: AgentName;
   model?: string;
   selfDestruct?: SelfDestructConfig;
+  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  telegramOrigin?: TelegramSpawnOrigin;
+}
+
+export interface SourceProjectListItem {
+  id: string;
+  name: string;
 }
 
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
@@ -47,6 +58,14 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   signal: AbortSignal;
   logger: SourceLogger;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  /**
+   * Every configured, non-shepherd project this daemon knows about — the
+   * spawnable-project list for a source's own project picker. Filtered at
+   * the daemon boundary (see `spawnableProjects` in `event-sources/index.ts`)
+   * so no source module needs to know about `ProjectListEntry.kind` or
+   * `configured`.
+   */
+  listProjects?(): Promise<SourceProjectListItem[]>;
   /**
    * Resolves this instance's own web UI base URL, lazily — called at the
    * moment a source actually needs it (voice transcription today), not at

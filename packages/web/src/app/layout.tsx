@@ -1,14 +1,18 @@
 import type { Metadata, Viewport } from "next";
-import { JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { BG_BASE_HEX } from "@/design/colors";
 import Providers from "./providers";
 import "./globals.css";
 
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
+const jetbrainsMono = localFont({
+  src: [
+    { path: "../../public/fonts/JetBrainsMono-Light.woff2", weight: "300", style: "normal" },
+    { path: "../../public/fonts/JetBrainsMono-Regular.woff2", weight: "400", style: "normal" },
+    { path: "../../public/fonts/JetBrainsMono-Medium.woff2", weight: "500", style: "normal" },
+    { path: "../../public/fonts/JetBrainsMono-Bold.woff2", weight: "700", style: "normal" },
+  ],
   variable: "--font-jetbrains-mono",
   display: "swap",
-  weight: ["300", "400", "500", "700"],
 });
 
 export const viewport: Viewport = {

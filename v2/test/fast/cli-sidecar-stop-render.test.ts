@@ -7,6 +7,7 @@ import type { SidecarStopView } from "../../src/types.js";
 
 function stopView(sidecarStop: SidecarStopView["sidecarStop"]): SidecarStopView {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-1",
     project: "api",
     agent: "claude",

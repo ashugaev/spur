@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -11,6 +12,9 @@ import {
 import { dirname, join, relative, sep } from "node:path";
 import {
   isSessionState,
+  AUTOMATIC_REMINDER_MAX_ATTEMPTS,
+  DELIVERY_MAX_ATTEMPTS,
+  CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
   type ReviewProviderId,
@@ -18,19 +22,26 @@ import {
   type ReviewSnapshot,
   type RuntimeLogCursorState,
   type SessionQueuedMessagesState,
+  type SubmitAckBaseline,
   type ServiceInstanceRecord,
   type ServiceSourceState,
   type SessionPipelineState,
   type SessionRecord,
+  type SessionTokenUsageRecord,
   type SessionStateSubscription,
   type SidecarProcessIdentity,
   type TelegramBinding,
+  type TelegramChoice,
+  type TelegramMessageOwner,
   type TelegramReplyTarget,
+  type TokenUsageTotals,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
+import { aggregateTokenUsage } from "./token-usage.js";
+import { normalizePreflightTotals } from "./preflight-usage-store.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -114,6 +125,14 @@ function telegramBindingFilePath(dataDir: string, projectId: string, sourceId: s
   return join(dataDir, "source-state", "telegram", projectId, `${sourceId}.json`);
 }
 
+function telegramChoiceFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, "choices", `${sourceId}.json`);
+}
+
+function telegramMessageFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "telegram", projectId, "messages", `${sourceId}.json`);
+}
+
 function telegramReplyTargetFilePath(dataDir: string, sessionId: string): string {
   return join(
     dataDir,
@@ -193,6 +212,47 @@ function isPersistedPendingBatch(value: unknown): value is PersistedPendingBatch
   }
   const batch = value["batch"];
   if (!isRecord(batch)) return false;
+  const admissionCapRetryAt = value["admissionCapRetryAt"];
+  if (
+    admissionCapRetryAt !== undefined &&
+    (typeof admissionCapRetryAt !== "number" ||
+      !Number.isFinite(admissionCapRetryAt) ||
+      admissionCapRetryAt <= 0)
+  )
+    return false;
+  const admissionCapDenials = value["admissionCapDenials"];
+  if (
+    admissionCapDenials !== undefined &&
+    (typeof admissionCapDenials !== "number" ||
+      !Number.isInteger(admissionCapDenials) ||
+      admissionCapDenials < 1 ||
+      admissionCapDenials >= DELIVERY_MAX_ATTEMPTS)
+  )
+    return false;
+  const accounting = value["retryAccounting"];
+  if (
+    accounting !== undefined &&
+    (!Array.isArray(accounting) ||
+      !accounting.every(
+        (entry: unknown) =>
+          isRecord(entry) &&
+          typeof entry["itemKey"] === "string" &&
+          typeof entry["fingerprint"] === "string" &&
+          /^[a-f0-9]{64}$/.test(entry["fingerprint"]) &&
+          typeof entry["deliveryAttempts"] === "number" &&
+          Number.isInteger(entry["deliveryAttempts"]) &&
+          entry["deliveryAttempts"] >= 0 &&
+          entry["deliveryAttempts"] <= DELIVERY_MAX_ATTEMPTS &&
+          typeof entry["ciAttempts"] === "number" &&
+          Number.isInteger(entry["ciAttempts"]) &&
+          entry["ciAttempts"] >= 0 &&
+          entry["ciAttempts"] <= CI_FAILED_MAX_ATTEMPTS &&
+          typeof entry["nextAttemptAt"] === "number" &&
+          Number.isFinite(entry["nextAttemptAt"]) &&
+          entry["nextAttemptAt"] >= 0,
+      ))
+  )
+    return false;
   return batch["kind"] === "review" || batch["kind"] === "service" || batch["kind"] === "telegram";
 }
 
@@ -264,6 +324,23 @@ interface CachedSessionFile extends FileFingerprint {
 
 const sessionFileCache = new Map<string, CachedSessionFile>();
 
+interface CachedSessionIndex extends FileFingerprint {
+  index: Readonly<Record<string, string>>;
+}
+
+// Keyed on sessionIndexFilePath(dataDir). The .index.json of a live fleet is
+// hundreds of KB and every readSession() parses it, so the parsed AND filtered
+// projection is cached together — a hit must rebuild nothing.
+const sessionIndexCache = new Map<string, CachedSessionIndex>();
+
+const EMPTY_INDEX: Readonly<Record<string, string>> = Object.freeze({});
+
+/** Cap on pending inline-button choices kept per Telegram source. */
+const MAX_TELEGRAM_CHOICES = 200;
+
+/** Cap on bot-message owners kept per Telegram source; oldest evicted first. */
+const MAX_TELEGRAM_MESSAGES = 1000;
+
 function statFingerprint(path: string): FileFingerprint | null {
   try {
     return statSync(path);
@@ -315,7 +392,7 @@ function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
 }
 
-function readTelegramBindingKey(chatId: number, messageThreadId?: number): string {
+export function telegramBindingKey(chatId: number, messageThreadId?: number): string {
   return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
@@ -339,6 +416,40 @@ function isTelegramBinding(value: unknown): value is TelegramBinding {
   );
 }
 
+function isTelegramMessageOwner(value: unknown): value is TelegramMessageOwner {
+  if (!value || typeof value !== "object") return false;
+  const owner = value as Partial<TelegramMessageOwner>;
+  return (
+    typeof owner.chatId === "number" &&
+    Number.isInteger(owner.chatId) &&
+    typeof owner.messageId === "number" &&
+    Number.isInteger(owner.messageId) &&
+    typeof owner.sessionId === "string" &&
+    owner.sessionId.length > 0
+  );
+}
+
+function isTelegramChoice(value: unknown): value is TelegramChoice {
+  if (!value || typeof value !== "object") return false;
+  const choice = value as Partial<TelegramChoice>;
+  return (
+    typeof choice.token === "string" &&
+    choice.token.length > 0 &&
+    typeof choice.offerId === "string" &&
+    choice.offerId.length > 0 &&
+    typeof choice.sessionId === "string" &&
+    choice.sessionId.length > 0 &&
+    typeof choice.chatId === "number" &&
+    Number.isInteger(choice.chatId) &&
+    (choice.messageThreadId === undefined ||
+      (typeof choice.messageThreadId === "number" && Number.isInteger(choice.messageThreadId))) &&
+    typeof choice.text === "string" &&
+    typeof choice.value === "string" &&
+    typeof choice.expiresAt === "string" &&
+    !Number.isNaN(Date.parse(choice.expiresAt))
+  );
+}
+
 function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
   if (!isTelegramBinding(value)) return false;
   const target = value as Partial<TelegramReplyTarget>;
@@ -349,6 +460,7 @@ function isTelegramReplyTarget(value: unknown): value is TelegramReplyTarget {
     target.sourceId.trim().length > 0 &&
     (target.statusMessageId === undefined ||
       (typeof target.statusMessageId === "number" && Number.isInteger(target.statusMessageId))) &&
+    (target.topicName === undefined || typeof target.topicName === "string") &&
     (target.lastInboundAt === undefined || typeof target.lastInboundAt === "string") &&
     (target.lastReplyAt === undefined || typeof target.lastReplyAt === "string") &&
     typeof target.updatedAt === "string"
@@ -359,25 +471,45 @@ function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
-function readSessionIndex(dataDir: string): Record<string, string> {
+function readSessionIndex(dataDir: string): Readonly<Record<string, string>> {
   const path = sessionIndexFilePath(dataDir);
-  if (!existsSync(path)) {
-    return {};
+  // One stat replaces the existsSync + read pair: it both proves the file is
+  // there and carries the fingerprint the cache is keyed on.
+  const stat = statFingerprint(path);
+  if (!stat) {
+    sessionIndexCache.delete(path);
+    return EMPTY_INDEX;
+  }
+
+  const cached = sessionIndexCache.get(path);
+  if (cached && sameFingerprint(cached, stat)) {
+    return cached.index;
   }
 
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!isRecord(parsed)) {
-      return {};
+      sessionIndexCache.delete(path);
+      return EMPTY_INDEX;
     }
-    return Object.fromEntries(
+    const index = Object.fromEntries(
       Object.entries(parsed).filter(
         (entry): entry is [string, string] =>
           typeof entry[0] === "string" && typeof entry[1] === "string",
       ),
     );
+    sessionIndexCache.set(path, {
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      index,
+    });
+    return index;
   } catch {
-    return {};
+    // A corrupt or torn file is never cached: it must be retried, and the
+    // caller must keep seeing an empty index until it parses again.
+    sessionIndexCache.delete(path);
+    return EMPTY_INDEX;
   }
 }
 
@@ -414,10 +546,29 @@ function readAvailableBacklogFile(path: string): Map<string, AvailableBacklogIte
   }
 }
 
+// Sole writer of .index.json. Caches the object it wrote against the
+// fingerprint of the tmp inode that carries those bytes, so a foreign writer
+// landing on the destination afterwards reads as a mismatch, never as a hit.
+function writeSessionIndexFile(dataDir: string, index: Readonly<Record<string, string>>): void {
+  const path = sessionIndexFilePath(dataDir);
+  const fingerprint = writeJsonFile(path, index);
+  if (fingerprint) {
+    sessionIndexCache.set(path, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      index,
+    });
+  } else {
+    sessionIndexCache.delete(path);
+  }
+}
+
 function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
   const index = readSessionIndex(dataDir);
-  index[sessionId] = relative(dataDir, filePath);
-  writeJsonFile(sessionIndexFilePath(dataDir), index);
+  // Copy, never mutate: the object may be the one every other reader is holding.
+  const next = { ...index, [sessionId]: relative(dataDir, filePath) };
+  writeSessionIndexFile(dataDir, next);
 }
 
 function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
@@ -426,7 +577,7 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
     return;
   }
   const { [sessionId]: _removed, ...nextIndex } = index;
-  writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+  writeSessionIndexFile(dataDir, nextIndex);
 }
 
 function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
@@ -510,6 +661,9 @@ function readPendingSendBatchesFile(path: string): Map<string, PersistedPendingB
     const result = new Map<string, PersistedPendingBatch>();
     for (const record of records) {
       if (!isPersistedPendingBatch(record)) continue;
+      if (record.admissionCapRetryAt !== undefined && record.admissionCapDenials === undefined) {
+        record.admissionCapDenials = 1;
+      }
       result.set(record.queueKey, record);
     }
     return result;
@@ -551,11 +705,30 @@ function findSessionFilePath(dataDir: string, sessionId: string): string | null 
   return null;
 }
 
-function writeJsonFile(path: string, value: unknown): void {
+// Returns the fingerprint of the bytes just written, taken on the tmp path
+// BEFORE the rename. tmpPath sits in the destination's own directory, so the
+// rename is never a cross-device copy: ino, mtimeMs and size all survive it.
+// Fingerprinting the tmp inode instead of the destination is what keeps a
+// foreign writer from pinning our object to their fingerprint forever.
+function writeJsonFile(path: string, value: unknown): FileFingerprint | null {
   mkdirSync(dirname(path), { recursive: true });
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf-8");
+  const fingerprint = statFingerprint(tmpPath);
   renameSync(tmpPath, path);
+  return fingerprint;
+}
+
+function writePrivateJsonFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+  chmodSync(path, 0o600);
 }
 
 // Discriminates the current envelope (`{prNumber, signals}`) from the legacy
@@ -571,8 +744,16 @@ function parseReviewSnapshot(path: string): ReviewSnapshot {
     | ReviewSignal[]
     | undefined;
   const prNumber = typeof envelope?.prNumber === "number" ? envelope.prNumber : null;
+  const mergeConflictClearId = envelope?.mergeConflictClearId;
+  if (
+    mergeConflictClearId !== undefined &&
+    (typeof mergeConflictClearId !== "string" || !/^[0-9a-f-]{36}$/.test(mergeConflictClearId))
+  ) {
+    throw new Error("Invalid merge-conflict clear identifier");
+  }
   return {
     prNumber,
+    ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
     signals: new Map(
       (signalsRaw ?? []).map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]),
     ),
@@ -601,6 +782,60 @@ function normalizeQueuedMessagesState(
     messages: queuedMessages.messages,
     awaitingPrompt: queuedMessages.awaitingPrompt,
   };
+}
+
+// A malformed ackBaseline drops alone: the marker then re-queues on restart,
+// the same as an unconfirmed ack.
+function normalizeQueuedMessageTyped(
+  typed: NonNullable<SessionRecord["queuedMessageTyped"]>,
+): NonNullable<SessionRecord["queuedMessageTyped"]> {
+  const ackBaseline = normalizeSubmitAckBaseline(typed.ackBaseline);
+  return {
+    message: typed.message,
+    typedAt: typed.typedAt,
+    ...(ackBaseline ? { ackBaseline } : {}),
+  };
+}
+
+function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const { agent } = record;
+  if (
+    (agent === "claude" || agent === "cursor") &&
+    typeof record["file"] === "string" &&
+    typeof record["size"] === "number"
+  ) {
+    const base = { file: record["file"], size: record["size"] };
+    const rotated = record["rotated"];
+    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
+      return { agent, ...base };
+    }
+    const { file, size } = rotated as Record<string, unknown>;
+    return typeof file === "string" && typeof size === "number"
+      ? { agent, ...base, rotated: { file, size } }
+      : { agent, ...base };
+  }
+  const offsets = record["offsets"];
+  if (agent === "codex" && offsets !== null && typeof offsets === "object") {
+    const entries = Object.entries(offsets).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    );
+    return { agent, offsets: Object.fromEntries(entries) };
+  }
+  const after = record["after"];
+  if (agent === "opencode" && typeof record["sessionId"] === "string") {
+    if (after === null) {
+      return { agent, sessionId: record["sessionId"], after: null };
+    }
+    if (typeof after === "object") {
+      const { createdMs, id } = after as Record<string, unknown>;
+      if (typeof createdMs === "number" && typeof id === "string") {
+        return { agent, sessionId: record["sessionId"], after: { createdMs, id } };
+      }
+    }
+  }
+  return undefined;
 }
 
 // Keeps only entries whose pid/pgid/starttime are finite positive integers —
@@ -663,10 +898,168 @@ function normalizeStateSubscriptions(
   return normalized.length > 0 ? normalized : undefined;
 }
 
+const OPTIONAL_TOKEN_COMPONENTS = [
+  "cacheReadInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+  "cacheWrite5mInputTokens",
+  "cacheWrite1hInputTokens",
+] as const;
+
+function normalizeTokenTotals(value: unknown): TokenUsageTotals | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const totals = value as Record<string, unknown>;
+  const values = [totals["inputTokens"], totals["outputTokens"], totals["totalTokens"]];
+  if (!values.every((token) => Number.isSafeInteger(token) && (token as number) >= 0)) return null;
+  const normalized = {
+    inputTokens: totals["inputTokens"] as number,
+    outputTokens: totals["outputTokens"] as number,
+    totalTokens: totals["totalTokens"] as number,
+  } as TokenUsageTotals;
+  if (normalized.totalTokens !== normalized.inputTokens + normalized.outputTokens) return null;
+  for (const component of OPTIONAL_TOKEN_COMPONENTS) {
+    const token = totals[component];
+    if (token === undefined) continue;
+    if (!Number.isSafeInteger(token) || (token as number) < 0) return null;
+    normalized[component] = token as number;
+  }
+  if (
+    (normalized.cacheReadInputTokens ?? 0) + (normalized.cacheWriteInputTokens ?? 0) >
+      normalized.inputTokens ||
+    (normalized.reasoningOutputTokens ?? 0) > normalized.outputTokens ||
+    (normalized.cacheWrite5mInputTokens ?? 0) + (normalized.cacheWrite1hInputTokens ?? 0) >
+      (normalized.cacheWriteInputTokens ?? 0)
+  )
+    return null;
+  return normalized;
+}
+
+function normalizeTokenUsage(value: unknown): SessionTokenUsageRecord | undefined {
+  const totals = normalizeTokenTotals(value);
+  if (!totals || typeof value !== "object" || value === null) return undefined;
+  const usage = value as Record<string, unknown>;
+  const provider = usage["provider"];
+  if (
+    provider !== "claude" &&
+    provider !== "codex" &&
+    provider !== "cursor" &&
+    provider !== "opencode"
+  )
+    return undefined;
+  const rawGenerations = usage["generations"] ?? usage["sources"];
+  if (
+    typeof rawGenerations !== "object" ||
+    rawGenerations === null ||
+    Array.isArray(rawGenerations)
+  ) {
+    return undefined;
+  }
+  const generations: Record<string, TokenUsageTotals> = {};
+  for (const [generationId, rawGeneration] of Object.entries(rawGenerations)) {
+    const generation = normalizeTokenTotals(rawGeneration);
+    if (!generationId || !generation) return undefined;
+    generations[generationId] = generation;
+  }
+  if (Object.keys(generations).length === 0) return undefined;
+  const aggregate = aggregateTokenUsage(provider, generations);
+  if (usage["generations"] === undefined) {
+    if (
+      aggregate.inputTokens > totals.inputTokens ||
+      aggregate.outputTokens > totals.outputTokens ||
+      aggregate.totalTokens > totals.totalTokens
+    )
+      return undefined;
+    if (aggregate.totalTokens < totals.totalTokens) {
+      generations[`legacy:${provider}`] = {
+        inputTokens: totals.inputTokens - aggregate.inputTokens,
+        outputTokens: totals.outputTokens - aggregate.outputTokens,
+        totalTokens: totals.totalTokens - aggregate.totalTokens,
+      };
+    }
+    return aggregateTokenUsage(provider, generations);
+  }
+  for (const component of [
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    ...OPTIONAL_TOKEN_COMPONENTS,
+  ] as const) {
+    if (aggregate[component] !== totals[component]) return undefined;
+  }
+  return aggregate;
+}
+
+function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightTokenUsage"] {
+  const totals = normalizePreflightTotals(value);
+  if (!totals || !isRecord(value)) return undefined;
+  const status = value["status"];
+  const attemptCount = value["attemptCount"];
+  const unknownAttemptCount = value["unknownAttemptCount"];
+  const providerIterationCount = value["providerIterationCount"];
+  const rawByProvider = value["byProvider"];
+  if (
+    (status !== "measured" && status !== "partial" && status !== "unknown") ||
+    !Number.isSafeInteger(attemptCount) ||
+    (attemptCount as number) < 0 ||
+    !Number.isSafeInteger(unknownAttemptCount) ||
+    (unknownAttemptCount as number) < 0 ||
+    (unknownAttemptCount as number) > (attemptCount as number) ||
+    !Number.isSafeInteger(providerIterationCount) ||
+    (providerIterationCount as number) < 0 ||
+    !isRecord(rawByProvider)
+  )
+    return undefined;
+  const byProvider: NonNullable<SessionRecord["preflightTokenUsage"]>["byProvider"] = {};
+  for (const provider of ["claude", "codex", "cursor", "opencode"] as const) {
+    if (rawByProvider[provider] === undefined) continue;
+    const providerTotals = normalizeTokenTotals(rawByProvider[provider]);
+    if (!providerTotals) return undefined;
+    byProvider[provider] = providerTotals;
+  }
+  const aggregate = Object.values(byProvider).reduce(
+    (sum, provider) => ({
+      inputTokens: sum.inputTokens + provider.inputTokens,
+      outputTokens: sum.outputTokens + provider.outputTokens,
+      totalTokens: sum.totalTokens + provider.totalTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  );
+  if (
+    aggregate.inputTokens !== totals.inputTokens ||
+    aggregate.outputTokens !== totals.outputTokens ||
+    aggregate.totalTokens !== totals.totalTokens
+  )
+    return undefined;
+  return {
+    ...totals,
+    status,
+    attemptCount: attemptCount as number,
+    unknownAttemptCount: unknownAttemptCount as number,
+    providerIterationCount: providerIterationCount as number,
+    byProvider,
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
+  const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
+  // Records written before the rename carry the hold as launchUnconfirmedAt;
+  // read it once here so an existing hold survives, and write only the new name.
+  const legacyUnconfirmed = (normalizedSession as { launchUnconfirmedAt?: unknown })
+    .launchUnconfirmedAt;
+  const submitUnconfirmedAt =
+    normalizedSession.submitUnconfirmedAt ??
+    (typeof legacyUnconfirmed === "string" ? legacyUnconfirmed : undefined);
+  const workspaceId = workspaceIdOf(normalizedSession);
+  const closeoutOwner =
+    typeof normalizedSession.closeoutOwner === "boolean"
+      ? normalizedSession.closeoutOwner
+      : normalizedSession.restrictWrites !== true &&
+        normalizedSession.worktree === true &&
+        workspaceId === normalizedSession.id;
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
@@ -674,20 +1067,34 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
     // stays written in exactly one place (session-desk.ts).
-    workspaceId: workspaceIdOf(normalizedSession),
+    workspaceId,
     agent: normalizedSession.agent,
     ...(normalizedSession.model ? { model: normalizedSession.model } : {}),
+    ...(normalizedSession.reasoningEffort !== undefined
+      ? { reasoningEffort: normalizedSession.reasoningEffort }
+      : {}),
     ...(normalizedSession.mode !== undefined ? { mode: normalizedSession.mode } : {}),
     ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.restrictWrites !== undefined
       ? { restrictWrites: normalizedSession.restrictWrites }
       : {}),
+    closeoutOwner,
     ...(normalizedSession.allowedTriggers !== undefined
       ? { allowedTriggers: normalizedSession.allowedTriggers }
       : {}),
     ...(normalizedSession.selfDestruct ? { selfDestruct: normalizedSession.selfDestruct } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
+      : {}),
+    ...(normalizedSession.cursorRestoreBoundary &&
+    typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
+    Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&
+    normalizedSession.cursorRestoreBoundary.offset >= 0
+      ? { cursorRestoreBoundary: normalizedSession.cursorRestoreBoundary }
+      : {}),
+    ...(typeof normalizedSession.codexRestoreStartedAt === "string" &&
+    Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
+      ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
@@ -703,8 +1110,14 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     worktreePath: normalizedSession.worktreePath,
     tmuxSession: normalizedSession.tmuxSession,
     launchCommand: normalizedSession.launchCommand,
-    status: normalizedSession.status,
+    status:
+      normalizedSession.status === "stopped" && normalizedSession.stopReason === "token_budget"
+        ? "budget_limited"
+        : normalizedSession.status,
     ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    ...(normalizedSession.tokenBudgetOverride === true ? { tokenBudgetOverride: true } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
+    ...(preflightTokenUsage ? { preflightTokenUsage } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.lastOpenedAt ? { lastOpenedAt: normalizedSession.lastOpenedAt } : {}),
@@ -724,11 +1137,46 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),
+    ...(submitUnconfirmedAt ? { submitUnconfirmedAt } : {}),
+    ...(typeof normalizedSession.submitRequeuedMessage === "string"
+      ? { submitRequeuedMessage: normalizedSession.submitRequeuedMessage }
+      : {}),
+    ...(normalizedSession.submitFailedMessage &&
+    typeof normalizedSession.submitFailedMessage.message === "string" &&
+    typeof normalizedSession.submitFailedMessage.at === "string"
+      ? {
+          submitFailedMessage: {
+            message: normalizedSession.submitFailedMessage.message,
+            at: normalizedSession.submitFailedMessage.at,
+          },
+        }
+      : {}),
+    ...(normalizedSession.queuedMessageTyped &&
+    typeof normalizedSession.queuedMessageTyped.message === "string" &&
+    typeof normalizedSession.queuedMessageTyped.typedAt === "string"
+      ? {
+          queuedMessageTyped: normalizeQueuedMessageTyped(normalizedSession.queuedMessageTyped),
+        }
+      : {}),
     ...(normalizedSession.scheduledWake ? { scheduledWake: normalizedSession.scheduledWake } : {}),
     ...(normalizedSession.intervalWake ? { intervalWake: normalizedSession.intervalWake } : {}),
     ...(normalizedSession.dailyWake ? { dailyWake: normalizedSession.dailyWake } : {}),
     ...(normalizedSession.rateLimitedAt ? { rateLimitedAt: normalizedSession.rateLimitedAt } : {}),
     ...(normalizedSession.serverErrorAt ? { serverErrorAt: normalizedSession.serverErrorAt } : {}),
+    ...(typeof normalizedSession.serverErrorReactivationAttempts === "number" &&
+    Number.isInteger(normalizedSession.serverErrorReactivationAttempts) &&
+    normalizedSession.serverErrorReactivationAttempts >= 0 &&
+    normalizedSession.serverErrorReactivationAttempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { serverErrorReactivationAttempts: normalizedSession.serverErrorReactivationAttempts }
+      : {}),
+    ...(normalizedSession.todoNudge &&
+    typeof normalizedSession.todoNudge.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(normalizedSession.todoNudge.fingerprint) &&
+    Number.isInteger(normalizedSession.todoNudge.attempts) &&
+    normalizedSession.todoNudge.attempts >= 0 &&
+    normalizedSession.todoNudge.attempts <= AUTOMATIC_REMINDER_MAX_ATTEMPTS
+      ? { todoNudge: normalizedSession.todoNudge }
+      : {}),
     ...(normalizedSession.claudeAccountId
       ? { claudeAccountId: normalizedSession.claudeAccountId }
       : {}),
@@ -845,7 +1293,7 @@ export function archiveSessions(
     const nextIndex = Object.fromEntries(
       Object.entries(index).filter(([id]) => !archivedIdSet.has(id)),
     );
-    writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+    writeSessionIndexFile(dataDir, nextIndex);
   }
 
   return { archivedIds, archiveDir };
@@ -1002,6 +1450,9 @@ export function writeReviewSourceSnapshot(
   writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
     prNumber: snapshot.prNumber,
     signals: [...snapshot.signals.values()],
+    ...(snapshot.mergeConflictClearId !== undefined
+      ? { mergeConflictClearId: snapshot.mergeConflictClearId }
+      : {}),
   });
 }
 
@@ -1279,10 +1730,27 @@ export function readPendingSendBatches(dataDir: string): Map<string, PersistedPe
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
 }
 
+/**
+ * Whether a Telegram message for this session is persisted and not yet
+ * delivered. `unclaimedOnly` skips a batch whose delivery already started.
+ */
+export function hasPendingTelegramSend(
+  dataDir: string,
+  sessionId: string,
+  options: { unclaimedOnly?: true } = {},
+): boolean {
+  for (const record of readPendingSendBatches(dataDir).values()) {
+    if (record.batch.kind !== "telegram" || record.batch.sessionId !== sessionId) continue;
+    if (options.unclaimedOnly && record.claim) continue;
+    return true;
+  }
+  return false;
+}
+
 export function recordPendingSendBatch(dataDir: string, record: PersistedPendingBatch): void {
   const records = readPendingSendBatches(dataDir);
   records.set(record.queueKey, record);
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
@@ -1292,11 +1760,70 @@ export function recordPendingSendBatch(dataDir: string, record: PersistedPending
 export function deletePendingSendBatch(dataDir: string, queueKey: string): void {
   const records = readPendingSendBatches(dataDir);
   if (!records.delete(queueKey)) return;
-  writeJsonFile(pendingSendBatchesFilePath(dataDir), {
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
     records: [...records.values()].sort((left, right) =>
       left.queueKey.localeCompare(right.queueKey),
     ),
   });
+}
+
+export function readPendingSendBatch(
+  dataDir: string,
+  workId: string,
+): PersistedPendingBatch | null {
+  return (
+    [...readPendingSendBatches(dataDir).values()].find((record) => record.workId === workId) ?? null
+  );
+}
+
+export function updatePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision: number; claimId?: string },
+  next: PersistedPendingBatch,
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    current.revision !== expected.revision ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  records.set(next.queueKey, next);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
+}
+
+// Deletes the record owning `workId`, never the record sitting at a queue key.
+// A stale controller that deleted by queue key would drop a newer generation's
+// work. `revision`/`claimId` narrow the delete further when the caller holds a
+// claim.
+export function deletePendingSendBatchConditional(
+  dataDir: string,
+  expected: { workId: string; revision?: number; claimId?: string },
+): boolean {
+  const records = readPendingSendBatches(dataDir);
+  const current = [...records.values()].find((record) => record.workId === expected.workId);
+  if (
+    !current ||
+    (expected.revision !== undefined && current.revision !== expected.revision) ||
+    (expected.claimId !== undefined && current.claim?.claimId !== expected.claimId)
+  ) {
+    return false;
+  }
+  records.delete(current.queueKey);
+  writePrivateJsonFile(pendingSendBatchesFilePath(dataDir), {
+    records: [...records.values()].sort((left, right) =>
+      left.queueKey.localeCompare(right.queueKey),
+    ),
+  });
+  return true;
 }
 
 export function readServiceSourceState(
@@ -1343,10 +1870,7 @@ export function readTelegramBindings(
     return new Map(
       values
         .filter(isTelegramBinding)
-        .map((binding) => [
-          readTelegramBindingKey(binding.chatId, binding.messageThreadId),
-          binding,
-        ]),
+        .map((binding) => [telegramBindingKey(binding.chatId, binding.messageThreadId), binding]),
     );
   } catch {
     return new Map();
@@ -1389,7 +1913,7 @@ export function writeTelegramBindings(
     existing.delete(key);
   }
   for (const binding of bindings) {
-    existing.set(readTelegramBindingKey(binding.chatId, binding.messageThreadId), binding);
+    existing.set(telegramBindingKey(binding.chatId, binding.messageThreadId), binding);
   }
   const existingLastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
   writeJsonFile(telegramBindingFilePath(dataDir, projectId, sourceId), {
@@ -1404,6 +1928,175 @@ export function writeTelegramBindings(
         ? { lastUpdateId: existingLastUpdateId }
         : {}),
   });
+}
+
+function readTelegramMessages(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): TelegramMessageOwner[] {
+  const path = telegramMessageFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const messages = (parsed as { messages?: unknown }).messages;
+  return Array.isArray(messages) ? messages.filter(isTelegramMessageOwner) : [];
+}
+
+/** Records bot messages a session sent, upserting by chat and message id. Empty ids write nothing. */
+export function recordTelegramMessages(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  owner: { sessionId: string; chatId: number },
+  messageIds: number[],
+): void {
+  if (messageIds.length === 0) return;
+  const recorded = new Set(messageIds);
+  const kept = readTelegramMessages(dataDir, projectId, sourceId).filter(
+    (message) => message.chatId !== owner.chatId || !recorded.has(message.messageId),
+  );
+  const added = [...recorded].map((messageId) => ({
+    chatId: owner.chatId,
+    messageId,
+    sessionId: owner.sessionId,
+  }));
+  writeJsonFile(telegramMessageFilePath(dataDir, projectId, sourceId), {
+    messages: [...kept, ...added].slice(-MAX_TELEGRAM_MESSAGES),
+  });
+}
+
+/** The session that sent one bot message, or null when unrecorded. */
+export function findTelegramMessageSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  chatId: number,
+  messageId: number,
+): string | null {
+  const found = readTelegramMessages(dataDir, projectId, sourceId).find(
+    (message) => message.chatId === chatId && message.messageId === messageId,
+  );
+  return found?.sessionId ?? null;
+}
+
+/** Newest-last, expired entries dropped. */
+export function readTelegramChoices(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): TelegramChoice[] {
+  const path = telegramChoiceFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const choices = (parsed as { choices?: unknown }).choices;
+  if (!Array.isArray(choices)) return [];
+  const now = Date.now();
+  return choices.filter(
+    (choice): choice is TelegramChoice =>
+      isTelegramChoice(choice) && Date.parse(choice.expiresAt) > now,
+  );
+}
+
+/**
+ * Evicts whole offers, oldest first: half an offer would leave live buttons
+ * beside dead ones in the same Telegram message.
+ */
+function capTelegramChoices(choices: TelegramChoice[]): TelegramChoice[] {
+  if (choices.length <= MAX_TELEGRAM_CHOICES) return choices;
+  const sizes = new Map<string, number>();
+  for (const choice of choices) {
+    sizes.set(choice.offerId, (sizes.get(choice.offerId) ?? 0) + 1);
+  }
+  const evicted = new Set<string>();
+  let remaining = choices.length;
+  for (const choice of choices) {
+    if (remaining <= MAX_TELEGRAM_CHOICES) break;
+    if (evicted.has(choice.offerId)) continue;
+    // Never evict the newest offer: it is the one the user is looking at.
+    if (sizes.size - evicted.size === 1) break;
+    evicted.add(choice.offerId);
+    remaining -= sizes.get(choice.offerId) ?? 0;
+  }
+  return choices.filter((choice) => !evicted.has(choice.offerId));
+}
+
+function writeTelegramChoices(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  choices: TelegramChoice[],
+): void {
+  writeJsonFile(telegramChoiceFilePath(dataDir, projectId, sourceId), {
+    choices: capTelegramChoices(choices),
+  });
+}
+
+/**
+ * Records one offer for a session in a chat, retiring that session's previous
+ * offer there. Empty `choices` retires without recording: two live questions
+ * would let a click answer the wrong one, since the reply carries the value
+ * alone.
+ */
+export function writeTelegramOffer(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  offer: { sessionId: string; chatId: number; choices: TelegramChoice[] },
+): void {
+  const kept = readTelegramChoices(dataDir, projectId, sourceId).filter(
+    (choice) => choice.sessionId !== offer.sessionId || choice.chatId !== offer.chatId,
+  );
+  writeTelegramChoices(dataDir, projectId, sourceId, [...kept, ...offer.choices]);
+}
+
+/** Looks up one pending choice without consuming it. */
+export function findTelegramChoice(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  token: string,
+  chatId: number,
+): TelegramChoice | null {
+  return (
+    readTelegramChoices(dataDir, projectId, sourceId).find(
+      (choice) => choice.token === token && choice.chatId === chatId,
+    ) ?? null
+  );
+}
+
+/**
+ * Consumes the whole offer the token belongs to, so sibling buttons go dead.
+ * A token clicked from a chat it was not offered in consumes nothing.
+ */
+export function takeTelegramChoice(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  token: string,
+  chatId: number,
+): TelegramChoice | null {
+  const choices = readTelegramChoices(dataDir, projectId, sourceId);
+  const taken = choices.find((choice) => choice.token === token && choice.chatId === chatId);
+  if (!taken) return null;
+  writeTelegramChoices(
+    dataDir,
+    projectId,
+    sourceId,
+    choices.filter((choice) => choice.offerId !== taken.offerId),
+  );
+  return taken;
 }
 
 export function readTelegramReplyTarget(
@@ -1438,11 +2131,25 @@ export function deleteTelegramSourceStateForSession(
   dataDir: string,
   projectId: string,
   sessionId: string,
-): void {
+): { heldBinding: boolean } {
   const dir = join(dataDir, "source-state", "telegram", projectId);
   if (!existsSync(dir)) {
     deleteTelegramReplyTarget(dataDir, sessionId);
-    return;
+    return { heldBinding: false };
+  }
+  let heldBinding = false;
+
+  const choiceDir = join(dir, "choices");
+  if (existsSync(choiceDir)) {
+    for (const entry of readdirSync(choiceDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const sourceId = entry.name.slice(0, -".json".length);
+      const choices = readTelegramChoices(dataDir, projectId, sourceId);
+      const remaining = choices.filter((choice) => choice.sessionId !== sessionId);
+      if (remaining.length !== choices.length) {
+        writeTelegramChoices(dataDir, projectId, sourceId, remaining);
+      }
+    }
   }
 
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -1451,6 +2158,7 @@ export function deleteTelegramSourceStateForSession(
     const bindings = readTelegramBindings(dataDir, projectId, sourceId);
     const remaining = [...bindings.values()].filter((binding) => binding.sessionId !== sessionId);
     if (remaining.length !== bindings.size) {
+      heldBinding = true;
       const lastUpdateId = readTelegramLastUpdateId(dataDir, projectId, sourceId);
       writeTelegramBindings(
         dataDir,
@@ -1462,6 +2170,7 @@ export function deleteTelegramSourceStateForSession(
     }
   }
   deleteTelegramReplyTarget(dataDir, sessionId);
+  return { heldBinding };
 }
 
 export function listActiveServiceProblems(

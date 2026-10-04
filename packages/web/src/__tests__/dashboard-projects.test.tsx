@@ -49,6 +49,7 @@ vi.mock("@/components/DirectTerminal", () => ({
 function ghostSession() {
   return {
     id: "ghost-1",
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     project: "ghost-id",
     agent: "claude",
     prompt: "Continuing work",
@@ -85,7 +86,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const entry = {
@@ -104,6 +108,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo",
             agent: "claude",
             prompt: "",
@@ -162,7 +167,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const parsed = JSON.parse(String(init.body)) as unknown;
@@ -182,6 +190,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo",
             agent: "claude",
             prompt: "",
@@ -234,7 +243,10 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ lifecycleInstanceId: "test-instance", projects: [], sessions: [] }),
+          { status: 200 },
+        );
       }
       if (url === "/api/projects" && init?.method === "POST") {
         const parsed = JSON.parse(String(init.body)) as { createMissing?: boolean };
@@ -263,6 +275,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "demo-bootstrap-1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "demo-app",
             agent: "claude",
             prompt: "",
@@ -352,6 +365,7 @@ describe("Dashboard project create/delete", () => {
                 path: "/tmp/stub",
               },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -434,6 +448,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -489,6 +504,7 @@ describe("Dashboard project create/delete", () => {
                     path: "/tmp/stub",
                   },
                 ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -539,9 +555,16 @@ describe("Dashboard project create/delete", () => {
         return new Response(JSON.stringify({ available: false, language: "" }));
       }
       if (url === "/api/sessions") {
-        return new Response(JSON.stringify({ projects: [], sessions: [ghostSession()] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({
+            lifecycleInstanceId: "test-instance",
+            projects: [],
+            sessions: [ghostSession()],
+          }),
+          {
+            status: 200,
+          },
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -583,6 +606,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -606,6 +630,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -684,6 +709,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -742,6 +768,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -758,6 +785,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -842,6 +870,8 @@ describe("Dashboard project create/delete", () => {
     }> = [];
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "server-batch" }));
       if (url === "/api/runtime/resources") {
         return new Response(JSON.stringify({ available: false }));
       }
@@ -854,6 +884,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -872,6 +903,7 @@ describe("Dashboard project create/delete", () => {
           prompt?: string;
           agent?: string;
           overrides?: { worktree: boolean };
+          preflightBatchId?: string;
         };
         preflightRequests.push(body);
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
@@ -903,14 +935,87 @@ describe("Dashboard project create/delete", () => {
     resolveSpawnDefaults?.(new Response(JSON.stringify({ model: "sonnet", worktree: false })));
     await waitFor(() => {
       expect(preflightRequests).toEqual([
-        {
+        expect.objectContaining({
           projectId: "api",
           prompt: "Do the thing",
           agent: "claude",
           overrides: { worktree: false },
-        },
+          preflightBatchId: expect.any(String),
+        }),
       ]);
     });
+  });
+
+  it("shows preview loading and failure beside recorded token usage", async () => {
+    let resolvePreview: ((response: Response) => void) | undefined;
+    let previewRequested = false;
+    const pendingPreview = new Promise<Response>((resolve) => {
+      resolvePreview = resolve;
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "server-batch" }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/sessions")
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
+            ],
+            lifecycleInstanceId: "test-instance",
+            sessions: [],
+          }),
+        );
+      if (url.startsWith("/api/models"))
+        return new Response(JSON.stringify({ models: [{ id: "sonnet", label: "Sonnet" }] }));
+      if (url.startsWith("/api/projects/api/spawn-defaults"))
+        return new Response(JSON.stringify({ model: "sonnet", worktree: true }));
+      if (url === "/api/preflight") {
+        previewRequested = true;
+        return pendingPreview;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Spawn Session" }))[0]!);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Prompt..."), {
+      target: { value: "Check the branch" },
+    });
+
+    expect(await within(dialog).findByText("Checking branch preview…")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    await waitFor(() => expect(previewRequested).toBe(true));
+    resolvePreview?.(
+      new Response(
+        JSON.stringify({
+          error: "provider failed after output",
+          preflightTokenUsageView: {
+            status: "measured",
+            inputTokens: 10,
+            outputTokens: 2,
+            totalTokens: 12,
+            attemptCount: 1,
+            unknownAttemptCount: 0,
+            providerIterationCount: 1,
+            byProvider: { codex: { totalTokens: 12 } },
+          },
+        }),
+        { status: 500 },
+      ),
+    );
+    expect(
+      await within(dialog).findByText("Branch preview failed. Token usage may still count."),
+    ).toHaveAttribute("role", "alert");
+    expect(within(dialog).getByText("Pre-flight tokens: 12")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Checking branch preview…")).not.toBeInTheDocument();
   });
 
   it("unblocks submit when the user confirms the already-selected workspace mode after a spawn-defaults failure", async () => {
@@ -929,6 +1034,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -945,6 +1051,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -1041,6 +1148,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1055,6 +1163,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",
@@ -1145,6 +1254,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1232,6 +1342,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1251,6 +1362,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1366,6 +1478,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1385,6 +1498,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1466,6 +1580,7 @@ describe("Dashboard project create/delete", () => {
             projects: [
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1552,6 +1667,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1571,6 +1687,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "web-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "web",
             agent: "claude",
             model: "sonnet",
@@ -1654,6 +1771,7 @@ describe("Dashboard project create/delete", () => {
               { id: "api", name: "API", configured: true, prefix: "api", path: "/repo/api" },
               { id: "web", name: "Web", configured: true, prefix: "web", path: "/repo/web" },
             ],
+            lifecycleInstanceId: "test-instance",
             sessions: [],
           }),
           { status: 200 },
@@ -1673,6 +1791,7 @@ describe("Dashboard project create/delete", () => {
         return new Response(
           JSON.stringify({
             id: "api-a1",
+            lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
             project: "api",
             agent: "claude",
             model: "sonnet",

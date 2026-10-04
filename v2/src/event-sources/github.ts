@@ -1,4 +1,5 @@
 import { clearInterval, setInterval as startInterval } from "node:timers";
+import { randomUUID } from "node:crypto";
 import { logSpurEvent } from "../event-log.js";
 import { extractGithubErrorText, gh, isGitHubRateLimitError, runGhPollCycle } from "../gh.js";
 import {
@@ -33,7 +34,11 @@ import {
   writeReviewSourceSnapshot,
 } from "../metadata.js";
 import { hasRecentSessionUserAction } from "../user-action-log.js";
-import { collectGitHubSignalsBatch, hasTerminalSignal } from "../review-providers/github.js";
+import {
+  collectGitHubSignalsBatch,
+  GitHubReviewBatchError,
+  hasTerminalSignal,
+} from "../review-providers/github.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -108,10 +113,12 @@ function isGitHubBadCredentialsError(text: string): boolean {
 }
 
 // True only when `text` is unambiguously a "this PR number does not exist" error for
-// `prNumber` and nothing else. A joined multi-session GraphQL error message (batch
-// poisoning, review-providers/github.ts:733-739) can name several PR numbers or a PR
-// number belonging to a different session; either case must stay transient so a
-// healthy co-batched session is never mistaken for a dead one.
+// `prNumber` and nothing else. A pathless envelope error now settles the whole batch
+// as one GitHubReviewBatchError (review-providers/github.ts runReviewRepoBatch) whose
+// message is shared across every co-batched session; that shared message can still
+// name several PR numbers or a PR number belonging to a different session, so this
+// predicate must stay this narrow or a healthy co-batched session could be mistaken
+// for a dead one.
 function isGitHubPermanentNotFoundError(text: string, prNumber: number): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("could not resolve to a") || !lower.includes("pullrequest")) return false;
@@ -424,6 +431,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       const currentSessionIds = new Set(sessions.map((session) => session.id));
       let cycleCiActive = false;
       let cycleHadPollError = false;
+      // Cycle-scoped: a batch-level failure logs one source.poll.error for every
+      // member sharing its dedupeKey, not one per session (D4). Per-session backoff
+      // and CI hysteresis below stay unconditional.
+      const loggedBatchFailures = new Set<string>();
       const pollableSessions = [];
 
       for (const session of sessions) {
@@ -451,6 +462,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.dataDir,
         deps.projectId,
         deps.sourceId,
+        deps.config.maxReviewBatchTargets,
       );
       for (const session of pollableSessions) {
         try {
@@ -514,7 +526,22 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
           // Built once, handed to both the in-memory map and the on-disk write so
           // the two copies cannot desync.
-          const nextSnapshot: ReviewSnapshot = { prNumber: collected.data.prNumber, signals: next };
+          const priorSnapshot = snapshots.get(session.id);
+          const priorClearId =
+            priorSnapshot?.prNumber === collected.data.prNumber
+              ? priorSnapshot.mergeConflictClearId
+              : undefined;
+          const mergeConflictClearId =
+            !next.has("merge_conflict") && (!priorClearId || previous?.has("merge_conflict"))
+              ? randomUUID()
+              : priorClearId;
+          const nextSnapshot: ReviewSnapshot = {
+            prNumber: collected.data.prNumber,
+            signals: next,
+            ...(mergeConflictClearId !== undefined ? { mergeConflictClearId } : {}),
+          };
+          if (mergeConflictClearId !== undefined)
+            collected.data.mergeConflictClearId = mergeConflictClearId;
           snapshots.set(session.id, nextSnapshot);
           writeReviewSourceSnapshot(
             deps.dataDir,
@@ -524,20 +551,6 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
             session.id,
             nextSnapshot,
           );
-
-          if (restoreReplayRequested) {
-            const mergeConflictSignal = next.get("merge_conflict");
-            if (mergeConflictSignal) {
-              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
-            }
-            clearGitHubMergeConflictRestoreReplay(
-              deps.dataDir,
-              deps.projectId,
-              deps.sourceId,
-              session.id,
-            );
-            continue;
-          }
 
           const baselined = lifecycleBaselined.has(session.id);
           if (!baselined) {
@@ -553,6 +566,20 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           const toEmit = baselined
             ? candidates
             : candidates.filter((signal) => !LIFECYCLE_KINDS.has(signal.kind));
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (
+              mergeConflictSignal &&
+              !toEmit.some((signal) => signal.key === mergeConflictSignal.key)
+            )
+              toEmit.push(mergeConflictSignal);
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+          }
           if (toEmit.length > 0) {
             emitSignalsByKind(deps, collected.data, toEmit);
           }
@@ -580,17 +607,25 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           }
           if (handleGitHubSuppressionError(error)) return;
           if (countsTowardCiHysteresis(session.id)) cycleHadPollError = true;
-          deps.logger.warn?.(
-            `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
-          );
-          logSpurEvent(deps.dataDir, {
-            event: "source.poll.error",
-            level: "error",
-            projectId: deps.projectId,
-            sourceId: deps.sourceId,
-            sessionId: session.id,
-            message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
-          });
+          // A batch-level failure (GitHubReviewBatchError) shares one dedupeKey across
+          // every co-batched member: log it once per cycle, not once per member. Every
+          // member still gets its own warn-worthy backoff update below regardless.
+          const dedupeKey = error instanceof GitHubReviewBatchError ? error.dedupeKey : null;
+          const alreadyLogged = dedupeKey !== null && loggedBatchFailures.has(dedupeKey);
+          if (dedupeKey !== null) loggedBatchFailures.add(dedupeKey);
+          if (!alreadyLogged) {
+            deps.logger.warn?.(
+              `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
+            );
+            logSpurEvent(deps.dataDir, {
+              event: "source.poll.error",
+              level: "error",
+              projectId: deps.projectId,
+              sourceId: deps.sourceId,
+              sessionId: session.id,
+              message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
+            });
+          }
           const existingBackoff = transientPollBackoff.get(session.id);
           const failures = (existingBackoff?.failures ?? 0) + 1;
           transientPollBackoff.set(session.id, {

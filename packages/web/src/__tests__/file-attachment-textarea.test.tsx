@@ -21,11 +21,13 @@ function HostedTextarea(props: {
   onChange: (value: string) => void;
   onAddFiles?: (files: FileList | File[] | null) => void;
   voice?: UseVoiceInput;
+  adaptiveHeight?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   return (
     <FileAttachmentTextarea
       ariaLabel="composer"
+      adaptiveHeight={props.adaptiveHeight}
       attachments={[]}
       onAddFiles={props.onAddFiles ?? vi.fn()}
       onChange={props.onChange}
@@ -87,6 +89,24 @@ describe("FileAttachmentTextarea", () => {
       target: { value: "hello" },
     });
     expect(onChange).toHaveBeenCalledWith("hello");
+  });
+
+  it("keeps the default resizable minimum outside adaptive layouts", () => {
+    render(<HostedTextarea onChange={vi.fn()} value="" />);
+    expect(screen.getByRole("textbox", { name: "composer" })).toHaveClass("resize-y", "min-h-24");
+  });
+
+  it("uses a four-line floor and internal scrolling in adaptive layouts", () => {
+    render(<HostedTextarea adaptiveHeight onChange={vi.fn()} value="" />);
+    const textarea = screen.getByRole("textbox", { name: "composer" });
+    expect(textarea).toHaveClass(
+      "h-full",
+      "min-h-[calc(6em+4rem+2px)]",
+      "resize-none",
+      "overflow-y-auto",
+      "leading-[1.5]",
+    );
+    expect(textarea.parentElement).toHaveClass("min-h-[calc(6em+4rem+2px)]", "flex-1");
   });
 
   it("renders clear button when value.length > 0", () => {

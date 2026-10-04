@@ -1,4 +1,4 @@
-import { captureTmuxPane } from "./runtime-tmux.js";
+import { captureTmuxPaneOrEmpty } from "./runtime-tmux.js";
 import type { SendMessageAttachment } from "./types.js";
 
 export const HANDOFF_SCREENSHOT_NAME = "handoff-screenshot.txt";
@@ -7,7 +7,7 @@ const HANDOFF_SCREENSHOT_LINES = 400;
 export async function buildHandoffScreenshotAttachment(
   tmuxSession: string,
 ): Promise<SendMessageAttachment | null> {
-  const pane = await captureTmuxPane(tmuxSession, HANDOFF_SCREENSHOT_LINES);
+  const pane = await captureTmuxPaneOrEmpty(tmuxSession, HANDOFF_SCREENSHOT_LINES);
   if (!pane.trim()) {
     return null;
   }

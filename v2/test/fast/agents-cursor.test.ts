@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
@@ -39,15 +39,17 @@ import {
   findCursorSessionId,
 } from "../../src/agents/cursor.js";
 
-const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockReadFile = readFile as ReturnType<typeof vi.fn>;
-const mockRename = rename as ReturnType<typeof vi.fn>;
-const mockChmod = chmod as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockExistsSync = existsSync as unknown as Mock<typeof existsSync>;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockReadFile = readFile as unknown as Mock<typeof readFile>;
+const mockRename = rename as unknown as Mock;
+const mockChmod = chmod as unknown as Mock<typeof chmod>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 function cursorHash(path: string): string {
   return createHash("md5").update(resolve(path)).digest("hex");
@@ -84,6 +86,21 @@ describe("cursorConfigDirForSession", () => {
 });
 
 describe("buildCursorPlan", () => {
+  it("keeps a validated native effort alias unchanged", () => {
+    expect(
+      buildCursorPlan("work", { model: "model-thinking-high-fast", reasoningEffort: "high" })
+        .launchCommand,
+    ).toContain("--model 'model-thinking-high-fast'");
+  });
+
+  it("replaces bracket effort once and preserves other parameters", () => {
+    const command = buildCursorPlan("work", {
+      model: "model[fast=true,effort=low,effort=medium]",
+      reasoningEffort: "high",
+    }).launchCommand;
+    expect(command).toContain("--model 'model[fast=true,effort=high]'");
+    expect(command.match(/effort=/g)).toHaveLength(1);
+  });
   it("returns the default launch plan", () => {
     const plan = buildCursorPlan("ship it");
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
@@ -103,6 +120,14 @@ describe("buildCursorPlan", () => {
 });
 
 describe("buildCursorResumePlan", () => {
+  it("forwards selected model and effort on resume", () => {
+    expect(
+      buildCursorResumePlan("chat-123", "agent", {
+        model: "model[fast=true,effort=low]",
+        reasoningEffort: "max",
+      }).launchCommand,
+    ).toContain("--model 'model[fast=true,effort=max]'");
+  });
   it("quotes the binary and chat id", () => {
     const plan = buildCursorResumePlan("chat-123", "/opt/cursor agent");
     expect(plan.launchCommand).toBe(
@@ -232,6 +257,38 @@ describe("ensureCursorRestrictWritesConfig", () => {
     ]);
   });
 
+  it("prunes spur-managed restrict-writes guard entries but keeps human hooks", async () => {
+    const staleGuard = "/tmp/.spur/cursor/old-session/restrict-writes-hook.js";
+    const humanGuard = ".cursor/restrict-writes-hook.js";
+    mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          beforeShellExecution: [
+            { command: staleGuard, timeout: 5, failClosed: true },
+            { command: `node ${staleGuard}`, timeout: 5, failClosed: true },
+            { command: humanGuard, timeout: 5 },
+            { command: "other-hook.sh", timeout: 5 },
+          ],
+        },
+      }),
+    );
+
+    await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
+
+    const tmpPath = mockRename.mock.calls[0]?.[0] as string;
+    const written = mockWriteFile.mock.calls.find((call) => call[0] === tmpPath);
+    const merged = JSON.parse(written?.[1] as string) as {
+      hooks: { beforeShellExecution: Array<{ command: string }> };
+    };
+    expect(merged.hooks.beforeShellExecution).toEqual([
+      { command: humanGuard, timeout: 5 },
+      { command: "other-hook.sh", timeout: 5 },
+      { command: scriptPath, timeout: 5, failClosed: true },
+    ]);
+  });
+
   it("does not duplicate the entry on re-invocation", async () => {
     let hooksJson = JSON.stringify({ version: 1, hooks: {} });
     mockExistsSync.mockImplementation((path: unknown) => path === hooksPath);
@@ -274,6 +331,16 @@ describe("ensureCursorRestrictWritesConfig", () => {
 });
 
 describe("buildCursorRestorePlan", () => {
+  it("preserves selected model and effort on restore", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockResolvedValue(["chat-123"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1_000 });
+    const plan = await buildCursorRestorePlan("/worktree/path", "restore prompt", {
+      model: "model[fast=true,effort=low]",
+      reasoningEffort: "high",
+    });
+    expect(plan?.launchCommand).toContain("--model 'model[fast=true,effort=high]'");
+  });
   it("returns null when no chat can be found", async () => {
     mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
     mockReaddir.mockResolvedValue([]);

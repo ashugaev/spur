@@ -14,7 +14,7 @@ import {
   writeGitHubReviewPagination,
   writeSession,
 } from "../../src/metadata.js";
-import type { SessionRecord } from "../../src/types.js";
+import type { SessionRecord, ReviewSignal } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
@@ -49,12 +49,138 @@ const {
   resolveBoundPrSummary,
   hasActiveChecks,
   githubReviewProvider,
+  GitHubReviewBatchError,
 } = await import("../../src/review-providers/github.js");
 const { _resetPrLookupsForTests, claimPollPrLookup, enqueuePrLookup, flushPrLookups } =
   await import("../../src/pr-lookup.js");
 const { _resetPrLookupCacheForTests, readPrLookupEntry } =
   await import("../../src/pr-lookup-cache.js");
-const { _resetGhUsageForTests } = await import("../../src/gh.js");
+const { _resetGhUsageForTests, extractGithubErrorText } = await import("../../src/gh.js");
+
+describe("live GitHub feedback", () => {
+  const signals: [ReviewSignal, ReviewSignal, ReviewSignal] = [
+    { key: "comment:1", kind: "comment", text: "cached" },
+    {
+      key: "review-comment:2",
+      kind: "comment",
+      text: "cached",
+      providerThreadTarget: { kind: "github-review-thread", threadId: "thread2" },
+    },
+    { key: "review:3", kind: "comment", text: "cached" },
+  ];
+  const refresh = (input: ReviewSignal[] = signals) => {
+    if (!githubReviewProvider.refreshSignals) throw new Error("Missing refresh");
+    return githubReviewProvider.refreshSignals({
+      hostname: "git.example.com",
+      repo: "acme/api",
+      prNumber: 42,
+      cwd: "/tmp/daemon-data",
+      signals: input,
+    });
+  };
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+
+  it("requests four Enterprise comments concurrently and preserves inline thread metadata", async () => {
+    const releases: Array<(body: string) => void> = [];
+    ghMock.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    const pending = refresh([...signals, { ...signals[0], key: "comment:4" }]);
+    expect(ghMock).toHaveBeenCalledTimes(4);
+    const replies = [
+      { body: "edited issue", user: { login: "alice" } },
+      { body: "edited inline", user: { login: "bob" }, path: "main.ts", line: 7 },
+      { body: " edited review ", state: "COMMENTED", user: null },
+      { body: "fourth comment", user: null },
+    ];
+    releases.forEach((release, index) => release(JSON.stringify(replies[index])));
+    const outcomes = await pending;
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["live", "live", "live", "live"]);
+    expect(outcomes[1]).toMatchObject({
+      signal: { ...signals[1], text: 'New review comment from bob on main.ts:7: "edited inline"' },
+    });
+    expect(ghMock.mock.calls).toEqual([
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/issues/comments/1",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/pulls/comments/2",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/pulls/42/reviews/3",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+      [
+        "/tmp/daemon-data",
+        "api",
+        "repos/acme/api/issues/comments/4",
+        "--hostname",
+        "git.example.com",
+        "--cache",
+        "0s",
+      ],
+    ]);
+  });
+
+  it("isolates deletion, malformed response, and live siblings", async () => {
+    ghMock
+      .mockRejectedValueOnce(new Error("gh: Not Found (HTTP 404)"))
+      .mockResolvedValueOnce("bad json")
+      .mockResolvedValueOnce(JSON.stringify({ body: "new review", state: "CHANGES_REQUESTED" }));
+    expect((await refresh()).map((outcome) => outcome.status)).toEqual([
+      "deleted",
+      "failed",
+      "live",
+    ]);
+  });
+
+  it.each(["gh not found", "HTTP 401", "HTTP 403 rate limit", "network timeout"])(
+    "retains %s as failure",
+    async (message) => {
+      ghMock.mockRejectedValue(new Error(message));
+      expect(await refresh([signals[0]])).toEqual([
+        { status: "failed", key: "comment:1", error: message },
+      ]);
+    },
+  );
+
+  it.each([
+    { body: " ", state: "COMMENTED" },
+    { body: "old", state: "DISMISSED" },
+  ])("removes nonactionable review %j", async (response) => {
+    ghMock.mockResolvedValue(JSON.stringify(response));
+    expect(await refresh([signals[2]])).toEqual([{ status: "deleted", key: "review:3" }]);
+  });
+
+  it("fails an unknown comment key without issuing a request", async () => {
+    expect(await refresh([{ key: "unknown:1", kind: "comment", text: "old" }])).toMatchObject([
+      { status: "failed" },
+    ]);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+});
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -454,6 +580,10 @@ describe("collectSignals GraphQL batch", () => {
     );
 
     expect(result?.ciActive).toBe(false);
+    expect(result?.data).toMatchObject({
+      repo: "acme/api",
+      prUrl: "https://github.com/acme/api/pull/42",
+    });
     expect(result?.ciCheckFetchFailed).toBe(false);
   });
 
@@ -603,6 +733,36 @@ describe("GitHub review batching", () => {
   function unboundSession(id: string): SessionRecord {
     const { pr: _pr, ...session } = sourceSession(`/tmp/${id}`);
     return { ...session, id, branch: "feature/no-pr" };
+  }
+
+  function boundSession(id: string, number: number, repo = "acme/api"): SessionRecord {
+    return {
+      ...sourceSession(`/tmp/${id}`),
+      id,
+      pr: { number, repo, url: `https://github.com/${repo}/pull/${number}` },
+    };
+  }
+
+  function fullPrNode(
+    number: number,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      id: `PR_${number}`,
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/acme/api/pull/${number}`,
+      reviewDecision: null,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      isDraft: false,
+      state: "OPEN",
+      commits: { nodes: [] },
+      reviewThreads: { nodes: [], pageInfo: { hasPreviousPage: false, startCursor: null } },
+      reviews: { nodes: [] },
+      comments: { nodes: [] },
+      ...overrides,
+    };
   }
 
   it("shares the persisted absent cache with branch attention lookups", async () => {
@@ -885,7 +1045,9 @@ describe("GitHub review batching", () => {
     const second = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
 
     expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(48);
+    // 47 = floor(500,000 / the bound-PR node budget), the derived cap under
+    // GITHUB_REVIEW_BATCH_MAX_TARGETS.
+    expect(ghMock.mock.calls[0]?.join(" ").match(/n\d+=/g)).toHaveLength(47);
     expect(first.get("api-50")).toEqual({ status: "skipped", reason: "capacity" });
     expect(second.get("api-50")?.status).toBe("ok");
   });
@@ -1182,6 +1344,7 @@ describe("GitHub review batching", () => {
               reviewThreads: {
                 nodes: [
                   {
+                    id: "PRRT_1",
                     isResolved: false,
                     comments: {
                       nodes: [101, 102, 103].map((databaseId) => ({
@@ -1217,6 +1380,13 @@ describe("GitHub review batching", () => {
     expect([...collected.collected.snapshot.keys()]).toEqual(
       expect.arrayContaining(["review-comment:101", "review-comment:102", "review-comment:103"]),
     );
+    for (const key of ["review-comment:101", "review-comment:102", "review-comment:103"]) {
+      expect(collected.collected.snapshot.get(key)).toEqual(
+        expect.objectContaining({
+          providerThreadTarget: { kind: "github-review-thread", threadId: "PRRT_1" },
+        }),
+      );
+    }
   });
 
   it("paginates past 100 same-thread comments to the prior high-water mark", async () => {
@@ -1838,6 +2008,375 @@ describe("GitHub review batching", () => {
     expect(collected?.status).toBe("ok");
     if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
     expect(collected.collected.snapshot.has("review-comment:999")).toBe(true);
+  });
+
+  it("resolves co-batched members when one alias returns NOT_FOUND", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: fullPrNode(10), a1: null, a2: fullPrNode(12) },
+        },
+        errors: [
+          {
+            type: "NOT_FOUND",
+            path: ["r", "a1"],
+            message: "Could not resolve to a PullRequest with the number of 999999.",
+          },
+        ],
+      }),
+    );
+    const sessions = [boundSession("s0", 10), boundSession("s1", 999999), boundSession("s2", 12)];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const s0 = result.get("s0");
+    const s1 = result.get("s1");
+    const s2 = result.get("s2");
+    expect(s0?.status).toBe("ok");
+    if (s0?.status !== "ok") throw new Error("s0 not ok");
+    expect(s0.collected).not.toBeNull();
+    expect(s2?.status).toBe("ok");
+    expect(s1?.status).toBe("error");
+    if (s1?.status !== "error") throw new Error("s1 not error");
+    expect((s1.error as Error).message).toContain("999999");
+  });
+
+  it("never batches two repositories into one graphql call", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const owner = args.find((a) => a.startsWith("owner="))?.slice("owner=".length) ?? "";
+      const name = args.find((a) => a.startsWith("name="))?.slice("name=".length) ?? "";
+      const numberArg = args.find((a) => /^n\d+=/.test(a));
+      const number = numberArg ? Number(numberArg.slice(numberArg.indexOf("=") + 1)) : 1;
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: {
+              a0: fullPrNode(number, { url: `https://github.com/${owner}/${name}/pull/${number}` }),
+            },
+          },
+        }),
+      );
+    });
+    const sessions = [boundSession("s0", 1, "acme/api"), boundSession("s1", 2, "other/repo")];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    const argvs = ghMock.mock.calls.map((call) => call.slice(1) as string[]);
+    expect(argvs.some((argv) => argv.includes("owner=acme") && argv.includes("name=api"))).toBe(
+      true,
+    );
+    expect(argvs.some((argv) => argv.includes("owner=other") && argv.includes("name=repo"))).toBe(
+      true,
+    );
+    for (const argv of argvs) {
+      expect(argv.includes("name=api") && argv.includes("name=repo")).toBe(false);
+    }
+    expect(result.get("s0")?.status).toBe("ok");
+    expect(result.get("s1")?.status).toBe("ok");
+  });
+
+  it("sends a batch at exactly the configured cap", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 4 }, (_unused, index) =>
+      boundSession(`s${index}`, index + 1),
+    );
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const numbers = args
+        .filter((arg) => /^n\d+=/.test(arg))
+        .map((arg) => Number(arg.slice(arg.indexOf("=") + 1)));
+      const aliases = Object.fromEntries(
+        numbers.map((number, index) => [`a${index}`, fullPrNode(number)]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch", 4);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const argv = ghMock.mock.calls[0]?.slice(1) as string[];
+    expect(argv.filter((a) => /^n\d+=/.test(a))).toHaveLength(4);
+    expect(argv.some((a) => a.startsWith("n4="))).toBe(false);
+    for (const session of sessions) {
+      expect(result.get(session.id)?.status).toBe("ok");
+    }
+  });
+
+  it("never exceeds the configured cap in one call", async () => {
+    const dataDir = await makeDataDir();
+    const sessions = Array.from({ length: 6 }, (_unused, index) =>
+      boundSession(`s${index}`, index + 1),
+    );
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const numbers = args
+        .filter((arg) => /^n\d+=/.test(arg))
+        .map((arg) => Number(arg.slice(arg.indexOf("=") + 1)));
+      const aliases = Object.fromEntries(
+        numbers.map((number, index) => [`a${index}`, fullPrNode(number)]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch", 2);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const argv = ghMock.mock.calls[0]?.slice(1) as string[];
+    expect(argv.filter((a) => /^n\d+=/.test(a))).toHaveLength(2);
+    const skipped = sessions.filter((session) => result.get(session.id)?.status === "skipped");
+    expect(skipped).toHaveLength(4);
+    for (const session of skipped) {
+      expect(result.get(session.id)).toEqual({ status: "skipped", reason: "capacity" });
+    }
+  });
+
+  it("keeps the gh argv out of a transport failure", async () => {
+    const dataDir = await makeDataDir();
+    const rawError = Object.assign(
+      new Error(
+        "Command failed: gh api --hostname github.com graphql -f query=query($owner:String!...) -F n0=1",
+      ),
+      {
+        stderr:
+          "gh: HTTP 503\nupstream connect error or disconnect/reset before headers. reset reason: connection termination",
+        stdout: "",
+      },
+    );
+    ghMock.mockRejectedValueOnce(rawError);
+    const sessions = [boundSession("s0", 1), boundSession("s1", 2), boundSession("s2", 3)];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    for (const session of sessions) {
+      const entry = result.get(session.id);
+      expect(entry?.status).toBe("error");
+      if (entry?.status !== "error") throw new Error("missing error");
+      expect(entry.error).toBeInstanceOf(GitHubReviewBatchError);
+      const text = extractGithubErrorText(entry.error);
+      expect(text).toContain("github.com/acme/api");
+      expect(text).toContain("3 sessions");
+      expect(text).toContain("HTTP 503");
+      expect(text).not.toContain("query=");
+      expect(text).not.toContain("-F n0=");
+      expect(text).not.toContain("query(");
+    }
+  });
+
+  it("classifies a timeout distinctly", async () => {
+    const dataDir = await makeDataDir();
+    const rawError = Object.assign(
+      new Error(
+        "Command failed: gh api --hostname github.com graphql -f query=query($owner:String!...) -F n0=1",
+      ),
+      { killed: true, signal: "SIGTERM" },
+    );
+    ghMock.mockRejectedValueOnce(rawError);
+    const sessions = [boundSession("s0", 1), boundSession("s1", 2), boundSession("s2", 3)];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    for (const session of sessions) {
+      const entry = result.get(session.id);
+      if (entry?.status !== "error") throw new Error("missing error");
+      const text = extractGithubErrorText(entry.error);
+      expect(text).toContain("timeout");
+      expect(text).toContain("SIGTERM");
+      expect(text).not.toContain("query=");
+      expect(text).not.toContain("Command failed");
+    }
+  });
+
+  it("settles every member as an error on a pathless envelope error", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: fullPrNode(42) },
+        },
+        errors: [{ message: "Something went wrong while executing your query." }],
+      }),
+    );
+    const session = boundSession("s0", 42);
+
+    const result = await collectGitHubSignalsBatch([session], dataDir, "api", "pr-watch");
+
+    expect(result.size).toBeGreaterThan(0);
+    for (const entry of result.values()) {
+      expect(entry.status).toBe("error");
+      expect(entry).not.toEqual({ status: "ok", collected: null });
+    }
+  });
+
+  it("clamps a configured cap above the node budget", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockImplementation((_cwd: string, ...args: string[]) => {
+      const numbers = args
+        .filter((arg) => /^n\d+=/.test(arg))
+        .map((arg) => Number(arg.slice(arg.indexOf("=") + 1)));
+      const aliases = Object.fromEntries(
+        numbers.map((number, index) => [`a${index}`, fullPrNode(number)]),
+      );
+      return Promise.resolve(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: aliases,
+          },
+        }),
+      );
+    });
+    const smallSessions = Array.from({ length: 3 }, (_unused, index) =>
+      boundSession(`s${index}`, index + 1),
+    );
+
+    const smallResult = await collectGitHubSignalsBatch(
+      smallSessions,
+      dataDir,
+      "api",
+      "pr-watch",
+      500,
+    );
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const smallArgv = ghMock.mock.calls[0]?.slice(1) as string[];
+    expect(smallArgv.filter((a) => /^n\d+=/.test(a))).toHaveLength(3);
+    for (const session of smallSessions) {
+      expect(smallResult.get(session.id)?.status).toBe("ok");
+    }
+
+    ghMock.mockClear();
+    _resetGitHubReviewBatchForTests();
+    const largeSessions = Array.from({ length: 60 }, (_unused, index) =>
+      boundSession(`t${index}`, index + 1),
+    );
+
+    await collectGitHubSignalsBatch(largeSessions, dataDir, "api", "pr-watch", 500);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    const largeArgv = ghMock.mock.calls[0]?.slice(1) as string[];
+    expect(largeArgv.filter((a) => /^n\d+=/.test(a))).toHaveLength(47);
+  });
+
+  it("errors only the paginating member when its thread page fails", async () => {
+    const dataDir = await makeDataDir();
+    const node0 = fullPrNode(1, {
+      reviewThreads: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: "c1" } },
+    });
+    const node1 = fullPrNode(2);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+            r: { a0: node0, a1: node1 },
+          },
+        }),
+      )
+      .mockRejectedValueOnce(new Error("thread pagination failed"));
+    const sessions = [boundSession("s0", 1), boundSession("s1", 2)];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    const s1 = result.get("s1");
+    expect(s1?.status).toBe("ok");
+    if (s1?.status !== "ok") throw new Error("s1 not ok");
+    expect(s1.collected).not.toBeNull();
+    expect(result.get("s0")?.status).toBe("error");
+  });
+
+  it("picks a live worktree for the batch cwd", async () => {
+    const dataDir = await makeDataDir();
+    const deadDir = await mkdtemp(join(tmpdir(), "spur-dead-wt-"));
+    await rm(deadDir, { recursive: true, force: true });
+    const liveDir = await mkdtemp(join(tmpdir(), "spur-live-wt-"));
+    tempDirs.push(liveDir);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: { a0: fullPrNode(1), a1: fullPrNode(2) },
+        },
+      }),
+    );
+    const sessions = [
+      { ...boundSession("s0", 1), worktreePath: deadDir },
+      { ...boundSession("s1", 2), worktreePath: liveDir },
+    ];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(ghMock.mock.calls[0]?.[0]).toBe(liveDir);
+    expect(result.get("s0")?.status).toBe("ok");
+    expect(result.get("s1")?.status).toBe("ok");
+  });
+
+  it("resolves a paginating member's cwd from a live sibling when targets[0]'s worktree is dead", async () => {
+    const dataDir = await makeDataDir();
+    const deadDir = await mkdtemp(join(tmpdir(), "spur-dead-wt-"));
+    await rm(deadDir, { recursive: true, force: true });
+    const liveDir = await mkdtemp(join(tmpdir(), "spur-live-wt-"));
+    tempDirs.push(liveDir);
+    // s0 (targets[0], dead worktree) needs a pagination call; s1 (live worktree) does
+    // not. Both the main batch call and the pagination call must use the live cwd.
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          r: {
+            a0: fullPrNode(1, {
+              reviewThreads: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: "c1" } },
+            }),
+            a1: fullPrNode(2),
+          },
+        },
+      }),
+    );
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2026-08-04T18:00:00.000Z" },
+          p0: {
+            reviewThreads: {
+              nodes: [],
+              pageInfo: { hasPreviousPage: false, startCursor: null },
+            },
+          },
+        },
+      }),
+    );
+    const sessions = [
+      { ...boundSession("s0", 1), worktreePath: deadDir },
+      { ...boundSession("s1", 2), worktreePath: liveDir },
+    ];
+
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[0]?.[0]).toBe(liveDir);
+    expect(ghMock.mock.calls[1]?.[0]).toBe(liveDir);
+    expect(result.get("s0")?.status).toBe("ok");
+    expect(result.get("s1")?.status).toBe("ok");
   });
 });
 

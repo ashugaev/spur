@@ -7,6 +7,12 @@ import {
   restoreSendBatch,
 } from "../../src/send-batches.js";
 import type { GitHubSignal, ReviewSnapshot } from "../../src/types.js";
+import type * as ghModule from "../../src/gh.js";
+const { ghMock } = vi.hoisted(() => ({ ghMock: vi.fn() }));
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
+  gh: ghMock,
+}));
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: vi.fn(),
@@ -57,7 +63,213 @@ function requireBatch<T>(value: T | null, message: string): T {
   return value;
 }
 
+describe("live submission identity", () => {
+  const parse = createSendBatchParser("github", "api", "pr-watch");
+  const url = "https://git.example.com/acme/api/pull/42";
+  const binding = { number: 42, repo: "acme/api", url };
+  it("round-trips authoritative URL and overlays only the submission with stable daemon cwd", async () => {
+    ghMock.mockReset().mockResolvedValue(JSON.stringify({ body: "current" }));
+    const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+    const original = queue.retryItems();
+    const submission = requireBatch(
+      restoreSendBatch(structuredClone(queue.serialize())),
+      "submission",
+    );
+    expect(
+      await submission.refresh?.("/tmp/daemon-data", {
+        ...binding,
+        url: "https://other.example/acme/api/pull/42",
+      }),
+    ).toMatchObject([{ status: "live" }]);
+    expect(queue.retryItems()).toEqual(original);
+    expect(queue.format()).toContain("New comment from user");
+    expect(submission.format()).toContain("current");
+    expect(submission.serialize()).toMatchObject({ prUrl: url });
+    expect(ghMock).toHaveBeenCalledWith(
+      "/tmp/daemon-data",
+      "api",
+      "repos/acme/api/issues/comments/1",
+      "--hostname",
+      "git.example.com",
+      "--cache",
+      "0s",
+    );
+  });
+
+  it.each(["host", "repo", "number"])(
+    "retires the outgoing namespace on %s replacement",
+    (change) => {
+      const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+      const incoming = requireBatch(
+        parse(
+          githubEventData({
+            prUrl:
+              change === "host"
+                ? "https://new.example/acme/api/pull/42"
+                : change === "repo"
+                  ? "https://git.example.com/other/api/pull/42"
+                  : "https://git.example.com/acme/api/pull/43",
+            repo: change === "repo" ? "other/api" : "acme/api",
+            prNumber: change === "number" ? 43 : 42,
+            signals: [{ key: "comment:2", kind: "comment", text: "incoming" }],
+          }),
+        ),
+        "incoming",
+      );
+      expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
+      expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
+    },
+  );
+
+  it("preserves known identity and same-context descriptors when incoming metadata is absent", () => {
+    const queue = requireBatch(parse(githubEventData({ prUrl: url, repo: "acme/api" })), "queue");
+    expect(queue.merge(requireBatch(parse(githubEventData()), "incoming"))).toBeUndefined();
+    expect(queue.serialize()).toMatchObject({ prUrl: url, repo: "acme/api" });
+  });
+
+  it.each(["URL to repo", "repo to URL"])(
+    "replaces conflicting partial identity: %s",
+    async (shape) => {
+      ghMock.mockReset().mockResolvedValue(JSON.stringify({ body: "current new context" }));
+      const queue = requireBatch(
+        parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "acme/api" })),
+        "queue",
+      );
+      queue.attachAutoPing({
+        occurrenceId: "old",
+        routeFingerprint: "route",
+        destination: { kind: "session", sessionId: "api-1" },
+        createGrant: () => "old-handle",
+      });
+      const newUrl = "https://new.example/other/api/pull/42";
+      const incoming = requireBatch(
+        parse(
+          githubEventData({
+            ...(shape === "URL to repo" ? { repo: "other/api" } : { prUrl: newUrl }),
+            signals: [{ key: "comment:2", kind: "comment", text: "new context" }],
+          }),
+        ),
+        "incoming",
+      );
+      expect(queue.merge(incoming)).toEqual({ retiredItemPrefix: '["github",42,' });
+      expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:2"]);
+      expect(queue.serialize().autoPing?.items["comment:1"]).toBeUndefined();
+      if (shape === "URL to repo") {
+        expect(queue.serialize()).not.toHaveProperty("prUrl");
+        const unresolved = requireBatch(parse(queue.serialize()), "unresolved");
+        expect(await unresolved.refresh?.("/tmp/daemon-data")).toMatchObject([
+          { status: "failed" },
+        ]);
+        expect(ghMock).not.toHaveBeenCalled();
+      }
+      expect(
+        await queue.refresh?.("/tmp/daemon-data", { number: 42, repo: "other/api", url: newUrl }),
+      ).toMatchObject([{ status: "live" }]);
+      expect(queue.serialize()).toMatchObject({ repo: "other/api", prUrl: newUrl });
+      expect(ghMock).toHaveBeenCalledWith(
+        "/tmp/daemon-data",
+        "api",
+        "repos/other/api/issues/comments/2",
+        "--hostname",
+        "new.example",
+        "--cache",
+        "0s",
+      );
+    },
+  );
+
+  it.each(["URL to repo", "repo to URL"])("preserves compatible partial identity: %s", (shape) => {
+    const queue = requireBatch(
+      parse(githubEventData(shape === "URL to repo" ? { prUrl: url } : { repo: "ACME/api" })),
+      "queue",
+    );
+    const original = queue.retryItems();
+    const incoming = requireBatch(
+      parse(
+        githubEventData({
+          ...(shape === "URL to repo" ? { repo: "ACME/api" } : { prUrl: url }),
+          signals: [{ key: "comment:2", kind: "comment", text: "compatible" }],
+        }),
+      ),
+      "incoming",
+    );
+    expect(queue.merge(incoming)).toBeUndefined();
+    expect(queue.serialize()).toMatchObject({ prUrl: url });
+    expect(queue.retryItems().slice(0, 1)).toEqual(original);
+    expect(queue.retryItems().map((item) => item.key)).toEqual(["comment:1", "comment:2"]);
+  });
+
+  it.each(["missing", "number", "repo", "credentials", "malformed"])(
+    "fails %s identity with zero requests",
+    async (problem) => {
+      ghMock.mockReset();
+      const queue = requireBatch(
+        parse(
+          githubEventData({
+            repo: "acme/api",
+            ...(problem === "credentials"
+              ? { prUrl: "https://user:pass@git.example.com/acme/api/pull/42" }
+              : problem === "malformed"
+                ? { prUrl: "not-url" }
+                : {}),
+          }),
+        ),
+        "queue",
+      );
+      const pr =
+        problem === "missing"
+          ? undefined
+          : {
+              ...binding,
+              number: problem === "number" ? 43 : 42,
+              repo: problem === "repo" ? "other/api" : "acme/api",
+            };
+      expect(await queue.refresh?.("/tmp/daemon-data", pr)).toMatchObject([{ status: "failed" }]);
+      expect(queue.isEmpty()).toBe(true);
+      expect(ghMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("recovers a matching legacy binding and removes failed/deleted controls through filterItems", async () => {
+    ghMock.mockReset().mockRejectedValue(new Error("HTTP 404"));
+    const queue = requireBatch(parse(githubEventData({ repo: "acme/api" })), "queue");
+    queue.attachAutoPing({
+      occurrenceId: "occurrence",
+      routeFingerprint: "route",
+      destination: { kind: "session", sessionId: "api-1" },
+      createGrant: () => "handle",
+    });
+    expect(await queue.refresh?.("/tmp/daemon-data", binding)).toEqual([
+      { status: "deleted", key: "comment:1" },
+    ]);
+    expect(queue.serialize()).toMatchObject({ prUrl: url, autoPing: { items: {} } });
+  });
+});
+
 describe("isGitHubEventData", () => {
+  it("restores proven legacy GitLab discussion targets without inventing individual threads", () => {
+    const batch = restoreSendBatch({
+      kind: "review",
+      providerId: "gitlab",
+      projectId: "proj",
+      sourceId: "src",
+      ...githubEventData({
+        signals: [
+          { key: "discussion:thread-1:note-2", kind: "comment", text: "thread" },
+          { key: "comment:3", kind: "comment", text: "individual" },
+        ],
+      }),
+    });
+    const stored = batch?.serialize();
+    expect(stored?.kind).toBe("review");
+    if (stored?.kind !== "review") throw new Error("missing review batch");
+    expect(stored.signals[0]?.providerThreadTarget).toEqual({
+      kind: "gitlab-discussion",
+      mergeRequestIid: 42,
+      discussionId: "thread-1",
+    });
+    expect(stored.signals[1]?.providerThreadTarget).toBeUndefined();
+  });
   it("returns true for valid data", () => {
     expect(isGitHubEventData(githubEventData())).toBe(true);
   });
@@ -188,7 +400,10 @@ describe("Telegram batch", () => {
     expect(formatted).toContain(
       "Source: telegram. The requester only sees messages you send with:",
     );
-    expect(formatted).toContain('spur source reply "<message>"');
+    expect(formatted).toContain('"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"');
+    expect(formatted).toContain(
+      'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options. Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.',
+    );
     expect(formatted).toContain(
       "Your terminal output is invisible to them. Reply to the same Telegram thread when you need input and when the task completes, with a short result summary.",
     );
@@ -434,7 +649,135 @@ describe("Service batch", () => {
   });
 });
 
+describe("automatic ping controls", () => {
+  it("filters one suppressed thread item while preserving its sibling and one subscription control", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(
+      parse(
+        githubEventData({
+          signals: [
+            {
+              key: "review-comment:1",
+              kind: "comment",
+              text: "inline",
+              providerThreadTarget: { kind: "github-review-thread", threadId: "thread-1" },
+            },
+            { key: "ready_for_review", kind: "ready_for_review", text: "ready" },
+          ],
+        }),
+      ),
+      "expected review batch",
+    );
+    let grant = 0;
+    batch.attachAutoPing({
+      occurrenceId: "occurrence",
+      routeFingerprint: "route",
+      destination: { kind: "session", sessionId: "api-1" },
+      createGrant: () => `ap1_${String(++grant).padStart(43, "a")}`,
+    });
+    batch.filterAutoPing(
+      (_occurrenceId, threadTarget) =>
+        threadTarget?.kind === "github-review-thread" && threadTarget.threadId === "thread-1",
+    );
+
+    expect(batch.format()).toContain("ready");
+    expect(batch.format()).not.toContain("inline");
+    expect(batch.formatAutoPingControls()).toContain("--event");
+    expect(batch.formatAutoPingControls().match(/--subscription/g)).toHaveLength(1);
+    expect(batch.formatAutoPingControls()).not.toContain("--thread");
+    expect(restoreSendBatch(batch.serialize())?.format()).toContain("ready");
+  });
+});
+
 describe("restoreSendBatch", () => {
+  it("rejects present policy state that omits targets for a restored payload", () => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: {},
+        },
+      }),
+    ).toBeNull();
+    expect(restoreSendBatch(batch.serialize())).not.toBeNull();
+  });
+  it.each([
+    null,
+    {},
+    { occurrenceId: "event", eventHandle: 1 },
+    { occurrenceId: "event", eventHandle: "handle", threadTarget: { kind: "subscription" } },
+    { occurrenceId: "event", eventHandle: "handle", threadHandle: "orphan" },
+  ])("rejects malformed persisted auto-ping items: %j", (item) => {
+    const batch = requireBatch(
+      createSendBatchParser("github", "proj", "src")(githubEventData()),
+      "review batch",
+    );
+    expect(
+      restoreSendBatch({
+        ...batch.serialize(),
+        autoPing: {
+          routeFingerprint: "route",
+          destination: { kind: "session", sessionId: "api-1" },
+          subscriptionHandle: "subscription",
+          items: { "comment:1": item },
+        },
+      }),
+    ).toBeNull();
+  });
+  it("reserves retained conflict replay budgets for GitHub without capping later GitLab episodes", () => {
+    const data = githubEventData({
+      signals: [{ key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" }],
+    });
+    const github = requireBatch(
+      createSendBatchParser("github", "proj", "src")(data),
+      "GitHub batch",
+    );
+    const gitlab = requireBatch(
+      createSendBatchParser("gitlab", "proj", "src")(data),
+      "GitLab batch",
+    );
+    expect(github.retryItems()[0]?.mergeConflict).toEqual({ prNumber: 42 });
+    expect(gitlab.retryItems()[0]?.mergeConflict).toBeUndefined();
+    expect(restoreSendBatch(gitlab.serialize())?.retryItems()[0]?.mergeConflict).toBeUndefined();
+  });
+  it("preserves semantic identity across control and title changes while separating edited items", () => {
+    const parse = createSendBatchParser("github", "proj", "src-1");
+    const batch = requireBatch(parse(githubEventData()), "review batch");
+    const [before] = batch.retryItems();
+    batch.merge(requireBatch(parse(githubEventData({ prTitle: "renamed" })), "renamed batch"));
+    expect(batch.retryItems()).toEqual([before]);
+    batch.merge(
+      requireBatch(
+        parse(
+          githubEventData({ signals: [{ key: "comment:1", kind: "comment", text: "Changed" }] }),
+        ),
+        "edited batch",
+      ),
+    );
+    expect(batch.retryItems()[0]?.itemKey).toBe(before?.itemKey);
+    expect(batch.retryItems()[0]?.fingerprint).not.toBe(before?.fingerprint);
+    expect(restoreSendBatch(batch.serialize())?.retryItems()).toEqual(batch.retryItems());
+  });
+
+  it("deduplicates a Telegram item while retaining same-text messages and separate chats", () => {
+    const parse = createSendBatchParser("telegram", "proj", "src-1");
+    const batch = requireBatch(parse(telegramEventData()), "Telegram batch");
+    batch.merge(requireBatch(parse(telegramEventData()), "duplicate"));
+    batch.merge(requireBatch(parse(telegramEventData({ messageId: 100 })), "new message"));
+    batch.merge(requireBatch(parse(telegramEventData({ chatId: -200 })), "other chat"));
+    expect(batch.retryItems()).toHaveLength(3);
+    const retained = batch.retryItems()[2]?.itemKey;
+    batch.filterItems((item) => item.itemKey === retained);
+    expect(batch.retryItems()).toHaveLength(1);
+    expect(batch.format()).toContain("chat -200");
+  });
   it("round-trips a multi-signal review batch through serialize()", () => {
     const parse = createSendBatchParser("github", "proj", "src-1");
     const batch = requireBatch(
@@ -567,5 +910,21 @@ describe("restoreSendBatch", () => {
         messages: [{ sessionId: "api-1" }],
       }),
     ).toBeNull();
+  });
+});
+
+describe("interactive batches", () => {
+  it("only telegram batches are interactive, including restored ones", () => {
+    const github = createSendBatchParser("github", "proj", "src-1")(githubEventData());
+    const service = createSendBatchParser("service", "proj", "src-1")(serviceEventData());
+    const telegram = createSendBatchParser("telegram", "proj", "src-1")(telegramEventData());
+
+    expect(github?.interactive).toBe(false);
+    expect(service?.interactive).toBe(false);
+    expect(telegram?.interactive).toBe(true);
+    const restored = telegram ? restoreSendBatch(telegram.serialize()) : null;
+    expect(restored?.interactive).toBe(true);
+    const restoredGithub = github ? restoreSendBatch(github.serialize()) : null;
+    expect(restoredGithub?.interactive).toBe(false);
   });
 });

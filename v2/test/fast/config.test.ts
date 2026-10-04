@@ -1188,6 +1188,185 @@ projects:
     });
   });
 
+  it("resolves telegram allowedUsers and allowedChats from the environment", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+        allowedChats: "\${TG_CHATS}"
+        chatId: "\${TG_CHAT}"
+`);
+    await writeProjectEnv(configPath, "TG_USERS=123, 456\nTG_CHATS=-1001,123\nTG_CHAT=-1001\n");
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      allowedUsers: [123, 456],
+      allowedChats: [-1001, 123],
+      chatId: -1001,
+    });
+
+    const empty = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(empty, 'TG_USERS=","\n');
+    expect(() => loadConfig(empty)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must include at least one integer",
+    );
+
+    const bogus = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(bogus, "TG_USERS=123,abc\n");
+    expect(() => loadConfig(bogus)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must be an integer",
+    );
+
+    const missing = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS_ABSENT}"
+`);
+    expect(() => loadConfig(missing)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers could not be resolved from the environment",
+    );
+  });
+
+  it("parses a telegram outbound chatId and requires it to be allowed", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: -1001
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1001,
+    });
+
+    const mismatched = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        allowedChats: [-1002]
+        chatId: -1001
+`);
+    expect(() => loadConfig(mismatched)).toThrow(
+      "projects.backend.sources.telegram.chatId must be listed in " +
+        "projects.backend.sources.telegram.allowedChats",
+    );
+
+    const fromEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(fromEnv, "TELEGRAM_CHAT_ID=-1002\n");
+    expect(loadConfig(fromEnv).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1002,
+    });
+
+    const missingEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID_ABSENT}"
+`);
+    expect(() => loadConfig(missingEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const emptyEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(emptyEnv, 'TELEGRAM_CHAT_ID=""\n');
+    // An empty value never resolves to chat 0.
+    expect(() => loadConfig(emptyEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const hex = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "0x10"
+`);
+    expect(() => loadConfig(hex)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+
+    const fractional = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: 1.5
+`);
+    expect(() => loadConfig(fractional)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+  });
+
   it("materializes telegram autoSpawn defaults with no model", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1228,7 +1407,7 @@ projects:
         allowedUsers: [123]
         autoSpawn:
           agent: opencode
-          model: google/gemini-3.7-flash
+          model: google/gemini-3.8-flash
 `);
 
     const config = loadConfig(configPath);
@@ -1237,7 +1416,7 @@ projects:
       autoSpawn: {
         enabled: true,
         agent: "opencode",
-        model: "google/gemini-3.7-flash",
+        model: "google/gemini-3.8-flash",
       },
     });
   });
@@ -1571,12 +1750,88 @@ projects:
     reasoningEffort:
       claude: low
       codex: high
+      cursor: xhigh
+      opencode: minimal
 `);
 
     expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({
       claude: "low",
       codex: "high",
+      cursor: "xhigh",
+      opencode: "minimal",
     });
+  });
+
+  it.each(["none", "minimal", "ultra", "invalid", "42"])(
+    "rejects Claude effort %s",
+    async (effort) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+      expect(() => loadConfig(configPath)).toThrow("reasoningEffort.claude");
+    },
+  );
+
+  it.each(["xhigh", "max"])("accepts Claude effort %s", async (effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+    expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({ claude: effort });
+  });
+
+  it("parses trigger effort without an explicit agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          reasoningEffort: ultra
+`);
+    expect(loadConfig(configPath).projects["backend"]?.triggers?.["kickoff"]).toMatchObject({
+      spawn: { blocks: [{ prompt: "ship it", reasoningEffort: "ultra" }] },
+    });
+  });
+
+  it.each([
+    ["codex", "invalid"],
+    ["claude", "ultra"],
+    ["claude", "none"],
+  ])("rejects trigger effort %s/%s", async (agent, effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          agent: ${agent}
+          reasoningEffort: ${effort}
+`);
+    expect(() => loadConfig(configPath)).toThrow("spawn.reasoningEffort");
   });
 
   it("rejects non-string project codex args", async () => {
@@ -2086,6 +2341,56 @@ projects:
     expect("adaptivePoll" in (parsed ?? {})).toBe(false);
   });
 
+  it("omits maxReviewBatchTargets when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect("maxReviewBatchTargets" in (parsed ?? {})).toBe(false);
+  });
+
+  it.each([0, 2.5, "8"])("rejects maxReviewBatchTargets %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: ${JSON.stringify(value)}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /maxReviewBatchTargets must be a positive integer/,
+    );
+  });
+
+  it("passes an in-range maxReviewBatchTargets value through", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        maxReviewBatchTargets: 16
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      maxReviewBatchTargets: 16,
+    });
+  });
+
   it("parses a sentry source with a resolved token and defaults", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2152,10 +2457,38 @@ projects:
     const config = loadConfig(configPath);
     expect(config.projects["backend"]?.sources["jira"]).toEqual({
       type: "jira",
+      runOnStart: false,
       baseUrl: "https://jira.example.com/",
       email: "bot@example.com",
       token: "secret",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 100,
     });
+  });
+
+  it("rejects a jira source with a non-positive maxResults", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+        maxResults: 0
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.jira.maxResults must be a positive number",
+    );
   });
 
   it("rejects a jira source whose auth cannot be resolved", async () => {
@@ -2323,7 +2656,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new",
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new or sentry:issue.new or github-ci:run.completed or jira:work_item.new",
     );
   });
 
@@ -2567,6 +2900,185 @@ projects:
     expect(() => loadConfig(configPath)).toThrow(
       'projects.backend: source "ci-green" has 2 triggers subscribed to a work-item event; at most one is allowed',
     );
+  });
+
+  it("parses a jira poller source with defaults and registers jira:work_item.new", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toEqual({
+      type: "jira",
+      runOnStart: false,
+      baseUrl: "https://jira.example.com/",
+      email: "bot@example.com",
+      token: "secret",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      emitExisting: false,
+      maxResults: 100,
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "jira",
+      event: "jira:work_item.new",
+      spawn: {
+        blocks: [{ prompt: "Take {{key}}" }],
+      },
+    });
+  });
+
+  it("rejects jira:work_item.new triggers when the source has no query", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.pick-up.event uses unsupported event "jira:work_item.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same jira source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV"
+    triggers:
+      one:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "first"
+      two:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "second"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "jira" has 2 triggers subscribed to a work-item event; at most one is allowed',
+    );
+  });
+
+  it("parses a backlog spawn block as parsed-and-ignored", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV AND statusCategory != Done"
+        spawn:
+          prompt: "Take {{key}} {{title}} {{url}}"
+          agent: claude
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toEqual({
+      source: "jira",
+      provider: "jira",
+      query: "project = WEBDEV AND statusCategory != Done",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+  });
+
+  it("keeps a jira source's own poll query and its backlog binding's query independent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      jira:
+        type: jira
+        baseUrl: \${JIRA_BASE_URL}
+        email: \${JIRA_EMAIL}
+        token: \${JIRA_TOKEN}
+        query: "project = WEBDEV AND statusCategory != Done"
+    backlog:
+      my-sprint:
+        source: jira
+        query: "project = WEBDEV ORDER BY Rank ASC"
+    triggers:
+      pick-up:
+        source: jira
+        event: jira:work_item.new
+        spawn:
+          prompt: "Take {{key}}"
+`);
+    await writeProjectEnv(
+      configPath,
+      "JIRA_BASE_URL=https://jira.example.com\nJIRA_EMAIL=bot@example.com\nJIRA_TOKEN=secret\n",
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["jira"]).toMatchObject({
+      query: "project = WEBDEV AND statusCategory != Done",
+    });
+    expect(config.projects["backend"]?.backlog["my-sprint"]).toMatchObject({
+      query: "project = WEBDEV ORDER BY Rank ASC",
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]?.event).toBe("jira:work_item.new");
   });
 
   it("parses spawn.restrictWrites on trigger spawn configs", async () => {
@@ -2850,15 +3362,21 @@ projects:
 
   it("keeps the root sp project free of a review fleet", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
     expect(config.projects["sp"]?.triggers["gh-pr-review-spawn"]).toBeUndefined();
-    expect(config.projects["sp"]?.sources["gh-pr-review"]?.type).toBe("github");
+    expect(config.projects["sp"]?.sources["gh-pr-review"]).toBeUndefined();
   });
 
   it("parses the root PR-merged send trigger", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
     const trigger = config.projects["sp"]?.triggers["gh-merged"];
     if (!trigger || !("send" in trigger)) {
@@ -2874,6 +3392,9 @@ projects:
 
   it("sets medium provider reasoning for the sp project", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -2883,6 +3404,9 @@ projects:
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
@@ -4481,6 +5005,61 @@ projects:
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
   });
 
+  it("parses a positive projects.<id>.tokenBudget in both config modes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+    expect(loadProjectConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+  });
+
+  it.each([0, -1, 1.5])("rejects projects.<id>.tokenBudget=%s", async (tokenBudget) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: ${tokenBudget}
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudget must be a positive integer",
+    );
+  });
+
+  it("parses projects.<id>.tokenBudgetWarnOnly in both config modes and defaults false", async () => {
+    const enabledPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+    tokenBudgetWarnOnly: true
+`);
+    expect(loadConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+    expect(loadProjectConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+
+    const defaultPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(defaultPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(false);
+  });
+
+  it("rejects a non-boolean projects.<id>.tokenBudgetWarnOnly", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudgetWarnOnly: yes
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudgetWarnOnly must be a boolean",
+    );
+  });
+
   it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -4709,6 +5288,75 @@ projects:
 `);
 
     expect(loadProjectConfig(configPath).opencodeGc).toEqual(defaults);
+  });
+});
+
+describe("artifactRetention", () => {
+  const DEFAULTS = {
+    enabled: false,
+    olderThanDays: 30,
+    intervalMinutes: 360,
+    maxAnchorsPerSweep: 20,
+    maxBytesPerSession: 2147483648,
+    maxFilesPerSession: 500,
+  };
+
+  it("defaults to disabled with the documented values when absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).artifactRetention).toEqual(DEFAULTS);
+  });
+
+  it("parses artifactRetention in instance mode", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  enabled: true
+  olderThanDays: 14
+  intervalMinutes: 120
+  maxAnchorsPerSweep: 5
+  maxBytesPerSession: 1073741824
+  maxFilesPerSession: 200
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadConfig(configPath).artifactRetention).toEqual({
+      enabled: true,
+      olderThanDays: 14,
+      intervalMinutes: 120,
+      maxAnchorsPerSweep: 5,
+      maxBytesPerSession: 1073741824,
+      maxFilesPerSession: 200,
+    });
+  });
+
+  it("rejects a non-positive cap", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  maxFilesPerSession: 0
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/artifactRetention\.maxFilesPerSession/);
+  });
+
+  it("ignores artifactRetention in project mode", async () => {
+    const configPath = await writeConfig(`
+artifactRetention:
+  enabled: true
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(loadProjectConfig(configPath).artifactRetention).toEqual(DEFAULTS);
   });
 });
 

@@ -172,7 +172,18 @@ for _ in $(seq 1 60); do
   active_web=0
   systemctl --user is-active --quiet spur-daemon.service && active_daemon=1
   systemctl --user is-active --quiet spur-web.service && active_web=1
-  daemon_code="$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:4310/sessions 2>/dev/null || echo 000)"
+  daemon_code=000
+  if node --input-type=module - "$PKG_ROOT" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const entrypoint = `${process.argv[2]}/dist/cli.js`;
+const { createRealUpdateDeps } = await import(pathToFileURL(`${process.argv[2]}/dist/update.js`));
+const deps = createRealUpdateDeps(entrypoint);
+const result = await deps.probe({ id: 'daemon', url: `http://127.0.0.1:${deps.readDaemonPort()}/info` });
+process.exitCode = result.ok ? 0 : 1;
+NODE
+  then
+    daemon_code=200
+  fi
   web_code="$(curl -fsS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${web_port}/" 2>/dev/null || echo 000)"
   if [[ "$active_daemon" -eq 1 && "$active_web" -eq 1 && "$daemon_code" = "200" && "$web_code" = "200" ]]; then
     break

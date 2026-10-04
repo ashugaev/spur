@@ -356,7 +356,10 @@ export function StatusBar() {
         {showGitlab ? <PlatformStatusButton platform="gitlab" status={gitlabStatus} /> : null}
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]">
+      <div
+        className="ml-auto flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]"
+        data-testid="status-bar-right-cluster"
+      >
         <ThemeToggle />
         <ClaudeAccountsMenu />
         <VersionMenu />

@@ -1,5 +1,4 @@
-import { test, expect } from "playwright/test";
-import { mockSessions } from "./fixtures.js";
+import { test, expect, mockSessions } from "./fixtures.js";
 
 // P1: PWA manifest
 test.describe("P1: PWA manifest", () => {

@@ -33,7 +33,10 @@ async function execFileTriState(
   args: string[],
 ): Promise<{ ok: true; stdout: string } | { ok: false }> {
   try {
-    const { stdout } = await execFileAsync(file, args, { timeout: LISTENER_LOOKUP_TIMEOUT_MS });
+    const { stdout } = await execFileAsync(file, args, {
+      timeout: LISTENER_LOOKUP_TIMEOUT_MS,
+      maxBuffer: 4 * 1024 * 1024,
+    });
     return { ok: true, stdout: stdout.toString() };
   } catch {
     return { ok: false };
@@ -60,6 +63,69 @@ function parseSsPids(output: string): number[] {
     }
   }
   return [...pids];
+}
+
+export type ListenerSnapshot =
+  | { ok: true; byPort: Map<number, Set<number>>; unattributedPorts?: ReadonlySet<number> }
+  | { ok: false };
+
+function listenerPort(address: string): number | undefined {
+  const match = /:(\d+)$/.exec(address);
+  const port = match ? Number(match[1]) : NaN;
+  return isValidPort(port) ? port : undefined;
+}
+
+function parseSsListeners(output: string): ListenerSnapshot {
+  const byPort = new Map<number, Set<number>>();
+  const unattributedPorts = new Set<number>();
+  for (const line of output.split("\n")) {
+    if (!line.trim()) continue;
+    const fields = line.trim().split(/\s+/);
+    if (fields[0] !== "LISTEN") return { ok: false };
+    const port = listenerPort(fields[3] ?? "");
+    if (port === undefined) return { ok: false };
+    const pids = byPort.get(port) ?? new Set<number>();
+    const attributed = parseSsPids(line);
+    if (attributed.length === 0) unattributedPorts.add(port);
+    for (const pid of attributed) pids.add(pid);
+    // Empty PID sets retain anonymous LISTEN presence.
+    byPort.set(port, pids);
+  }
+  return { ok: true, byPort, ...(unattributedPorts.size > 0 ? { unattributedPorts } : {}) };
+}
+
+function parseLsofListeners(output: string): ListenerSnapshot {
+  const byPort = new Map<number, Set<number>>();
+  let pid: number | undefined;
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    if (/^p\d+$/.test(line)) {
+      pid = Number(line.slice(1));
+    } else if (line.startsWith("n")) {
+      const port = listenerPort(line.slice(1));
+      if (port === undefined || pid === undefined || pid <= 0) return { ok: false };
+      const pids = byPort.get(port) ?? new Set<number>();
+      pids.add(pid);
+      byPort.set(port, pids);
+    } else if (!/^[cfPt]/.test(line)) {
+      return { ok: false };
+    }
+  }
+  return { ok: true, byPort };
+}
+
+export const _parseSsListenersForTests = parseSsListeners;
+export const _parseLsofListenersForTests = parseLsofListeners;
+
+/** Host readout only; signaling continues to use fresh per-port probes. */
+export async function snapshotListeners(): Promise<ListenerSnapshot> {
+  const ss = await execFileTriState("ss", ["-H", "-ltnp"]);
+  if (ss.ok) {
+    const parsed = parseSsListeners(ss.stdout);
+    if (parsed.ok) return parsed;
+  }
+  const lsof = await execFileTriState("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"]);
+  return lsof.ok ? parseLsofListeners(lsof.stdout) : { ok: false };
 }
 
 export function isHostPortFree(port: number): Promise<boolean> {

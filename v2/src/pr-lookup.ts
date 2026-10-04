@@ -82,11 +82,16 @@ interface PendingRequest {
 const slugMemo = new Map<string, SlugMemoEntry>();
 const pending = new Map<string, PendingRequest[]>();
 const activeFlushes = new Set<Promise<void>>();
+// A queue dequeued into a running flushRepo, from `pending.delete(key)` until
+// its `finally` removes it. cancelPendingPrLookups must still be able to
+// settle these entries so a drain cannot stall on a lookup mid-flush.
+const inFlightQueues = new Set<PendingRequest[]>();
 const activePollLookups = new Map<string, Promise<PrLookupOutcome>>();
 
 export function _resetPrLookupsForTests(): void {
   slugMemo.clear();
   pending.clear();
+  inFlightQueues.clear();
   activeFlushes.clear();
   activePollLookups.clear();
 }
@@ -636,7 +641,12 @@ async function flushRepo(key: string): Promise<void> {
     return;
   }
   pending.delete(key);
+  inFlightQueues.add(queue);
   try {
+    // PendingRequest.settle is the raw resolve of enqueuePrLookup's promise,
+    // so whichever caller settles an entry first wins: a later settle here
+    // (success or catch) is inert against one already fired by
+    // cancelPendingPrLookups while this flush's gh call was still in flight.
     const outcomes = await resolveLookups(
       queue.map((entry) => entry.request),
       "poll",
@@ -651,6 +661,8 @@ async function flushRepo(key: string): Promise<void> {
     for (const entry of queue) {
       entry.settle({ status: "skipped", reason: "error", message });
     }
+  } finally {
+    inFlightQueues.delete(queue);
   }
 }
 
@@ -674,4 +686,11 @@ export function cancelPendingPrLookups(): void {
     }
   }
   pending.clear();
+  // Also settle a queue already dequeued into a running flushRepo: its own
+  // finally owns removal from this set, not this function.
+  for (const queue of inFlightQueues) {
+    for (const entry of queue) {
+      entry.settle({ status: "skipped", reason: "cancelled" });
+    }
+  }
 }

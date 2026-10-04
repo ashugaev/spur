@@ -1,11 +1,18 @@
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { OpenCodeLogLevel, SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import type {
+  OpenCodeLogLevel,
+  ProviderReasoningEffort,
+  SidecarMcpBinding,
+  TranscriptEntry,
+} from "../types.js";
+import type { ProviderTokenUsageSample } from "../token-usage.js";
 import {
   agentExecutableCommand,
   missingAgentExecutableMessage,
@@ -83,6 +90,7 @@ export const OPENCODE_RESTRICT_WRITES_CONFIG = JSON.stringify({
 export function buildOpenCodeConfig(
   mcpBindings: SidecarMcpBinding[] | undefined,
   restrictWrites: boolean | undefined,
+  reasoning?: { model: string; reasoningEffort: ProviderReasoningEffort; variantNames: string[] },
   // opencode logs INFO by default and never rotates `log/opencode.log`;
   // INFO is ~99% of its volume. Capping here rides the existing
   // OPENCODE_CONFIG_CONTENT channel — no new launch flag. Future volume only;
@@ -103,6 +111,26 @@ export function buildOpenCodeConfig(
   }
   if (restrictWrites) {
     config["permission"] = OPENCODE_RESTRICT_WRITES_PERMISSION;
+  }
+  if (reasoning) {
+    const separator = reasoning.model.indexOf("/");
+    const providerId = reasoning.model.slice(0, separator);
+    const modelId = reasoning.model.slice(separator + 1);
+    const selection = { model: reasoning.model, variant: reasoning.reasoningEffort };
+    config["agent"] = { build: selection, plan: selection };
+    config["provider"] = {
+      [providerId]: {
+        models: {
+          [modelId]: {
+            variants: Object.fromEntries(
+              reasoning.variantNames
+                .filter((name) => name !== reasoning.reasoningEffort)
+                .map((name) => [name, { disabled: true }]),
+            ),
+          },
+        },
+      },
+    };
   }
   return Object.keys(config).length > 0 ? JSON.stringify(config) : undefined;
 }
@@ -356,6 +384,8 @@ export function parseOpenCodeExport(value: unknown): TranscriptEntry[] {
 export interface OpenCodeStructuredState {
   state: "working" | "waiting" | "needs_input" | "rate_limited" | "error";
   reason: string;
+  /** Last message's time.completed, else time.created (epoch ms); absent when it carries neither. */
+  activityMs?: number;
 }
 
 function errorText(value: unknown): string {
@@ -372,12 +402,40 @@ function isRateLimit(value: unknown): boolean {
   return /(?:rate[ _-]?limit|too many requests|\b429\b)/i.test(errorText(value));
 }
 
+// NamedError literals that opencode assigns to a user-initiated abort (ESC /
+// interrupt), never to a genuine provider or config failure. Sourced from the
+// opencode-ai 1.18.30 binary: `Ho(s){return s.role==="assistant"&&s.error?.name
+// ==="MessageAbortedError"}`. One-line addition if opencode adds another abort
+// discriminator.
+const OPENCODE_ABORTED_ERROR_NAMES = new Set(["MessageAbortedError"]);
+
+function isAbortedError(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const name = value["name"];
+  return typeof name === "string" && OPENCODE_ABORTED_ERROR_NAMES.has(name);
+}
+
+function messageActivityMs(record: Record<string, unknown>): number | undefined {
+  const time = record["time"];
+  if (!isRecord(time)) return undefined;
+  const completed = time["completed"];
+  if (typeof completed === "number") return completed;
+  const created = time["created"];
+  return typeof created === "number" ? created : undefined;
+}
+
 export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | null {
   const messages = openCodeMessages(value);
   if (messages.length === 0) return null;
   const last = messages.at(-1);
   const record = last ? messageInfo(last) : null;
   if (!record) return null;
+  const state = classifyOpenCodeMessage(record);
+  const activityMs = messageActivityMs(record);
+  return state && activityMs !== undefined ? { ...state, activityMs } : state;
+}
+
+function classifyOpenCodeMessage(record: Record<string, unknown>): OpenCodeStructuredState | null {
   if (record["role"] === "user") {
     return { state: "working", reason: "last role=user" };
   }
@@ -385,6 +443,9 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
   if (record["error"] !== undefined && record["error"] !== null) {
     if (isRateLimit(record["error"])) {
       return { state: "rate_limited", reason: "assistant rate limit" };
+    }
+    if (isAbortedError(record["error"])) {
+      return { state: "waiting", reason: "assistant aborted" };
     }
     return { state: "error", reason: "assistant error" };
   }
@@ -394,9 +455,80 @@ export function parseOpenCodeState(value: unknown): OpenCodeStructuredState | nu
     time !== null &&
     typeof (time as Record<string, unknown>)["completed"] === "number"
   ) {
+    // A step that ended in tool calls is complete, but the turn is not: the
+    // agent runs the tools and writes the next step.
+    if (record["finish"] === "tool-calls") {
+      return { state: "working", reason: "assistant step ended in tool calls" };
+    }
     return { state: "waiting", reason: "assistant completed" };
   }
   return { state: "working", reason: "assistant incomplete" };
+}
+
+export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSample | undefined {
+  if (!isRecord(value)) return undefined;
+  const rootInfo = isRecord(value["info"]) ? value["info"] : value;
+  const rootId = rootInfo["id"];
+  if (typeof rootId !== "string" || !rootId) return undefined;
+  const seen = new Set<string>();
+  let firstAssistantId: string | undefined;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadInputTokens = 0;
+  let cacheWriteInputTokens = 0;
+  let reasoningOutputTokens = 0;
+  for (const message of openCodeMessages(value)) {
+    const info = messageInfo(message);
+    if (info?.["role"] !== "assistant") continue;
+    const id = info["id"];
+    if (typeof id !== "string" || !id || seen.has(id)) continue;
+    const tokens = info["tokens"];
+    if (!isRecord(tokens)) return undefined;
+    const input = tokens["input"];
+    const output = tokens["output"];
+    const reasoning = tokens["reasoning"];
+    const cache = tokens["cache"];
+    if (
+      !Number.isSafeInteger(input) ||
+      (input as number) < 0 ||
+      !Number.isSafeInteger(output) ||
+      (output as number) < 0 ||
+      !Number.isSafeInteger(reasoning) ||
+      (reasoning as number) < 0 ||
+      !isRecord(cache) ||
+      !Number.isSafeInteger(cache["read"]) ||
+      (cache["read"] as number) < 0 ||
+      !Number.isSafeInteger(cache["write"]) ||
+      (cache["write"] as number) < 0
+    )
+      return undefined;
+    const messageInput = (input as number) + (cache["read"] as number) + (cache["write"] as number);
+    const messageOutput = (output as number) + (reasoning as number);
+    const computedTotal = messageInput + messageOutput;
+    if (
+      tokens["total"] !== undefined &&
+      (!Number.isSafeInteger(tokens["total"]) || tokens["total"] !== computedTotal)
+    )
+      return undefined;
+    seen.add(id);
+    firstAssistantId ??= id;
+    inputTokens += messageInput;
+    outputTokens += messageOutput;
+    cacheReadInputTokens += cache["read"] as number;
+    cacheWriteInputTokens += cache["write"] as number;
+    reasoningOutputTokens += reasoning as number;
+  }
+  if (!firstAssistantId) return undefined;
+  return {
+    provider: "opencode",
+    generationId: `opencode:${rootId}:${firstAssistantId}`,
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    cacheReadInputTokens,
+    cacheWriteInputTokens,
+    reasoningOutputTokens,
+  };
 }
 
 // Every export is a subprocess that queries the one multi-gigabyte SQLite DB
@@ -430,7 +562,7 @@ function releaseOpenCodeExportSlot(): void {
   else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
 }
 
-async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
+export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
   await acquireOpenCodeExportSlot();
   try {
     const stdout = await readOpenCodeJson(["export", sessionId], {
@@ -442,29 +574,116 @@ async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
   }
 }
 
+export async function deleteOpenCodeSession(sessionId: string): Promise<void> {
+  await readOpenCodeJson(["session", "delete", sessionId], {
+    timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
+  });
+}
+
+/** A user message's position in the session: creation time, id as tiebreak. */
+export interface OpenCodeUserMessageMark {
+  createdMs: number;
+  id: string;
+}
+
+/**
+ * The session's newest user message at send time, null when it had none.
+ * O(1) whatever the session's length, so it can be persisted.
+ */
 export interface OpenCodeSubmitBaseline {
   sessionId: string;
-  userMessageIds: Set<string>;
+  after: OpenCodeUserMessageMark | null;
+}
+
+function isAfterMark(
+  mark: OpenCodeUserMessageMark,
+  watermark: OpenCodeUserMessageMark | null,
+): boolean {
+  if (!watermark) return true;
+  return (
+    mark.createdMs > watermark.createdMs ||
+    (mark.createdMs === watermark.createdMs && mark.id > watermark.id)
+  );
+}
+
+function newerMark(
+  a: OpenCodeUserMessageMark | null,
+  b: OpenCodeUserMessageMark,
+): OpenCodeUserMessageMark {
+  return a && !isAfterMark(b, a) ? a : b;
 }
 
 // OpenCode rewrites what it persists: a prompt that opens with a slash command
 // is stored expanded, so the delivered text never equals the text Spur sent.
-// Delivery is confirmed by a new user message id, never by matching text.
-export function parseOpenCodeUserMessageIds(value: unknown): Set<string> {
-  const ids = new Set<string>();
+// Delivery is confirmed by a user message newer than the send's watermark,
+// never by matching text. Export form: messages without a numeric
+// `info.time.created` carry no position and never count.
+export function parseOpenCodeLatestUserMessage(value: unknown): OpenCodeUserMessageMark | null {
+  let latest: OpenCodeUserMessageMark | null = null;
   for (const message of openCodeMessages(value)) {
     const info = messageInfo(message);
     const id = info?.["id"];
-    if (info?.["role"] === "user" && typeof id === "string") ids.add(id);
+    const time = info?.["time"];
+    const createdMs = isRecord(time) ? time["created"] : undefined;
+    if (info?.["role"] === "user" && typeof id === "string" && typeof createdMs === "number") {
+      latest = newerMark(latest, { createdMs, id });
+    }
   }
-  return ids;
+  return latest;
 }
 
-export function hasNewOpenCodeUserMessage(
+export function hasOpenCodeUserMessageAfter(
   baseline: OpenCodeSubmitBaseline,
-  current: Set<string>,
+  latest: OpenCodeUserMessageMark | null,
 ): boolean {
-  return [...current].some((id) => !baseline.userMessageIds.has(id));
+  return latest !== null && isAfterMark(latest, baseline.after);
+}
+
+export function openCodeDatabasePath(env: NodeJS.ProcessEnv = process.env): string {
+  const dataHome = env["XDG_DATA_HOME"] || join(homedir(), ".local", "share");
+  return join(dataHome, "opencode", "opencode.db");
+}
+
+// One indexed query (message_session_time_created_id_idx) against opencode's
+// own SQLite store: ~1ms where `opencode export` costs 2-4s per call, so the
+// submit-ack scan can poll without a subprocess per tick. The schema is
+// opencode-internal, so a read that fails — missing DB, renamed table or
+// column — answers from the CLI export instead. `node:sqlite` loads lazily:
+// Node 22 prints an ExperimentalWarning on import, which must not reach every
+// CLI run that merely loads this module.
+export async function readOpenCodeLatestUserMessageFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<OpenCodeUserMessageMark | null> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const row = database
+      .prepare(
+        `SELECT id, time_created AS createdMs FROM message
+         WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
+         ORDER BY time_created DESC, id DESC LIMIT 1`,
+      )
+      .get(sessionId);
+    if (!row) return null;
+    const { id, createdMs } = row;
+    if (typeof id !== "string" || typeof createdMs !== "number") {
+      throw new Error(`Unexpected opencode message row for ${sessionId}`);
+    }
+    return { createdMs, id };
+  } finally {
+    database.close();
+  }
+}
+
+async function readOpenCodeLatestUserMessage(
+  sessionId: string,
+): Promise<OpenCodeUserMessageMark | null> {
+  try {
+    return await readOpenCodeLatestUserMessageFromDatabase(sessionId);
+  } catch {
+    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId));
+  }
 }
 
 export async function captureOpenCodeSubmitBaseline(
@@ -472,10 +691,7 @@ export async function captureOpenCodeSubmitBaseline(
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    return {
-      sessionId,
-      userMessageIds: parseOpenCodeUserMessageIds(await exportOpenCodeSession(sessionId)),
-    };
+    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId) };
   } catch {
     return null;
   }
@@ -485,14 +701,96 @@ export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
 ): Promise<boolean> {
   try {
-    const current = parseOpenCodeUserMessageIds(await exportOpenCodeSession(baseline.sessionId));
-    return hasNewOpenCodeUserMessage(baseline, current);
+    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId);
+    return hasOpenCodeUserMessageAfter(baseline, latest);
   } catch {
     return false;
   }
 }
 
-// One `opencode export` costs 2-4s on a loaded host, so the launch check needs
+const normalizeTypedText = (value: string) =>
+  value.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").trim();
+
+// User messages newer than the watermark, with their joined text parts.
+export async function readOpenCodeUserTextsAfterFromDatabase(
+  baseline: OpenCodeSubmitBaseline,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<string[]> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const after = baseline.after;
+    const rows = database
+      .prepare(
+        `SELECT m.id AS messageId, json_extract(p.data, '$.text') AS text
+         FROM message m JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user'
+           AND json_extract(p.data, '$.type') = 'text'
+           AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
+         ORDER BY m.time_created, m.id, p.id`,
+      )
+      .all(baseline.sessionId, after?.createdMs ?? -1, after?.createdMs ?? -1, after?.id ?? "");
+    const texts = new Map<unknown, string>();
+    for (const row of rows) {
+      const text = row["text"];
+      if (typeof text !== "string") continue;
+      const prior = texts.get(row["messageId"]);
+      texts.set(row["messageId"], prior === undefined ? text : `${prior}\n${text}`);
+    }
+    return [...texts.values()];
+  } finally {
+    database.close();
+  }
+}
+
+// Export form of readOpenCodeUserTextsAfterFromDatabase.
+export function parseOpenCodeUserTextsAfter(
+  value: unknown,
+  after: OpenCodeUserMessageMark | null,
+): string[] {
+  const texts: string[] = [];
+  for (const message of openCodeMessages(value)) {
+    const info = messageInfo(message);
+    const id = info?.["id"];
+    const time = info?.["time"];
+    const createdMs = isRecord(time) ? time["created"] : undefined;
+    if (info?.["role"] !== "user" || typeof id !== "string" || typeof createdMs !== "number") {
+      continue;
+    }
+    if (isAfterMark({ createdMs, id }, after)) texts.push(textFromParts(message["parts"]));
+  }
+  return texts;
+}
+
+// The ack of one typed text: a slash command is stored expanded, so any user
+// message past the watermark acks it; any other text must appear in one, or
+// the user's own direct input would ack a message opencode never got.
+export async function scanOpenCodeForTypedMessage(
+  baseline: OpenCodeSubmitBaseline,
+  typed: string,
+): Promise<boolean> {
+  if (typed.trimStart().startsWith("/")) {
+    return scanOpenCodeForNewUserMessage(baseline);
+  }
+  const target = normalizeTypedText(typed);
+  try {
+    let texts: string[];
+    try {
+      texts = await readOpenCodeUserTextsAfterFromDatabase(baseline);
+    } catch {
+      texts = parseOpenCodeUserTextsAfter(
+        await exportOpenCodeSession(baseline.sessionId),
+        baseline.after,
+      );
+    }
+    return texts.some((text) => normalizeTypedText(text).includes(target));
+  } catch {
+    return false;
+  }
+}
+
+// The scan reads opencode.db, but falls back to `opencode export` (2-4s per
+// call on a loaded host) when the DB is unreadable, so the launch check keeps
 // the same budget as identity binding rather than a few polls' worth.
 const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
 
@@ -500,7 +798,7 @@ export async function waitForOpenCodeLaunchMessage(
   sessionId: string,
   timeoutMs = OPENCODE_LAUNCH_MESSAGE_WAIT_MS,
 ): Promise<boolean> {
-  const baseline: OpenCodeSubmitBaseline = { sessionId, userMessageIds: new Set() };
+  const baseline: OpenCodeSubmitBaseline = { sessionId, after: null };
   const deadline = Date.now() + timeoutMs;
   do {
     if (await scanOpenCodeForNewUserMessage(baseline)) return true;
@@ -511,8 +809,9 @@ export async function waitForOpenCodeLaunchMessage(
 
 // Every other agent classifies from an incremental file read; opencode has no
 // per-session file to stat — all sessions share one multi-gigabyte SQLite DB —
-// so its only state source is `opencode export`, a subprocess that queries that
-// DB and serializes the whole transcript. Left ungated, the 2s dashboard tick
+// so the state comes from that DB's last message row (readOpenCodeStateFromDatabase),
+// with `opencode export` — a subprocess that queries that DB and serializes the
+// whole transcript — only when the DB is unreadable. Left ungated, the 2s dashboard tick
 // spawned one per live opencode session faster than they finished: a
 // 15-session fleet sampled at mean 4 and peak 17 concurrent exports, 3.7 GB
 // resident at the peak, with 40% of the daemon's own CPU in system time.
@@ -521,14 +820,45 @@ export async function waitForOpenCodeLaunchMessage(
 // that produced it — and concurrent callers share one in-flight export. A
 // session's state is at most OPENCODE_STATE_TTL_MS staler than the export it
 // came from, which was already seconds old by the time it returned.
+// The TTL alone only paces the exports, it never stops them: a 5s TTL polled by
+// a 2s tick means every expiry is met by a waiting caller, so each live opencode
+// session costs a steady export every 5s forever. The lever is the NUMBER of
+// spawns, and the signal is the pane's own output clock — an export that
+// re-derives the state of a pane that has printed nothing since the last export
+// cannot return anything new. So a cached state is served past the TTL while the
+// caller's tmux activity timestamp proves the pane has been silent, up to
+// OPENCODE_STATE_MAX_AGE_MS, which self-heals a state change that produced no
+// pane output at all.
 const OPENCODE_STATE_TTL_MS = 5_000;
-const openCodeStateCache = new Map<string, { at: number; state: OpenCodeStructuredState | null }>();
-const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredState | null>>();
+const OPENCODE_STATE_MAX_AGE_MS = 600_000;
+// tmux `window_activity` has ONE-SECOND resolution. A pane painting 0.4s after
+// an export starts reports the same whole second the export already recorded, so
+// `activityAtMs <= cached.activityAtMs` would hold and the transition would hide
+// until the ceiling. The gate is therefore only trusted when the export started
+// more than this margin after the pane's last recorded output second.
+const ACTIVITY_SETTLED_MS = 3_000;
+type OpenCodeStateEntry = {
+  at: number;
+  result: OpenCodeStructuredRead;
+  /** Activity timestamp observed when this entry's export STARTED. */
+  activityAtMs: number | null;
+  startedAtMs: number;
+};
+const openCodeStateCache = new Map<string, OpenCodeStateEntry>();
+const openCodeStateInFlight = new Map<string, Promise<OpenCodeStructuredRead>>();
+
+export interface OpenCodeStructuredRead {
+  state: OpenCodeStructuredState | null;
+  tokenUsage?: ProviderTokenUsageSample;
+}
+// Bumped per pane write (invalidateOpenCodeState); a read that spans a bump is not cached.
+const openCodeStateGeneration = new Map<string, number>();
 
 /** Drops every session's cached state and the export gate's counters. Test seam. */
 export function resetOpenCodeExportState(): void {
   openCodeStateCache.clear();
   openCodeStateInFlight.clear();
+  openCodeStateGeneration.clear();
   // The gate's counters are module state too. A slot still held when a test
   // ends shifts the peak concurrency every later test observes, so clear them
   // here as well — resuming queued waiters rather than dropping them, so a
@@ -537,43 +867,199 @@ export function resetOpenCodeExportState(): void {
   openCodeExportActive = 0;
 }
 
-export async function readOpenCodeState(
-  sessionId?: string,
+function shouldServeCachedOpenCodeState(
+  cached: OpenCodeStateEntry,
+  now: number,
+  activityAtMs: number | null,
+): boolean {
+  const age = now - cached.at;
+  // Floor: unchanged TTL, no signal consulted.
+  if (age < OPENCODE_STATE_TTL_MS) return true;
+  // Ceiling: self-heal a state change that left no trace in the pane.
+  if (age >= OPENCODE_STATE_MAX_AGE_MS) return false;
+  // A failed export is cached as null and classified as "working" by the
+  // caller. Pinning that for the ceiling would hold a wrong LIVE state, not a
+  // stale one, so it always retries on the TTL.
+  if (cached.result.state === null) return false;
+  // Unknown activity falls back to TTL-only behaviour.
+  if (activityAtMs === null || cached.activityAtMs === null) return false;
+  return (
+    activityAtMs <= cached.activityAtMs && cached.startedAtMs - activityAtMs > ACTIVITY_SETTLED_MS
+  );
+}
+
+// Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase.
+// The state depends on the session's last message alone, so one indexed row
+// replaces a whole-transcript export; its `data` is the export's `info`, so the
+// export parser classifies both.
+export async function readOpenCodeStateFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
 ): Promise<OpenCodeStructuredState | null> {
-  if (!sessionId) return null;
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const row = database
+      .prepare(
+        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
+      )
+      .get(sessionId);
+    if (!row) return parseOpenCodeState({ messages: [] });
+    const data = row["data"];
+    if (typeof data !== "string") {
+      throw new Error(`Unexpected opencode message row for ${sessionId}`);
+    }
+    return parseOpenCodeState({ messages: [{ info: JSON.parse(data) as unknown }] });
+  } finally {
+    database.close();
+  }
+}
+
+async function readOpenCodeStructuredStateFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<OpenCodeStructuredRead> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const rows = database
+      .prepare("SELECT data FROM message WHERE session_id = ? ORDER BY time_created, id")
+      .all(sessionId);
+    const messages = rows.map((row) => {
+      const data = row["data"];
+      if (typeof data !== "string") {
+        throw new Error(`Unexpected opencode message row for ${sessionId}`);
+      }
+      return { info: JSON.parse(data) as unknown };
+    });
+    const value = { id: sessionId, messages };
+    const tokenUsage = parseOpenCodeTokenUsage(value);
+    return {
+      state: parseOpenCodeState(value),
+      ...(tokenUsage ? { tokenUsage } : {}),
+    };
+  } finally {
+    database.close();
+  }
+}
+
+export async function readOpenCodeStructuredState(
+  sessionId?: string,
+  activityAtMs?: number | null,
+  force = false,
+): Promise<OpenCodeStructuredRead> {
+  if (!sessionId) return { state: null };
 
   const now = Date.now();
+  const observedActivityAtMs = activityAtMs ?? null;
   const cached = openCodeStateCache.get(sessionId);
-  if (cached && now - cached.at < OPENCODE_STATE_TTL_MS) {
-    return cached.state;
+  if (!force && cached && shouldServeCachedOpenCodeState(cached, now, observedActivityAtMs)) {
+    return cached.result;
   }
   const inFlight = openCodeStateInFlight.get(sessionId);
   if (inFlight) {
-    return inFlight;
+    if (!force) return inFlight;
+    await inFlight;
   }
 
-  const pending = (async (): Promise<OpenCodeStructuredState | null> => {
+  const pending = (async (): Promise<OpenCodeStructuredRead> => {
     try {
-      return parseOpenCodeState(await exportOpenCodeSession(sessionId));
+      return await readOpenCodeStructuredStateFromDatabase(sessionId);
     } catch {
-      return null;
+      try {
+        const exported = await exportOpenCodeSession(sessionId);
+        const tokenUsage = parseOpenCodeTokenUsage(exported);
+        return {
+          state: parseOpenCodeState(exported),
+          ...(tokenUsage ? { tokenUsage } : {}),
+        };
+      } catch {
+        return { state: null };
+      }
     }
   })();
   openCodeStateInFlight.set(sessionId, pending);
+  const startedAtMs = now;
+  const generation = openCodeStateGeneration.get(sessionId) ?? 0;
   try {
-    const state = await pending;
-    openCodeStateCache.set(sessionId, { at: Date.now(), state });
+    const result = await pending;
+    // A pane write since this read started (invalidateOpenCodeState) makes
+    // its answer pre-write: return it to this caller, never cache it.
+    if ((openCodeStateGeneration.get(sessionId) ?? 0) !== generation) {
+      return result;
+    }
+    openCodeStateCache.set(sessionId, {
+      at: Date.now(),
+      result,
+      activityAtMs: observedActivityAtMs,
+      startedAtMs,
+    });
     // Expired entries are evicted here rather than on a timer: the map only
-    // grows when a session is classified, so this is the one place it can.
+    // grows when a session is classified, so this is the one place it can. The
+    // bound is the max age, not the TTL — a TTL-bound sweep destroys the very
+    // entry the activity gate needs to consult, and one continuously-painting
+    // pane's completions would wipe every silent session's entry.
     for (const [id, entry] of openCodeStateCache) {
-      if (Date.now() - entry.at >= OPENCODE_STATE_TTL_MS) {
+      if (Date.now() - entry.at >= OPENCODE_STATE_MAX_AGE_MS) {
         openCodeStateCache.delete(id);
       }
     }
-    return state;
+    return result;
   } finally {
-    openCodeStateInFlight.delete(sessionId);
+    if (openCodeStateInFlight.get(sessionId) === pending) {
+      openCodeStateInFlight.delete(sessionId);
+    }
   }
+}
+
+// A message just typed into the session's pane: every cached or in-flight
+// state predates it, and a cached "waiting" would let a queued message type
+// straight into the turn the write started.
+export function invalidateOpenCodeState(sessionId: string): void {
+  openCodeStateCache.delete(sessionId);
+  openCodeStateInFlight.delete(sessionId);
+  openCodeStateGeneration.set(sessionId, (openCodeStateGeneration.get(sessionId) ?? 0) + 1);
+}
+
+// Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase:
+// the agent page polls the conversation every few seconds, and a per-poll
+// `opencode export` piles up behind the export gate. Only text parts are
+// selected; rows are shaped like the export so one parser serves both paths.
+export async function readOpenCodeConversationFromDatabase(
+  sessionId: string,
+  databasePath: string = openCodeDatabasePath(),
+): Promise<TranscriptEntry[]> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const rows = database
+      .prepare(
+        `SELECT m.id AS messageId, json_extract(m.data, '$.role') AS role, json_extract(p.data, '$.text') AS text
+         FROM message m JOIN part p ON p.message_id = m.id
+         WHERE m.session_id = ? AND json_extract(p.data, '$.type') = 'text'
+         ORDER BY m.time_created, m.id, p.id`,
+      )
+      .all(sessionId);
+    const messages = new Map<unknown, { info: { role: unknown }; parts: unknown[] }>();
+    for (const row of rows) {
+      let message = messages.get(row["messageId"]);
+      if (!message) {
+        message = { info: { role: row["role"] }, parts: [] };
+        messages.set(row["messageId"], message);
+      }
+      message.parts.push({ type: "text", text: row["text"] });
+    }
+    return parseOpenCodeExport({ messages: [...messages.values()] });
+  } finally {
+    database.close();
+  }
+}
+
+export async function readOpenCodeState(
+  sessionId?: string,
+  activityAtMs?: number | null,
+): Promise<OpenCodeStructuredState | null> {
+  return (await readOpenCodeStructuredState(sessionId, activityAtMs)).state;
 }
 
 export async function readOpenCodeConversation(
@@ -581,8 +1067,12 @@ export async function readOpenCodeConversation(
 ): Promise<TranscriptEntry[] | null> {
   if (!sessionId) return null;
   try {
-    return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+    return await readOpenCodeConversationFromDatabase(sessionId);
   } catch {
-    return null;
+    try {
+      return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+    } catch {
+      return null;
+    }
   }
 }

@@ -1,12 +1,14 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
 import { logSpurEvent } from "../event-log.js";
 import { resolveWebBaseUrl } from "../ports.js";
-import type { AppConfig, SourceType } from "../types.js";
+import type { AppConfig, ProjectListEntry, SourceConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubCiSourceModule } from "./github-ci.js";
 import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
+import { jiraSourceModule } from "./jira.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
@@ -15,6 +17,7 @@ import type {
   SourceHandle,
   SourceLogger,
   SourceModule,
+  SourceProjectListItem,
   SourceSpawnSessionRequest,
   SourceSessionListItem,
 } from "./types.js";
@@ -25,6 +28,18 @@ interface StartConfiguredSourcesDeps {
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
+  listProjects?(): Promise<SourceProjectListItem[]>;
+}
+
+/**
+ * The spawnable-project list every source's project picker sees: configured
+ * projects only, never the shepherd project and never a registry-discovered
+ * (unconfigured) one. Pure so it's testable without booting a server.
+ */
+export function spawnableProjects(entries: ProjectListEntry[]): SourceProjectListItem[] {
+  return entries
+    .filter((entry) => entry.configured && entry.kind !== "shepherd")
+    .map(({ id, name }) => ({ id, name }));
 }
 
 interface StartedSource {
@@ -40,14 +55,17 @@ const SOURCE_MODULES = {
   github: githubSourceModule,
   "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,
+  jira: jiraSourceModule,
   sentry: sentrySourceModule,
   service: serviceSourceModule,
   telegram: telegramSourceModule,
-} satisfies Record<Exclude<SourceType, "jira">, SourceModule>;
+} satisfies Record<SourceType, SourceModule>;
 
-// Connection-only source types are consumed by the backlog subsystem, not
-// started by the event-source loop.
-const CONNECTION_SOURCE_TYPES = new Set<SourceType>(["jira"]);
+// A jira source with no `query` is consumed by the backlog subsystem only,
+// not started by the event-source loop (connection-only, no poller).
+function isConnectionOnlySource(source: SourceConfig): boolean {
+  return source.type === "jira" && source.query === undefined;
+}
 
 async function stopAll(sources: StartedSource[]): Promise<void> {
   for (const source of [...sources].reverse()) {
@@ -102,8 +120,8 @@ export async function startConfiguredSources(
         continue;
       }
       for (const [sourceId, source] of Object.entries(project.sources)) {
-        if (CONNECTION_SOURCE_TYPES.has(source.type)) continue;
-        const module = SOURCE_MODULES[source.type as Exclude<SourceType, "jira">] as SourceModule;
+        if (isConnectionOnlySource(source)) continue;
+        const module = SOURCE_MODULES[source.type] as SourceModule;
         const abortController = new AbortController();
         const handle = await module.start({
           sourceId,
@@ -113,6 +131,7 @@ export async function startConfiguredSources(
           deferInitialSync: true,
           listSessions: deps.listSessions,
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
+          ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {
@@ -129,6 +148,7 @@ export async function startConfiguredSources(
             });
             deps.bus.emit({
               name,
+              occurrenceId: randomUUID(),
               projectId,
               sourceId,
               ...(data === undefined ? {} : { data }),
