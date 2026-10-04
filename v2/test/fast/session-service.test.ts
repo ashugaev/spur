@@ -33349,7 +33349,7 @@ describe("SessionService", () => {
         },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -33392,7 +33392,7 @@ describe("SessionService", () => {
         },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -33880,7 +33880,7 @@ describe("SessionService", () => {
         },
       },
     });
-    readSessionMock.mockReturnValue({
+    createSessionStore({
       id: "api-1",
       project: "api",
       agent: "claude",
