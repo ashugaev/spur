@@ -218,9 +218,37 @@ export interface AvailableBacklogItem {
 
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
+/** Internal spawn option and persisted session tag: which trigger block spawned a work-item session. */
+export interface WorkItemTriggerOrigin {
+  triggerId: string;
+  sourceId: string;
+  externalId: string;
+  blockIndex: number;
+}
+
+export type WorkItemMemberState = "spawning" | "running" | "failed" | "completed";
+
+/** One spawn-block outcome for a work item. A member without `triggerId` is a migrated pre-upgrade record. */
+export interface WorkItemMember {
+  triggerId?: string;
+  blockIndex: number;
+  state: WorkItemMemberState;
+  sessionId?: string;
+  claimedAt: string;
+  attempts: number;
+  deferrals: number;
+  nextRetryAt?: string;
+  error?: string;
+  /** Running owner a claimed member would replace; restored when the owner is still live. */
+  replacesSessionId?: string;
+}
+
 interface WorkItemLifecycleBase extends WorkItemEventData {
   autoComplete: boolean;
   createdAt: string;
+  members: WorkItemMember[];
+  /** Last time the source re-emitted this item for a retry. */
+  lastRetryEmitAt?: string;
 }
 
 export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
@@ -1140,6 +1168,8 @@ export interface SessionRecord {
   lastOpenedAt?: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  /** Set when a work-item spawn trigger created this session; lets a retry find it after a lost spawn. */
+  triggerOrigin?: WorkItemTriggerOrigin;
   selfDestruct?: SelfDestructConfig;
   sidecarNames?: string[];
   // Sidecar names that were tmux-alive at park time (stale_timeout), replayed

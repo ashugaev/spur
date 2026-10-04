@@ -37,7 +37,11 @@ import {
   type TokenUsageTotals,
   type WorkItemLifecycleRecord,
   type WorkItemLifecycleState,
+  type WorkItemMember,
+  type WorkItemTriggerOrigin,
+  type WorkItemMemberState,
 } from "./types.js";
+import { buildWorkItemRecord, type WorkItemRecordBase } from "./work-item-retry.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
 import { aggregateTokenUsage } from "./token-usage.js";
@@ -580,6 +584,79 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
   writeSessionIndexFile(dataDir, nextIndex);
 }
 
+const WORK_ITEM_MEMBER_STATES: ReadonlySet<unknown> = new Set([
+  "spawning",
+  "running",
+  "failed",
+  "completed",
+]);
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function isWorkItemTriggerOrigin(value: unknown): value is WorkItemTriggerOrigin {
+  return (
+    isRecord(value) &&
+    typeof value.triggerId === "string" &&
+    typeof value.sourceId === "string" &&
+    typeof value.externalId === "string" &&
+    typeof value.blockIndex === "number"
+  );
+}
+
+function parseWorkItemMember(raw: unknown): WorkItemMember | null {
+  if (!isRecord(raw)) return null;
+  const { blockIndex, state, claimedAt, attempts, sessionId } = raw;
+  if (
+    typeof blockIndex !== "number" ||
+    !Number.isInteger(blockIndex) ||
+    blockIndex < 0 ||
+    !WORK_ITEM_MEMBER_STATES.has(state) ||
+    typeof claimedAt !== "string" ||
+    typeof attempts !== "number"
+  ) {
+    return null;
+  }
+  const memberState = state as WorkItemMemberState;
+  if ((memberState === "running" || memberState === "completed") && typeof sessionId !== "string") {
+    return null;
+  }
+  const triggerId = optionalString(raw.triggerId);
+  const nextRetryAt = optionalString(raw.nextRetryAt);
+  const error = optionalString(raw.error);
+  const replacesSessionId = optionalString(raw.replacesSessionId);
+  return {
+    ...(triggerId !== undefined ? { triggerId } : {}),
+    blockIndex,
+    state: memberState,
+    ...(typeof sessionId === "string" ? { sessionId } : {}),
+    claimedAt,
+    attempts,
+    deferrals: typeof raw.deferrals === "number" ? raw.deferrals : 0,
+    ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
+    ...(error !== undefined ? { error } : {}),
+    ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
+  };
+}
+
+// A pre-upgrade record has one record-level state and no members: it becomes
+// one untriggered member that stands for every block of the next claiming trigger.
+function legacyWorkItemMember(
+  raw: Record<string, unknown>,
+  createdAt: string,
+): WorkItemMember | null {
+  const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
+  const sessionId = optionalString(raw.sessionId);
+  const common = { blockIndex: 0, claimedAt: createdAt, attempts: 0, deferrals: 0 };
+  if (state === "pending") return { ...common, state: "spawning" };
+  if (state === "failed") {
+    const error = optionalString(raw.error);
+    return error === undefined ? null : { ...common, state, error };
+  }
+  return sessionId === undefined ? null : { ...common, state, sessionId };
+}
+
 function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -600,6 +677,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
       ) {
         continue;
       }
+      const lastRetryEmitAt = optionalString(raw.lastRetryEmitAt);
       const base = {
         externalId: raw.externalId,
         url: raw.url,
@@ -608,39 +686,16 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         repo: raw.repo,
         createdAt: raw.createdAt,
         autoComplete: typeof raw.autoComplete === "boolean" ? raw.autoComplete : true,
+        ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}),
       };
-      const state = isWorkItemLifecycleState(raw.state) ? raw.state : "running";
-      if (state === "pending") {
-        result.set(raw.externalId, {
-          ...base,
-          state,
-        });
-        continue;
-      }
-      if (state === "failed") {
-        if (typeof raw.error !== "string") continue;
-        result.set(raw.externalId, {
-          ...base,
-          state,
-          error: raw.error,
-        });
-        continue;
-      }
-      if (typeof raw.sessionId !== "string") continue;
-      if (state === "completed") {
-        result.set(raw.externalId, {
-          ...base,
-          state,
-          sessionId: raw.sessionId,
-          completedAt: typeof raw.completedAt === "string" ? raw.completedAt : raw.createdAt,
-        });
-        continue;
-      }
-      result.set(raw.externalId, {
-        ...base,
-        state: "running",
-        sessionId: raw.sessionId,
-      });
+      const members = Array.isArray(raw.members)
+        ? raw.members.flatMap((member) => parseWorkItemMember(member) ?? [])
+        : [legacyWorkItemMember(raw, raw.createdAt)].flatMap((member) => member ?? []);
+      if (members.length === 0) continue;
+      result.set(
+        raw.externalId,
+        buildWorkItemRecord(base, members, optionalString(raw.completedAt) ?? raw.createdAt),
+      );
     }
     return result;
   } catch {
@@ -1127,6 +1182,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     // stay legible, but nothing writes a fresh one.
     ...(normalizedSession.deskId ? { deskId: normalizedSession.deskId } : {}),
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
+    ...(isWorkItemTriggerOrigin(normalizedSession.triggerOrigin)
+      ? { triggerOrigin: normalizedSession.triggerOrigin }
+      : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
@@ -1695,19 +1753,58 @@ export function readWorkItemLifecycles(
   return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
 }
 
-export function recordWorkItemLifecycle(
+function writeWorkItemLifecycles(
   dataDir: string,
   projectId: string,
   sourceId: string,
-  record: WorkItemLifecycleRecord,
+  records: Map<string, WorkItemLifecycleRecord>,
 ): void {
-  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
-  records.set(record.externalId, record);
   writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
     records: [...records.values()].sort((left, right) =>
       left.externalId.localeCompare(right.externalId),
     ),
   });
+}
+
+// One synchronous read-modify-write: concurrent callers (two triggers, a
+// source stamp) never clobber each other's members because nothing awaits
+// between the read and the write. `base` overwrites the record's item fields;
+// record-level state is derived from the mutated members.
+export function updateWorkItemMembers(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  base: WorkItemRecordBase,
+  mutate: (members: WorkItemMember[]) => WorkItemMember[],
+): WorkItemLifecycleRecord {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  const existing = records.get(base.externalId);
+  const lastRetryEmitAt = base.lastRetryEmitAt ?? existing?.lastRetryEmitAt;
+  const next = buildWorkItemRecord(
+    { ...base, ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}) },
+    mutate(existing?.members ?? []),
+    new Date().toISOString(),
+  );
+  records.set(next.externalId, next);
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
+  return next;
+}
+
+// Stamps the re-emit time for exactly the given items in one write, before the
+// source emits them.
+export function markWorkItemRetriesEmitted(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalIds: readonly string[],
+  nowIso: string,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  for (const externalId of externalIds) {
+    const record = records.get(externalId);
+    if (record) records.set(externalId, { ...record, lastRetryEmitAt: nowIso });
+  }
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function deleteWorkItemLifecycle(
@@ -1718,11 +1815,7 @@ export function deleteWorkItemLifecycle(
 ): void {
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   if (!records.delete(externalId)) return;
-  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
-    records: [...records.values()].sort((left, right) =>
-      left.externalId.localeCompare(right.externalId),
-    ),
-  });
+  writeWorkItemLifecycles(dataDir, projectId, sourceId, records);
 }
 
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {

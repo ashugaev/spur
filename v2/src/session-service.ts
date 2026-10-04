@@ -484,6 +484,7 @@ import {
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
+  type WorkItemTriggerOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -11361,6 +11362,8 @@ export class SessionService {
       closeoutOwnerTransfer?: boolean;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
+      /** Internal: set by a work-item spawn trigger, never from the HTTP body. */
+      triggerOrigin?: WorkItemTriggerOrigin;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -11599,6 +11602,7 @@ export class SessionService {
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
           : {}),
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };

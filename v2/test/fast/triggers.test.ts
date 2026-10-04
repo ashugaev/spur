@@ -16,7 +16,13 @@ import type {
   ReviewSignal,
   ReviewSnapshot,
   WorkItemLifecycleRecord,
+  WorkItemMember,
 } from "../../src/types.js";
+import {
+  buildWorkItemRecord,
+  WORK_ITEM_RETRY_INTERVAL_MS,
+  type WorkItemRecordBase,
+} from "../../src/work-item-retry.js";
 
 // Builds the on-disk/in-memory envelope shape `readGitHubSourceSnapshotMock`
 // now returns. `prNumber` defaults to 42 to match the fixture events' `prNumber`
@@ -28,7 +34,8 @@ function storedSnapshot(signals: ReviewSignal[], prNumber: number | null = 42): 
 const readGitHubSourceSnapshotMock = vi.fn();
 const readReviewSourceSnapshotMock = vi.fn();
 const readWorkItemLifecyclesMock = vi.fn();
-const recordWorkItemLifecycleMock = vi.fn();
+const updateWorkItemMembersMock = vi.fn();
+const listSessionsMock = vi.fn();
 const deleteWorkItemLifecycleMock = vi.fn();
 const readPendingSendBatchesMock = vi.fn();
 const recordPendingSendBatchMock = vi.fn();
@@ -40,6 +47,12 @@ const logSpurEventMock = vi.fn();
 const refreshSignalsMock =
   vi.fn<(input: RefreshReviewSignalsInput) => Promise<ReviewSignalRefreshResult[]>>();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
+
+function loggedEvents(event: string): Array<{ level: string; details?: Record<string, unknown> }> {
+  return logSpurEventMock.mock.calls
+    .map(([, entry]) => entry)
+    .filter((entry) => entry.event === event);
+}
 
 function inputLogEntries(sessionId: string): unknown[] {
   return logSpurEventMock.mock.calls
@@ -64,7 +77,8 @@ vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
   readReviewSourceSnapshot: readReviewSourceSnapshotMock,
   readWorkItemLifecycles: readWorkItemLifecyclesMock,
-  recordWorkItemLifecycle: recordWorkItemLifecycleMock,
+  updateWorkItemMembers: updateWorkItemMembersMock,
+  listSessions: listSessionsMock,
   readPendingSendBatches: readPendingSendBatchesMock,
   recordPendingSendBatch: recordPendingSendBatchMock,
   deletePendingSendBatch: deletePendingSendBatchMock,
@@ -670,21 +684,68 @@ function workItemEvent() {
   };
 }
 
-function runningWorkItemLifecycle(
-  options?: Partial<Extract<WorkItemLifecycleRecord, { state: "running" }>>,
-): Extract<WorkItemLifecycleRecord, { state: "running" }> {
+const WORK_ITEM_BASE = {
+  externalId: "acme/api#42",
+  url: "https://github.com/acme/api/pull/42",
+  number: 42,
+  title: "Fix the bug",
+  repo: "acme/api",
+  autoComplete: true,
+};
+
+function workItemSpawnOptions(blockIndex = 0) {
   return {
-    externalId: "acme/api#42",
-    sessionId: "api-9",
-    url: "https://github.com/acme/api/pull/42",
-    number: 42,
-    title: "Fix the bug",
-    repo: "acme/api",
-    createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-    autoComplete: true,
-    state: "running",
-    ...options,
+    triggerOrigin: {
+      triggerId: "pick-up",
+      sourceId: "pr-watch",
+      externalId: "acme/api#42",
+      blockIndex,
+    },
   };
+}
+
+// `undefined` in an override drops the field (the member shape forbids it).
+function workItemMember(overrides?: {
+  [K in keyof WorkItemMember]?: WorkItemMember[K] | undefined;
+}): WorkItemMember {
+  const member = {
+    triggerId: "pick-up",
+    blockIndex: 0,
+    state: "running",
+    sessionId: "api-9",
+    claimedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    attempts: 1,
+    deferrals: 0,
+    ...overrides,
+  };
+  return Object.fromEntries(
+    Object.entries(member).filter(([, value]) => value !== undefined),
+  ) as unknown as WorkItemMember;
+}
+
+// A lifecycle record built from members the way the metadata writer derives it.
+function workItemLifecycle(
+  members: WorkItemMember[],
+  options?: { createdAt?: string; autoComplete?: boolean },
+): WorkItemLifecycleRecord {
+  return buildWorkItemRecord(
+    {
+      ...WORK_ITEM_BASE,
+      autoComplete: options?.autoComplete ?? true,
+      createdAt: options?.createdAt ?? new Date(Date.now() - 5 * 60_000).toISOString(),
+    },
+    members,
+    new Date().toISOString(),
+  );
+}
+
+function runningWorkItemLifecycle(options?: {
+  createdAt?: string;
+}): Extract<WorkItemLifecycleRecord, { state: "running" }> {
+  return workItemLifecycle([workItemMember()], options) as Extract<
+    WorkItemLifecycleRecord,
+    { state: "running" }
+  >;
 }
 
 function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
@@ -692,17 +753,35 @@ function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
   for (const record of initial ?? []) {
     records.set(record.externalId, record);
   }
-  readWorkItemLifecyclesMock.mockImplementation(() => new Map(records));
-  recordWorkItemLifecycleMock.mockImplementation(
-    (_dataDir: string, _projectId: string, _sourceId: string, record: WorkItemLifecycleRecord) => {
-      records.set(record.externalId, record);
-    },
-  );
-  deleteWorkItemLifecycleMock.mockImplementation(
-    (_dataDir: string, _projectId: string, _sourceId: string, externalId: string) => {
-      records.delete(externalId);
-    },
-  );
+  readWorkItemLifecyclesMock.mockReset().mockImplementation(() => new Map(records));
+  updateWorkItemMembersMock
+    .mockReset()
+    .mockImplementation(
+      (
+        _dataDir: string,
+        _projectId: string,
+        _sourceId: string,
+        base: WorkItemRecordBase,
+        mutate: (members: WorkItemMember[]) => WorkItemMember[],
+      ) => {
+        const existing = records.get(base.externalId);
+        const lastRetryEmitAt = base.lastRetryEmitAt ?? existing?.lastRetryEmitAt;
+        const next = buildWorkItemRecord(
+          { ...base, ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}) },
+          mutate(existing?.members ?? []),
+          new Date().toISOString(),
+        );
+        records.set(next.externalId, next);
+        return next;
+      },
+    );
+  deleteWorkItemLifecycleMock
+    .mockReset()
+    .mockImplementation(
+      (_dataDir: string, _projectId: string, _sourceId: string, externalId: string) => {
+        records.delete(externalId);
+      },
+    );
   return records;
 }
 
@@ -751,9 +830,8 @@ describe("startConfiguredTriggers", () => {
       );
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
     readReviewSourceSnapshotMock.mockReset().mockReturnValue(null);
-    readWorkItemLifecyclesMock.mockReset().mockReturnValue(new Map());
-    recordWorkItemLifecycleMock.mockReset();
-    deleteWorkItemLifecycleMock.mockReset();
+    useWorkItemLifecycleStore();
+    listSessionsMock.mockReset().mockReturnValue([]);
     readPendingSendBatchesMock.mockReset().mockReturnValue(new Map());
     recordPendingSendBatchMock
       .mockReset()
@@ -4803,7 +4881,7 @@ describe("startConfiguredTriggers", () => {
 
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    useWorkItemLifecycleStore();
+    const records = useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -4818,15 +4896,15 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        DATA_DIR,
-        "api",
-        "pr-watch",
+      expect(spawnMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        workItemSpawnOptions(),
+      );
+      expect(records.get("acme/api#42")).toEqual(
         expect.objectContaining({
           externalId: "acme/api#42",
           state: "running",
@@ -4836,6 +4914,15 @@ describe("startConfiguredTriggers", () => {
           title: "Fix the bug",
           repo: "acme/api",
           autoComplete: true,
+          members: [
+            expect.objectContaining({
+              triggerId: "pick-up",
+              blockIndex: 0,
+              state: "running",
+              sessionId: "api-9",
+              attempts: 1,
+            }),
+          ],
         }),
       );
     } finally {
@@ -4863,18 +4950,26 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "codex",
-        prompt: "Codex review https://github.com/acme/api/pull/42.",
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          agent: "claude",
+          prompt: "Claude review https://github.com/acme/api/pull/42.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        workItemSpawnOptions(0),
+      );
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          agent: "codex",
+          prompt: "Codex review https://github.com/acme/api/pull/42.",
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        workItemSpawnOptions(1),
+      );
     } finally {
       await controller.stop();
     }
@@ -4885,7 +4980,7 @@ describe("startConfiguredTriggers", () => {
       .fn()
       .mockResolvedValueOnce({ id: "api-9" })
       .mockResolvedValueOnce({ id: "api-10" });
-    useWorkItemLifecycleStore();
+    const records = useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -4900,33 +4995,34 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
-        project: "api",
-        agent: "claude",
-        model: "sonnet",
-        prompt: "Claude review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
-        project: "api",
-        agent: "cursor",
-        model: "composer-2.5",
-        prompt: "Cursor review https://github.com/acme/api/pull/42.",
-        restrictWrites: true,
-        allowedTriggers: [],
-        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "pr-watch",
-        expect.objectContaining({
-          externalId: "acme/api#42",
-          state: "running",
-          autoComplete: false,
-        }),
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        1,
+        {
+          project: "api",
+          agent: "claude",
+          model: "sonnet",
+          prompt: "Claude review https://github.com/acme/api/pull/42.",
+          restrictWrites: true,
+          allowedTriggers: [],
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        workItemSpawnOptions(0),
+      );
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        2,
+        {
+          project: "api",
+          agent: "cursor",
+          model: "composer-2.5",
+          prompt: "Cursor review https://github.com/acme/api/pull/42.",
+          restrictWrites: true,
+          allowedTriggers: [],
+          slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+        },
+        workItemSpawnOptions(1),
+      );
+      expect(records.get("acme/api#42")).toEqual(
+        expect.objectContaining({ state: "running", autoComplete: false }),
       );
     } finally {
       await controller.stop();
@@ -4935,7 +5031,7 @@ describe("startConfiguredTriggers", () => {
 
   it("spawns and tracks the work-item lifecycle for a sentry:issue.new event", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
-    useWorkItemLifecycleStore();
+    const records = useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -4950,21 +5046,23 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
-        slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
-      });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        "/tmp/spur-data",
-        "api",
-        "sentry-issues",
-        expect.objectContaining({
-          externalId: "acme/web#WEB-7",
-          state: "running",
-          sessionId: "api-9",
-          autoComplete: true,
-        }),
+      expect(spawnMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
+          slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
+        },
+        {
+          triggerOrigin: {
+            triggerId: "triage",
+            sourceId: "sentry-issues",
+            externalId: "acme/web#WEB-7",
+            blockIndex: 0,
+          },
+        },
+      );
+      expect(records.get("acme/web#WEB-7")).toEqual(
+        expect.objectContaining({ state: "running", sessionId: "api-9", autoComplete: true }),
       );
     } finally {
       await controller.stop();
@@ -5017,7 +5115,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual(workItemSpawnOptions());
       const path = join(policyDir, "auto-ping.json");
       const grants = existsSync(path)
         ? (JSON.parse(readFileSync(path, "utf8")) as { grants: unknown[] }).grants
@@ -5083,7 +5181,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual(workItemSpawnOptions());
     } finally {
       await controller.stop();
       autoPing.dispose();
@@ -5117,7 +5215,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("leaves a failed work-item claim and retries on the next event", async () => {
+  it("retries a failed work-item spawn only after 45 minutes", async () => {
     const spawnMock = vi
       .fn()
       .mockRejectedValueOnce(new Error("spawn failed"))
@@ -5142,7 +5240,20 @@ describe("startConfiguredTriggers", () => {
           }),
         );
       });
+      const failed = records.get("acme/api#42")?.members[0];
+      expect(failed).toMatchObject({ state: "failed", attempts: 1, deferrals: 0 });
+      const retryAt = Date.parse(failed?.nextRetryAt ?? "");
+      expect(retryAt - Date.now()).toBeLessThanOrEqual(WORK_ITEM_RETRY_INTERVAL_MS);
+      expect(retryAt - Date.now()).toBeGreaterThan(WORK_ITEM_RETRY_INTERVAL_MS - 5_000);
+      expect(loggedEvents("trigger.spawn.retry_scheduled")).toHaveLength(1);
 
+      vi.setSystemTime(retryAt - 1);
+      bus.emit(workItemEvent());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(loggedEvents("trigger.spawn.suppressed")).toHaveLength(1);
+
+      vi.setSystemTime(retryAt);
       bus.emit(workItemEvent());
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
@@ -5153,6 +5264,7 @@ describe("startConfiguredTriggers", () => {
           sessionId: "api-10",
         }),
       );
+      expect(records.get("acme/api#42")?.members[0]).toMatchObject({ attempts: 2 });
     } finally {
       await controller.stop();
     }
@@ -5166,7 +5278,7 @@ describe("startConfiguredTriggers", () => {
       state: "needs_input",
       workspaceExists: true,
     });
-    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const records = useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5183,17 +5295,9 @@ describe("startConfiguredTriggers", () => {
       });
       expect(spawnMock).not.toHaveBeenCalled();
 
-      readWorkItemLifecyclesMock.mockReturnValue(
-        new Map([
-          [
-            "acme/api#42",
-            {
-              ...runningWorkItemLifecycle(),
-              state: "completed",
-              completedAt: new Date().toISOString(),
-            },
-          ],
-        ]),
+      records.set(
+        "acme/api#42",
+        workItemLifecycle([workItemMember({ state: "completed", sessionId: "api-9" })]),
       );
       bus.emit(workItemEvent());
       await vi.advanceTimersByTimeAsync(1);
@@ -5207,17 +5311,15 @@ describe("startConfiguredTriggers", () => {
     {
       reason: "work_item_pending",
       level: "info",
-      lifecycle: { ...runningWorkItemLifecycle(), state: "pending" as const, sessionId: undefined },
+      lifecycle: workItemLifecycle([
+        workItemMember({ state: "spawning", claimedAt: new Date().toISOString() }),
+      ]),
       get: undefined,
     },
     {
       reason: "work_item_completed",
       level: "info",
-      lifecycle: {
-        ...runningWorkItemLifecycle(),
-        state: "completed" as const,
-        completedAt: new Date().toISOString(),
-      },
+      lifecycle: workItemLifecycle([workItemMember({ state: "completed" })]),
       get: undefined,
     },
     {
@@ -5243,7 +5345,7 @@ describe("startConfiguredTriggers", () => {
       },
     },
     {
-      reason: "owner_not_replaceable",
+      reason: "owner_active",
       level: "info",
       lifecycle: runningWorkItemLifecycle(),
       get: {
@@ -5393,6 +5495,7 @@ describe("startConfiguredTriggers", () => {
           project: "api",
           prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
+        workItemSpawnOptions(),
       );
     } finally {
       await controller.stop();
@@ -5430,6 +5533,655 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  describe("work-item spawn retry", () => {
+    const MINUTE = 60_000;
+
+    function deskConfig(
+      blocks: Array<{ agent?: string; prompt: string }> = [
+        { agent: "claude", prompt: "Claude review {{url}}." },
+        { agent: "opencode", prompt: "Opencode review {{url}}." },
+      ],
+    ) {
+      return {
+        dataDir: DATA_DIR,
+        projects: {
+          api: {
+            sources: { "pr-watch": { type: "github", query: "is:pr is:open" } },
+            triggers: {
+              "pick-up": {
+                source: "pr-watch",
+                event: "github:work_item.new",
+                spawnDeskGroup: true,
+                spawn: { blocks },
+              },
+            },
+          },
+        },
+      };
+    }
+
+    async function startTriggers(config: unknown, sessionService: unknown) {
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config as never,
+        bus,
+        sessionService: sessionService as never,
+        logger: { warn: vi.fn() },
+      });
+      return { bus, controller };
+    }
+
+    function taggedSession(sessionId: string, blockIndex = 0) {
+      return {
+        id: sessionId,
+        project: "api",
+        createdAt: new Date().toISOString(),
+        triggerOrigin: {
+          triggerId: "pick-up",
+          sourceId: "pr-watch",
+          externalId: "acme/api#42",
+          blockIndex,
+        },
+      };
+    }
+
+    function failedMember(overrides?: Partial<WorkItemMember>): WorkItemMember {
+      return workItemMember({
+        state: "failed",
+        sessionId: undefined,
+        error: "spawn failed",
+        nextRetryAt: new Date(Date.now() - MINUTE).toISOString(),
+        ...overrides,
+      });
+    }
+
+    function memberOf(records: Map<string, WorkItemLifecycleRecord>, blockIndex = 0) {
+      return records.get("acme/api#42")?.members.find((m) => m.blockIndex === blockIndex);
+    }
+
+    function eventsOf(event: string) {
+      return loggedEvents(event);
+    }
+
+    it.each(["memory_guard", "cap"] as const)(
+      "admission denial defers without spending an attempt (%s)",
+      async (reason) => {
+        const records = useWorkItemLifecycleStore();
+        const spawnMock = vi.fn();
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+        });
+        const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+        spawnMock
+          .mockRejectedValueOnce(new SessionAdmissionDeniedError("held", reason))
+          .mockResolvedValueOnce({ id: "api-10" });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(memberOf(records)?.state).toBe("failed");
+          });
+          const failed = memberOf(records);
+          expect(failed).toMatchObject({ attempts: 0, deferrals: 1 });
+          expect(records.get("acme/api#42")?.state).toBe("failed");
+          const retryAt = Date.parse(failed?.nextRetryAt ?? "");
+          expect(retryAt - Date.now()).toBeLessThanOrEqual(WORK_ITEM_RETRY_INTERVAL_MS);
+          expect(retryAt - Date.now()).toBeGreaterThan(WORK_ITEM_RETRY_INTERVAL_MS - 5_000);
+          expect(eventsOf("trigger.spawn.retry_deferred")).toHaveLength(1);
+          expect(eventsOf("trigger.spawn.retry_deferred")[0]?.details).toMatchObject({
+            reason,
+            deferrals: 1,
+          });
+          expect(eventsOf("trigger.spawn.retry_scheduled")).toHaveLength(0);
+
+          vi.setSystemTime(retryAt);
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(spawnMock).toHaveBeenCalledTimes(2);
+          });
+          expect(memberOf(records)).toMatchObject({
+            state: "running",
+            sessionId: "api-10",
+            attempts: 1,
+            deferrals: 1,
+          });
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it("stops retrying after 24 attempts", async () => {
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle([failedMember({ attempts: 23 })]),
+      ]);
+      const spawnMock = vi.fn().mockRejectedValue(new Error("still broken"));
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+        });
+        expect(memberOf(records)).toMatchObject({ state: "failed", attempts: 24 });
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(Date.now() + 24 * 60 * MINUTE);
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("stops after 96 deferrals", async () => {
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle([failedMember({ attempts: 0, deferrals: 95 })]),
+      ]);
+      const spawnMock = vi.fn();
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+      });
+      const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
+      spawnMock.mockRejectedValue(new SessionAdmissionDeniedError("held", "memory_guard"));
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+        });
+        expect(eventsOf("trigger.spawn.retry_exhausted")[0]?.details).toMatchObject({
+          cause: "deferrals",
+        });
+        expect(memberOf(records)).toMatchObject({ attempts: 0, deferrals: 96 });
+
+        vi.setSystemTime(Date.now() + 24 * 60 * MINUTE);
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(eventsOf("trigger.spawn.retry_exhausted")).toHaveLength(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    const WORKING = { status: "running", state: "working", workspaceExists: true };
+
+    it("retries only the missing desk member and keeps the anchor as owner", async () => {
+      const records = useWorkItemLifecycleStore();
+      const spawnMock = vi
+        .fn()
+        .mockResolvedValueOnce({ id: "api-1" })
+        .mockRejectedValueOnce(new Error("member failed"))
+        .mockResolvedValueOnce({ id: "api-3" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", ...WORKING });
+      const { bus, controller } = await startTriggers(deskConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(memberOf(records, 1)?.state).toBe("failed");
+        });
+        expect(memberOf(records, 0)).toMatchObject({ state: "running", sessionId: "api-1" });
+
+        vi.setSystemTime(Date.parse(memberOf(records, 1)?.nextRetryAt ?? ""));
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(3);
+        });
+        expect(spawnMock.mock.calls[2]?.[0]).toMatchObject({
+          agent: "opencode",
+          reuseWorkspaceSessionId: "api-1",
+        });
+        expect(spawnMock.mock.calls[2]?.[1]).toEqual(workItemSpawnOptions(1));
+        expect(memberOf(records, 1)).toMatchObject({ state: "running", sessionId: "api-3" });
+        expect(records.get("acme/api#42")).toMatchObject({ state: "running", sessionId: "api-1" });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each([
+      { label: "working", session: { status: "running", state: "working" } },
+      { label: "server-error wedge", session: { status: "running", state: "error" } },
+    ])(
+      "adopts a session left by a spawn lost to restart instead of respawning ($label)",
+      async ({ session }) => {
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            }),
+          ]),
+        ]);
+        listSessionsMock.mockReturnValue([taggedSession("api-9")]);
+        const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+        const getMock = vi
+          .fn()
+          .mockResolvedValue({ id: "api-9", workspaceExists: true, ...session });
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+          get: getMock,
+        });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+          });
+          expect(spawnMock).not.toHaveBeenCalled();
+          expect(memberOf(records)).toMatchObject({ state: "running", sessionId: "api-9" });
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it("resumes a persisted due retry after controller restart", async () => {
+      const records = useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        expect(memberOf(records)).toMatchObject({ state: "running", sessionId: "api-10" });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("overlapping retry events spawn the member once", async () => {
+      const records = useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
+      const spawnMock = vi.fn().mockImplementation(async () => {
+        await Promise.resolve();
+        return { id: "api-10" };
+      });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-10", ...WORKING });
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(memberOf(records)).toMatchObject({ state: "running", sessionId: "api-10" });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("two trigger controllers claim a due member once", async () => {
+      const records = useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
+      let release: (() => void) | undefined;
+      const spawnMock = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ id: "api-10" });
+          }),
+      );
+      const service = { spawn: spawnMock };
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const first = startConfiguredTriggers({
+        config: workItemSpawnConfig() as never,
+        bus,
+        sessionService: service as never,
+        logger: { warn: vi.fn() },
+      });
+      const second = startConfiguredTriggers({
+        config: workItemSpawnConfig() as never,
+        bus,
+        sessionService: service as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(memberOf(records)?.state).toBe("spawning");
+        expect(eventsOf("trigger.spawn.suppressed")[0]?.details).toMatchObject({
+          reason: "work_item_pending",
+        });
+        release?.();
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await first.stop();
+        await second.stop();
+      }
+    });
+
+    it("claims every planned block before the anchor spawns", async () => {
+      const records = useWorkItemLifecycleStore();
+      const statesAtSpawn: string[] = [];
+      const spawnMock = vi.fn().mockImplementationOnce(async () => {
+        statesAtSpawn.push(
+          ...(records.get("acme/api#42")?.members.map((member) => member.state) ?? []),
+        );
+        return { id: "api-1" };
+      });
+      spawnMock.mockResolvedValue({ id: "api-2" });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn: spawnMock });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(2);
+        });
+        expect(statesAtSpawn).toEqual(["spawning", "spawning"]);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("after a crash post-anchor retries only the member", async () => {
+      useWorkItemLifecycleStore([
+        workItemLifecycle([
+          workItemMember({ blockIndex: 0, state: "running", sessionId: "api-1" }),
+          workItemMember({
+            blockIndex: 1,
+            state: "spawning",
+            sessionId: undefined,
+            claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+          }),
+        ]),
+      ]);
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", ...WORKING });
+      const { bus, controller } = await startTriggers(deskConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+          agent: "opencode",
+          reuseWorkspaceSessionId: "api-1",
+        });
+        expect(spawnMock.mock.calls[0]?.[1]).toEqual(workItemSpawnOptions(1));
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("claims before checking the running owner", async () => {
+      const records = useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+      const stateAtGet: Array<string | undefined> = [];
+      const getMock = vi.fn().mockImplementation(async () => {
+        stateAtGet.push(memberOf(records)?.state);
+        return { id: "api-9", ...WORKING };
+      });
+      const spawnMock = vi.fn();
+      const { bus, controller } = await startTriggers(
+        workItemSpawnConfig({ autoComplete: false }),
+        {
+          spawn: spawnMock,
+          get: getMock,
+        },
+      );
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(getMock).toHaveBeenCalledTimes(1);
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stateAtGet).toEqual(["spawning"]);
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(memberOf(records)).toMatchObject({
+          state: "running",
+          sessionId: "api-9",
+          attempts: 1,
+          deferrals: 0,
+        });
+        expect(memberOf(records)).not.toHaveProperty("replacesSessionId");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each([
+      { label: "running working", session: { status: "running", state: "working" } },
+      { label: "running error", session: { status: "running", state: "error" } },
+      { label: "spawning stopped", session: { status: "spawning", state: "stopped" } },
+    ])("adopts a session that survived a failed spawn ($label)", async ({ session }) => {
+      const records = useWorkItemLifecycleStore();
+      listSessionsMock.mockReturnValue([taggedSession("api-9")]);
+      const spawnMock = vi.fn().mockRejectedValue(new Error("readiness timeout"));
+      const getMock = vi.fn().mockResolvedValue({ id: "api-9", workspaceExists: true, ...session });
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(memberOf(records)).toMatchObject({ state: "running", sessionId: "api-9" });
+        });
+        expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+        expect(eventsOf("trigger.spawn.retry_scheduled")).toHaveLength(0);
+
+        vi.setSystemTime(Date.now() + 45 * MINUTE);
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("legacy partial desk retries only the unmatched block", async () => {
+      useWorkItemLifecycleStore([
+        workItemLifecycle([
+          {
+            blockIndex: 0,
+            state: "failed",
+            error: "boom",
+            claimedAt: new Date(Date.now() - 60 * MINUTE).toISOString(),
+            attempts: 0,
+            deferrals: 0,
+          },
+        ]),
+      ]);
+      listSessionsMock.mockReturnValue([
+        {
+          id: "api-1",
+          project: "api",
+          createdAt: "2026-06-01T10:00:00.000Z",
+          slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+        },
+      ]);
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", agent: "claude", ...WORKING });
+      const { bus, controller } = await startTriggers(deskConfig(), {
+        spawn: spawnMock,
+        get: getMock,
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+          agent: "opencode",
+          reuseWorkspaceSessionId: "api-1",
+        });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("legacy fill gives explicit-agent blocks first pick", async () => {
+      useWorkItemLifecycleStore([
+        workItemLifecycle([
+          {
+            blockIndex: 0,
+            state: "failed",
+            error: "boom",
+            claimedAt: new Date(Date.now() - 60 * MINUTE).toISOString(),
+            attempts: 0,
+            deferrals: 0,
+          },
+        ]),
+      ]);
+      listSessionsMock.mockReturnValue([
+        {
+          id: "api-1",
+          project: "api",
+          createdAt: "2026-06-01T10:00:00.000Z",
+          slots: { links: [{ label: "pr", url: WORK_ITEM_BASE.url }] },
+        },
+      ]);
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+      const getMock = vi.fn().mockResolvedValue({ id: "api-1", agent: "opencode", ...WORKING });
+      const { bus, controller } = await startTriggers(
+        deskConfig([
+          { prompt: "Default review {{url}}." },
+          { agent: "opencode", prompt: "Opencode review {{url}}." },
+        ]),
+        { spawn: spawnMock, get: getMock },
+      );
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        });
+        expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+          prompt: `Default review ${WORK_ITEM_BASE.url}.`,
+          reuseWorkspaceSessionId: "api-1",
+        });
+        expect(spawnMock.mock.calls[0]?.[1]).toEqual(workItemSpawnOptions(0));
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("refreshes each block claim before its spawn", async () => {
+      const records = useWorkItemLifecycleStore();
+      let claimAtSecondSpawn: string | undefined;
+      let timeAtSecondSpawn: string | undefined;
+      const spawnMock = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(Date.now() + 50 * MINUTE);
+          return { id: "api-1" };
+        })
+        .mockImplementationOnce(async () => {
+          claimAtSecondSpawn = memberOf(records, 1)?.claimedAt;
+          timeAtSecondSpawn = new Date().toISOString();
+          return { id: "api-2" };
+        });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn: spawnMock });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(spawnMock).toHaveBeenCalledTimes(2);
+        });
+        expect(claimAtSecondSpawn).toBe(timeAtSecondSpawn);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("does not spawn a block another controller already took", async () => {
+      const records = useWorkItemLifecycleStore();
+      const spawnMock = vi.fn().mockImplementationOnce(async () => {
+        updateWorkItemMembersMock(
+          DATA_DIR,
+          "api",
+          "pr-watch",
+          { ...WORK_ITEM_BASE, createdAt: new Date().toISOString() },
+          (members: WorkItemMember[]) =>
+            members.map((member) =>
+              member.blockIndex === 1
+                ? { ...member, state: "running", sessionId: "api-other" }
+                : member,
+            ),
+        );
+        return { id: "api-1" };
+      });
+      const { bus, controller } = await startTriggers(deskConfig(), { spawn: spawnMock });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(memberOf(records, 1)).toMatchObject({ state: "running", sessionId: "api-other" });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("suppresses a record claimed only by other triggers", async () => {
+      useWorkItemLifecycleStore([
+        workItemLifecycle([workItemMember({ triggerId: "someone-else" })]),
+      ]);
+      const spawnMock = vi.fn();
+      const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+        spawn: spawnMock,
+        get: vi.fn(),
+      });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).not.toHaveBeenCalled();
+        expect(eventsOf("trigger.spawn.suppressed")[0]?.details).toMatchObject({
+          reason: "not_claimed_by_trigger",
+        });
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it.each([
+      {
+        label: "completed",
+        session: { status: "completed", state: "waiting" },
+        expected: "completed",
+      },
+      { label: "spawning", session: { status: "spawning", state: "stopped" }, expected: "adopt" },
+      { label: "working", session: { status: "running", state: "working" }, expected: "adopt" },
+      { label: "wedge", session: { status: "running", state: "error" }, expected: "adopt" },
+      {
+        label: "stale-parked",
+        session: { status: "stopped", state: "stale", stopReason: "stale_timeout" },
+        expected: "adopt",
+      },
+      { label: "stopped", session: { status: "stopped", state: "stopped" }, expected: "replace" },
+    ])("classifies a work-item owner ($label)", async ({ session, expected }) => {
+      const { classifyWorkItemOwner } = await loadTriggersModule();
+      expect(classifyWorkItemOwner(session as never)).toBe(expected);
+    });
+  });
+
   it("auto-completes a waiting work-item session after the minimum age", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-9",
@@ -5438,16 +6190,9 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const completeMock = vi.fn().mockResolvedValue(undefined);
-    readWorkItemLifecyclesMock.mockReturnValue(
-      new Map([
-        [
-          "acme/api#42",
-          runningWorkItemLifecycle({
-            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-          }),
-        ],
-      ]),
-    );
+    const records = useWorkItemLifecycleStore([
+      runningWorkItemLifecycle({ createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }),
+    ]);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5461,14 +6206,11 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(completeMock).toHaveBeenCalledWith("api-9", { prAction: "leave_open" });
       });
-      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
-        DATA_DIR,
-        "api",
-        "pr-watch",
+      expect(records.get("acme/api#42")).toEqual(
         expect.objectContaining({
-          externalId: "acme/api#42",
           state: "completed",
           sessionId: "api-9",
+          members: [expect.objectContaining({ state: "completed", sessionId: "api-9" })],
         }),
       );
     } finally {
@@ -5491,16 +6233,9 @@ describe("startConfiguredTriggers", () => {
     const completeMock = vi
       .fn()
       .mockRejectedValue(new SessionResourceNotFoundError("Session not found: api-9"));
-    readWorkItemLifecyclesMock.mockReturnValue(
-      new Map([
-        [
-          "acme/api#42",
-          runningWorkItemLifecycle({
-            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-          }),
-        ],
-      ]),
-    );
+    useWorkItemLifecycleStore([
+      runningWorkItemLifecycle({ createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }),
+    ]);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5543,16 +6278,9 @@ describe("startConfiguredTriggers", () => {
       workspaceExists: true,
     });
     const completeMock = vi.fn().mockResolvedValue(undefined);
-    readWorkItemLifecyclesMock.mockReturnValue(
-      new Map([
-        [
-          "acme/api#42",
-          runningWorkItemLifecycle({
-            createdAt: new Date(Date.now() - 10_000).toISOString(),
-          }),
-        ],
-      ]),
-    );
+    const records = useWorkItemLifecycleStore([
+      runningWorkItemLifecycle({ createdAt: new Date(Date.now() - 10_000).toISOString() }),
+    ]);
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -5566,15 +6294,9 @@ describe("startConfiguredTriggers", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(completeMock).not.toHaveBeenCalled();
 
-      readWorkItemLifecyclesMock.mockReturnValue(
-        new Map([
-          [
-            "acme/api#42",
-            runningWorkItemLifecycle({
-              createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-            }),
-          ],
-        ]),
+      records.set(
+        "acme/api#42",
+        runningWorkItemLifecycle({ createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }),
       );
       await vi.advanceTimersByTimeAsync(30_000);
       await vi.waitFor(() => {
