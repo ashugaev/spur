@@ -1,11 +1,19 @@
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type * as ChildProcess from "node:child_process";
+import type * as Config from "../../src/config.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
 
 const spawnMock = vi.fn();
 const sleepMock = vi.fn().mockResolvedValue(undefined);
 const loadConfigMock = vi.fn();
+const isDefaultInstanceConfigPathMock = vi.fn();
+const tempDirs: string[] = [];
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof ChildProcess>()),
   spawn: spawnMock,
 }));
 
@@ -13,8 +21,10 @@ vi.mock("node:timers/promises", () => ({
   setTimeout: sleepMock,
 }));
 
-vi.mock("../../src/config.js", () => ({
+vi.mock("../../src/config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof Config>()),
   loadConfig: loadConfigMock,
+  isDefaultInstanceConfigPath: isDefaultInstanceConfigPathMock,
 }));
 
 function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
@@ -41,6 +51,8 @@ async function loadClientModule() {
 
 describe("client.ensureServer", () => {
   beforeEach(() => {
+    vi.stubEnv("XDG_CONFIG_HOME", undefined);
+    isDefaultInstanceConfigPathMock.mockReset().mockReturnValue(false);
     vi.stubEnv("SPUR_DISABLE_AUTOSTART", undefined);
     vi.stubEnv("SPUR_SESSION", "");
     vi.stubEnv("SPUR_SIDECAR_NAME", "");
@@ -53,10 +65,11 @@ describe("client.ensureServer", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
   it("reuses a compatible daemon without spawning a new one", async () => {
@@ -274,6 +287,73 @@ describe("client.ensureServer", () => {
       /SPUR_DISABLE_AUTOSTART/,
     );
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["autostart", false],
+    ["restart", false],
+    ["autostart", true],
+    ["restart", true],
+  ] as const)(
+    "refuses detached %s when a user unit owns the default instance (XDG=%s)",
+    async (reason, xdg) => {
+      isDefaultInstanceConfigPathMock.mockReturnValue(true);
+      const home = await mkdtemp(join(tmpdir(), "spur-client-managed-unit-"));
+      tempDirs.push(home);
+      const configHome = join(home, xdg ? "xdg" : ".config");
+      if (xdg) vi.stubEnv("XDG_CONFIG_HOME", configHome);
+      const unitDir = join(configHome, "systemd", "user");
+      await mkdir(unitDir, { recursive: true });
+      await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
+      const configPath = join(home, ".spur", "config.yaml");
+      vi.stubEnv("HOME", home);
+      loadConfigMock.mockReturnValue({
+        configPath,
+        server: { host: "127.0.0.1", port: 4310 },
+      });
+      vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+      if (reason === "restart") {
+        vi.spyOn(process, "kill").mockReturnValue(true);
+        vi.mocked(fetch).mockResolvedValueOnce(
+          new Response(JSON.stringify(runtimeInfo()), { status: 200 }),
+        );
+      }
+
+      const { ensureServer, restartDaemonIfRunning } = await loadClientModule();
+      const operation = reason === "restart" ? restartDaemonIfRunning : ensureServer;
+      await expect(operation("/tmp/dist/cli.js")).rejects.toThrow(/spur-daemon.service/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("auto-starts a non-default config even when a user systemd unit exists", async () => {
+    const home = await mkdtemp(join(tmpdir(), "spur-client-non-default-unit-"));
+    tempDirs.push(home);
+    const unitDir = join(home, ".config", "systemd", "user");
+    await mkdir(unitDir, { recursive: true });
+    await writeFile(join(unitDir, "spur-daemon.service"), "[Service]\n", "utf8");
+    vi.stubEnv("HOME", home);
+    loadConfigMock.mockReturnValue({
+      configPath: "/tmp/spur-alt.yaml",
+      server: { host: "127.0.0.1", port: 4312 },
+    });
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
+      .mockRejectedValueOnce(new Error("still starting"))
+      .mockResolvedValue(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
+
+    const { ensureServer } = await loadClientModule();
+    const baseUrl = await ensureServer("/tmp/dist/cli.js", "/tmp/spur-alt.yaml");
+
+    expect(baseUrl).toBe("http://127.0.0.1:4312");
+    expect(spawnMock).toHaveBeenCalledWith(
+      process.execPath,
+      ["/tmp/dist/cli.js", "--config", "/tmp/spur-alt.yaml", "daemon", "start"],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
   });
 
   it("refuses implicit auto-start from a session pane and never spawns", async () => {

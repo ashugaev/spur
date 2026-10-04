@@ -1,5 +1,11 @@
 import { existsSync } from "node:fs";
-import { gh, pollBudgetState, recordGraphqlBudgetFromEnvelope, withGhPollBudget } from "../gh.js";
+import {
+  extractGithubErrorText,
+  gh,
+  pollBudgetState,
+  recordGraphqlBudgetFromEnvelope,
+  withGhPollBudget,
+} from "../gh.js";
 import {
   readCommentSeenRegistry,
   readGitHubReviewPagination,
@@ -29,7 +35,11 @@ import {
   normalizeReviewState,
   shortText,
 } from "./shared.js";
-import type { ReviewProvider } from "./types.js";
+import type {
+  RefreshReviewSignalsInput,
+  ReviewProvider,
+  ReviewSignalRefreshResult,
+} from "./types.js";
 
 export { hasMergeConflict, normalizeReviewDecision, shortText } from "./shared.js";
 
@@ -57,12 +67,14 @@ const REVIEW_BODY_FEEDBACK_STATES = new Set(["COMMENTED", "CHANGES_REQUESTED"]);
 const GITHUB_REVIEW_BATCH_MAX_TARGETS = 50;
 const GITHUB_GRAPHQL_NODE_LIMIT = 500_000;
 const GITHUB_REVIEW_THREAD_COUNT = 100;
+const GITHUB_REVIEW_REQUEST_COUNT = 20;
 const GITHUB_CONNECTION_PAGE_SIZE = 100;
 const GITHUB_BOUND_PR_NODE_BUDGET =
   1 +
   GITHUB_CONNECTION_PAGE_SIZE +
   GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
-  GITHUB_CONNECTION_PAGE_SIZE * 2;
+  GITHUB_CONNECTION_PAGE_SIZE * 2 +
+  GITHUB_REVIEW_REQUEST_COUNT;
 const GITHUB_UNBOUND_PR_CANDIDATES = 5;
 const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
   GITHUB_UNBOUND_PR_CANDIDATES * (1 + GITHUB_BOUND_PR_NODE_BUDGET);
@@ -263,6 +275,13 @@ type PullRequestReviewComment = {
 type ReviewSignalWithThreadTarget = ReviewSignal & {
   providerThreadTarget?: AutoPingThreadTarget;
 };
+type RefreshableCommentKind = "issue-comment" | "review-comment" | "review";
+
+interface RefreshableCommentSignal {
+  kind: RefreshableCommentKind;
+  id: string;
+  signal: ReviewSignal;
+}
 
 type GitHubPrStatusSummary = GitHubPrSummary & {
   statusCheckRollupState: string;
@@ -426,7 +445,8 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergea
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
-  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
+  reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
   const nodesPerTarget = bound ? GITHUB_BOUND_PR_NODE_BUDGET : GITHUB_UNBOUND_TARGET_NODE_BUDGET;
@@ -457,7 +477,7 @@ function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
     }
   }
   return {
-    query: `query(${declarations.join(",")}){rateLimit{cost remaining resetAt} r:repository(owner:$owner,name:$name){${fields.join(" ")}}}`,
+    query: `query(${declarations.join(",")}){viewer{login} rateLimit{cost remaining resetAt} r:repository(owner:$owner,name:$name){${fields.join(" ")}}}`,
     aliases,
   };
 }
@@ -523,6 +543,20 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
     const author = isRecord(raw.author) ? readString(raw.author.login) : null;
     return [{ id, body, user: { login: author } }];
   });
+}
+
+// Logins with a PENDING review request on the PR, lowercased for comparison.
+// GitHub clears a reviewer's request when that reviewer submits a review and
+// re-adds it on a re-request, so presence in this set is the whole signal: the
+// snapshot diff turns each new appearance into one emit.
+function requestedReviewerLoginsFromPrNode(value: Record<string, unknown>): Set<string> {
+  const logins = new Set<string>();
+  for (const raw of connectionNodes(value.reviewRequests)) {
+    if (!isRecord(raw) || !isRecord(raw.requestedReviewer)) continue;
+    const login = readString(raw.requestedReviewer.login);
+    if (login) logins.add(login.toLowerCase());
+  }
+  return logins;
 }
 
 function summaryAndNode(
@@ -731,6 +765,156 @@ function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal
   });
 }
 
+function parseSignalId(signal: ReviewSignal, prefix: string): string | null {
+  if (!signal.key.startsWith(prefix)) return null;
+  const id = signal.key.slice(prefix.length);
+  return /^\d+$/.test(id) ? id : null;
+}
+
+function refreshableCommentSignal(signal: ReviewSignal): RefreshableCommentSignal | null {
+  if (signal.kind !== "comment") return null;
+  const issueCommentId = parseSignalId(signal, "comment:");
+  if (issueCommentId) return { kind: "issue-comment", id: issueCommentId, signal };
+  const reviewCommentId = parseSignalId(signal, "review-comment:");
+  if (reviewCommentId) return { kind: "review-comment", id: reviewCommentId, signal };
+  const reviewId = parseSignalId(signal, "review:");
+  if (reviewId) return { kind: "review", id: reviewId, signal };
+  return null;
+}
+
+function isGithubNotFound(error: unknown): boolean {
+  const text = extractGithubErrorText(error).toLowerCase();
+  return /\bhttp 404\b/.test(text);
+}
+
+export function githubFeedbackIdentity(
+  prUrl: string,
+  prNumber: number,
+  repo?: string,
+): {
+  hostname: string;
+  repo: string;
+} {
+  const url = new URL(prUrl);
+  const path = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(url.pathname);
+  const slug = path ? `${path[1]}/${path[2]}`.toLowerCase() : "";
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    !path ||
+    Number(path[3]) !== prNumber ||
+    (repo !== undefined && repo.toLowerCase() !== slug)
+  )
+    throw new Error("Invalid GitHub feedback identity");
+  return { hostname: url.hostname, repo: slug };
+}
+
+function liveIssueCommentSignal(signal: ReviewSignal, raw: unknown): ReviewSignal {
+  if (!isRecord(raw) || typeof raw["body"] !== "string") {
+    throw new Error("Invalid GitHub comment response");
+  }
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : "unknown";
+  return {
+    ...signal,
+    text: `New PR comment from ${login}: "${shortText(raw["body"])}"`,
+  };
+}
+
+function liveReviewCommentSignal(signal: ReviewSignal, raw: unknown): ReviewSignal {
+  if (
+    !isRecord(raw) ||
+    typeof raw["body"] !== "string" ||
+    typeof raw["path"] !== "string" ||
+    (raw["line"] !== null && typeof raw["line"] !== "number")
+  ) {
+    throw new Error("Invalid GitHub review comment response");
+  }
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : "unknown";
+  const path = raw["path"];
+  const line = raw["line"];
+  const location = path ? ` on ${path}${line ? `:${line}` : ""}` : "";
+  return {
+    ...signal,
+    text: `New review comment from ${login}${location}: "${shortText(raw["body"])}"`,
+  };
+}
+
+function liveReviewBodySignal(signal: ReviewSignal, raw: unknown): ReviewSignal | null {
+  if (!isRecord(raw) || typeof raw["body"] !== "string" || typeof raw["state"] !== "string") {
+    throw new Error("Invalid GitHub review response");
+  }
+  const body = raw["body"].trim();
+  const state = raw["state"];
+  if (!body || !REVIEW_BODY_FEEDBACK_STATES.has(normalizeReviewState(state))) return null;
+  const user = isRecord(raw["user"]) ? raw["user"] : null;
+  const login = typeof user?.["login"] === "string" ? user["login"] : null;
+  return {
+    ...signal,
+    text: `New review from ${login ?? "a former user"}: "${shortText(body)}"`,
+  };
+}
+
+async function refreshGitHubCommentSignal(
+  hostname: string,
+  repo: string,
+  prNumber: number,
+  cwd: string,
+  refreshable: RefreshableCommentSignal,
+): Promise<ReviewSignal | null> {
+  const endpoint =
+    refreshable.kind === "issue-comment"
+      ? `repos/${repo}/issues/comments/${refreshable.id}`
+      : refreshable.kind === "review-comment"
+        ? `repos/${repo}/pulls/comments/${refreshable.id}`
+        : `repos/${repo}/pulls/${prNumber}/reviews/${refreshable.id}`;
+  try {
+    const raw = parseJson(await gh(cwd, "api", endpoint, "--hostname", hostname, "--cache", "0s"));
+    if (refreshable.kind === "issue-comment") {
+      return liveIssueCommentSignal(refreshable.signal, raw);
+    }
+    if (refreshable.kind === "review-comment") {
+      return liveReviewCommentSignal(refreshable.signal, raw);
+    }
+    return liveReviewBodySignal(refreshable.signal, raw);
+  } catch (error) {
+    if (isGithubNotFound(error)) return null;
+    throw error;
+  }
+}
+
+async function refreshSignals(
+  input: RefreshReviewSignalsInput,
+): Promise<ReviewSignalRefreshResult[]> {
+  return Promise.all(
+    input.signals.map(async (signal): Promise<ReviewSignalRefreshResult> => {
+      try {
+        const refreshable = refreshableCommentSignal(signal);
+        if (!refreshable) throw new Error(`Cannot resolve GitHub comment signal ${signal.key}`);
+        const live = await refreshGitHubCommentSignal(
+          input.hostname,
+          input.repo,
+          input.prNumber,
+          input.cwd,
+          refreshable,
+        );
+        return live
+          ? { status: "live", key: signal.key, signal: live }
+          : { status: "deleted", key: signal.key };
+      } catch (error) {
+        return {
+          status: "failed",
+          key: signal.key,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }),
+  );
+}
+
 function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
@@ -738,6 +922,7 @@ function collectSignalsFromNode(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  viewerLogin: string | null,
 ): GitHubCollectedSignals {
   const checks = checksFromPrNode(node);
   const reviewSignals = reviewSignalsFromComments(
@@ -756,6 +941,21 @@ function collectSignalsFromNode(
       ? null
       : summarizeFailingCi(checks);
   const snapshot = new Map<string, ReviewSignal>();
+  // Terminal PRs are excluded for the same reason approvals are: closing a PR
+  // does not clear its pending review requests, and a review on a dead PR is
+  // not work.
+  if (
+    viewerLogin &&
+    pr.state !== "MERGED" &&
+    pr.state !== "CLOSED" &&
+    requestedReviewerLoginsFromPrNode(node).has(viewerLogin.toLowerCase())
+  ) {
+    snapshot.set("review_requested", {
+      key: "review_requested",
+      kind: "review_requested",
+      text: `Review requested from ${viewerLogin} on this PR.`,
+    });
+  }
   if (pr.reviewDecision === "changes_requested") {
     snapshot.set("changes_requested", {
       key: "changes_requested",
@@ -807,6 +1007,8 @@ function collectSignalsFromNode(
   return {
     data: {
       sessionId: session.id,
+      repo: pr.repo,
+      prUrl: pr.url,
       prNumber: pr.number,
       prTitle: pr.title,
       signals: [],
@@ -1458,6 +1660,11 @@ async function runReviewRepoBatch(
     );
   }
   const repository = data.r;
+  // Root `viewer` rides in the same query as the PR aliases, so identifying the
+  // account this daemon authenticates as costs no extra request. Null (an old
+  // cached response, a token without the field) simply yields no
+  // review_requested signal.
+  const viewerLogin = isRecord(data.viewer) ? readString(data.viewer.login) : null;
   const invalidAliases = new Set(
     aliases
       .filter(
@@ -1582,6 +1789,7 @@ async function runReviewRepoBatch(
           dataDir,
           projectId,
           sourceId,
+          viewerLogin,
         ),
       });
     }
@@ -1743,4 +1951,5 @@ export const githubReviewProvider: ReviewProvider = {
     return pr?.url ?? null;
   },
   collectSignals,
+  refreshSignals,
 };

@@ -1,14 +1,68 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import {
   findCursorAckTranscriptFile,
+  readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
+import { findCursorSessionId } from "./cursor.js";
 
 export interface CursorSubmitBaseline {
   file: string;
   size: number;
+  // Mutated in place across polls of the same binding (session-service.ts
+  // captures one baseline object and calls scan() repeatedly against it, see
+  // waitForSubmitAck). Records the byte offset a rotated chat-id transcript
+  // was FIRST seen at, so a later poll only scans records written after that
+  // sighting rather than the rotated file's full pre-existing history.
+  // Optional: attached lazily by scanCursorJsonlForMessage the first time a
+  // rotation is observed, so callers that build a baseline literal (tests)
+  // need not know about it up front.
+  rotationOffsets?: Map<string, number>;
+}
+
+// Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
+// send-time offset rides along so a restart's scan starts where the live one did.
+export interface CursorPersistedSubmitBaseline {
+  file: string;
+  size: number;
+  rotated?: { file: string; size: number };
+}
+
+export function persistCursorSubmitBaseline(
+  baseline: CursorSubmitBaseline,
+): CursorPersistedSubmitBaseline {
+  const rotated = baseline.rotationOffsets?.entries().next().value;
+  return {
+    file: baseline.file,
+    size: baseline.size,
+    ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
+  };
+}
+
+export function restoreCursorSubmitBaseline(
+  persisted: CursorPersistedSubmitBaseline,
+): CursorSubmitBaseline {
+  return {
+    file: persisted.file,
+    size: persisted.size,
+    ...(persisted.rotated
+      ? { rotationOffsets: new Map([[persisted.rotated.file, persisted.rotated.size]]) }
+      : {}),
+  };
+}
+
+// Cursor rotates its chat id mid-session; a pinned id's transcript never
+// rotates, so re-resolve the current chat id from the session-private config
+// dir (never the shared project transcripts dir — see #889/#890).
+async function findRotatedCursorTranscript(
+  worktreePath: string,
+  agentSessionId: string,
+  cursorConfigDir: string,
+): Promise<string | null> {
+  const resolvedId = await findCursorSessionId(worktreePath, { configDir: cursorConfigDir });
+  if (!resolvedId || resolvedId === agentSessionId) return null;
+  return findCursorAckTranscriptFile(worktreePath, resolvedId);
 }
 
 export interface CursorSubmitAckScanResult {
@@ -17,6 +71,24 @@ export interface CursorSubmitAckScanResult {
 }
 
 export async function captureCursorSubmitBaseline(
+  worktreePath: string,
+  agentSessionId?: string,
+  options?: { cursorConfigDir?: string },
+): Promise<CursorSubmitBaseline | null> {
+  const baseline = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
+  if (!baseline || !agentSessionId || !options?.cursorConfigDir) return baseline;
+  // An already-rotated chat: offset its file at send time, as the pinned one.
+  const rotated = await findRotatedCursorTranscript(
+    worktreePath,
+    agentSessionId,
+    options.cursorConfigDir,
+  );
+  if (!rotated) return baseline;
+  const offset = await readCursorStableOffset(rotated).catch(() => 0);
+  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]) };
+}
+
+async function capturePinnedCursorBaseline(
   worktreePath: string,
   agentSessionId?: string,
 ): Promise<CursorSubmitBaseline | null> {
@@ -34,8 +106,7 @@ export async function captureCursorSubmitBaseline(
     return { file: await resolveCursorPinnedTranscriptPath(worktreePath, agentSessionId), size: 0 };
   }
   try {
-    const fileStat = await stat(file);
-    return { file, size: fileStat.size };
+    return { file, size: await readCursorStableOffset(file) };
   } catch {
     return agentSessionId ? { file, size: 0 } : null;
   }
@@ -126,6 +197,7 @@ export async function scanCursorJsonlForMessage(
   text: string,
   worktreePath: string,
   agentSessionId?: string,
+  options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitAckScanResult> {
   const normalizedTarget = submitAckMatchText(text);
   if (!normalizedTarget) {
@@ -134,6 +206,36 @@ export async function scanCursorJsonlForMessage(
 
   if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
     return { found: true, scannedFile: baseline.file };
+  }
+
+  if (agentSessionId && options?.cursorConfigDir) {
+    const rotated = await findRotatedCursorTranscript(
+      worktreePath,
+      agentSessionId,
+      options.cursorConfigDir,
+    );
+    if (rotated) {
+      // The rotated chat id can carry history from before this send (or
+      // even before the rotation was first detected by this binding): a
+      // full-history scan from 0 lets a short send like "continue" match an
+      // unrelated earlier turn (substring match, see submitAckMatchText).
+      // Baseline against the file's size the FIRST time this binding sees
+      // it, and remember that offset for every later poll of the same
+      // binding, so only records written after that sighting can ack.
+      baseline.rotationOffsets ??= new Map();
+      let offset = baseline.rotationOffsets.get(rotated);
+      if (offset === undefined) {
+        offset = await readCursorStableOffset(rotated).catch(() => 0);
+        baseline.rotationOffsets.set(rotated, offset);
+      }
+      const found = await scanFileForUserText(rotated, offset, normalizedTarget);
+      return { found, scannedFile: rotated };
+    }
+    // No chat-id rotation (or no rotated file yet): fall through to the
+    // existing pinned-file re-resolve below. A symlinked worktree can baseline
+    // against a candidate path that never gets written while cursor writes
+    // the pinned transcript under a different worktree-path candidate; that
+    // rescan must still run even when the chat id itself never rotated.
   }
 
   const latest = await findCursorAckTranscriptFile(worktreePath, agentSessionId);

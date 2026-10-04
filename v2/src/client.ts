@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
-import { loadConfig } from "./config.js";
+import { isDefaultInstanceConfigPath, loadConfig } from "./config.js";
+import { resolveSystemdScope } from "./host-install.js";
 import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
   type ConnectProjectConfigRequest,
@@ -298,6 +300,11 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
   }
 }
 
+function hasManagedDefaultDaemonUnit(configPath: string): boolean {
+  if (!isDefaultInstanceConfigPath(configPath)) return false;
+  return resolveSystemdScope(homedir()).kind !== "missing";
+}
+
 function spawnDaemon(
   cliEntrypoint: string,
   configPath: string,
@@ -312,6 +319,11 @@ function spawnDaemon(
   if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
     throw new Error(
       "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; this managed instance must come back through the repo deploy or service restart flow.",
+    );
+  }
+  if (hasManagedDefaultDaemonUnit(configPath)) {
+    throw new Error(
+      `Spur daemon at ${configPath} is unreachable and spur-daemon.service owns this instance; restart it with systemctl instead of forking a detached daemon.`,
     );
   }
   if (reason === "autostart") {

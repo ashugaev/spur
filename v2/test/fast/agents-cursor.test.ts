@@ -86,6 +86,21 @@ describe("cursorConfigDirForSession", () => {
 });
 
 describe("buildCursorPlan", () => {
+  it("keeps a validated native effort alias unchanged", () => {
+    expect(
+      buildCursorPlan("work", { model: "model-thinking-high-fast", reasoningEffort: "high" })
+        .launchCommand,
+    ).toContain("--model 'model-thinking-high-fast'");
+  });
+
+  it("replaces bracket effort once and preserves other parameters", () => {
+    const command = buildCursorPlan("work", {
+      model: "model[fast=true,effort=low,effort=medium]",
+      reasoningEffort: "high",
+    }).launchCommand;
+    expect(command).toContain("--model 'model[fast=true,effort=high]'");
+    expect(command.match(/effort=/g)).toHaveLength(1);
+  });
   it("returns the default launch plan", () => {
     const plan = buildCursorPlan("ship it");
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled --model 'auto'");
@@ -105,6 +120,14 @@ describe("buildCursorPlan", () => {
 });
 
 describe("buildCursorResumePlan", () => {
+  it("forwards selected model and effort on resume", () => {
+    expect(
+      buildCursorResumePlan("chat-123", "agent", {
+        model: "model[fast=true,effort=low]",
+        reasoningEffort: "max",
+      }).launchCommand,
+    ).toContain("--model 'model[fast=true,effort=max]'");
+  });
   it("quotes the binary and chat id", () => {
     const plan = buildCursorResumePlan("chat-123", "/opt/cursor agent");
     expect(plan.launchCommand).toBe(
@@ -308,6 +331,16 @@ describe("ensureCursorRestrictWritesConfig", () => {
 });
 
 describe("buildCursorRestorePlan", () => {
+  it("preserves selected model and effort on restore", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockResolvedValue(["chat-123"]);
+    mockStat.mockResolvedValue({ mtimeMs: 1_000 });
+    const plan = await buildCursorRestorePlan("/worktree/path", "restore prompt", {
+      model: "model[fast=true,effort=low]",
+      reasoningEffort: "high",
+    });
+    expect(plan?.launchCommand).toContain("--model 'model[fast=true,effort=high]'");
+  });
   it("returns null when no chat can be found", async () => {
     mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
     mockReaddir.mockResolvedValue([]);

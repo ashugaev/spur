@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_PR_OCCURRENCE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
@@ -27,6 +28,7 @@ import {
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ProviderReasoningEffort,
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
@@ -218,6 +220,14 @@ function asOptionalPositiveInteger(value: unknown, label: string): number | unde
   return value;
 }
 
+function asOptionalInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -287,17 +297,39 @@ function parseProjectReasoningEffort(
   const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
   const effort: AgentReasoningEffortConfig = {};
   for (const [agent, entry] of Object.entries(raw)) {
-    if (agent !== "claude" && agent !== "codex") {
+    if (agent !== "claude" && agent !== "codex" && agent !== "cursor" && agent !== "opencode") {
       throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
     }
-    if (entry !== "low" && entry !== "medium" && entry !== "high") {
-      throw new Error(
-        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
-      );
-    }
-    effort[agent] = entry;
+    effort[agent] = parseReasoningEffort(
+      entry,
+      `projects.${projectId}.reasoningEffort.${agent}`,
+      agent,
+    );
   }
   return effort;
+}
+
+function parseReasoningEffort(
+  value: unknown,
+  label: string,
+  agent?: AgentName,
+): ProviderReasoningEffort {
+  if (
+    value !== "none" &&
+    value !== "minimal" &&
+    value !== "low" &&
+    value !== "medium" &&
+    value !== "high" &&
+    value !== "xhigh" &&
+    value !== "max" &&
+    value !== "ultra"
+  ) {
+    throw new Error(`${label} must be a recognized reasoning effort`);
+  }
+  if (agent === "claude" && (value === "none" || value === "minimal" || value === "ultra")) {
+    throw new Error(`${label} must be "low", "medium", "high", "xhigh", or "max" for Claude`);
+  }
+  return value;
 }
 
 function parseTriggerSpawnBlock(
@@ -311,6 +343,10 @@ function parseTriggerSpawnBlock(
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const model = asOptionalString(raw["model"], `${label}.model`);
+  const reasoningEffort =
+    raw["reasoningEffort"] === undefined
+      ? undefined
+      : parseReasoningEffort(raw["reasoningEffort"], `${label}.reasoningEffort`, agent);
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
@@ -331,6 +367,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
@@ -369,6 +406,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "reasoningEffort",
       "mode",
       "branch",
       "overrides",
@@ -637,6 +675,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -804,7 +843,7 @@ function parseBacklog(
 
   // `spawn` (used by some live configs to document Take-spawn prompts) is
   // parsed and ignored here — no code path consumes it. See
-  // docs/configuration.md's backlog section.
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,
@@ -916,6 +955,70 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   };
 }
 
+/** Integer, or a `${VAR}` string resolving to one, so a chat id can stay out of a shared config. */
+/**
+ * Strict digits: `Number("")` is 0 and `Number("0x10")` is 16 — both would pass
+ * validation and fail later inside Telegram.
+ */
+function telegramIdToken(value: string, label: string): number {
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return parsed;
+}
+
+function resolveTelegramEnvValue(
+  raw: string,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+/** Integer, or a `${VAR}` string resolving to one, so an id stays out of a shared config. */
+function parseTelegramChatId(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalInteger(raw, label);
+  }
+  return telegramIdToken(resolveTelegramEnvValue(raw, label, projectEnv), label);
+}
+
+/**
+ * Integer array, or a `${VAR}` string resolving to a comma-separated list, so
+ * user and chat ids stay out of a shared config.
+ */
+function parseTelegramIdList(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number[] | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalIntegerArray(raw, label);
+  }
+  const ids = resolveTelegramEnvValue(raw, label, projectEnv)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => telegramIdToken(entry, label));
+  if (ids.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return ids;
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -928,8 +1031,20 @@ function parseTelegramSource(
   if (token === undefined) {
     throw new Error(`${label}.token could not be resolved from the environment`);
   }
-  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
-  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  const allowedUsers = parseTelegramIdList(
+    raw["allowedUsers"],
+    `${label}.allowedUsers`,
+    projectEnv,
+  );
+  const allowedChats = parseTelegramIdList(
+    raw["allowedChats"],
+    `${label}.allowedChats`,
+    projectEnv,
+  );
+  const chatId = parseTelegramChatId(raw["chatId"], `${label}.chatId`, projectEnv);
+  if (chatId !== undefined && allowedChats !== undefined && !allowedChats.includes(chatId)) {
+    throw new Error(`${label}.chatId must be listed in ${label}.allowedChats`);
+  }
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
@@ -940,6 +1055,7 @@ function parseTelegramSource(
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    ...(chatId !== undefined ? { chatId } : {}),
     autoSpawn,
   };
 }
@@ -1485,6 +1601,9 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const tokenBudget = asOptionalPositiveInteger(raw["tokenBudget"], `${label}.tokenBudget`);
+  const tokenBudgetWarnOnly =
+    asOptionalBoolean(raw["tokenBudgetWarnOnly"], `${label}.tokenBudgetWarnOnly`) ?? false;
   const staleAfterMinutes = asNonNegativeNumber(
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
@@ -1587,6 +1706,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    tokenBudgetWarnOnly,
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }

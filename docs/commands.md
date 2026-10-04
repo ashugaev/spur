@@ -1,275 +1,132 @@
 # Commands
 
-CLI reference: what to run, what it does, what `--help` skips. Config fields: [configuration.md](configuration.md). Daemon HTTP routes: [daemon-api.md](daemon-api.md).
+> Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
 
-## Surface
-
-Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`.
-
-`spur <unknown> --help` reports the unknown command, exits `1`. `spur --help <unknown>`/`spur -h <unknown>` prints root help, exits `0`.
-
-Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config. A missing non-default path is never created — only the default `~/.spur/config.yaml` is bootstrapped, on first boot. Any command that resolves a daemon from `<path>` exits non-zero when it doesn't exist, so a typo'd or stale path can't be seeded from defaults and target the daemon on `4310`.
-
-Commands that never reach that guard: `init`/`reinit` bootstrap the default path only; `doctor` and `cache` never bootstrap; `update`/`update-monitor` fall back to default port resolution rather than failing, so a typo'd `SPUR_CONFIG` there probes `4310` instead of exiting non-zero.
+Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
 
 ## Session tools and environment
 
-`$SPUR_SESSION_TOOL_DIR` on `PATH`, holding session-bound wrappers:
-
-- `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo`.
-- `branchNaming.regex` adds `spur-branch` and a push-checking `git` wrapper.
-- Hook-state agents also get `spur-agent-state`.
-- `isolated-daemon`/`isolated-ui` sidecars add `spur-isolated`, a CLI wrapper bound to the throwaway isolated daemon; the plain `spur` wrapper still targets the real daemon.
-- Call each by its explicit `"$SPUR_SESSION_TOOL_DIR/<tool>"` path — login shells rebuild `PATH`, drop the tool dir.
-- Identity: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`.
-- Closeout: `$SPUR_CLOSEOUT_OWNER=1` marks the assigned closeout owner for a writable worktree, including transferred handoff ownership on a reused workspace; `0` marks non-owners, including read-only and shared-workspace sessions. The Stop hook skips git and PR closeout for `0`. A missing variable preserves standalone hook enforcement outside Spur.
-- Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND`; hook-state agents add `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE`.
+`$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook.
 
 ## doctor
 
-Read-only: checks host install, config, daemon/web health; exits non-zero only on a broken host. `--scaffold` writes a minimal local `spur.yaml` when missing, no daemon start, no `~/.spur/config.yaml` write.
-
-- `sidecar-orphans` (warn) — leaked trees `sidecar sweep` reaps, report-only; also lists reparented Spur daemons whose CLI entrypoint no longer exists on disk (`kind: orphan-daemon`), always report-only, never counted toward `fix: --reap`. Each `orphan-daemon` row carries its own instance config's `port` and a `liveness` of `serving`/`not-serving`/`unknown`; a row marked `serving` never carries kill-verb wording — the `fix` names `daemon stop` instead.
-- `config-registry` (info) — every registered path, alive/dead/worktree-internal state.
-- `session-headroom` (warn, daemon up) — live count vs [cap](configuration.md#admission-control), id+RSS, `fix` names ids to stop.
-- `home-disk-headroom` (warn/info) — `$HOME` space under [`diskRetention.warnFreeGb`](configuration.md), default 10GB.
-- `reclaimable-caches` (info) — reclaimable total, top 5 prunable, one row/cache root.
-- `claude-onboarding` (warn) — authenticated, never onboarded; first `spawn` hits the OAuth screen; fix: run `claude` once.
-- `opencode-executable` (warn) — missing from PATH/`SPUR_OPENCODE_BIN`; fix: install `opencode-ai` or set [override](configuration.md#field-reference).
-- `skills-symlinks` (warn) — skill link state under `~/.claude/skills`/`~/.codex/skills`; never creates a dir/link; `fix` names a conflicting path before `spur reinit`.
-- `agent-process-ownership` (warn, Linux) — live agent processes their record doesn't own: `duplicate_for_session`, `terminal_record`, `unknown_session`, `foreign_instance` (info). Prints pid/agent/session/reason/rss/age.
+Read-only host/config/daemon health check. `--scaffold` writes a minimal local `spur.yaml`. Checks: `sidecar-orphans`, `config-registry`, `session-headroom`, `home-disk-headroom`, `reclaimable-caches`, `claude-onboarding`, `opencode-executable`, `skills-symlinks`, `agent-process-ownership`.
 
 ## gc
 
-`spur gc [--execute]` reclaims stale worktrees, archives terminal session records. Dry run unless `--execute`, daemon-free. Unit: workspace group — sessions sharing a `workspaceId` or `worktreePath`; one non-eligible member blocks the group.
-
-Actions: `reclaim` removes worktree, archives; `archive` moves records only; `blocked` prints reasons: `not_eligible_status`, `too_recent`, `changed_during_run`, `path_outside_worktree_dir`, `shared_workspace_path`, `path_is_cwd_or_ancestor`, `uncommitted_changes`, `unpushed_commits`, `open_pr`, `probe_failed`.
-
-Records move to `<dataDir>/sessions-archive/<projectId>/<sessionId>.json` with their log shard; `mv` back into `sessions/<projectId>/` to un-archive (a collected `stopped` session can't restore — `gc` lists those ids first). `--no-sizes` skips freed-byte measurement; exits `1` on any group error. Defaults: `sessionGc.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
+`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
 
-`spur disk [--json]` reports Spur-attributable disk usage, read-only, daemon-free. Rows: `session-artifacts`, `worktrees`, `session-tools`, `opencode-store` (under `~/.local/share/opencode`), `npm-cacache`, `npm-npx`, `playwright-browsers`, `playwright-mcp-profiles`, and an aggregated `worktree-build-caches` row (webpack/`.next` caches found by a bounded depth-3 walk under `worktreeDir`, skipping `node_modules`/`.git`). Each row carries `reclaimedByDiskGc` (this run's `disk-gc` reclaim set includes it) and `reclaimedBy` (`disk-gc`, `spur cache`, `opencode-gc`, `spur gc`, `artifacts-gc`, or `none`) so one table names which command owns each root's deletion — `artifacts-gc` owns `session-artifacts` ([`spur artifacts-gc`](#artifacts-gc)), `spur gc` owns `worktrees`, `session-tools` and `opencode-store` are `none`. A `du` that times out or is aborted reports `status: "unmeasured"`, never `sizeBytes: 0`.
-
-Side effect: every run overwrites `<dataDir>/disk-budget.json` (`{ generatedAt, roots, totals }`). The daemon's warn sweep ([`diskBudget`](configuration.md#field-reference)) reads only this file — it never runs its own `du` — and emits nothing when the file is absent or older than `2 * diskBudget.intervalMinutes`. Nothing runs `spur disk` on a schedule; for the warn sweep to have data, cron it yourself, e.g. `0 * * * * spur disk` for hourly.
+`spur disk [--json]` reports disk usage, writes `<dataDir>/disk-budget.json` ([disk budget](configuration.md#disk-budget)).
 
 ## disk-gc
 
-`spur disk-gc [--execute]` reclaims: stale `mcp-*` playwright profile dirs under `~/.cache/ms-playwright(-mcp)` (default target, protected by a live argv match or a live `SingletonLock`/`SingletonSocket` pid), and webpack/`.next` build caches inside a worktree where every session record sharing that `worktreePath` is `completed` or `killed` — a worktree with zero matching records is reported `orphaned_no_record` and never touched, and a `worktree: false` session's real checkout (outside `worktreeDir`) is refused (`path_outside_worktree_dir`, re-checked on the realpath immediately before delete). `--execute` re-checks every profile candidate immediately before delete, not just at plan time: it refuses a candidate that turned into a symlink or a foreign-uid dir since planning (`symlink`, `not_owned`), and it fails closed — refusing the delete (`process_list_unreadable`) — rather than treating an unreadable or empty process snapshot as "nothing has this profile open". Dry run by default; `--execute` applies the plan. Both a dry run and an executed run print every candidate path, its bytes, and its justification — per target (build caches, mcp profiles, browser revisions, npm keys) — never just a total.
-
-`--browser-revisions` additionally prunes unpinned playwright browser revisions, delegating to `spur cache`'s pin resolver unchanged (never a second deletion implementation) — off by default because the predicate is "referenced by any installed playwright's `browsers.json` pins", a strict superset of "referenced by a live session", not an exact live-session test.
-
-npm cap: `disk-gc` measures `~/.npm/_cacache` itself with its own `du` call, independent of any prior `spur disk` run or `<dataDir>/disk-budget.json` — a destructive path never trusts a cached, possibly stale or absent measurement. When it exceeds `diskBudget.npmCacheMaxGb`, `--execute` runs `npm cache verify` (collects orphaned/corrupt content only), re-measures, and — only if still over cap — reads `index-v5` to rank entries oldest-first by `time` and removes exactly enough with `npm cache clean <key>` (one entry per call, never `--force`) to clear the cap, then `npm cache verify` once more. Skipped entirely while any npm/pnpm/npx/yarn process runs, and also when the process snapshot itself is unreadable or empty — an unreadable process list is never read as "nothing is running", matching `spur cache`'s fail-closed rule. An unreadable/malformed `index-v5` aborts the whole npm target (`report.npmCap.status: "index-unreadable"`) without touching it. This command never runs `npm cache clean --force` and never deletes `_cacache` itself — that whole-root wipe stays `spur cache --prune --yes`'s job (see below).
-
-Build-cache selection: every eligible worktree (already past the terminal-status and `worktreeDir`-containment gates above) is measured, then ranked by reclaimable bytes descending — `--limit` keeps the N LARGEST eligible worktrees, never the first N in path order. Ranking only reorders what already passed both safety gates; it never widens eligibility.
-
-Flags: `--execute`, `--browser-revisions`, `--older-than <days>` (default `diskBudget.buildCacheOlderThanDays`), `--limit <n>` (default `diskBudget.maxWorktreesPerSweep`, the N largest eligible worktrees by reclaimable bytes), `--json`. Requires a resolved instance config.
+`spur disk-gc [--execute --browser-revisions --older-than <days> --limit <n> --json]` reclaims stale playwright profiles and terminal-worktree build caches.
 
 ## artifacts-gc
 
-`spur artifacts-gc [--execute]` prunes `agent-history-*.jsonl` session artifacts. Dry run unless `--execute`, daemon-free. Unit: the artifacts dir of a workspace (desk members share one). Prints per-workspace files and bytes plus the total it would free.
-
-Selection, eviction order, and what always survives: [Artifact retention](configuration.md#artifact-retention). A blocked workspace prints `listing_truncated`; exits `1` on any deletion error.
-
-Flags: `--older-than <days>`, `--max-bytes <bytes>`, `--max-files <n>`, `--project <id>`, `--limit <n>`, `--json`. Defaults: `artifactRetention.*` ([configuration.md](configuration.md#field-reference)), `--limit` `100`.
+`spur artifacts-gc [--execute --older-than <days> --max-bytes <bytes> --max-files <n> --project <id> --limit <n> --json]` prunes `agent-history-*.jsonl`. See [Artifact retention](configuration.md#artifact-retention).
 
 ## cache
 
-`spur cache [--prune --yes]` reports host caches outside `~/.spur` — size, path, age (days), protection reason per entry, size-ranked. Dry-run by default; `--prune --yes` deletes `prunable` entries, no daemon needed. Covers `~/.npm/_cacache`, `~/.npm/_npx`, `~/.cache/ms-playwright(-mcp)`, rest of `~/.cache`, `/tmp`, never `~/.spur`. The in-`~/.spur/worktrees` webpack/`.next` build-cache target is out of scope here — see `disk-gc` above.
-
-Prunable: `vendor-cache` (`~/.npm/_cacache`) — 7d, protected while npm/pnpm/npx/yarn runs. `npx-package` (`~/.npm/_npx/<hash>`) — 30d, protected by a `browsers.json` pin or live-process argv match. `browser-revision` (`~/.cache/ms-playwright/<name>-<rev>`) — 30d, protected by any resolved `browsers.json` pin (including a `~/.cache/ms-playwright/.links` referrer's own `browsers.json`), fail-closed if none resolve, and fail-closed for every revision if any `.links` referrer is itself unreadable or missing. This `.links` fail-closed behavior is strictly more conservative than before — it can only add protection, never remove it. Report-only: `browser-profile` (`mcp-*` dirs, cookies; reclaimed by `disk-gc`, not this command), `browser-registry` (`~/.cache/ms-playwright/b`), `generic` (rest of `~/.cache`), `tmp-entry` (`/tmp`). Unreadable process tree degrades plan to report-only.
+`spur cache [--prune --yes]` reports/prunes host caches outside `~/.spur`.
 
 ## daemon
 
-`daemon start|stop|restart` additionally refuse a non-default `--config <path>` claiming the production slot (`server.port` `4310` or `dataDir` `~/.spur`, explicit/inherited); read-only check.
+`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
 
-Any CLI command syncs its `--config` into the daemon's durable registry. Attached configs must agree on `server.host`, `server.port`, `dataDir`, `worktreeDir`; project ids/`sessionPrefix` stay globally unique per daemon. Registry mechanics: [config registry](configuration.md#config-registry).
+## init
 
-Implicit auto-start (any command that reaches an unreachable daemon outside `daemon start|stop|restart`) refuses only in these cases, otherwise it forks a detached daemon:
+`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
 
-- `$SPUR_SESSION` or `$SPUR_SIDECAR_NAME` set: `systemctl --user restart spur-daemon` or `spur daemon start` from a host shell.
-- `$SPUR_DISABLE_AUTOSTART=1`: applies to every auto-start path, including `daemon restart`'s internal fallback.
+## update
 
-A resolved `--config` that isn't the default instance config no longer blocks autostart — a plain host shell running against a non-default config path forks a daemon like any other unreachable-daemon case.
-
-`daemon restart` itself is exempt from the first term.
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
 
 ## spawn
 
-```bash
-spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> ...]
-```
+`spur spawn <project> [prompt...] [--agent claude|codex|cursor|opencode] [--model <id>] [--reasoning-effort <level>] [--mode <name>] [--plan] [--restrict-writes] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared] [--subscribe-to <sessionId> --subscribe-state <state> ... [--subscribe-message <text>]] [--json]`
 
-Empty `[prompt...]` skips default `spawn.steps`. Spur sends the next phase after the agent returns to prompt, waits 30s before auto-send. Project configs set default `spawn.steps`; manual/API/trigger override.
-
-`--model <id>` ids: claude aliases (opus/sonnet/haiku/fable), Codex `models_cache.json` under `models.codexHome`, `cursor models`, `opencode models`. `--subscribe-to`/`--subscribe-state`/`--subscribe-message` arm one subscription at spawn, see [subscribe](#subscribe). See [Modes](configuration.md#modes).
-
-Full-access launch: `claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `opencode --auto` (>= 1.18.18). Spur resumes `ses_...` ids via `opencode --session`, reads state/conversation via `opencode export`. OpenCode `restrictWrites` (config field, not the flag above) denies edit tools, `git commit`/push.
-
-Preflight (`projects.<id>.preflight`, no `--branch`): Spur asks the agent for one line before worktree creation — a branch name or sentinel `NO_PROJECT_RULES`. Empty/malformed/checked-out results retry 3x, fail spawn. New worktree branches fetch `origin`, branch from freshest remote ref; `--worktree <defaultBranch>` overrides base.
+Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `projects.<id>.tokenBudget`. `--subscribe-state`/`--subscribe-message` require `--subscribe-to`. Modes: [configuration.md#modes](configuration.md#modes).
 
 ## shepherd, wake
 
-`spur shepherd [prompt...]`. `spur wake <sessionId> [--in <duration> | --at <iso> | --every <duration> --until <cond> | --daily-at HH:MM[,HH:MM...] --until <cond> | --cancel] [message...]`.
-
-`shepherd` opens Spur's built-in manager session: `Shepherd` project, Claude, shared workspace, orchestration-only prompt; re-creates on `send`/`restore` if missing.
-
-`wake` stores a delayed or recurring message, delivered when due. Daily wakes use daemon-local `HH:MM`; daily and `--every` both require `--until`. `--cancel` drops a recurring wake, exclusive with scheduling options. Each occurrence fires once: a synchronous failure fails the wake, a queued pane-write failure retries via the queue instead. Event names: [configuration.md](configuration.md#events).
-
-Fires only while status is restorable (`running`, `stopped`, `paused`); dropped once `killed`. `errored`/`completed` stay armed but silent until `restore`/`reopen`, then fire one catch-up wake — same for an unrecoverable-but-restorable session. Admission refusal: [Admission control](configuration.md#admission-control).
+`spur shepherd [prompt...]` opens Spur's manager session. `spur wake <sessionId> [--in <duration> | --at <iso> | --every <duration> --until <cond> | --daily-at HH:MM[,HH:MM...] --until <cond> | --cancel] [message...]`. Events: [configuration.md#events](configuration.md#events).
 
 ## list
 
-TTY opens a live selector: `Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit, `Ctrl+G` back. The selected session's details pane shows a `queued <N>` field when it holds real queued messages, never a per-row column. Non-TTY prints a one-shot summary, hides `completed`/`killed` by default, and adds a `queued <N>` fact beside the sidecar-age fact for a session holding real queued messages. Neither surface counts a pipeline's own auto-steps. A resolvable-age sidecar shows `sidecar <name> <age>` (oldest, `+N more`); `!` marks one past [`sidecarGc.maxAgeWarnMinutes`](configuration.md#sidecar-reaping).
+`spur list [--json]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)). TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
 
-`spur list --json` (and the non-TTY list row set) comes from `GET /sessions` — the projected list item ([daemon-api.md](daemon-api.md#session-routes)). The interactive selector's details pane (`prompt`/`launch` rows) fetches the full record from `GET /sessions/:id` for the currently selected session, on selection change and on each 2s refresh tick — the pane shows a loading line until that fetch resolves.
-
-`pause` keeps the worktree; `complete`/`kill` tear down the pane, remove an owned worktree (`kill` needs `--force` on dirty/unpushed). Both check for an open PR first: `--pr-action leave_open|close` answers it, `--skip-pr-check` skips it; a failed check fails with retry hint. Shared-workspace sessions keep the project path on `kill`.
-
-`spur restore <sessionId> [--force] [--json]` needs an existing workspace plus: `running`+state `stopped`; `stopped`+state `stopped`/`error`/`stale`; `paused`+state `stopped`/`error`; `errored`+state `error` (`killed`/`completed` never restore). `restore`/`reopen` refuse over a live agent process still carrying the id, or an unreadable process table (skipped off Linux); a first `r` surfaces refusal, a second `r`/`--force` bypasses only the foreign-process refusal. `restore` resumes the session's existing conversation.
-
-`spur reopen <sessionId> [--force] [--json]` restarts a `completed` session in place — same id/worktree, native conversation resumed, prompt not resent. Refuses if branch is gone (use `respawn`), worktree isn't the session's own or its rebuild fails, or a reopen for that session is already running; skips Telegram binding and artifacts; MCP sidecars restart through restore. `respawn <sessionId>` starts a fresh session with a new id instead — the conversation is not carried over.
+`spur pause <sessionId> [--json]` — keeps the worktree.
+`spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
+`spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
+`spur restore <sessionId> [--force] [--json]`, `spur reopen <sessionId> [--force] [--json]` (in place, prompt not resent) — `--force` bypasses the foreign-live-process refusal; token-budget refusal: [configuration](configuration.md#field-reference).
+`spur respawn <sessionId> [--reasoning-effort <level>] [--force] [--json]` — fresh id; same-agent reasoning override inherited; `v2/src/cli.ts`.
+`spur handoff <sessionId> --agent <name> [--model <id>] [--reasoning-effort <level>] [--notes <text>] [--json]` — same workspace; provider/model effort validation in `v2/src/session-service.ts`.
 
 ## todo
 
-`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`.
-
-Each session's ToDo ledger starts empty — no code path seeds an item; the agent adds one per step, right before it, and resolves it right after. `add`/`complete`/`cancel`/`hold` require a reason; `--human-action` records a human blocker; `resume` reopens held work; no delete. A human can also `add` through the CLI or session-detail UI. An empty ledger, and open or held work, both block a session closing itself: completion, self-destruct, handoff, trigger+desk completion. The block is on the agent only — a `complete` or `handoff` a person issues from the CLI or the UI, with no session acting on its own behalf, goes through whatever the ledger holds.
-
-`$SPUR_TODO_COMMAND`: session-bound `spur-todo` wrapper, same actions, no `--session`, can't target another ledger. Routes/error codes: [daemon-api.md](daemon-api.md#session-routes).
-
-Automatic ToDo reminders stop after 3 attempts for unchanged open work, human blockers, or an empty ledger. A changed actionable item or a clean ledger resets the limit; restart, restore, and failed delivery do not.
+`spur todo list|add|complete|cancel|hold|resume --session <id> [<itemId>] [--text <text>] [--reason <reason>] [--human-action <action>]`. `$SPUR_TODO_COMMAND`: session-bound, no `--session`. Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 
 ## auto-ping
 
-`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`
-`spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`
-`spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`
-`spur auto-ping list [--session <id>] [--json]`
-`spur auto-ping resume <suppressionId> [--session <id>] [--json]`
+```
+spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]
+spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]
+spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]
+spur auto-ping list [--session <id>] [--json]
+spur auto-ping resume <suppressionId> [--session <id>] [--json]
+```
 
-`unsubscribe` requires exactly one scope flag. The flag must match the handle scope.
+One scope flag required: `--event` (one occurrence), `--thread` (provider thread), `--subscription` (route). Unredeemed handles expire after 30d; `--event` suppression lasts 24h post-work. `SPUR_SESSION` supplies the target inside a session; else pass `--session`. Error `grant_not_ready` means retry.
 
-Suppressions start empty and persist across daemon restart and config reload. Existing queued automatic updates gain controls when restored.
-
-Handles are session credentials. Do not log, persist, or share them. `grant_not_ready` means activation is still finishing; retry the same command with the same handle.
-
-Send controls belong to the recipient. Spawn controls belong to the first successfully spawned session, the anchor in a desk group; later blocks get none. Handoff and respawn do not transfer control ownership.
-
-`--event` suppresses one emitted source occurrence for this trigger route and destination.
-`--thread` suppresses one supported provider thread for this trigger route and destination.
-`--subscription` suppresses one source/event/trigger/action route and destination.
-
-Inside a session, `SPUR_SESSION` supplies the target session. Passing a different `--session` fails. Outside a session, pass `--session`.
-
-Trigger prompts print the session-bound wrapper form, for example:
-
-`"$SPUR_SESSION_TOOL_DIR/spur" auto-ping unsubscribe --event <handle>`
-
-`list` prints active suppressions owned by the target session, never raw handles or handle hashes. `resume` removes a suppression by id; repeating it for a known removed id succeeds with `removed:false` under `--json`.
-
-Unredeemed handles expire after 30 days. Event suppressions expire 24 hours after the occurrence has no pending or in-flight work. Thread and subscription suppressions remain until resume or removal of their configured route.
-
-Routes and status codes: [daemon-api.md](daemon-api.md#session-routes). Source support: [configuration.md#events](configuration.md#events).
+Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source support: [configuration.md#events](configuration.md#events). Full rules: `v2/src/auto-ping.ts`.
 
 ## send, queue
 
-`spur send <sessionId> <message>`. While an agent is busy, `send` queues per session, flushes on return to prompt, ahead of the next auto-step. Prints `Delivered message to <id>.` when the response carries no real queued messages, `Queued message for <id> (<N> pending).` otherwise; N counts real queued messages, never a pipeline's own auto-steps. A `stopped`/`paused` session with an existing workspace: `send` tries native resume first, then a fresh launch.
-
-`spur queue <sessionId> list|remove|flush [index]`. `list` numbers real queued messages from `1`; a pipeline's own future steps print unnumbered, never a target. `remove`/`flush` resolve that number to exact text just before acting; `remove` drops it unsent, `flush` sends it immediately, ahead of the queue. `flush` fails `409` while any pane write for that session is in flight. `remove` fails `409` only when the target is the queue head and its delivery is in flight; any other position always succeeds. Wire: [daemon-api.md](daemon-api.md#session-routes).
-
-Delivery, wake, and lifecycle event names: [configuration.md](configuration.md#events). Lifecycle events land in `<dataDir>/events.jsonl`; retention: [configuration.md](configuration.md#event-log-retention).
+`spur send <sessionId> <message>` refuses exhausted token budgets. `spur queue <sessionId> list|remove|flush [index]`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events).
 
 ## connect, disconnect
 
-`spur connect [path]` / `spur disconnect [path]` register or unregister a project config with the running instance. `[path]` resolves against cwd; omitted, Spur takes the nearest `spur.yaml`/`spur.yml`. Accepted configs: [config registry](configuration.md#config-registry).
+`spur connect [path]` / `spur disconnect [path]`. Accepted configs: [config registry](configuration.md#config-registry).
 
 ## spur-slots
 
-On each live session's `PATH`. Updates the tmux status-line title and named links stored with the session: `spur-slots --title-if-absent "Fix flaky auth test"`, `spur-slots --link pr=<url> --link tracker=<url>`.
+`spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags.
 
-`--title-if-absent` sets the title once; later conditional writes no-op. `--title`/`--clear-title` are unrestricted manual controls; either blocks future conditional writes for that workspace.
+`spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
 
-## service
+## service, memory, agent-issue, comment-seen, subscribe
 
-Each live session gets a `spur` wrapper on `PATH`, bound to that session's config, for session-bound sidecars: `spur service run web --port 3000 -- <command>`, `spur service logs`, `spur service status <id>`.
+`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` returns nothing today — no code path emits the `service.output`/`sidecar.output` events it filters on; read the tmux pane directly instead. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 
-`service run` reads `SPUR_SESSION`, starts the command in a separate tmux sidecar. No stop or restart — stays bound while the session is alive. Pass `--port` so `list` can surface it. `service logs` returns nothing — it filters on `service.output`/`sidecar.output` events that nothing emits. `GET /sessions/:id/logs?scope=runtime|sidecar|service` uses the same filter; default scope `all` still returns other session events. A sidecar's output lives only in its tmux pane.
+`spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 
-## memory
+`spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 
-`spur memory set|get|list|rm [key] [body] --scope task|project|global`. One `.md` file per key, body only. `set` creates or overwrites; `list`/`get`/`rm` read or remove. Session id defaults to `SPUR_SESSION`; pass `--session` outside a live session. `set` takes the body positional or `--file <path>` — never both/neither. Writes are atomic, unlocked — concurrent `set` on the same key is last-writer-wins.
+`spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
 
-Scopes resolve server-side from the caller's session, never from client input: `task` (`<dataDir>/memory/task/<workspaceId>/<key>.md`, per workspace), `project` (`<dataDir>/memory/project/<projectId>/<key>.md`, per project), `global` (`<dataDir>/memory/global/<key>.md`, one per instance). Spawn prompt tells agents to read `task`/`project` on start, write durable, high-value facts only.
+## source reply
 
-## agent-issue
-
-`spur agent-issue log <text...>` / `spur agent-issue list [--project <id>] [--session <id>] [--limit <n>] [--json]`.
-
-Friction an agent hits operating Spur itself: a sidecar that won't start, an unclear test path, a branch preflight rejection. Boundary — friction blocking the agent's own operation lands here; a code defect in a repo goes to that repo's issue tracker, never here.
-
-`log` needs `SPUR_PROJECT` set to a known project (a live session), stamps the running session id, appends to `<dataDir>/agent-issues.jsonl` (mode `0600`, rotates at 50 MB, keeps 5 archives). `list` prints newest first; `--limit` default `200`.
-
-## comment-seen
-
-`spur comment-seen record <id...>`.
-
-Records inline-review-reply ids as seen so they never re-trigger the GitHub review-comment poll loop. Needs `SPUR_PROJECT` set to a known project (a live session); errors and exits 1 without it or on an unknown project. Ids are raw numeric review-comment ids. Stores each as `review-comment:<id>` in every `github`-type source's registry under `<dataDir>/source-state/github-comment-seen/<projectId>/<sourceId>.json`.
-
-## subscribe
-
-`spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`.
-
-Watches another session's state, sends the subscriber a message on a matching transition. Subscriber defaults to `SPUR_SESSION`. One subscription per target (`id` = `state-<targetSessionId>`); re-subscribing overwrites states/message; no self-subscribe. `--state` repeatable, valid: `working`, `waiting`, `needs_input`, `rate_limited`, `stale`, `stopped`, `error`, `killed`. Fires once per matching transition, right after it settles — already-in-state at subscribe fires nothing until next transition. Default message: `Session <targetSessionId> changed state: <from> -> <to> at <iso> (source: <src>).`; `--message` appends after it.
-
-A `stopped`/`paused` subscriber resumes to receive delivery (native resume, then fresh launch), no retry of the dispatch. A sync `send` failure logs `session.subscription.delivery_failed`, leaves the transition unclaimed for retry; a pane-write failure after queuing keeps it claimed, retries via message queue. `spur spawn --subscribe-to/--subscribe-state/--subscribe-message` arms one at spawn, same rules; CLI fails clearly if the target's missing. Direct API/MCP callers skip that check — an invalid target logs `session.subscription.spawn_failed`, comes up unsubscribed.
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`). Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Reply routing, binding and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 
 ## Sidecars
 
-Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`, never bare — starts a configured sidecar from `projects.<id>.sidecars`. `autoStart` sidecars return on spawn, restore, recover, or a stale-`errored` session healing back to `running` — the last case skips a sidecar the same call just stopped, and its dependents. A sidecar starting another is manual-only; nesting stops after one level.
-
-Ports reserve/probe on the host at start, inject into the sidecar env only — pane env freezes first, no session variable carries it. Read with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports` (`--name <name>`, `--json`): `<sidecar> <portId> <env> <port> alive|dead` per line. `alive` means the sidecar's pane is running; a pane that exited reports `dead` even though its tmux session is retained (`remain-on-exit`). A non-MCP sidecar is desk-shared: one tmux pane/port per [desk group](configuration.md#desk-groups).
-
-Commands run through `sh -lc`, no `exec` — `/bin/sh` is `dash` on Debian/Ubuntu, nvm needs `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A remapped `$HOME` still resolves via `$SPUR_REAL_HOME` (from `/etc/passwd`). A long-lived server should start its own command with `exec` — otherwise the pane pid is a shell above the real process, hiding it from pid/args-based reaping and leaving the shell holding unexpanded `$PORT` env.
-
-Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree); nothing dies without `--reap`. A duplicate sidecar start across workspaces is refused. Daemon idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping).
+Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
+Open: configured reserved TCP listener + live recorded launcher; independent of tmux/PID attribution/HTTP health; `v2/src/session-service.ts`.
+Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
+Slot links: omit exact normalized matches of sidecar name and configured reserved URL, including manual duplicates; retain other targets; `v2/src/session-service.ts`.
+Stop/restart reap the sidecar's whole tmux pane process tree, not just the direct child. Only that tree — anything the command detached from it survives, including docker containers and a compose project. A sidecar that starts detached resources owns tearing them down. `spur sidecar sweep` reports unclaimed process trees (pid, rss, age, worktree), each with its descendant tree's pid list and, when reaped, any survivor pids left after the confirmation window; a trailing line totals the would-free RSS across every reported tree. Nothing dies without `--reap`.
 
 `sidecar sweep` rows carry a `kind`: `worktree-tree` (the original unclaimed-process-tree sweep, reapable when Spur provenance is proven) or `orphan-daemon` (a reparented Spur daemon whose own `cli.js` no longer exists on disk — printed `[report-only]` with its `--config` path, `port`, and `liveness`; never signaled by `--reap`, no matter what). A `serving` row still keeps loading and answering from memory — it prints `[report-only, SERVING on <port>]` and a `daemon stop` pointer instead of the verify-before-killing note. A `liveness: "unknown"` row (the row's own port listener probe itself could not run — neither `lsof` nor `ss` produced a usable result — or its instance config didn't resolve) prints `[report-only, liveness unknown — verify manually before killing]` and never shares the plain not-serving row's "genuinely dead" fix text. A probe that DID run and found zero listeners on the port is `not-serving`, not `unknown` — the probe answered, it just found nobody there.
 
-`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` — causes and the ambiguous-port exclusion rule are in [daemon-api.md](daemon-api.md#session-routes): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone. `partial` with zero named survivors means the recorded port could not be confirmed clear by this stop, never reported as `reaped` — the message names the port instead of "0 process(es) survived".
+`sidecar stop` prints the real outcome, never a claimed stop that did not happen, per `sidecarStop.outcome` — causes and the ambiguous-port exclusion rule are in [daemon-api.md#session-routes](daemon-api.md#session-routes): `reaped` (exit `0`), `partial` — names the survivor pids and points at `spur sidecar sweep` (exit `1`), `nothing-to-stop` (exit `0`). `partial`'s survivors can include a detached daemon still holding the sidecar's reserved port, not just a surviving pane process — `stop` always probes the recorded port even when the pane is already gone. `partial` with zero named survivors means the recorded port could not be confirmed clear by this stop, never reported as `reaped` — the message names the port instead of "0 process(es) survived".
 
 ### Built-in MCP sidecars
 
-A sidecar entry can carry MCP wiring, injecting its port into the launching agent's MCP config (claude `mcp-config.json`, codex `config.toml [mcp_servers.*]`) before launch. `playwright` is the one built-in: an HTTP playwright MCP sidecar for claude/codex, never cursor, off by default: `sidecars: { playwright: { autoStart: true } }`. YAML only overrides `autoStart`, rejects any other key incl. `dependsOn` (MCP sidecars start before the agent, ahead of the dependency-aware autostart pass). Re-resolved every spawn/restore/recover, no per-session toggle; the errored-session heal above never restarts one — its MCP config is frozen at launch.
-
-Enabling an MCP sidecar for claude changes MCP resolution for the whole session: claude launches
-with `--mcp-config <path> --strict-mcp-config`, so only servers Spur pre-merged into that generated
-config survive — the merge reads `~/.claude.json` user-scope servers, `<worktree>/.mcp.json`, and
-`~/.claude.json` `projects["<worktree path>"]` (later wins). A fresh worktree has no
-`projects["<worktree path>"]` entry yet, so local-scope servers approved against the main repo path
-are dropped for that session. A host `mcpServers.playwright` entry (from any of those three sources)
-is silently replaced by Spur's own. `~/.claude/settings.json` is not a source: claude ignores an
-`mcpServers` block there, so merging it would start servers the session would otherwise not have.
+`playwright`, off by default: `sidecars: { playwright: { autoStart: true } }`. Rejects every other key, including `dependsOn`.
 
 ### Suppressing a host MCP server
 
-A globally-configured MCP server is spawned per session by the agent, whether or not the session
-uses it. `projects.<id>.mcp.exclude` drops named servers from what Spur hands the agent, so a
-project pays no RAM for tooling it does not need:
-
-```yaml
-projects:
-  api:
-    mcp:
-      exclude: [playwright, digitalocean]
-```
-
-Applies to claude (dropped from the generated `mcp-config.json`, which is then launched with
-`--strict-mcp-config`) and codex (the inherited `[mcp_servers.<name>]` table is stripped from the
-session `config.toml`). Cursor has no suppression path. Excluding a name that a sidecar also binds
-is safe: the sidecar wins, so `exclude: [playwright]` plus `sidecars.playwright.autoStart: true`
-gives the session Spur's managed server and not the host's.
-
-For claude, any non-empty `exclude` makes the generated config authoritative for the session, the
-same as enabling an MCP sidecar — the caveats above apply. With no `exclude` and no MCP sidecar,
-Spur passes no MCP flags and claude resolves servers itself.
+`projects.<id>.mcp.exclude: [name, ...]` drops named MCP servers from claude/codex sessions.

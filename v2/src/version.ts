@@ -51,6 +51,12 @@ export function readGitDescribedVersion(repoRoot: URL): string | undefined {
   }
 }
 
+export function resolvePackageVersion(packageVersion: string | undefined, repoRoot: URL): string {
+  return packageVersion && packageVersion !== MANAGED_PLACEHOLDER
+    ? packageVersion
+    : (readGitDescribedVersion(repoRoot) ?? "0.0.0-dev");
+}
+
 // Lazy and memoized so importing this module never spawns `git` as a side
 // effect -- only the first caller that actually reads the version pays for
 // it, and callers that never need it (most module graphs just import other
@@ -59,9 +65,6 @@ let cachedVersion: string | undefined;
 export function getVersion(): string {
   if (cachedVersion !== undefined) return cachedVersion;
   const packageVersion = readPackageVersion(new URL("../package.json", import.meta.url));
-  cachedVersion =
-    packageVersion && packageVersion !== MANAGED_PLACEHOLDER
-      ? packageVersion
-      : (readGitDescribedVersion(new URL("../../", import.meta.url)) ?? "0.0.0-dev");
+  cachedVersion = resolvePackageVersion(packageVersion, new URL("../../", import.meta.url));
   return cachedVersion;
 }

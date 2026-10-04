@@ -18,28 +18,6 @@ const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" 
 async function openSpawnModal(page: Page) {
   const session = makeWorkingSession({ id: "scenario-spawn-base", project: "my-project" });
   await mockSessions(page, [session], DEFAULT_PROJECTS);
-  await page.route("**/api/sessions**", async (route) => {
-    if (new URL(route.request().url()).pathname !== "/api/sessions") {
-      await route.fallback();
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sessions: [session],
-        projects: [
-          {
-            id: "my-project",
-            name: "my-project",
-            configured: true,
-            prefix: "my-project",
-            path: "",
-          },
-        ],
-      }),
-    });
-  });
   await page.goto("/");
   await page.getByRole("button", { name: "Spawn Session" }).click();
   await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();

@@ -1,5 +1,4 @@
-import { test as base } from "playwright/test";
-import type { BrowserContext, Page } from "@playwright/test";
+import { test as base, type BrowserContext, type Page } from "playwright/test";
 import type {
   AvailableBacklogItem,
   ProjectInfo,
@@ -74,6 +73,7 @@ function baseSession(id: string): SpurSessionView {
     sidecars: [],
     runningSidecarNames: [],
     slots: { links: [] },
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
   };
 }
 
@@ -263,6 +263,7 @@ export async function mockSessions(
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        lifecycleInstanceId: "test-instance",
         sessions: typeof sessions === "function" ? sessions() : sessions,
         projects: rawProjects.map(normalizeProject),
         backlog: typeof backlog === "function" ? backlog() : (backlog ?? []),
@@ -447,7 +448,14 @@ const NEUTRAL_PR_STATUS = {
 // Registered after the catch-all (so they win over it) and before the spec body
 // (so a spec's own route wins over them).
 const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unknown }[] = [
-  { pattern: "**/api/runtime/info", body: { version: "0.0.0-test" } },
+  {
+    pattern: /\/api\/projects\/[^/]+\/preflight-batches$/,
+    body: { preflightBatchId: "10000000-0000-4000-8000-000000000001" },
+  },
+  {
+    pattern: "**/api/runtime/info",
+    body: { version: "0.0.0-test", lifecycleInstanceId: "test-instance" },
+  },
   {
     pattern: "**/api/runtime/versions",
     body: { current: "0.0.0-test", autoUpdate: false, available: [] },
@@ -472,9 +480,10 @@ const APP_SHELL_ROUTES: { pattern: string | RegExp; status?: number; body: unkno
     pattern: /\/api\/sessions\/[^/]+\/todo$/,
     body: {
       revision: "event-0",
-      status: "empty",
+      status: "resolved",
       counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
       items: [],
+      finishOverrides: [],
     },
   },
   {

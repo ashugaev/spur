@@ -1,6 +1,6 @@
 # Install from source
 
-> Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
+> Scope: source install guide for contributors. Caveman, no overhead.
 
 Source install is for contributors/maintainers only. Coding agents must not use it for normal installs; use npm unless the user explicitly asks for source: [install-from-npm.md](install-from-npm.md).
 

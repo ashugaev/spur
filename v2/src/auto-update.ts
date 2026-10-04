@@ -124,23 +124,11 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
     return;
   }
 
-  // Retry suppression, by recorded kind. A terminal record naming this exact
-  // candidate suppresses it only when another attempt cannot help:
-  // `succeeded` (install-and-restart.sh can exit 0 without restarting the
-  // daemon — e.g. systemctl absent — leaving a `succeeded` record for a
-  // candidate still newer than the running version), or a failure kind that
-  // says the package installed and left the host changed. A failure that
-  // installed nothing, or one with no recorded kind at all, is attempted
-  // again on every tick with no cap: the reported bug was a transient
-  // registry error stranding a host on the old version forever, silently.
-  // A human press is unaffected either way: this branch lives in the tick,
-  // not in `startDeploySwitch`. `state` is guaranteed terminal here (the
-  // `phase === "running"` branch above already returned).
-  // Level tracks whether the tick did something: this branch does not, so
-  // `info`. Every attempt still logs — `retry` below, `started`/`skipped`
-  // after it — and the disarm, a real state change, stays `warn`.
+  // A skipped restart cannot advance the running version on another install.
+  // Plain success and retryable failures still permit another attempt.
   if (state && state.version === candidate.tag) {
-    if (state.phase === "succeeded" || isNoRetryFailureKind(state.failureKind)) {
+    const restartSkipped = state.phase === "succeeded" && state.outcome === "restart_skipped";
+    if (restartSkipped || isNoRetryFailureKind(state.failureKind)) {
       log("daemon.auto_update.suppressed", {
         level: "info",
         details: {
@@ -148,7 +136,7 @@ export async function runAutoUpdateTick(deps: RunAutoUpdateTickDeps): Promise<vo
           phase: state.phase,
           failureKind: state.failureKind,
           initiator: state.initiator,
-          reason: state.phase === "succeeded" ? "succeeded_record" : "no_retry_kind",
+          reason: restartSkipped ? "restart_skipped" : "no_retry_kind",
         },
       });
       return;

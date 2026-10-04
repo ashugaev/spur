@@ -21,6 +21,25 @@ describe("useToasts", () => {
     ]);
   });
 
+  it("auto-dismisses an error toast after 8 seconds", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useToasts());
+
+    act(() => {
+      result.current.showErrorToast("Failed to fetch");
+    });
+    act(() => {
+      vi.advanceTimersByTime(7_999);
+    });
+    expect(result.current.toasts.map((toast) => toast.title)).toEqual(["Failed to fetch"]);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(result.current.toasts).toEqual([]);
+    vi.useRealTimers();
+  });
+
   it("clears timers on manual dismiss, timeout, cap drop, and unmount", () => {
     vi.useFakeTimers();
     const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");

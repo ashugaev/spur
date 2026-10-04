@@ -20,7 +20,8 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Stop unwanted auto-pings with `spur auto-ping unsubscribe`. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
+  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`. Reply routing: `docs/configuration.md#telegram-binding`; command: `docs/commands.md#source-reply`.
+  Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
 
@@ -31,16 +32,19 @@ SAFETY
   Never run `disk-gc --execute` (or `--browser-revisions`) on a host running agents you do not own; a bare `disk-gc` is the dry run.
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, or Jira runs arbitrary commands as the daemon user.
+  Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
-  Read a sidecar's port with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`, never by grepping `/proc` or session state.
+  Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
 
 DOCS
 
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Daemon HTTP routes: docs/daemon-api.md
+  Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
   Config fields: docs/configuration.md
+  Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
+  Automatic updates and retry policy: docs/configuration.md#auto-update
 
 EDITING THIS FILE
 

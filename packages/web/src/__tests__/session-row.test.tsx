@@ -66,6 +66,25 @@ const onRestoreSession = vi.fn().mockResolvedValue(undefined);
 const onCompleteSession = vi.fn().mockResolvedValue(undefined);
 
 describe("SessionRow", () => {
+  it("links budget-limited sessions to their approval action", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "budget_limited",
+          state: "budget_limited",
+          runtimeAlive: false,
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/sessions/"),
+    );
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+  });
   beforeEach(() => {
     onCompleteSession.mockReset();
     onCompleteSession.mockResolvedValue(undefined);
@@ -312,6 +331,41 @@ describe("SessionRow", () => {
     expect(screen.queryByRole("button", { name: /Stop sidecar/i })).not.toBeInTheDocument();
   });
 
+  it("removes a ready sidecar link on refresh while retaining a running URL-less sidecar", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "none" });
+    const props = { onCompleteSession, onRestoreSession };
+    const { rerender } = render(
+      <SessionRow
+        {...props}
+        session={makeSession({
+          sidecars: [
+            {
+              name: "detached",
+              alive: false,
+              tmuxSession: "detached",
+              url: "https://ready.example.com/",
+            },
+          ],
+          runningSidecars: [
+            { name: "detached", url: "https://ready.example.com/" },
+            { name: "worker" },
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Running sidecars for api-a1"));
+    expect(screen.getByRole("link", { name: "detached" })).toHaveAttribute(
+      "href",
+      "https://ready.example.com/",
+    );
+    rerender(
+      <SessionRow {...props} session={makeSession({ runningSidecars: [{ name: "worker" }] })} />,
+    );
+    expect(screen.queryByRole("link", { name: "detached" })).not.toBeInTheDocument();
+    expect(screen.getByText("worker")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "worker" })).not.toBeInTheDocument();
+  });
+
   it("colors a dashboard sidecar age by ageWarn, not a fresh sidecar's age", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -477,6 +531,85 @@ describe("SessionRow", () => {
           runtimeAlive: false,
           status: "stopped",
           state: "stale",
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Restore session api-a1" })).toBeInTheDocument();
+  });
+
+  it("hides restore for an exhausted token budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "stopped",
+          state: "stopped",
+          runtimeAlive: false,
+          tokenUsageView: {
+            status: "available",
+            provider: "codex",
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            budget: 100,
+            exhausted: false,
+          },
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 100,
+            exhausted: true,
+            enforced: true,
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Restore session api-a1" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the compact token total without budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          tokenBudgetView: {
+            budget: 500000,
+            knownTotalTokens: 184200,
+            exhausted: false,
+            enforced: true,
+          },
+        })}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByText("184K")).toBeInTheDocument();
+    expect(screen.queryByText(/500K/)).not.toBeInTheDocument();
+  });
+
+  it("allows restore when pre-flight usage is unknown under a budget", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({ state: "unknown" });
+    render(
+      <SessionRow
+        session={makeSession({
+          status: "stopped",
+          state: "stopped",
+          runtimeAlive: false,
+          tokenBudgetView: {
+            budget: 100,
+            knownTotalTokens: 20,
+            exhausted: false,
+            enforced: false,
+            reason: "preflight_unknown",
+          },
         })}
         onCompleteSession={onCompleteSession}
         onRestoreSession={onRestoreSession}

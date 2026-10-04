@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeTelegramTopic,
   editTelegramTopic,
+  sendTelegramChatAction,
   sendTelegramReply,
 } from "../../src/telegram-source-state.js";
 
@@ -31,10 +32,11 @@ describe("sendTelegramReply", () => {
           chat_id: 123,
           message_id: 77,
           text: "done",
+          parse_mode: "HTML",
         }),
       }),
     );
-    expect(result).toEqual({ statusMessageIdConsumed: true });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
   });
 
   it("falls back to a fresh message when editing the pending status fails", async () => {
@@ -68,7 +70,32 @@ describe("sendTelegramReply", () => {
         }),
       }),
     );
-    expect(result).toEqual({ statusMessageIdConsumed: true });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [55] });
+  });
+
+  it("returns the ids of every sent chunk and the edited status message", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const okId = (id: number): Response =>
+      new Response(JSON.stringify({ ok: true, result: { message_id: id } }));
+    const config = { token: "token-123" };
+    const long = `${"a".repeat(4096)}b`;
+
+    fetchMock.mockResolvedValueOnce(okId(77)).mockResolvedValueOnce(okId(78));
+    const edited = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, long);
+    expect(edited.messageIds).toEqual([77, 78]);
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "message to edit not found" })),
+      )
+      .mockResolvedValueOnce(okId(90))
+      .mockResolvedValueOnce(okId(91));
+    const fallback = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, long);
+    expect(fallback.messageIds).toEqual([90, 91]);
+
+    fetchMock.mockResolvedValueOnce(okId(100)).mockResolvedValueOnce(okId(101));
+    const fresh = await sendTelegramReply(config, { chatId: 123 }, long);
+    expect(fresh.messageIds).toEqual([100, 101]);
   });
 
   it("chunks Telegram replies longer than one message", async () => {
@@ -89,6 +116,7 @@ describe("sendTelegramReply", () => {
         body: JSON.stringify({
           chat_id: 123,
           text: "a".repeat(4096),
+          parse_mode: "HTML",
         }),
       }),
     );
@@ -99,6 +127,72 @@ describe("sendTelegramReply", () => {
         body: JSON.stringify({
           chat_id: 123,
           text: "b",
+          parse_mode: "HTML",
+        }),
+      }),
+    );
+  });
+
+  it("puts the inline keyboard on the last chunk only", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 55 } })))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 56 } })),
+      );
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123 }, `${"a".repeat(4096)}b`, {
+      buttons: [
+        { text: "Yes", callbackData: "spur_choice:t0" },
+        { text: "No", callbackData: "spur_choice:t1" },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: 123, text: "a".repeat(4096), parse_mode: "HTML" }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.telegram.org/bottoken-123/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          text: "b",
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Yes", callback_data: "spur_choice:t0" }],
+              [{ text: "No", callback_data: "spur_choice:t1" }],
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
+  it("keeps the keyboard when the reply edits a pending status message", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await sendTelegramReply({ token: "token-123" }, { chatId: 123, statusMessageId: 77 }, "Pick", {
+      buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/editMessageText",
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: 123,
+          message_id: 77,
+          text: "Pick",
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]],
+          },
         }),
       }),
     );
@@ -166,11 +260,189 @@ describe("sendTelegramReply", () => {
         body: JSON.stringify({
           chat_id: -1001,
           text: "hello",
+          parse_mode: "HTML",
           message_thread_id: 44,
         }),
       }),
     );
-    expect(result).toEqual({ messageThreadId: 44 });
+    expect(result).toEqual({ messageThreadId: 44, messageIds: [55] });
+  });
+});
+
+describe("sendTelegramReply formatting", () => {
+  const config = { token: "token-123" };
+  const okId = (id: number): Response =>
+    new Response(JSON.stringify({ ok: true, result: { message_id: id } }));
+  const parseError = (): Response =>
+    new Response(
+      JSON.stringify({
+        ok: false,
+        description: "Bad Request: can't parse entities: Unsupported start tag",
+      }),
+      { status: 400 },
+    );
+  const bodyOf = (fetchMock: ReturnType<typeof vi.mocked<typeof fetch>>, call: number) =>
+    JSON.parse(String((fetchMock.mock.calls[call]?.[1] as RequestInit).body)) as Record<
+      string,
+      unknown
+    >;
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends rendered HTML with parse_mode", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+
+    await sendTelegramReply(config, { chatId: 123 }, "a **b** <c> & `d`");
+
+    expect(bodyOf(fetchMock, 0)).toEqual({
+      chat_id: 123,
+      text: "a <b>b</b> &lt;c&gt; &amp; <code>d</code>",
+      parse_mode: "HTML",
+    });
+  });
+
+  it("resends one chunk as plain text when Telegram cannot parse entities", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(parseError()).mockResolvedValueOnce(okId(56));
+
+    const result = await sendTelegramReply(config, { chatId: 123 }, "a **b**", {
+      buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retry = bodyOf(fetchMock, 1);
+    expect(retry["text"]).toBe("a **b**");
+    expect(retry).not.toHaveProperty("parse_mode");
+    expect(retry["reply_markup"]).toEqual(bodyOf(fetchMock, 0)["reply_markup"]);
+    expect(result.messageIds).toEqual([56]);
+  });
+
+  it("does not treat a non-400 rejection as a parse error", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "Forbidden: can't parse entities" }), {
+        status: 403,
+      }),
+    );
+
+    await expect(sendTelegramReply(config, { chatId: 123 }, "a **b**")).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not loop when the plain resend is rejected too", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(parseError()).mockResolvedValueOnce(parseError());
+
+    await expect(sendTelegramReply(config, { chatId: 123 }, "a **b**")).rejects.toThrow(
+      "can't parse entities",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a placeholder edit as plain text before sending new", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(parseError())
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    const result = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, "a **b**");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bodyOf(fetchMock, 0)["parse_mode"]).toBe("HTML");
+    expect(bodyOf(fetchMock, 1)).toEqual({ chat_id: 123, message_id: 77, text: "a **b**" });
+    expect(result.messageIds).toEqual([77]);
+  });
+
+  it("falls to a plain new message when the plain edit retry fails too", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(parseError())
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "message to edit not found" }), {
+          status: 400,
+        }),
+      )
+      .mockResolvedValueOnce(okId(90));
+
+    const result = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, "a **b**");
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const created = bodyOf(fetchMock, 2);
+    expect(created["text"]).toBe("a **b**");
+    expect(created).not.toHaveProperty("parse_mode");
+    expect(result.messageIds).toEqual([90]);
+  });
+
+  it("sends a pane tail escaped inside one pre, never parsed", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+
+    await sendTelegramReply(config, { chatId: 123 }, "api-1 needs input", {
+      preformatted: "x ``` <b>y</b> **z**",
+    });
+
+    expect(bodyOf(fetchMock, 0)).toEqual({
+      chat_id: 123,
+      text: "api-1 needs input\n<pre>x ``` &lt;b&gt;y&lt;/b&gt; **z**</pre>",
+      parse_mode: "HTML",
+    });
+  });
+
+  it("adds no pre for an empty pane tail", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+
+    await sendTelegramReply(config, { chatId: 123 }, "api-1 needs input", { preformatted: "" });
+
+    expect(bodyOf(fetchMock, 0)["text"]).toBe("api-1 needs input");
+  });
+
+  it("puts an oversized pane tail in its own pre chunk", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55)).mockResolvedValueOnce(okId(56));
+
+    await sendTelegramReply(config, { chatId: 123 }, "n".repeat(4000), {
+      preformatted: "t".repeat(200),
+    });
+
+    expect(bodyOf(fetchMock, 1)["text"]).toBe(`<pre>${"t".repeat(200)}</pre>`);
+  });
+
+  it("splits on the last newline and never inside a surrogate pair", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async () => okId(55));
+    const lines = `${"a".repeat(3000)}\n${"b".repeat(3000)}`;
+    await sendTelegramReply(config, { chatId: 123 }, lines);
+    expect(bodyOf(fetchMock, 0)["text"]).toBe("a".repeat(3000));
+    expect(bodyOf(fetchMock, 1)["text"]).toBe("b".repeat(3000));
+
+    fetchMock.mockClear();
+    const emoji = "\u{1F600}";
+    await sendTelegramReply(config, { chatId: 123 }, `${"x".repeat(4095)}${emoji}tail`);
+    expect(bodyOf(fetchMock, 0)["text"]).toBe("x".repeat(4095));
+    expect(bodyOf(fetchMock, 1)["text"]).toBe(`${emoji}tail`);
+  });
+
+  it("closes and reopens a fence across chunks", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async () => okId(55));
+    const code = Array.from({ length: 700 }, (_, index) => `line ${index}`).join("\n");
+
+    await sendTelegramReply(config, { chatId: 123 }, `\`\`\`ts\n${code}\n\`\`\`\ndone`);
+
+    const first = String(bodyOf(fetchMock, 0)["text"]);
+    const second = String(bodyOf(fetchMock, 1)["text"]);
+    expect(first.startsWith('<pre><code class="language-ts">')).toBe(true);
+    expect(first.endsWith("</code></pre>")).toBe(true);
+    expect(second.startsWith('<pre><code class="language-ts">')).toBe(true);
+    expect(second.endsWith("done")).toBe(true);
   });
 });
 
@@ -183,11 +455,13 @@ describe("editTelegramTopic", () => {
     vi.unstubAllGlobals();
   });
 
-  it("posts editForumTopic with name and swallows failures", async () => {
+  it("posts editForumTopic with name and reports success", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
 
-    await editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex");
+    await expect(
+      editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
+    ).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.telegram.org/bottoken-123/editForumTopic",
@@ -201,7 +475,7 @@ describe("editTelegramTopic", () => {
     );
   });
 
-  it("swallows a non-ok editForumTopic response without throwing", async () => {
+  it("reports false for a non-ok editForumTopic response without throwing", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ ok: false, description: "topic not found" }), {
@@ -211,7 +485,20 @@ describe("editTelegramTopic", () => {
 
     await expect(
       editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
+  });
+
+  it("counts an already-applied name as success", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: false, description: "Bad Request: TOPIC_NOT_MODIFIED" }), {
+        status: 400,
+      }),
+    );
+
+    await expect(
+      editTelegramTopic({ token: "token-123" }, -1001, 22, "🟡 api-1 codex"),
+    ).resolves.toBe(true);
   });
 });
 
@@ -250,5 +537,57 @@ describe("closeTelegramTopic", () => {
     );
 
     await expect(closeTelegramTopic({ token: "token-123" }, -1001, 22)).resolves.toBeUndefined();
+  });
+});
+
+describe("sendTelegramChatAction", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends one typing action without retry", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })));
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, -1001, 22)).resolves.toEqual({});
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/bottoken-123/sendChatAction",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: -1001, action: "typing", message_thread_id: 22 }),
+      }),
+    );
+  });
+
+  it("reports retry_after on 429 and never retries or throws", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          description: "Too Many Requests",
+          parameters: { retry_after: 12 },
+        }),
+        { status: 429 },
+      ),
+    );
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, 123)).resolves.toEqual({
+      retryAfterMs: 12_000,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a network error without retrying", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValueOnce(new Error("network down"));
+
+    await expect(sendTelegramChatAction({ token: "token-123" }, 123)).resolves.toEqual({});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

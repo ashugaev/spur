@@ -1,40 +1,123 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   findOpenCodeSessionId,
+  readOpenCodeConversation,
   readOpenCodeJson,
   readOpenCodeState,
+  readOpenCodeStructuredState,
+  invalidateOpenCodeState,
   resetOpenCodeExportState,
   buildOpenCodePlan,
   buildOpenCodeConfig,
   buildOpenCodeResumePlan,
+  buildOpenCodeRestorePlan,
+  captureOpenCodeSubmitBaseline,
   diffOpenCodeSessionIds,
-  hasNewOpenCodeUserMessage,
+  hasOpenCodeUserMessageAfter,
   isSupportedOpenCodeVersion,
+  openCodeDatabasePath,
   OPENCODE_EXPORT_MAX_CONCURRENCY,
   OPENCODE_RESTRICT_WRITES_CONFIG,
   parseOpenCodeExport,
   parseOpenCodeSessionListOutput,
   parseOpenCodeState,
+  parseOpenCodeTokenUsage,
+  readOpenCodeLatestUserMessageFromDatabase,
+  scanOpenCodeForNewUserMessage,
+  scanOpenCodeForTypedMessage,
+  parseOpenCodeUserTextsAfter,
   waitForOpenCodeLaunchMessage,
-  parseOpenCodeUserMessageIds,
+  parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
-  it("keeps deferred controls out of the launch command", () => {
-    const handle = `ap1_${"a".repeat(43)}`;
-    const plan = buildAgentLaunchPlan("opencode", "ordinary prompt", undefined, {
-      text: handle,
-      sensitive: true,
+  it("combines selected variant with MCP and permissions without replacing native selected options", () => {
+    const config = JSON.parse(
+      buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {
+        model: "provider/model/nested",
+        reasoningEffort: "high",
+        variantNames: ["low", "high", "custom"],
+      }) ?? "{}",
+    );
+    expect(config.agent).toEqual({
+      build: { model: "provider/model/nested", variant: "high" },
+      plan: { model: "provider/model/nested", variant: "high" },
     });
-    expect(plan.launchCommand).toContain("ordinary prompt");
-    expect(plan.launchCommand).not.toContain(handle);
-    expect(plan.initialMessage).not.toContain(handle);
-    expect(plan.deferredSensitiveInitialMessage).toEqual({ text: handle, sensitive: true });
+    expect(config.provider).toEqual({
+      provider: {
+        models: {
+          "model/nested": {
+            variants: { low: { disabled: true }, custom: { disabled: true } },
+          },
+        },
+      },
+    });
+    expect(config.mcp.tools).toEqual({
+      type: "remote",
+      url: "http://localhost/mcp",
+      enabled: true,
+    });
+    expect(config.permission.edit).toBe("deny");
+    const configContent = JSON.stringify(config);
+    for (const command of [
+      buildOpenCodePlan("work's task", { model: "provider/model/nested", configContent })
+        .launchCommand,
+      buildOpenCodeResumePlan("session's id", "opencode", {
+        model: "provider/model/nested",
+        configContent,
+      }).launchCommand,
+    ]) {
+      expect(command).toContain(`OPENCODE_CONFIG_CONTENT='${configContent}'`);
+      expect(command).toContain("--model 'provider/model/nested'");
+      expect(command).not.toContain("--variant");
+    }
+  });
+
+  it("omits config when no session settings exist", () => {
+    expect(buildOpenCodeConfig(undefined, false)).toBeUndefined();
+  });
+
+  it("retains reasoning config and escaped variant keys on restore", async () => {
+    const configContent =
+      buildOpenCodeConfig(undefined, false, {
+        model: "provider/model",
+        reasoningEffort: "high",
+        variantNames: ["high", "custom's"],
+      }) ?? "";
+    const plan = await buildOpenCodeRestorePlan("/repo", "restore", {
+      model: "provider/model",
+      sessionId: "ses_selected",
+      configContent,
+    });
+    expect(plan?.launchCommand).toContain("OPENCODE_CONFIG_CONTENT=");
+    expect(plan?.launchCommand).toContain('"custom\'\\\'\'s":{"disabled":true}');
+    expect(plan?.launchCommand).toContain("--session 'ses_selected' --model 'provider/model'");
+    expect(plan?.initialMessage).toBe("restore");
+    expect(plan?.launchCommand).not.toMatch(/XDG_|--variant/);
+  });
+  it("extracts deduped structured components from a sanitized export fixture", async () => {
+    const fixture = JSON.parse(
+      await readFile(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+
+    expect(parseOpenCodeTokenUsage(fixture)).toEqual({
+      provider: "opencode",
+      generationId: "opencode:session-sanitized:msg-assistant-1",
+      inputTokens: 50,
+      outputTokens: 29,
+      totalTokens: 79,
+      cacheReadInputTokens: 34,
+      cacheWriteInputTokens: 4,
+      reasoningOutputTokens: 6,
+    });
   });
 
   it("launches with permission auto-approval and a selected model", () => {
@@ -152,23 +235,38 @@ describe("OpenCode adapter", () => {
     ]);
   });
 
-  it("confirms delivery by user message id, not by the text OpenCode persisted", () => {
+  it("confirms delivery by a user message past the watermark, not by the text OpenCode persisted", () => {
     // OpenCode stores a slash-command prompt expanded, so the persisted text
-    // never equals what Spur sent; only the new id proves the prompt landed.
+    // never equals what Spur sent; only a newer user message proves it landed.
     const exported = {
       messages: [
-        { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL" }] },
-        { info: { role: "assistant", id: "msg_2" }, parts: [] },
+        { info: { role: "user", id: "msg_0" }, parts: [] },
+        {
+          info: { role: "user", id: "msg_1", time: { created: 200 } },
+          parts: [{ type: "text", text: "EXPANDED SKILL" }],
+        },
+        { info: { role: "user", id: "msg_a", time: { created: 100 } }, parts: [] },
+        { info: { role: "assistant", id: "msg_2", time: { created: 300 } }, parts: [] },
       ],
     };
-    const ids = parseOpenCodeUserMessageIds(exported);
-    expect([...ids]).toEqual(["msg_1"]);
-    expect(hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set() }, ids)).toBe(
-      true,
-    );
+    // Newest user message by time; a user message with no time never counts.
+    const latest = parseOpenCodeLatestUserMessage(exported);
+    expect(latest).toEqual({ createdMs: 200, id: "msg_1" });
+    expect(hasOpenCodeUserMessageAfter({ sessionId: "ses_1", after: null }, latest)).toBe(true);
     expect(
-      hasNewOpenCodeUserMessage({ sessionId: "ses_1", userMessageIds: new Set(["msg_1"]) }, ids),
+      hasOpenCodeUserMessageAfter(
+        { sessionId: "ses_1", after: { createdMs: 200, id: "msg_1" } },
+        latest,
+      ),
     ).toBe(false);
+    // Same millisecond: the id breaks the tie.
+    expect(
+      hasOpenCodeUserMessageAfter(
+        { sessionId: "ses_1", after: { createdMs: 200, id: "msg_0" } },
+        latest,
+      ),
+    ).toBe(true);
+    expect(hasOpenCodeUserMessageAfter({ sessionId: "ses_1", after: null }, null)).toBe(false);
   });
 
   it("classifies structured busy, completed, and error messages", () => {
@@ -180,7 +278,18 @@ describe("OpenCode adapter", () => {
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", time: { completed: 123 } } }],
       }),
-    ).toEqual({ state: "waiting", reason: "assistant completed" });
+    ).toEqual({ state: "waiting", reason: "assistant completed", activityMs: 123 });
+    expect(
+      parseOpenCodeState({
+        messages: [{ info: { role: "assistant", finish: "stop", time: { completed: 123 } } }],
+      }),
+    ).toEqual({ state: "waiting", reason: "assistant completed", activityMs: 123 });
+    // A step that ended in tool calls leaves the turn running.
+    expect(
+      parseOpenCodeState({
+        messages: [{ info: { role: "assistant", finish: "tool-calls", time: { completed: 123 } } }],
+      }),
+    ).toEqual({ state: "working", reason: "assistant step ended in tool calls", activityMs: 123 });
     expect(
       parseOpenCodeState({
         messages: [{ info: { role: "assistant", error: { name: "ApiError" } } }],
@@ -219,7 +328,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "waiting", reason: "assistant aborted" });
+    ).toEqual({ state: "waiting", reason: "assistant aborted", activityMs: 1787369901319 });
 
     // Rate limit takes priority over the abort classification.
     expect(
@@ -252,7 +361,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
 
     // Near-miss on name: substring/case matches must NOT be treated as
     // aborted. The allowlist is exact-match only.
@@ -268,7 +377,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
 
     // Near-miss on case: lower-cased name must NOT be treated as aborted.
     expect(
@@ -283,7 +392,7 @@ describe("OpenCode adapter", () => {
           },
         ],
       }),
-    ).toEqual({ state: "error", reason: "assistant error" });
+    ).toEqual({ state: "error", reason: "assistant error", activityMs: 2 });
   });
 
   it("classifies real export shapes without inventing live-service state", () => {
@@ -347,6 +456,7 @@ describe("OpenCode adapter", () => {
     // bookkeeping.
     async function stubCountingOpenCode(options?: {
       exitCode?: number;
+      output?: unknown;
     }): Promise<{ dir: string; countPath: string }> {
       const dir = await mkdtemp(join(tmpdir(), "spur-opencode-bin-"));
       const countPath = join(dir, "calls.log");
@@ -358,13 +468,21 @@ describe("OpenCode adapter", () => {
           ...(options?.exitCode
             ? [`process.exit(${options.exitCode});`]
             : [
-                'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
+                `process.stdout.write(${JSON.stringify(
+                  JSON.stringify(
+                    options?.output ?? {
+                      messages: [{ info: { role: "assistant", time: { completed: 1 } } }],
+                    },
+                  ),
+                )});`,
               ]),
         ].join("\n"),
         "utf8",
       );
       await chmod(join(dir, "opencode"), 0o755);
       vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+      // No opencode.db here: these reads take the export fallback.
+      vi.stubEnv("XDG_DATA_HOME", join(dir, "no-data"));
       return { dir, countPath };
     }
 
@@ -394,11 +512,61 @@ describe("OpenCode adapter", () => {
         ]);
 
         expect(results).toEqual([
-          { state: "waiting", reason: "assistant completed" },
-          { state: "waiting", reason: "assistant completed" },
-          { state: "waiting", reason: "assistant completed" },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
+          { state: "waiting", reason: "assistant completed", activityMs: 1 },
         ]);
         expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("shares one cached export between state and token usage", async () => {
+      const { dir, countPath } = await stubCountingOpenCode({
+        output: {
+          info: { id: "ses_a" },
+          messages: [
+            {
+              info: {
+                id: "msg_a",
+                role: "assistant",
+                time: { completed: 1 },
+                tokens: {
+                  input: 10,
+                  output: 5,
+                  reasoning: 2,
+                  cache: { read: 3, write: 1 },
+                },
+              },
+            },
+          ],
+        },
+      });
+      try {
+        const structured = await readOpenCodeStructuredState("ses_a");
+        const state = await readOpenCodeState("ses_a");
+
+        expect(structured.tokenUsage).toMatchObject({
+          inputTokens: 14,
+          outputTokens: 7,
+          totalTokens: 21,
+        });
+        expect(state).toMatchObject({ state: "waiting", reason: "assistant completed" });
+        expect(await spawnCount(countPath)).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("forces one fresh structured export after the agent exits", async () => {
+      const { dir, countPath } = await stubCountingOpenCode();
+      try {
+        await readOpenCodeStructuredState("ses_a");
+        await readOpenCodeStructuredState("ses_a");
+        expect(await spawnCount(countPath)).toBe(1);
+        await readOpenCodeStructuredState("ses_a", null, true);
+        expect(await spawnCount(countPath)).toBe(2);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -598,19 +766,32 @@ describe("OpenCode adapter", () => {
             "#!/usr/bin/env node",
             'const fs = require("node:fs");',
             `const log = ${JSON.stringify(logPath)};`,
+            `const limit = ${JSON.stringify(OPENCODE_EXPORT_MAX_CONCURRENCY)};`,
+            "function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }",
+            "function liveCount() {",
+            '  const spans = fs.readFileSync(log, "utf8");',
+            "  let live = 0;",
+            '  for (const mark of spans) live += mark === "+" ? 1 : -1;',
+            "  return live;",
+            "}",
             'fs.appendFileSync(log, "+");',
-            "setTimeout(() => {",
-            '  fs.appendFileSync(log, "-");',
-            '  process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
-            // Held long enough that spawn stagger cannot decide the peak: at an
-            // 80ms hold an early export can finish before the last one starts,
-            // and the exact assertion below false-fails on a loaded host.
-            "}, 500);",
+            // Spawn stagger, not a fixed hold, decides the peak on a loaded
+            // host: wait until the log itself shows `limit` exports in
+            // flight (polling so a narrow gate is caught rather than
+            // trusted), capped so a broken gate fails fast instead of
+            // hanging, then hold an extra fixed window so a gate that is
+            // too wide still has time to show peak > limit.
+            "const deadline = Date.now() + 4_000;",
+            "while (liveCount() < limit && Date.now() < deadline) sleep(10);",
+            "sleep(300);",
+            'fs.appendFileSync(log, "-");',
+            'process.stdout.write(JSON.stringify({ messages: [{ info: { role: "assistant", time: { completed: 1 } } }] }));',
           ].join("\n"),
           "utf8",
         );
         await chmod(join(dir, "opencode"), 0o755);
         vi.stubEnv("SPUR_OPENCODE_BIN", join(dir, "opencode"));
+        vi.stubEnv("XDG_DATA_HOME", join(dir, "no-data"));
 
         const ids = Array.from({ length: CONCURRENT_READS }, (_, i) => `ses_${i}`);
         await Promise.all(ids.map((id) => readOpenCodeState(id)));
@@ -648,6 +829,7 @@ describe("OpenCode adapter", () => {
         );
         await chmod(join(failDir, "opencode"), 0o755);
         vi.stubEnv("SPUR_OPENCODE_BIN", join(failDir, "opencode"));
+        vi.stubEnv("XDG_DATA_HOME", join(failDir, "no-data"));
 
         for (let i = 0; i <= OPENCODE_EXPORT_MAX_CONCURRENCY; i += 1) {
           expect(await readOpenCodeState(`ses_fail_${i}`)).toBeNull();
@@ -667,6 +849,7 @@ describe("OpenCode adapter", () => {
         expect(await readOpenCodeState("ses_ok")).toEqual({
           state: "waiting",
           reason: "assistant completed",
+          activityMs: 1,
         });
       } finally {
         await rm(failDir, { recursive: true, force: true });
@@ -717,7 +900,7 @@ describe("OpenCode adapter", () => {
         "#!/usr/bin/env node",
         "const exported = {",
         "  messages: [",
-        '    { info: { role: "user", id: "msg_1" }, parts: [{ type: "text", text: "EXPANDED SKILL BODY" }] },',
+        '    { info: { role: "user", id: "msg_1", time: { created: 1790546673635 } }, parts: [{ type: "text", text: "EXPANDED SKILL BODY" }] },',
         "  ],",
         "};",
         "process.stdout.write(JSON.stringify(exported));",
@@ -726,11 +909,359 @@ describe("OpenCode adapter", () => {
     );
     await chmod(binPath, 0o755);
     vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+    // No opencode.db under this data home: the check answers from the CLI export.
+    vi.stubEnv("XDG_DATA_HOME", join(binDir, "no-data"));
     try {
       await expect(waitForOpenCodeLaunchMessage("ses_launch", 5_000)).resolves.toBe(true);
     } finally {
       vi.unstubAllEnvs();
       await rm(binDir, { recursive: true, force: true });
     }
+  });
+
+  describe("submit ack from opencode.db", () => {
+    async function makeDatabase(dataHome: string): Promise<DatabaseSync> {
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      return database;
+    }
+
+    function insert(
+      database: DatabaseSync,
+      id: string,
+      sessionId: string,
+      role: string,
+      createdMs = 0,
+    ): void {
+      database
+        .prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)")
+        .run(id, sessionId, createdMs, JSON.stringify({ role }));
+    }
+
+    it("reads the session's newest user message, by time then id", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      insert(database, "msg_u2", "ses_1", "user", 100);
+      insert(database, "msg_u1", "ses_1", "user", 200);
+      insert(database, "msg_u0", "ses_1", "user", 200);
+      insert(database, "msg_a1", "ses_1", "assistant", 300);
+      insert(database, "msg_u9", "ses_other", "user", 400);
+      database.close();
+      const path = openCodeDatabasePath({ XDG_DATA_HOME: dataHome });
+      try {
+        await expect(readOpenCodeLatestUserMessageFromDatabase("ses_1", path)).resolves.toEqual({
+          createdMs: 200,
+          id: "msg_u1",
+        });
+        await expect(readOpenCodeLatestUserMessageFromDatabase("ses_none", path)).resolves.toBe(
+          null,
+        );
+      } finally {
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    // `opencode export` costs 2-4s per call; the ack scan polls every 250ms.
+    it("acks a new user message from the database without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      insert(database, "msg_u1", "ses_1", "user");
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write("{}");\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        if (!baseline) throw new Error("expected a baseline");
+        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(false);
+        insert(database, "msg_u2", "ses_1", "user");
+        await expect(scanOpenCodeForNewUserMessage(baseline)).resolves.toBe(true);
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
+        database.close();
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    // The user's own input, or a ToDo nudge, past the watermark is not the
+    // ack of a text opencode never got; a slash command is stored expanded.
+    it("acks a typed text only by a new user message that carries it, a slash command by any", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      database.exec(
+        "CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const addPart = (id: string, messageId: string, text: string) =>
+        database
+          .prepare("INSERT INTO part VALUES (?, ?, 'ses_1', 0, 0, ?)")
+          .run(id, messageId, JSON.stringify({ type: "text", text }));
+      insert(database, "msg_u1", "ses_1", "user", 100);
+      addPart("prt_1", "msg_u1", "Marker QA1: reply ok");
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const baseline = await captureOpenCodeSubmitBaseline("ses_1");
+        if (!baseline) throw new Error("expected a baseline");
+        insert(database, "msg_u2", "ses_1", "user", 200);
+        addPart("prt_2", "msg_u2", "Reply with the single word pong.");
+        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
+          false,
+        );
+        await expect(scanOpenCodeForTypedMessage(baseline, "/review 986")).resolves.toBe(true);
+        insert(database, "msg_u3", "ses_1", "user", 300);
+        addPart("prt_3", "msg_u3", "Marker   QA1:\r\nreply ok");
+        await expect(scanOpenCodeForTypedMessage(baseline, "Marker QA1: reply ok")).resolves.toBe(
+          true,
+        );
+      } finally {
+        database.close();
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("reads the texts of user messages past a watermark from an export", () => {
+      const exported = {
+        messages: [
+          {
+            info: { id: "m1", role: "user", time: { created: 100 } },
+            parts: [{ type: "text", text: "old" }],
+          },
+          {
+            info: { id: "m2", role: "assistant", time: { created: 150 } },
+            parts: [{ type: "text", text: "a" }],
+          },
+          {
+            info: { id: "m3", role: "user", time: { created: 200 } },
+            parts: [{ type: "text", text: "new" }],
+          },
+        ],
+      };
+      expect(parseOpenCodeUserTextsAfter(exported, { createdMs: 100, id: "m1" })).toEqual(["new"]);
+      expect(parseOpenCodeUserTextsAfter(exported, null)).toEqual(["old", "new"]);
+    });
+  });
+
+  describe("state from opencode.db", () => {
+    afterEach(() => {
+      resetOpenCodeExportState();
+      vi.unstubAllEnvs();
+    });
+
+    it("drops a cached state on a pane write, and never caches a read that spans one", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      const completed = JSON.stringify({ role: "assistant", time: { completed: 1 } });
+      const user = JSON.stringify({ role: "user", time: { created: 1 } });
+      insert.run("msg_1", "ses_1", 100, completed);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("waiting");
+        // A Send now lands: the cached "waiting" must not survive it.
+        insert.run("msg_2", "ses_1", 200, user);
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("waiting");
+        invalidateOpenCodeState("ses_1");
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("working");
+
+        // A read started before a write returns to its caller but is not cached.
+        insert.run("msg_3", "ses_1", 300, completed);
+        invalidateOpenCodeState("ses_1");
+        const spanning = readOpenCodeState("ses_1");
+        invalidateOpenCodeState("ses_1");
+        expect((await spanning)?.state).toBe("waiting");
+        insert.run("msg_4", "ses_1", 400, user);
+        expect((await readOpenCodeState("ses_1"))?.state).toBe("working");
+      } finally {
+        database.close();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("classifies from the session's last message row without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      insert.run(
+        "msg_1",
+        "ses_busy",
+        100,
+        JSON.stringify({ role: "assistant", time: { completed: 1 } }),
+      );
+      insert.run(
+        "msg_2",
+        "ses_busy",
+        200,
+        JSON.stringify({ role: "user", time: { created: 200 } }),
+      );
+      insert.run(
+        "msg_3",
+        "ses_idle",
+        100,
+        JSON.stringify({ role: "user", time: { created: 100 } }),
+      );
+      // Same millisecond as the user turn: the id orders it last.
+      insert.run(
+        "msg_4",
+        "ses_idle",
+        100,
+        JSON.stringify({ role: "assistant", time: { created: 100, completed: 150 } }),
+      );
+      insert.run(
+        "msg_5",
+        "ses_tools",
+        100,
+        JSON.stringify({ role: "assistant", finish: "tool-calls", time: { completed: 150 } }),
+      );
+      database.close();
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write("{}");\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        await expect(readOpenCodeState("ses_busy")).resolves.toEqual({
+          state: "working",
+          reason: "last role=user",
+          activityMs: 200,
+        });
+        await expect(readOpenCodeState("ses_idle")).resolves.toEqual({
+          state: "waiting",
+          reason: "assistant completed",
+          activityMs: 150,
+        });
+        await expect(readOpenCodeState("ses_tools")).resolves.toEqual({
+          state: "working",
+          reason: "assistant step ended in tool calls",
+          activityMs: 150,
+        });
+        await expect(readOpenCodeState("ses_none")).resolves.toBeNull();
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("conversation from opencode.db", () => {
+    async function makeDatabase(dataHome: string): Promise<DatabaseSync> {
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      database.exec(
+        "CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      return database;
+    }
+
+    function insertMessage(
+      database: DatabaseSync,
+      message: { id: string; sessionId: string; role: string; createdAt: number },
+      parts: Array<{ id: string; data: Record<string, unknown> }>,
+    ): void {
+      database
+        .prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)")
+        .run(
+          message.id,
+          message.sessionId,
+          message.createdAt,
+          JSON.stringify({ role: message.role }),
+        );
+      for (const part of parts) {
+        database
+          .prepare("INSERT INTO part VALUES (?, ?, ?, 0, 0, ?)")
+          .run(part.id, message.id, message.sessionId, JSON.stringify(part.data));
+      }
+    }
+
+    async function fakeOpenCodeBin(dataHome: string, exportJson: unknown): Promise<string> {
+      const binPath = join(dataHome, "opencode-bin");
+      const spawnedMarker = join(dataHome, "spawned");
+      await writeFile(
+        binPath,
+        `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(spawnedMarker)}, "1");\nprocess.stdout.write(${JSON.stringify(JSON.stringify(exportJson))});\n`,
+        "utf8",
+      );
+      await chmod(binPath, 0o755);
+      vi.stubEnv("SPUR_OPENCODE_BIN", binPath);
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      return spawnedMarker;
+    }
+
+    it("reads the session's text parts in order without spawning the CLI", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const database = await makeDatabase(dataHome);
+      // Inserted out of order: the read orders by message time, then part id.
+      insertMessage(
+        database,
+        { id: "msg_a1", sessionId: "ses_1", role: "assistant", createdAt: 2 },
+        [
+          { id: "prt_a3", data: { type: "text", text: "world" } },
+          { id: "prt_a1", data: { type: "step-start" } },
+          { id: "prt_a2", data: { type: "text", text: "hello" } },
+          { id: "prt_a4", data: { type: "tool", tool: "bash", state: { output: "ls" } } },
+        ],
+      );
+      insertMessage(database, { id: "msg_u1", sessionId: "ses_1", role: "user", createdAt: 1 }, [
+        { id: "prt_u1", data: { type: "text", text: "hi" } },
+      ]);
+      insertMessage(
+        database,
+        { id: "msg_o1", sessionId: "ses_other", role: "user", createdAt: 0 },
+        [{ id: "prt_o1", data: { type: "text", text: "other session" } }],
+      );
+      database.close();
+      const spawnedMarker = await fakeOpenCodeBin(dataHome, { messages: [] });
+      try {
+        await expect(readOpenCodeConversation("ses_1")).resolves.toEqual([
+          { kind: "message", role: "user", text: "hi" },
+          { kind: "message", role: "assistant", text: "hello\nworld" },
+        ]);
+        await expect(readFile(spawnedMarker, "utf8")).rejects.toThrow();
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to the CLI export when the database is unreadable", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      const spawnedMarker = await fakeOpenCodeBin(dataHome, {
+        messages: [{ info: { role: "user" }, parts: [{ type: "text", text: "from export" }] }],
+      });
+      try {
+        await expect(readOpenCodeConversation("ses_1")).resolves.toEqual([
+          { kind: "message", role: "user", text: "from export" },
+        ]);
+        await expect(readFile(spawnedMarker, "utf8")).resolves.toBe("1");
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -28,6 +28,7 @@ const activeContexts: Array<{
   daemonPid?: number;
   sessionPrefix: string;
 }> = [];
+let currentService: SessionService | undefined;
 
 function startConfiguredTriggers(
   deps: Omit<Parameters<typeof startTriggerController>[0], "autoPing">,
@@ -40,7 +41,6 @@ function startConfiguredTriggers(
     deps.sessionService.deliver(sessionId, message, {
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-  sessionService.spawn = async (request) => deps.sessionService.spawn(request);
   const controller = startTriggerController({ ...deps, sessionService, autoPing });
   return {
     async stop(): Promise<void> {
@@ -128,6 +128,9 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
   try {
     return await run();
   } finally {
+    // Dispose before env restore so timers cannot fire inside the next env window.
+    currentService?.dispose();
+    currentService = undefined;
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
         Reflect.deleteProperty(process.env, key);
@@ -340,6 +343,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -479,6 +483,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,
@@ -627,6 +632,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -715,6 +721,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         handle.stop();
         await controller.stop();
         service.dispose();
+        currentService = undefined;
       }
     });
   });
@@ -769,6 +776,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -899,6 +907,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -1071,6 +1080,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,
@@ -1215,6 +1225,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
       await withRuntimeEnv(context, async () => {
         const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        currentService = service;
         const session = await service.spawn({
           project: "api",
           agent,
