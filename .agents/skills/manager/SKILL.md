@@ -53,6 +53,7 @@ PROCESS
        - Close-out: mandatory after any code change, never without an open PR.
   4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.
      Reviewer before close-out: local gate, publication NOT REQUIRED. Live review: dispatch trusted external contract path/digest and scoped receipt/network capability before PR reads. Publication BLOCKED: report external prerequisite, never retry as code failure or count as GitHub approval.
+     Reviewer lacks nested delegation: dispatch separate coverage-only challenger with requirements, diff/boundaries and draft rows/exclusions; return identity/output before execution. Missing output blocks gate; challenge never supplies lane approval.
 
 RULES
 

@@ -22,6 +22,11 @@ ATTEMPT
 
 SCENARIOS
 
+  1  Record draft rows/exclusions before execution.
+  2  Obtain separate coverage-only sub-agent challenge using requirements, diff/boundaries and draft; require concrete omissions or evidence-bound clean result.
+  3  Revise rows; close each omission with added scenario or boundary-grounded exclusion. Save challenger identity/output, dispositions and final matrix.
+  4  Execute revised required rows; coverage challenge supplies no lane approval, source-edit or publication authority.
+  Use available native delegation; absent nesting, request caller dispatch and await independent output. Self-critique, missing output or unresolved omissions block execution.
   Derive maximal meaningful risk rows from requirements, entry points, callers and transitive/shared dependencies.
   Cross action/state/data/failure/recovery/timing/permission/provider axes; bound exclusions by unaffected boundary.
   Row: requirement/boundary, precondition/variant, action, observable expected result, risk, status, evidence ID.
@@ -35,7 +40,7 @@ SCENARIOS
 DELTA
 
   Compare last evidenced H/B with current pair, including base/config/environment changes and shared dependencies.
-  Retain unaffected rows only with prior evidence IDs and dependency-based impact rationale.
+  Challenge affected rows/exclusions/shared-dependency impact before reruns; retain unaffected evidence/challenge IDs only with dependency-based impact rationale.
   Rerun affected rows and regression probes. Unknown impact, absent baseline or rewritten history broadens affected review.
   Passing new H requires new pinned approval; unchanged H/B still requires current lane affirmation.
   Regression requests changes; missing evidence blocks and attempts permitted dismissal of prior own approval.
