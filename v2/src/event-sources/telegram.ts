@@ -40,6 +40,7 @@ import {
   renderSettings,
   renderInbox,
   renderDetail,
+  workbenchPage,
   type WorkbenchCard,
   type WorkbenchOwner,
   type WorkbenchView,
@@ -604,14 +605,6 @@ async function requestSpawnProject(
   });
 }
 
-async function spawnTelegramSession(
-  runtime: TelegramRuntime,
-  request: SourceSpawnSessionRequest,
-): Promise<SourceSessionListItem | null> {
-  if (!runtime.deps.spawnSession) return null;
-  return runtime.deps.spawnSession(request);
-}
-
 export function wrapTelegramSpawnPrompt(taskText: string): string {
   return [
     taskText,
@@ -697,14 +690,17 @@ async function bindSpawnedSession(
   const current = (): boolean => !deps.signal.aborted && (!options || options.current());
   try {
     if (!current()) return { phase: "not_submitted" };
+    if (!deps.spawnSession) {
+      if (!options) await ctx.reply("Spur spawn is not available for this Telegram source.");
+      return { phase: "not_submitted" };
+    }
     if (!options) {
       const status = await ctx.reply(`Spawning ${request.agent} agent...`);
       statusMessageId = extractMessageId(status);
     }
-    if (!deps.spawnSession) return { phase: "not_submitted" };
     if (!current()) return { phase: "not_submitted" };
     submitted = true;
-    const session = await spawnTelegramSession(runtime, {
+    const session = await deps.spawnSession({
       ...request,
       prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
       telegramOrigin: {
@@ -714,15 +710,6 @@ async function bindSpawnedSession(
         ...(messageThreadId !== undefined ? { messageThreadId } : {}),
       },
     });
-    if (!session) {
-      await editOrReply(
-        ctx,
-        chatId,
-        statusMessageId,
-        "Spur spawn is not available for this Telegram source.",
-      );
-      return { phase: "submitted_unknown", error: new Error("Spawn returned no session") };
-    }
     created = session;
     options?.created();
     if (!current()) {
@@ -931,7 +918,8 @@ async function workbenchView(
   if (!capability || !runtime.deps.listProjects) throw new Error("Workbench unavailable");
   if (card.kind === "launch") {
     const projects = await launchProjects(runtime, card);
-    card.page = Math.min(card.page, Math.max(0, Math.ceil(projects.length / 6) - 1));
+    const visible = workbenchPage(projects, card.page);
+    card.page = visible.index;
     if (card.project !== undefined) {
       if (!projects.some((entry) => entry.id === card.project))
         throw new Error("Project unavailable");
@@ -944,9 +932,8 @@ async function workbenchView(
         }),
       );
     }
-    const visible = projects.slice(card.page * 6, (card.page + 1) * 6);
     const options = await Promise.all(
-      visible.map(async ({ id }) => {
+      visible.items.map(async ({ id }) => {
         try {
           return await capability.launchOptions({ project: id });
         } catch {
@@ -1032,6 +1019,26 @@ async function bindWorkbenchSession(
   }
 }
 
+async function notifyUnboundWorkbenchResult(
+  ctx: TelegramCallbackContext,
+  runtime: TelegramRuntime,
+  card: WorkbenchCard,
+  session: SourceSessionListItem,
+): Promise<void> {
+  if (
+    isAborted(runtime.deps) ||
+    !isAllowed(runtime.deps.config, card.owner.chatId, { id: card.owner.userId })
+  )
+    return;
+  try {
+    await ctx.reply?.(
+      `Task ${session.id} is available but not bound here. Use /work to inspect and continue it.`,
+    );
+  } catch (error) {
+    logPersistError(runtime.deps, error);
+  }
+}
+
 async function handleWorkbenchCallback(
   ctx: TelegramCallbackContext,
   runtime: TelegramRuntime,
@@ -1107,7 +1114,11 @@ async function handleWorkbenchCallback(
           },
         },
       );
-      if (!workbenchCurrent(runtime, card)) return;
+      if (!workbenchCurrent(runtime, card)) {
+        if (outcome.phase === "created" && !outcome.bound)
+          await notifyUnboundWorkbenchResult(ctx, runtime, card, outcome.session);
+        return;
+      }
       if (outcome.phase === "created") {
         await editWorkbenchCard(ctx, runtime, card, {
           text: `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
@@ -1158,9 +1169,15 @@ async function handleWorkbenchCallback(
           sessionId: session.id,
           expectedProject: action.project,
         });
-        if (!workbenchCurrent(runtime, card)) return;
+        if (!workbenchCurrent(runtime, card)) {
+          await notifyUnboundWorkbenchResult(ctx, runtime, card, session);
+          return;
+        }
         session = await capability.getSession(action.sessionId);
-        if (!workbenchCurrent(runtime, card)) return;
+        if (!workbenchCurrent(runtime, card)) {
+          await notifyUnboundWorkbenchResult(ctx, runtime, card, session);
+          return;
+        }
       }
       if (
         session.id !== action.sessionId ||
@@ -1185,7 +1202,7 @@ async function handleWorkbenchCallback(
         const projects = await launchProjects(runtime, card);
         if (!workbenchCurrent(runtime, card)) return;
         if (!action.project) {
-          const current = projects.slice(card.page * 6, (card.page + 1) * 6);
+          const current = workbenchPage(projects, card.page).items;
           await editWorkbenchCard(ctx, runtime, card, {
             text: "Choose a project for Settings.",
             rows: [

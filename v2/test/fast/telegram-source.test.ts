@@ -160,6 +160,7 @@ async function startSource(
     resolveWebBaseUrl?: () => Promise<string | null>;
     workbench?: SourceWorkbench;
     signal?: AbortSignal;
+    spawnSession?: null;
   } = {},
 ) {
   const listSessions =
@@ -203,7 +204,7 @@ async function startSource(
     logger,
     listSessions,
     ...(listProjects ? { listProjects } : {}),
-    spawnSession,
+    ...(overrides.spawnSession === null ? {} : { spawnSession }),
     ...(overrides.workbench ? { workbench: overrides.workbench } : {}),
     resolveWebBaseUrl:
       overrides.resolveWebBaseUrl ??
@@ -428,6 +429,63 @@ describe("telegramSourceModule", () => {
       "api-new",
     );
   });
+
+  it.each(["manual", "auto"])(
+    "legacy %s spawn without capability reports unavailable without leaving Spawning",
+    async (kind) => {
+      const dataDir = await createTempDir("spur-telegram-status-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        spawnSession: null,
+        listProjects: vi.fn().mockResolvedValue([{ id: "api", name: "api" }]),
+        config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+      });
+      const ctx = telegramContext({ text: kind === "manual" ? "/spawn codex task" : "task" });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith(
+        "Spur spawn is not available for this Telegram source.",
+      );
+      expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining("Spawning"));
+    },
+  );
+
+  it.each(["success", "submitted_unknown", "binding_failure"])(
+    "legacy status ends in terminal text after %s",
+    async (outcome) => {
+      const dataDir = await createTempDir("spur-telegram-status-");
+      tempDirs.push(dataDir);
+      const spawn =
+        outcome === "submitted_unknown"
+          ? vi.fn().mockRejectedValue(new Error("boom token-123"))
+          : vi.fn().mockResolvedValue({
+              id: "created",
+              project: "api",
+              agent: "codex",
+              state: "working",
+            });
+      const { bot } = await startSource(dataDir, vi.fn(), spawn, {
+        listProjects: vi.fn().mockResolvedValue([{ id: "api", name: "api" }]),
+      });
+      const write =
+        outcome === "binding_failure"
+          ? vi
+              .spyOn(metadataModule, "writeTelegramBindings")
+              .mockRejectedValueOnce(new Error("Write failed"))
+          : undefined;
+      const ctx = telegramContext({ text: "/spawn codex task" });
+      ctx.reply.mockResolvedValue({ message_id: 900 });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith("Spawning codex agent...");
+      const expected =
+        outcome === "success"
+          ? "Spawned and bound: created."
+          : outcome === "binding_failure"
+            ? "Created created. Binding failed. Use /work to inspect."
+            : "Spawn failed: boom <telegram-token>";
+      expect(ctx.api.editMessageText).toHaveBeenLastCalledWith(-1001, 900, expected);
+      write?.mockRestore();
+    },
+  );
 
   it("workbench rejects wrong owner/chat/topic/message without consuming valid revision", async () => {
     const dataDir = await createTempDir("spur-telegram-workbench-");
@@ -763,7 +821,57 @@ describe("telegramSourceModule", () => {
     await first;
     expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
     expect(action.editMessageText).not.toHaveBeenCalled();
+    expect(action.reply).toHaveBeenCalledWith(
+      "Task created is available but not bound here. Use /work to inspect and continue it.",
+    );
   });
+
+  it.each(["replaced", "revoked", "aborted"])(
+    "workbench completed Restore reports unbound id only while still authorized (%s)",
+    async (reason) => {
+      const dataDir = await createTempDir("spur-telegram-restore-notice-");
+      tempDirs.push(dataDir);
+      const { capability, sessions } = workbenchFixture();
+      const session = required(sessions[0]);
+      session.canContinue = false;
+      session.restorable = true;
+      const controller = new AbortController();
+      const allowedUsers = [123];
+      let finish: ((session: SourceWorkSessionItem) => void) | undefined;
+      capability.restoreSession.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        workbench: capability,
+        signal: controller.signal,
+        config: { allowedUsers },
+      });
+      const ctx = await openWorkbench(required(bot), "/work");
+      const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+      await required(bot).emitCallback(detail);
+      const action = cardCallback(cardButton(detail.editMessageText, "Restore and continue here"));
+      const pending = required(bot).emitCallback(action);
+      await vi.waitFor(() => expect(capability.restoreSession).toHaveBeenCalledTimes(1));
+      if (reason === "replaced") await openWorkbench(required(bot), "/work");
+      else if (reason === "revoked") allowedUsers.splice(0);
+      else controller.abort();
+      session.canContinue = true;
+      session.restorable = false;
+      session.runtimeAlive = true;
+      required(finish)(session);
+      await pending;
+      expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+      expect(action.editMessageText).not.toHaveBeenCalled();
+      if (reason === "replaced")
+        expect(action.reply).toHaveBeenCalledWith(
+          "Task api-1 is available but not bound here. Use /work to inspect and continue it.",
+        );
+      else expect(action.reply).not.toHaveBeenCalled();
+    },
+  );
 
   it("workbench Continue leaves other users and topics pending wizards intact", async () => {
     const dataDir = await createTempDir("spur-telegram-workbench-");

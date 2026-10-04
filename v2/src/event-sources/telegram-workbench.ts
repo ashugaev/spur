@@ -14,6 +14,8 @@ export interface WorkbenchOwner {
 }
 
 export type WorkbenchTab = "attention" | "working" | "recent";
+const WORKBENCH_AGENTS: readonly AgentName[] = ["claude", "codex", "cursor", "opencode"];
+const WORKBENCH_TABS: readonly WorkbenchTab[] = ["attention", "working", "recent"];
 export type WorkbenchAction =
   | { kind: "close" }
   | { kind: "launch"; options: SourceLaunchOptions }
@@ -166,7 +168,10 @@ export class TelegramWorkbench {
   }
 }
 
-function page<T>(items: T[], requested: number): { items: T[]; index: number; pages: number } {
+export function workbenchPage<T>(
+  items: T[],
+  requested: number,
+): { items: T[]; index: number; pages: number } {
   const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const index = Math.max(0, Math.min(requested, pages - 1));
   return { items: items.slice(index * PAGE_SIZE, (index + 1) * PAGE_SIZE), index, pages };
@@ -181,7 +186,7 @@ export function renderLauncher(
   projects: SourceProjectListItem[],
   options: SourceLaunchOptions[],
 ): WorkbenchView {
-  const current = page(projects, card.page);
+  const current = workbenchPage(projects, card.page);
   card.page = current.index;
   const rows: WorkbenchView["rows"] = [];
   const lines = [`New task: ${short(card.task, 800)}`];
@@ -219,9 +224,9 @@ export function renderSettings(card: LaunchCard, options: SourceLaunchOptions): 
   return {
     text: `Task: ${short(card.task, 800)}\n${options.project}: ${options.agent} · ${options.model ?? "provider default"} · ${options.mode ?? "no mode"}`,
     rows: [
-      ["claude", "codex", "cursor", "opencode"].map((agent) => ({
+      WORKBENCH_AGENTS.map((agent) => ({
         text: agent,
-        action: { kind: "agent", agent: agent as AgentName },
+        action: { kind: "agent", agent },
       })),
       [{ text: "Default engine", action: { kind: "agent" } }],
       ...options.modes.map((mode) => [
@@ -256,7 +261,7 @@ export function workbenchSessions(
 }
 
 export function renderInbox(card: InboxCard, sessions: SourceWorkSessionItem[]): WorkbenchView {
-  const current = page(workbenchSessions(sessions, card.tab), card.page);
+  const current = workbenchPage(workbenchSessions(sessions, card.tab), card.page);
   card.page = current.index;
   return {
     text: `${card.tab === "attention" ? "Attention" : card.tab === "working" ? "Working" : "Recent"}\n${current.items.length ? "Select a task to inspect." : card.tab === "attention" ? "No tasks need attention." : "No tasks."}`,
@@ -267,9 +272,9 @@ export function renderInbox(card: InboxCard, sessions: SourceWorkSessionItem[]):
           action: { kind: "detail" as const, sessionId: session.id },
         },
       ]),
-      ["attention", "working", "recent"].map((tab) => ({
+      WORKBENCH_TABS.map((tab) => ({
         text: tab,
-        action: { kind: "list", tab: tab as WorkbenchTab, page: 0 },
+        action: { kind: "list", tab, page: 0 },
       })),
       ...(current.pages > 1
         ? [
@@ -293,18 +298,6 @@ export function renderInbox(card: InboxCard, sessions: SourceWorkSessionItem[]):
   };
 }
 
-export function safeWorkbenchUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  try {
-    const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password
-      ? url.href
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export function renderDetail(
   card: InboxCard,
   session: SourceWorkSessionItem,
@@ -325,8 +318,7 @@ export function renderDetail(
         action: { kind: "restore", sessionId: session.id, project: session.project },
       },
     ]);
-  const url = safeWorkbenchUrl(session.prUrl);
-  if (url) rows.push([{ text: "PR", url }]);
+  if (session.prUrl) rows.push([{ text: "PR", url: session.prUrl }]);
   rows.push([
     { text: "Back", action: { kind: "list", tab: card.tab, page: card.page } },
     { text: "Refresh", action: { kind: "detail", sessionId: session.id } },

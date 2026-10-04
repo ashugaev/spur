@@ -71,9 +71,11 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-`spur auto-ping unsubscribe --event|--thread|--subscription <handle> [--session <id>] [--json]` requires one scope; event suppression lasts 24h, unredeemed handles expire after 30d.
+`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
 `spur auto-ping list [--session <id>] [--json]`; `spur auto-ping resume <suppressionId> [--session <id>] [--json]`; `SPUR_SESSION` supplies session inside agents; `grant_not_ready` requires retry.
-Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Scopes/events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
+Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
 
 ## send, queue
 

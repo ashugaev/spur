@@ -4,7 +4,7 @@ import {
   renderDetail,
   renderInbox,
   renderLauncher,
-  safeWorkbenchUrl,
+  workbenchPage,
   workbenchSessions,
   type InboxCard,
   type LaunchCard,
@@ -169,12 +169,18 @@ describe("Telegram workbench views", () => {
     ).toBe(true);
   });
 
-  it.each([
-    "javascript:alert(1)",
-    "file:///tmp/x",
-    "https://user:secret@example.test/pr",
-    "not-url",
-  ])("rejects unsafe PR URL %s", (url) => {
-    expect(safeWorkbenchUrl(url)).toBeUndefined();
+  it("renders the daemon-validated PR URL without a second validation path", () => {
+    const card = new TelegramWorkbench().create(owner) as InboxCard;
+    const url = "https://github.com/example/project/pull/1";
+    expect(renderDetail(card, { ...session, prUrl: url }, true).rows.flat()).toContainEqual({
+      text: "PR",
+      url,
+    });
+  });
+
+  it("shares project and session pagination with transport", () => {
+    const items = Array.from({ length: 8 }, (_, index) => index);
+    expect(workbenchPage(items, 99)).toEqual({ items: [6, 7], index: 1, pages: 2 });
+    expect(workbenchPage([], -1)).toEqual({ items: [], index: 0, pages: 1 });
   });
 });
