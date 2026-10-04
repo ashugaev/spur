@@ -152,6 +152,7 @@ const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
 const clearGitHubPollDisabledSessionMock = vi.fn();
+const listGitHubPollDisabledSourceIdsMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
@@ -677,6 +678,8 @@ vi.mock("../../src/metadata.js", () => ({
     `${chatId}:${messageThreadId ?? "main"}`,
   archiveSessions: archiveSessionsMock,
   clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
+  listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
+    (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -8484,6 +8487,45 @@ describe("SessionService", () => {
       cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
     });
     expect(overrideClearer).toHaveBeenCalledWith("api", "pr-watch", "api-1");
+  });
+
+  it("enableSourcePoll clears an entry left under a source no longer in config", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listGitHubPollDisabledSourceIdsMock.mockReturnValue(["pr-watch", "old-renamed-source"]);
+    clearGitHubPollDisabledSessionMock.mockImplementation(
+      (_dataDir: string, _projectId: string, sourceId: string) =>
+        sourceId === "old-renamed-source" ? 7 : null,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result.cleared).toEqual([{ sourceId: "old-renamed-source", prNumber: 7 }]);
+    expect(listGitHubPollDisabledSourceIdsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api");
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledTimes(2);
   });
 
   it("enableSourcePoll throws SessionResourceNotFoundError for an unknown session", async () => {

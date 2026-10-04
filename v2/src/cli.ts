@@ -2765,7 +2765,7 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           if (instanceConfig.status === "ok") {
             collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
-            collectedChecks.push(checkGitHubPollDisabled(instanceConfig.config.dataDir));
+            collectedChecks.push(checkGitHubPollDisabled(instanceConfig.config));
           }
           // `configRegistryPaths` rides on the "config-registry" check purely
           // as an internal carrier from `collectHostInstallChecks` to here

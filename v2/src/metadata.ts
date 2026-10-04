@@ -1802,6 +1802,20 @@ export function clearGitHubPollDisabledSession(
   return entry.prNumber;
 }
 
+// Read-only: every sourceId with a poll-disabled registry file under a project,
+// configured or not (a renamed/removed source leaves its file behind). Missing dir -> [].
+export function listGitHubPollDisabledSourceIds(dataDir: string, projectId: string): string[] {
+  try {
+    return readdirSync(join(dataDir, "source-state", "github-poll-disabled", projectId), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name.slice(0, -".json".length));
+  } catch {
+    return [];
+  }
+}
+
 // Read-only directory walk over every project/source poll-disabled registry file.
 // Only consumer is the doctor check (host-install.ts) — never writes. Missing root ->
 // [].
@@ -1830,17 +1844,7 @@ export function listGitHubPollDisabledEntries(dataDir: string): {
     return [];
   }
   for (const projectId of projectIds) {
-    const projectDir = join(root, projectId);
-    let fileNames: string[];
-    try {
-      fileNames = readdirSync(projectDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-        .map((entry) => entry.name);
-    } catch {
-      continue;
-    }
-    for (const fileName of fileNames) {
-      const sourceId = fileName.slice(0, -".json".length);
+    for (const sourceId of listGitHubPollDisabledSourceIds(dataDir, projectId)) {
       const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
       for (const [sessionId, entry] of entries) {
         results.push({

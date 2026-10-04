@@ -225,6 +225,7 @@ import {
 import { telegramStatusEmoji } from "./telegram-status-emoji.js";
 import {
   clearGitHubPollDisabledSession,
+  listGitHubPollDisabledSourceIds,
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -13759,6 +13760,8 @@ export class SessionService {
   // event-sources/github.ts permanentPrNotFound / metadata.ts's poll-disabled
   // registry). Missing session throws SessionResourceNotFoundError (404 per daemon-api.md).
   // Otherwise 200: unknown/unconfigured project, no github sources, or nothing disabled → cleared: [].
+  // Covers every configured github source plus every registry file under the project's
+  // directory, so an entry orphaned by a renamed or removed source is still clearable.
   // Clears both layers per source: the durable disk registry (clearGitHubPollDisabledSession)
   // and, via pollDisabledOverrideClearer, the live handle's in-process
   // pendingPollDisabledOverrides entry a failed disk write would otherwise leave
@@ -13771,9 +13774,16 @@ export class SessionService {
     }
     const projectId = session.project;
     const sources = this.config.projects[projectId]?.sources ?? {};
+    const sourceIds = new Set<string>(
+      Object.entries(sources)
+        .filter(([, source]) => source.type === "github")
+        .map(([sourceId]) => sourceId),
+    );
+    for (const sourceId of listGitHubPollDisabledSourceIds(this.config.dataDir, projectId)) {
+      sourceIds.add(sourceId);
+    }
     const cleared: { sourceId: string; prNumber: number }[] = [];
-    for (const [sourceId, source] of Object.entries(sources)) {
-      if (source.type !== "github") continue;
+    for (const sourceId of sourceIds) {
       const diskPrNumber = clearGitHubPollDisabledSession(
         this.config.dataDir,
         projectId,

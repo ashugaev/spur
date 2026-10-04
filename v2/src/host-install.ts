@@ -34,7 +34,7 @@ import {
   renderHostSkillWarnings,
 } from "./host-skills.js";
 import { writeStderr } from "./io.js";
-import { listGitHubPollDisabledEntries, listSessions } from "./metadata.js";
+import { listGitHubPollDisabledEntries, listSessions, readSession } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
@@ -120,8 +120,16 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
 // severity is static "warn" in both outcomes per the convention at cli.ts:
 // severity is the check's importance if it fails, not a flag that flips with the
 // outcome; the renderer only surfaces it once `ok` is false.
-export function checkGitHubPollDisabled(dataDir: string): HostInstallCheck {
-  const entries = listGitHubPollDisabledEntries(dataDir);
+//
+// Reports only entries that still gate polling: the session record exists and
+// (projectId, sourceId) is a currently configured github source. Registry files orphaned
+// by a removed session or renamed/removed source are ignored (never mutated here).
+export function checkGitHubPollDisabled(config: AppConfig): HostInstallCheck {
+  const entries = listGitHubPollDisabledEntries(config.dataDir).filter(
+    (entry) =>
+      config.projects[entry.projectId]?.sources[entry.sourceId]?.type === "github" &&
+      readSession(config.dataDir, entry.sessionId) !== null,
+  );
   if (entries.length === 0) {
     return {
       id: "github-poll-disabled",

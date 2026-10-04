@@ -118,8 +118,9 @@ import {
   satisfiesNodeEngineRange,
   type SystemdScope,
 } from "../../src/host-install.js";
-import { recordGitHubPollDisabledSession } from "../../src/metadata.js";
+import { recordGitHubPollDisabledSession, writeSession } from "../../src/metadata.js";
 import type { LeakedSidecarTree } from "../../src/sidecars/reap.js";
+import type { AppConfig } from "../../src/types.js";
 import { getVersion } from "../../src/version.js";
 import { NPM_PIN_SANITIZE_ENV_KEYS, npmPinConfigPath } from "../../src/npm-prefix.js";
 import { createProgram } from "../../src/cli.js";
@@ -2139,6 +2140,27 @@ describe("checkGitHubPollDisabled", () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
+  function pollDisabledConfig(dataDir: string, sources: Record<string, { type: "github" }>) {
+    return { dataDir, projects: { api: { sources } } } as unknown as AppConfig;
+  }
+
+  function seedSession(dataDir: string, id: string): void {
+    writeSession(dataDir, {
+      id,
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: id,
+      worktree: false,
+      worktreePath: "",
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+  }
+
   // A13
   it("passes with no disabled pairs", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
@@ -2146,7 +2168,9 @@ describe("checkGitHubPollDisabled", () => {
     const dataDir = join(rootDir, "data");
     await mkdir(dataDir, { recursive: true });
 
-    const check = checkGitHubPollDisabled(dataDir);
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
 
     expect(check.id).toBe("github-poll-disabled");
     expect(check.ok).toBe(true);
@@ -2159,12 +2183,15 @@ describe("checkGitHubPollDisabled", () => {
     tempDirs.push(rootDir);
     const dataDir = join(rootDir, "data");
     await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-a1b2");
     recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
 
     // Read-only proof: a filesystem snapshot before and after the check must be
     // byte-identical (see the "never writes" case below); this case only asserts
     // reporting content.
-    const check = checkGitHubPollDisabled(dataDir);
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
 
     expect(check.id).toBe("github-poll-disabled");
     expect(check.ok).toBe(false);
@@ -2182,6 +2209,8 @@ describe("checkGitHubPollDisabled", () => {
     tempDirs.push(rootDir);
     const dataDir = join(rootDir, "data");
     await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-a1b2");
+    seedSession(dataDir, "api-c3d4");
     recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1_750_000_000_000);
     recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-c3d4", 43, 1_750_000_100_000);
 
@@ -2199,10 +2228,69 @@ describe("checkGitHubPollDisabled", () => {
     }
 
     const before = snapshot();
-    checkGitHubPollDisabled(dataDir);
+    checkGitHubPollDisabled(pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }));
     const after = snapshot();
 
     expect(after).toEqual(before);
+  });
+
+  it("ignores entries for a deleted session or an unconfigured source, still reports a live one", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    seedSession(dataDir, "api-live");
+    seedSession(dataDir, "api-renamed");
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-live", 42, 1_750_000_000_000);
+    // Session record deleted.
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-deleted",
+      43,
+      1_750_000_000_000,
+    );
+    // Source no longer configured.
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "old-source",
+      "api-renamed",
+      44,
+      1_750_000_000_000,
+    );
+
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("1 session(s)");
+    expect(check.detail).toContain("api-live");
+    expect(check.detail).not.toContain("api-deleted");
+    expect(check.detail).not.toContain("old-source");
+  });
+
+  it("passes when every entry is orphaned", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(dataDir, { recursive: true });
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-deleted",
+      43,
+      1_750_000_000_000,
+    );
+
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(true);
   });
 });
 

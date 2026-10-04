@@ -45,7 +45,7 @@
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
 - `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
-- `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
+- `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head

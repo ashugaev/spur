@@ -12,6 +12,7 @@ import {
   listSessions,
   clearGitHubPollDisabledSession,
   listGitHubPollDisabledEntries,
+  listGitHubPollDisabledSourceIds,
   markGitHubPollDisabledChecked,
   readCommentSeenRegistry,
   readGitHubPollDisabled,
@@ -244,6 +245,18 @@ describe("github poll-disabled registry", () => {
       disabledAtMs: 1000,
       lastCheckedAtMs: 5000,
     });
+  });
+
+  it("listGitHubPollDisabledSourceIds lists every registry file under a project", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    recordGitHubPollDisabledSession(dataDir, "api", "gone-source", "api-a1b2", 43, 1000);
+    recordGitHubPollDisabledSession(dataDir, "web", "other", "web-1", 44, 1000);
+    expect(listGitHubPollDisabledSourceIds(dataDir, "api").sort()).toEqual([
+      "gone-source",
+      "pr-watch",
+    ]);
+    expect(listGitHubPollDisabledSourceIds(dataDir, "missing")).toEqual([]);
   });
 
   it("listGitHubPollDisabledEntries walks every project/source and sorts by disabledAtMs", async () => {
