@@ -47,6 +47,15 @@ function sessionFilePath(dataDir: string, projectId: string, sessionId: string):
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 
+// Existence only: never reads, so no index or legacy-rewrite writes and no throw on a corrupt record.
+export function sessionRecordExists(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): boolean {
+  return existsSync(sessionFilePath(dataDir, projectId, sessionId));
+}
+
 function sessionIndexFilePath(dataDir: string): string {
   return join(dataDir, "sessions", ".index.json");
 }
@@ -101,6 +110,10 @@ function lifecycleBaselineRegistryFilePath(
 
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
+}
+
+function githubPollDisabledFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-poll-disabled", projectId, `${sourceId}.json`);
 }
 
 // A single shared file, not one file per queueKey: queueKeys contain colons
@@ -1668,6 +1681,194 @@ export function writeGitHubReviewPagination(
   writeJsonFile(
     path,
     Object.fromEntries([...cursors].sort(([left], [right]) => left.localeCompare(right))),
+  );
+}
+
+// A session's poll-disable state. disabledAtMs and lastCheckedAtMs are 0 on a legacy
+// bare-number entry (see readGitHubPollDisabled) — 0 means "probe on the next cycle",
+// the safe direction.
+export interface GitHubPollDisabledEntry {
+  prNumber: number;
+  disabledAtMs: number;
+  lastCheckedAtMs: number;
+}
+
+function coerceTimestamp(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+// sessionId -> the disable entry for a session permanently disabled by a not-found PR.
+// Sticky across source-handle recreation (reloadAutomation) and daemon restart; see
+// event-sources/github.ts permanentPrNotFound, the in-memory cache backed by this file.
+// Corrupt or partial JSON reads as an empty map; if the session is still bound to that
+// PR, the next successful poll can persist disable again (one extra source.poll.disabled).
+// Accepts two on-disk value shapes: a bare positive integer (today's/legacy shape,
+// pre-recheck), read as { prNumber, disabledAtMs: 0, lastCheckedAtMs: 0 }; or an object
+// with a positive-integer prNumber, timestamps coerced to 0 unless finite and >= 0.
+// Anything else is dropped.
+export function readGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, GitHubPollDisabledEntry> {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    const result = new Map<string, GitHubPollDisabledEntry>();
+    for (const [sessionId, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+        result.set(sessionId, { prNumber: value, disabledAtMs: 0, lastCheckedAtMs: 0 });
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const record = value as Record<string, unknown>;
+        const prNumber = record["prNumber"];
+        if (typeof prNumber === "number" && Number.isInteger(prNumber) && prNumber > 0) {
+          result.set(sessionId, {
+            prNumber,
+            disabledAtMs: coerceTimestamp(record["disabledAtMs"]),
+            lastCheckedAtMs: coerceTimestamp(record["lastCheckedAtMs"]),
+          });
+        }
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+// The one legitimate multi-key write: the sweep prune in github.ts, built from a fresh
+// readGitHubPollDisabled, never from the in-memory cache. Every other mutation goes
+// through recordGitHubPollDisabledSession / clearGitHubPollDisabledSession /
+// markGitHubPollDisabledChecked below.
+export function writeGitHubPollDisabled(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  entries: ReadonlyMap<string, GitHubPollDisabledEntry>,
+): void {
+  const path = githubPollDisabledFilePath(dataDir, projectId, sourceId);
+  if (entries.size === 0) {
+    rmSync(path, { force: true });
+    return;
+  }
+  writeJsonFile(
+    path,
+    Object.fromEntries([...entries].sort(([left], [right]) => left.localeCompare(right))),
+  );
+}
+
+export function recordGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  nowMs: number,
+): void {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const existing = entries.get(sessionId);
+  if (existing?.prNumber === prNumber) return;
+  entries.set(sessionId, { prNumber, disabledAtMs: nowMs, lastCheckedAtMs: nowMs });
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+}
+
+// Single-key read-modify-write. Stamps lastCheckedAtMs on the session's disk entry so a
+// recreated source handle (reloadAutomation) does not re-probe within the same recheck
+// window. Returns false and writes nothing when the session has no entry on disk (a
+// prior record* write had failed and never landed) — the boolean is load-bearing: the
+// caller must not drop its in-memory override on a false return, or the disable would
+// re-arm the emit on the next refresh.
+export function markGitHubPollDisabledChecked(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  nowMs: number,
+): boolean {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const existing = entries.get(sessionId);
+  if (!existing) return false;
+  entries.set(sessionId, { ...existing, lastCheckedAtMs: nowMs });
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+  return true;
+}
+
+export function clearGitHubPollDisabledSession(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): number | null {
+  const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+  const entry = entries.get(sessionId);
+  if (entry === undefined) return null;
+  entries.delete(sessionId);
+  writeGitHubPollDisabled(dataDir, projectId, sourceId, entries);
+  return entry.prNumber;
+}
+
+// Read-only: every sourceId with a poll-disabled registry file under a project,
+// configured or not (a renamed/removed source leaves its file behind). Missing dir -> [].
+export function listGitHubPollDisabledSourceIds(dataDir: string, projectId: string): string[] {
+  try {
+    return readdirSync(join(dataDir, "source-state", "github-poll-disabled", projectId), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name.slice(0, -".json".length));
+  } catch {
+    return [];
+  }
+}
+
+// Read-only directory walk over every project/source poll-disabled registry file.
+// Only consumer is the doctor check (host-install.ts) — never writes. Missing root ->
+// [].
+export function listGitHubPollDisabledEntries(dataDir: string): {
+  projectId: string;
+  sourceId: string;
+  sessionId: string;
+  prNumber: number;
+  disabledAtMs: number;
+}[] {
+  const root = join(dataDir, "source-state", "github-poll-disabled");
+  if (!existsSync(root)) return [];
+  const results: {
+    projectId: string;
+    sourceId: string;
+    sessionId: string;
+    prNumber: number;
+    disabledAtMs: number;
+  }[] = [];
+  let projectIds: string[];
+  try {
+    projectIds = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  for (const projectId of projectIds) {
+    for (const sourceId of listGitHubPollDisabledSourceIds(dataDir, projectId)) {
+      const entries = readGitHubPollDisabled(dataDir, projectId, sourceId);
+      for (const [sessionId, entry] of entries) {
+        results.push({
+          projectId,
+          sourceId,
+          sessionId,
+          prNumber: entry.prNumber,
+          disabledAtMs: entry.disabledAtMs,
+        });
+      }
+    }
+  }
+  return results.sort(
+    (left, right) =>
+      left.disabledAtMs - right.disabledAtMs || left.sessionId.localeCompare(right.sessionId),
   );
 }
 
