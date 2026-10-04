@@ -1,10 +1,11 @@
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   collectOpenCodeGcPlan,
   OPENCODE_STORE_LIST_LIMIT,
   parseGitConfigWorktree,
+  parseOpenCodeStoreSessions,
   planOpenCodeGc,
   readSnapshotLeaves,
   REAL_DIRECTORY_PROBE,
@@ -608,6 +609,27 @@ describe("snapshot leaf selection (AC6)", () => {
     expect(result.snapshotLeaves).toEqual([deadLeaf]);
   });
 
+  it("keeps a leaf whose worktree stat fails with a non-ENOENT errno", async () => {
+    const root = await createTempDir("opencode-gc-snapshot-eacces");
+    const parent = join(root, "locked");
+    const worktree = join(parent, "worktree");
+    await mkdir(worktree, { recursive: true });
+    const leaf = join(root, "store", "snapshot", "proj", "live");
+    await mkdir(leaf, { recursive: true });
+    await writeFile(join(leaf, "config"), `[core]\n\tworktree = ${worktree}\n`);
+
+    await chmod(parent, 0o000);
+    try {
+      const leaves = await readSnapshotLeaves(join(root, "store"));
+      const result = plan({ sessions: [], snapshotLeaves: leaves });
+
+      expect(leaves[0]?.worktreeExists).toBe(true);
+      expect(result.snapshotLeaves).toEqual([]);
+    } finally {
+      await chmod(parent, 0o755);
+    }
+  });
+
   it("never selects a leaf with no worktree line", async () => {
     const root = await createTempDir("opencode-gc-snapshot-bare");
     const leaf = join(root, "snapshot", "proj", "bare");
@@ -668,6 +690,45 @@ describe("collectOpenCodeGcPlan", () => {
 
     expect(result.reason).toBe("enumeration_failed");
     expect(result.sessions).toEqual([]);
+  });
+
+  it("treats empty stdout as an empty listing, not a failure", async () => {
+    expect(parseOpenCodeStoreSessions("", "/p")).toEqual([]);
+    expect(parseOpenCodeStoreSessions(" \n", "/p")).toEqual([]);
+    expect(() => parseOpenCodeStoreSessions("{", "/p")).toThrow();
+
+    const result = await collectOpenCodeGcPlan(
+      collectorDeps({
+        listStoreSessions: async () => "",
+        listSpurRecords: () => [
+          record({ id: "spur-a", worktreePath: "/proj/a", agentSessionId: "ses_a" }),
+        ],
+      }),
+      options,
+    );
+
+    expect(result.reason).toBeNull();
+    expect(result.enumeration.directoriesFailed).toBe(0);
+  });
+
+  it("never selects a session whose updated is missing or non-numeric", async () => {
+    const parsed = parseOpenCodeStoreSessions(
+      JSON.stringify([
+        { id: "ses_missing", directory: "/worktrees/sp/a" },
+        { id: "ses_string", directory: "/worktrees/sp/a", updated: "0" },
+      ]),
+      "/worktrees/sp",
+    );
+    const result = plan({
+      sessions: parsed,
+      records: [
+        record({ id: "spur-1", worktreePath: "/worktrees/sp/a", agentSessionId: "ses_missing" }),
+        record({ id: "spur-2", worktreePath: "/worktrees/sp/a", agentSessionId: "ses_string" }),
+      ],
+    });
+
+    expect(result.sessions).toEqual([]);
+    expect(result.skipped.map((entry) => entry.reason)).toEqual(["too_recent", "too_recent"]);
   });
 
   it("plans from the CLI listing with both sides canonicalized", async () => {

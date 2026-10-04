@@ -271,7 +271,10 @@ export interface OpenCodeGcExecutorDeps {
    * opencode does not offer could remove it. What this buys is a window of
    * one function call instead of one planning run.
    */
-  recheckDirectory(entry: OpenCodeGcSessionEntry): Promise<OpenCodeGcSkipReason | null>;
+  recheckDirectory(
+    entry: OpenCodeGcSessionEntry,
+    statuses: readonly OpenCodeGcStatus[],
+  ): Promise<OpenCodeGcSkipReason | null>;
   /**
    * `cwd` is the session's own canonicalized directory — the same scope the
    * listing that produced it ran under, since `session delete` is
@@ -299,6 +302,8 @@ export function parseOpenCodeStoreSessions(
   stdout: string,
   listedFrom: string,
 ): OpenCodeStoreSession[] {
+  // opencode prints 0 bytes, exit 0, for a project with no sessions.
+  if (stdout.trim() === "") return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -316,11 +321,12 @@ export function parseOpenCodeStoreSessions(
     const directory = record["directory"];
     const updated = record["updated"];
     if (typeof id !== "string" || typeof directory !== "string") continue;
+    // Fail closed: an unparseable age must never pass the --older-than gate.
     sessions.push({
       id,
       directory,
       listedFrom,
-      updated: typeof updated === "number" && Number.isFinite(updated) ? updated : 0,
+      updated: typeof updated === "number" && Number.isFinite(updated) ? updated : Number.NaN,
     });
   }
   return sessions;
@@ -702,7 +708,7 @@ export function planOpenCodeGc(input: OpenCodeGcPlanInput): OpenCodeGcPlan {
     }
     const { direct, canonicalDirectory, directoryState } = verdict;
     const ageDays = (nowMs - session.updated) / DAY_MS;
-    if (ageDays < input.olderThanDays) {
+    if (!(ageDays >= input.olderThanDays)) {
       skipped.push({ id: session.id, reason: "too_recent" });
       continue;
     }
@@ -819,7 +825,7 @@ export async function executeOpenCodeGc(
     // which the raw record re-read above cannot see.
     let recheck: OpenCodeGcSkipReason | null;
     try {
-      recheck = await deps.recheckDirectory(entry);
+      recheck = await deps.recheckDirectory(entry, plan.statuses);
     } catch {
       recheck = "directory_unresolvable";
     }
@@ -1246,8 +1252,10 @@ async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    // ENOENT-only, like resolveDirectoryState: EACCES/EIO/ESTALE on a live
+    // worktree must keep the leaf, never mark it dead.
+    return errnoOf(error) !== "ENOENT";
   }
 }
 
@@ -1365,11 +1373,11 @@ export function createOpenCodeGcDeps(
     measureSize,
     removePath: (path) => rm(path, { recursive: true, force: true }),
     readRecords: (ids) => ids.map((id) => readSession(config.dataDir, id)),
-    recheckDirectory: (entry) =>
+    recheckDirectory: (entry, statuses) =>
       recheckSessionDirectory(entry, {
         listRecords: () => listSessions(config.dataDir),
         probe: REAL_DIRECTORY_PROBE,
-        statuses: config.opencodeGc.statuses,
+        statuses,
         // One `ps` per executor run, not per session: 15 processes, and a
         // per-session re-snapshot would multiply the cost by the session
         // count for no additional safety inside one run.

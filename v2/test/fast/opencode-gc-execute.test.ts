@@ -151,6 +151,40 @@ describe("executeOpenCodeGc dry run (AC1)", () => {
   });
 });
 
+describe("delete-time recheck uses the run's statuses", () => {
+  it("passes plan.statuses so a --statuses override including stopped deletes", async () => {
+    const identity: DirectoryProbe = {
+      realpath: async (path) => path,
+      readlink: async () => {
+        throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      },
+      isSymlink: async () => false,
+    };
+    const records = [
+      { ...freshRecord("spur-a", "stopped"), worktreePath: "/w/a", agentSessionId: "ses_a" },
+    ];
+    const deps = spyDeps({
+      readRecords: vi.fn((ids: readonly string[]) => ids.map(() => records[0] as SessionRecord)),
+      recheckDirectory: (entry, statuses) =>
+        recheckSessionDirectory(entry, {
+          listRecords: () => records,
+          probe: identity,
+          statuses,
+          processArgs: async () => [],
+        }),
+    });
+
+    const report = await executeOpenCodeGc(
+      planFixture({ statuses: ["completed", "killed", "stopped"] }),
+      deps,
+      { dryRun: false, sizes: true, vacuum: false },
+    );
+
+    expect(deps.deleteSession).toHaveBeenCalledTimes(1);
+    expect(report.totals.sessionsDeleted).toBe(1);
+  });
+});
+
 describe("AC17 delete-time directory re-check (TOCTOU)", () => {
   const GONE_DIR = "/worktrees/assistant/ass-91e4";
   /** The candidate directory the listing ran from: exists, same project. */
