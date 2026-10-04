@@ -33,6 +33,7 @@ vi.mock("@/components/DirectTerminal", () => ({
 function deskMember(id: string, title: string) {
   return {
     id,
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     deskId: "desk-1",
     project: "api",
     agent: "claude",
@@ -54,6 +55,7 @@ function deskMember(id: string, title: string) {
 }
 
 const sessionsResponse = {
+  lifecycleInstanceId: "test-instance",
   projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
   sessions: [deskMember("api-anchor", "Desk anchor"), deskMember("api-sub", "Desk subagent")],
   daemonAlive: true,
@@ -174,6 +176,7 @@ describe("Dashboard Filters modal PR-ready facet", () => {
     const readyUrl = "https://github.com/test/repo/pull/910";
     const notReadyUrl = "https://github.com/test/repo/pull/911";
     const sessions = {
+      lifecycleInstanceId: "test-instance",
       projects: [{ id: "api", name: "API", configured: true, prefix: "api", path: "/tmp/api" }],
       sessions: [
         {

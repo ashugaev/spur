@@ -4,6 +4,7 @@ export type SpurSessionStatus =
   | "spawning"
   | "running"
   | "stopped"
+  | "budget_limited"
   | "paused"
   | "errored"
   | "completed"
@@ -16,6 +17,7 @@ export type SpurSessionState =
   | "rate_limited"
   | "stale"
   | "stopped"
+  | "budget_limited"
   | "error"
   | "killed";
 
@@ -25,14 +27,27 @@ export interface BranchExistsResponse {
   checkedOutAt: string | null;
 }
 
+export type ProviderReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+
 export interface AgentModel {
   id: string;
   label: string;
   isDefault?: boolean;
+  reasoningEfforts?: ProviderReasoningEffort[];
 }
 
 export interface AgentModelsResponse {
   models: AgentModel[];
+  defaultReasoningEfforts?: ProviderReasoningEffort[];
+  reasoningError?: string;
 }
 
 // What a spawn would resolve to for this project+agent if the request named
@@ -41,6 +56,7 @@ export interface AgentModelsResponse {
 export interface SpawnDefaultsResponse {
   model: string | null;
   worktree: boolean;
+  reasoningEffort?: ProviderReasoningEffort | null;
 }
 
 export interface SpurServiceView {
@@ -64,6 +80,8 @@ export interface SpurTagDefinition {
   description: string;
   color: string;
 }
+
+export type SpurSessionTitleSource = "manual" | "agent";
 
 export type SpurSessionArtifactKind = "image" | "video" | "text" | "download";
 export type SpurSessionArtifactOrigin = "intentional" | "automatic";
@@ -110,12 +128,17 @@ export interface SpurSidecarPort {
 export interface SpurSessionSidecarView {
   name: string;
   alive: boolean;
+  /** Configured listening port URL with a current live launcher; independent of tmux liveness. */
+  url?: string;
   ports?: SpurSidecarPort[];
   tmuxSession: string;
   /** Elapsed seconds since the recorded identity's process start; absent when unresolvable. */
   ageSeconds?: number;
   /** True once ageSeconds has reached the backend's sidecarGc.maxAgeWarnMinutes threshold. */
   ageWarn?: boolean;
+  /** True when the sidecar's tmux session exists but its pane has exited
+   * (remain-on-exit); absent otherwise. */
+  deadPane?: boolean;
 }
 
 export interface SpurSidecarPortConflictCandidate {
@@ -123,6 +146,9 @@ export interface SpurSidecarPortConflictCandidate {
   env: string;
   port: number;
   owner?: string;
+  reservedBy?: string;
+  holder?: { pid: number; cwd: string | null };
+  clearable?: boolean;
 }
 
 export interface SpurSidecarPortConflict {
@@ -298,11 +324,108 @@ export interface SessionDailyWakeState {
   message: string;
   stopCondition: string;
 }
+export type SpurSessionTokenUsageView =
+  | {
+      status: "available";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      provider: "claude" | "codex" | "opencode" | "cursor";
+      budget?: number;
+      exhausted: boolean;
+    }
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "opencode" | "cursor";
+      budget?: number;
+      exhausted: false;
+    }
+  | {
+      status: "unavailable";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+      provider: "cursor";
+      reason: "structured_usage_unavailable";
+    };
+
+export type SpurPreflightTokenUsageView =
+  | {
+      status: "measured" | "partial";
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens?: number;
+      cacheWriteInputTokens?: number;
+      reasoningOutputTokens?: number;
+      cacheWrite5mInputTokens?: number;
+      cacheWrite1hInputTokens?: number;
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+      byProvider: Partial<
+        Record<"claude" | "codex" | "cursor" | "opencode", { totalTokens: number }>
+      >;
+    }
+  | {
+      status: "unknown" | "legacy_unknown";
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+    };
+
+export interface SpurTokenBudgetView {
+  overridden?: boolean;
+  budget?: number;
+  warnOnly?: boolean;
+  knownTotalTokens: number;
+  exhausted: boolean;
+  enforced: boolean;
+  reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
+}
+
+export function isTokenBudgetBlocked(
+  session: Pick<SpurSessionView, "tokenBudgetView" | "tokenUsageView">,
+): boolean {
+  const budget = session.tokenBudgetView;
+  if (budget?.overridden) return false;
+  if (budget) return budget.exhausted === true && budget.warnOnly !== true;
+  return session.tokenUsageView?.exhausted === true;
+}
+
+export type SpurSidecarStopReport =
+  | { outcome: "reaped" }
+  | { outcome: "partial"; survivors: readonly number[]; unverifiedPorts?: readonly number[] }
+  | { outcome: "nothing-to-stop" };
+
+export type LifecycleAction = "complete" | "restore" | "reopen";
+export type LifecyclePhase = "pending" | "succeeded" | "failed";
+export interface LifecycleOperation {
+  operationId: string;
+  action: LifecycleAction;
+  phase: LifecyclePhase;
+  targetIds: string[];
+  outcomes: { sessionId: string; phase: "succeeded" | "failed" }[];
+}
+export interface SessionLifecycleSnapshot {
+  instanceId: string;
+  revision: number;
+  operation: LifecycleOperation | null;
+}
+
 export interface SpurSessionView {
+  lifecycle: SessionLifecycleSnapshot;
+  lifecyclePending?: LifecycleAction;
   id: string;
   project: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -325,6 +448,10 @@ export interface SpurSessionView {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  /** Set while the agent has not confirmed the last prompt; sends are held. */
+  submitUnconfirmedAt?: string;
+  /** A send the agent never confirmed after its retry; shown until retried or dismissed. */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -335,6 +462,7 @@ export interface SpurSessionView {
   runningSidecarNames?: string[];
   slots?: {
     title?: string;
+    titleSource?: SpurSessionTitleSource;
     links: SpurSessionLink[];
     tags?: string[];
   };
@@ -352,6 +480,23 @@ export interface SpurSessionView {
   selfDestruct?: {
     enabled: boolean;
     conditions?: string;
+  };
+  tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
+}
+
+/** `POST /sessions/:id/sidecars/:name/stop`'s response: the session view
+ * plus the real stop outcome (`sidecarStop`), never claiming a clean reap
+ * when survivors were left behind. */
+export type SpurSidecarStopResponse = SpurSessionView & { sidecarStop: SpurSidecarStopReport };
+
+// Mirrors v2/src/types.ts UpdateSessionSlotsResponse — the daemon's reply to
+// POST /sessions/:id/slots.
+export interface SpurUpdateSessionSlotsResponse extends SpurSessionView {
+  slotUpdate: {
+    titleResult: "updated" | "cleared" | "unchanged" | "blocked";
+    message?: string;
   };
 }
 
@@ -567,6 +712,7 @@ export interface AgentSuggestionsResponse {
 }
 
 export interface SpurSessionsResponse {
+  lifecycleInstanceId: string;
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
   backlog?: AvailableBacklogItem[];
@@ -652,11 +798,14 @@ export interface DashboardRunningSidecar {
 }
 
 export interface DashboardSession {
+  lifecycle?: SessionLifecycleSnapshot;
+  lifecyclePending?: LifecycleAction;
   id: string;
   projectId: string;
   projectName: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   title: string | null;
   prompt: string;
   originalTaskPrompt: string | null;
@@ -683,6 +832,8 @@ export interface DashboardSession {
     awaitingPrompt: boolean;
     pipelineMessages?: string[];
   };
+  submitUnconfirmedAt?: string;
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -702,6 +853,9 @@ export interface DashboardSession {
     enabled: boolean;
     conditions?: string;
   };
+  tokenUsageView?: SpurSessionTokenUsageView;
+  preflightTokenUsageView?: SpurPreflightTokenUsageView;
+  tokenBudgetView?: SpurTokenBudgetView;
 }
 
 export interface SpawnOverrides {
@@ -716,15 +870,18 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
-  const sidecarLinkUrls = new Map(links.map((link) => [link.label, link.url]));
-  const runningSidecarNames = session.runningSidecarNames ?? [];
+  const runningSidecarNames = [
+    ...new Set([
+      ...(session.runningSidecarNames ?? []),
+      ...(session.sidecars ?? []).filter((sc) => sc.url).map((sc) => sc.name),
+    ]),
+  ];
   const sidecarViewsByName = new Map((session.sidecars ?? []).map((sc) => [sc.name, sc]));
   const runningSidecars = runningSidecarNames.map((name) => {
-    const url = sidecarLinkUrls.get(name);
     const view = sidecarViewsByName.get(name);
     return {
       name,
-      ...(url ? { url } : {}),
+      ...(view?.url ? { url: view.url } : {}),
       ...(view?.ageSeconds !== undefined ? { ageSeconds: view.ageSeconds } : {}),
       ...(view?.ageWarn !== undefined ? { ageWarn: view.ageWarn } : {}),
     };
@@ -739,10 +896,13 @@ export function toDashboardSession(
   };
   return {
     id: session.id,
+    lifecycle: session.lifecycle,
+    lifecyclePending: session.lifecyclePending,
     projectId: session.project,
     projectName,
     agent: session.agent,
     ...(session.model !== undefined ? { model: session.model } : {}),
+    ...(session.reasoningEffort !== undefined ? { reasoningEffort: session.reasoningEffort } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     originalTaskPrompt: session.originalTaskPrompt?.trim() || null,
@@ -764,6 +924,8 @@ export function toDashboardSession(
     artifacts: session.artifacts ?? [],
     ...(session.artifactsTruncated ? { artifactsTruncated: true } : {}),
     queuedMessages,
+    ...(session.submitUnconfirmedAt ? { submitUnconfirmedAt: session.submitUnconfirmedAt } : {}),
+    ...(session.submitFailedMessage ? { submitFailedMessage: session.submitFailedMessage } : {}),
     scheduledWake: session.scheduledWake,
     intervalWake: session.intervalWake,
     dailyWake: session.dailyWake,
@@ -784,6 +946,11 @@ export function toDashboardSession(
       : {}),
     error: session.error,
     ...(session.selfDestruct ? { selfDestruct: session.selfDestruct } : {}),
+    ...(session.tokenUsageView ? { tokenUsageView: session.tokenUsageView } : {}),
+    ...(session.preflightTokenUsageView
+      ? { preflightTokenUsageView: session.preflightTokenUsageView }
+      : {}),
+    ...(session.tokenBudgetView ? { tokenBudgetView: session.tokenBudgetView } : {}),
   };
 }
 
@@ -817,9 +984,15 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 }
 
 export function isRestorable(session: DashboardSession): boolean {
+  if (session.lifecyclePending) return false;
   if (isTerminalSession(session)) return false;
   if (!session.workspaceExists) return false;
-  if (session.status === "paused" || session.status === "stopped") return true;
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.status === "budget_limited"
+  )
+    return true;
   return !session.runtimeAlive;
 }
 
@@ -832,7 +1005,7 @@ export function canPause(session: DashboardSession): boolean {
 }
 
 export function canComplete(session: DashboardSession): boolean {
-  return !isTerminalSession(session);
+  return !session.lifecyclePending && !isTerminalSession(session);
 }
 
 export function canRespawn(session: DashboardSession): boolean {
@@ -859,8 +1032,10 @@ export function canHandoff(session: DashboardSession): boolean {
   );
 }
 
+// A spawning session takes queued messages before its pane exists; the daemon
+// holds them until the launch prompt is in.
 export function canSendMessage(session: DashboardSession): boolean {
-  return session.runtimeAlive && !isTerminalSession(session);
+  return (session.runtimeAlive || session.status === "spawning") && !isTerminalSession(session);
 }
 
 export interface ConversationMessage {
@@ -903,6 +1078,8 @@ export interface ConversationResponse {
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
+  if (session.lifecyclePending) return session.lifecyclePending === "complete" ? "done" : "working";
+  if (session.status === "budget_limited") return "respond";
   if (isTerminalSession(session)) {
     return "done";
   }

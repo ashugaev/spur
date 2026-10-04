@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
@@ -29,11 +29,13 @@ import {
   sessionFileForId,
 } from "../../src/agents/claude.js";
 
-const mockReaddir = readdir as ReturnType<typeof vi.fn>;
-const mockStat = stat as ReturnType<typeof vi.fn>;
-const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
-const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
-const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
+const mockReaddir = readdir as unknown as Mock;
+const mockStat = stat as unknown as Mock;
+const mockMkdir = mkdir as unknown as Mock<typeof mkdir>;
+const mockWriteFile = writeFile as unknown as Mock<typeof writeFile>;
+const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unknown as Mock<
+  typeof resolveWorktreePathCandidates
+>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -88,6 +90,16 @@ describe("buildClaudePlan", () => {
   it("includes configured reasoning effort", () => {
     const plan = buildClaudePlan("prompt", { reasoningEffort: "medium" });
     expect(plan.launchCommand).toContain("--effort medium");
+  });
+
+  it.each(["xhigh", "max"] as const)("transports %s on launch and resume", (reasoningEffort) => {
+    for (const command of [
+      buildClaudePlan("prompt", { reasoningEffort }).launchCommand,
+      buildClaudeResumePlan("session", "claude", { reasoningEffort }).launchCommand,
+    ]) {
+      expect(command).toContain(`--effort ${reasoningEffort}`);
+      expect(command.match(/--effort/g)).toHaveLength(1);
+    }
   });
 
   it("uses SPUR_CLAUDE_BIN override", () => {
@@ -440,8 +452,10 @@ describe("buildClaudeRestorePlan", () => {
     const result = await buildClaudeRestorePlan("/worktree/path", "prompt", {
       settingsPath: "/settings.json",
       planMode: true,
+      reasoningEffort: "max",
     });
     expect(result?.launchCommand).toContain("--settings '/settings.json'");
     expect(result?.launchCommand).toContain("--permission-mode plan");
+    expect(result?.launchCommand).toContain("--effort max");
   });
 });

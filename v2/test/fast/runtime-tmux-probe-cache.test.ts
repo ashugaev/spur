@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -57,7 +60,9 @@ function installFleetTmuxMock(): void {
       return { stdout: lines.join("\n"), stderr: "" };
     }
     if (file === "ps") {
-      const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
+      const psLines = sessionNames.map(
+        (_, i) => `${1000 + i} 1 ${1000 + i} ${1000 + i} pts/${i} 51200 node agent`,
+      );
       return { stdout: psLines.join("\n"), stderr: "" };
     }
     throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -68,6 +73,87 @@ describe("runtime-tmux shared probe cache", () => {
   afterEach(() => {
     execFileAsyncMock.mockReset();
     vi.resetModules();
+  });
+
+  it.each([
+    ["list-windows", "api-1"],
+    ["list-panes", "api-1 1 1 invalid 100 /dev/pts/1"],
+    ["ps", "100 broken 100 100 pts/1 10 node"],
+  ])(
+    "reports malformed %s output as unknown and observes a fresh recovery",
+    async (command, output) => {
+      let malformed = true;
+      execFileAsyncMock.mockImplementation(async (file, args) => {
+        const probe = file === "ps" ? "ps" : args.find((arg) => arg.startsWith("list-"));
+        if (malformed && probe === command) return { stdout: output, stderr: "" };
+        if (probe === "list-windows") return { stdout: "api-1 1700000000", stderr: "" };
+        if (probe === "list-panes") return { stdout: "api-1 1 1 0 100 /dev/pts/1", stderr: "" };
+        return {
+          stdout: "PID PPID PGID TPGID TT RSS COMMAND\n100 1 100 100 pts/1 10 node",
+          stderr: "",
+        };
+      });
+      const { getTmuxSessionPresence, getTmuxPanePresence, probeTmuxProcessMatch } =
+        await import("../../src/runtime-tmux.js");
+      if (command === "list-windows") {
+        expect((await getTmuxSessionPresence("api-1")).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await getTmuxSessionPresence("api-1", { fresh: true })).toEqual({
+          present: true,
+          unresponsive: false,
+        });
+      } else if (command === "list-panes") {
+        expect((await getTmuxPanePresence("api-1")).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await getTmuxPanePresence("api-1", { fresh: true })).toEqual({
+          dead: false,
+          unresponsive: false,
+        });
+      } else {
+        expect((await probeTmuxProcessMatch("api-1", ["node"])).diagnostic).toContain("malformed");
+        malformed = false;
+        expect(await probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).toEqual({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+      }
+    },
+  );
+
+  it.each([
+    new Error("ps access denied"),
+    Object.assign(new Error("ps timed out"), { killed: true }),
+    Object.assign(new Error("stdout maxBuffer exceeded"), {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    }),
+  ])("keeps failed process-table reads unknown: %s", async (error) => {
+    execFileAsyncMock.mockImplementation(async (file) => {
+      if (file === "ps") throw error;
+      return { stdout: "api-1 1 1 0 100 /dev/pts/1", stderr: "" };
+    });
+    const { probeTmuxProcessMatch, isProcessRunningInTmux } =
+      await import("../../src/runtime-tmux.js");
+    expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+      diagnostic: `ps failed: ${error.message}`,
+    });
+    await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow(error.message);
+  });
+
+  it("keeps successful empty fleet and process snapshots known", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { getTmuxSessionPresence, getTmuxPanePresence, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+    expect(await getTmuxSessionPresence("api-1")).toEqual({ present: false, unresponsive: false });
+    expect(await getTmuxPanePresence("api-1")).toEqual({ dead: true, unresponsive: false });
+    expect(await probeTmuxProcessMatch("api-1", ["node"])).toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+    });
   });
 
   it("bounds a fleet-wide dashboard tick to a small constant fork count, not O(N)", async () => {
@@ -155,8 +241,10 @@ describe("runtime-tmux shared probe cache", () => {
         return { stdout: lines.join("\n"), stderr: "" };
       }
       if (file === "ps") {
-        const psLines = sessionNames.map((_, i) => `${1000 + i} pts/${i} 51200 node agent`);
-        psLines.push("9000 pts/900 20480 node playwright-mcp");
+        const psLines = sessionNames.map(
+          (_, i) => `${1000 + i} 1 ${1000 + i} ${1000 + i} pts/${i} 51200 node agent`,
+        );
+        psLines.push("9000 1 9000 9000 pts/900 20480 node playwright-mcp");
         return { stdout: psLines.join("\n"), stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
@@ -185,7 +273,10 @@ describe("runtime-tmux shared probe cache", () => {
       }
       if (file === "ps") {
         return {
-          stdout: ["1001 pts/1 20480 node dev", "1002 pts/2 51200 node agent"].join("\n"),
+          stdout: [
+            "1001 1 1001 1001 pts/1 20480 node dev",
+            "1002 1 1002 1002 pts/2 51200 node agent",
+          ].join("\n"),
           stderr: "",
         };
       }
@@ -233,6 +324,61 @@ describe("runtime-tmux shared probe cache", () => {
     }
     await captureTmuxPane(firstSession, 15);
     expect(captureCalls).toBe(SESSION_COUNT + 1);
+  });
+
+  it("resolves a rejected capture-pane fork to null, distinct from a genuinely blank pane", async () => {
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        throw new Error("capture-pane failed");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane, captureTmuxPaneOrEmpty } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    // The rejected fork is evicted (memoizedProbe's evict-on-reject), so a
+    // second call within the same TTL window re-forks rather than serving a
+    // stale rejection.
+    await expect(captureTmuxPane("api-0")).resolves.toBeNull();
+    expect(captureCalls).toBe(2);
+
+    // captureTmuxPaneOrEmpty collapses the same rejection into "", never
+    // null, for display-only callers.
+    await expect(captureTmuxPaneOrEmpty("api-0")).resolves.toBe("");
+    expect(captureCalls).toBe(3);
+  });
+
+  it("still shares a resolved capture-pane result within the TTL after a prior rejection", async () => {
+    let shouldFail = true;
+    let captureCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args[0] === "capture-pane") {
+        captureCalls += 1;
+        if (shouldFail) throw new Error("capture-pane failed");
+        return { stdout: "pane text", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
+
+    await expect(captureTmuxPane("api-1")).resolves.toBeNull();
+    expect(captureCalls).toBe(1);
+
+    shouldFail = false;
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
+
+    // A second read within the TTL shares the resolved capture — no
+    // additional fork, even though the very first read for this session had
+    // rejected.
+    await expect(captureTmuxPane("api-1")).resolves.toBe("pane text");
+    expect(captureCalls).toBe(2);
   });
 
   it("prunes expired capture-pane cache entries instead of accumulating them forever", async () => {
@@ -285,7 +431,7 @@ describe("runtime-tmux shared probe cache", () => {
         return { stdout: rows.join("\n"), stderr: "" };
       }
       if (file === "ps") {
-        return { stdout: "222 pts/51 1024 agent-on-split-pane --flag", stderr: "" };
+        return { stdout: "222 1 222 222 pts/51 1024 agent-on-split-pane --flag", stderr: "" };
       }
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
@@ -378,6 +524,7 @@ describe("runtime-tmux shared probe cache", () => {
       sessionName: "fresh-api-1",
       cwd: "/tmp/worktree",
       launchCommand: "claude --dangerously-skip-permissions",
+      launchScriptDir: mkdtempSync(join(tmpdir(), "spur-launch-script-test-")),
     });
 
     // Without invalidation this would still serve the stale cached `false`
@@ -409,7 +556,7 @@ describe("runtime-tmux shared probe cache", () => {
     await expect(tmuxSessionExists("dying-api-1")).resolves.toBe(false);
   });
 
-  it("degrades to an empty fleet (never throws) when no tmux server is running", async () => {
+  it("keeps failed fleet probes unknown rather than authorizing absence", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-windows")) {
         const error = new Error("no server running on /tmp/tmux-0/default");
@@ -429,7 +576,335 @@ describe("runtime-tmux shared probe cache", () => {
       await import("../../src/runtime-tmux.js");
 
     await expect(listTmuxSessionNames()).resolves.toEqual(new Set());
-    await expect(tmuxSessionExists("api-1")).resolves.toBe(false);
-    await expect(isProcessRunningInTmux("api-1", ["node"])).resolves.toBe(false);
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("tmux list-windows failed");
+    await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow(
+      "tmux list-panes failed",
+    );
+  });
+
+  it.each([
+    "no server running on /tmp/test-tmux/socket\n",
+    "error connecting to /tmp/test-tmux/socket (No such file or directory)\n",
+  ])("recognizes structured absent-server stderr: %s", async (stderr) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("tmux failed"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect(await runtime.getTmuxSessionPresence("api-1")).toEqual({
+      present: false,
+      unresponsive: false,
+    });
+    expect(await runtime.getTmuxPanePresence("api-1")).toEqual({ dead: true, unresponsive: false });
+    expect(await runtime.tmuxSessionExists("api-1")).toBe(false);
+    expect(await runtime.tmuxPaneDead("api-1")).toBe(true);
+    expect(await runtime.isProcessRunningInTmux("api-1", ["node"])).toBe(false);
+    expect(callsFor((file) => file === "ps")).toBe(0);
+    execFileAsyncMock.mockImplementation(async (_file, args) => ({
+      stdout: args.includes("list-windows") ? "api-1 1700000000" : "api-1 1 1 0 100 /dev/pts/1",
+      stderr: "",
+    }));
+    expect(await runtime.tmuxSessionExists("api-1")).toBe(false);
+    expect(await runtime.tmuxSessionExists("api-1", { fresh: true })).toBe(true);
+    expect(await runtime.tmuxPaneDead("api-1", { fresh: true })).toBe(false);
+  });
+
+  it.each([
+    { code: "ENOENT" },
+    { code: "EACCES" },
+    { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+    { code: 2 },
+    { killed: true },
+    { signal: "SIGTERM" },
+    { stdout: "partial" },
+    { stderr: "permission denied" },
+    { stderr: "no server running on /tmp/socket\nextra" },
+    { stderr: "no server running on /tmp/socket extra text" },
+    { stderr: "no server running on " },
+    { stderr: undefined },
+    { killed: undefined },
+    { signal: undefined },
+    { stdout: undefined },
+  ])("keeps ambiguous absence evidence unknown: %j", async (override) => {
+    execFileAsyncMock.mockRejectedValue(
+      Object.assign(new Error("no server running on /tmp/socket"), {
+        code: 1,
+        killed: false,
+        signal: null,
+        stdout: "",
+        stderr: "no server running on /tmp/socket",
+        ...override,
+      }),
+    );
+    const runtime = await import("../../src/runtime-tmux.js");
+    expect((await runtime.getTmuxSessionPresence("api-1")).diagnostic).toContain(
+      "list-windows failed",
+    );
+    expect((await runtime.getTmuxPanePresence("api-1")).diagnostic).toContain("list-panes failed");
+    await expect(runtime.tmuxSessionExists("api-1")).rejects.toThrow();
+    await expect(runtime.tmuxPaneDead("api-1")).rejects.toThrow();
+    await expect(runtime.isProcessRunningInTmux("api-1", ["node"])).rejects.toThrow();
+  });
+
+  // Issue #807 / DELTA 1: a single combined reader (present+unresponsive off
+  // ONE fleet-snapshot fetch), not two separate exported readers — a second
+  // top-level call for the unresponsive flag alone would risk missing an
+  // already-expired memoizedProbe cache entry (a timeout kill takes 5s, the
+  // cache TTL is 2s) and re-forking.
+  it("AC1/A1: marks a fleet-session/fleet-pane probe unresponsive only for a timeout kill, never for an ordinary tmux failure", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw new Error("no server running on socket");
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw new Error("no server running on socket");
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getTmuxSessionPresence, getTmuxPanePresence } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: false,
+      diagnostic: expect.stringContaining("list-windows failed"),
+    });
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: false,
+      diagnostic: expect.stringContaining("list-panes failed"),
+    });
+  });
+
+  it("AC1/A1: a list-windows/list-panes fork killed by its own timeout reads unresponsive:true", async () => {
+    const timeoutKill = () =>
+      Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        throw timeoutKill();
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw timeoutKill();
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { getTmuxSessionPresence, getTmuxPanePresence, tmuxSessionExists, tmuxPaneDead } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-windows failed"),
+    });
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed"),
+    });
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("list-windows failed");
+    await expect(tmuxPaneDead("api-1")).rejects.toThrow("list-panes failed");
+  });
+
+  // AC11 (rewritten, DELTA 1): a getTmuxSessionPresence/getTmuxPanePresence
+  // read costs no additional tmux fork beyond the ONE that
+  // tmuxSessionExists/tmuxPaneDead already pay for the same fleet snapshot —
+  // including when that one fork is a timeout kill whose swallow-into-
+  // readable:false means memoizedProbe's cache entry is never evicted (see
+  // A2), so a same-tick second reader must reuse it, not re-fork.
+  it("AC11: getTmuxSessionPresence/getTmuxPanePresence issue no extra fork beyond the shared fleet snapshot, even under a timeout-killed probe", async () => {
+    let listWindowsCalls = 0;
+    let listPanesCalls = 0;
+    const timeoutKill = () =>
+      Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        listWindowsCalls += 1;
+        throw timeoutKill();
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        listPanesCalls += 1;
+        throw timeoutKill();
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionPresence, getTmuxPanePresence } =
+      await import("../../src/runtime-tmux.js");
+
+    // Mirrors readRuntimeSnapshot's real call order: the plain boolean read
+    // first, the combined presence read second, same tick, same TTL window.
+    await expect(tmuxSessionExists("api-1")).rejects.toThrow("list-windows failed");
+    await expect(getTmuxSessionPresence("api-1")).resolves.toEqual({
+      present: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-windows failed"),
+    });
+    await expect(tmuxPaneDead("api-1")).rejects.toThrow("list-panes failed");
+    await expect(getTmuxPanePresence("api-1")).resolves.toEqual({
+      dead: true,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed"),
+    });
+
+    expect(listWindowsCalls).toBe(1);
+    expect(listPanesCalls).toBe(1);
+  });
+
+  // Issue #903: a timeout-killed `ps` fork must not read as "process absent".
+  const psTimeoutKill = () =>
+    Object.assign(new Error("ps timed out"), { killed: true, signal: "SIGTERM" });
+
+  function installPsMock(onPs: () => Promise<{ stdout: string; stderr: string }>): {
+    psCalls: () => number;
+  } {
+    let psCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: "api-1 1700000000", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: fleetPaneLine("api-1", 0), stderr: "" };
+      }
+      if (file === "ps") {
+        psCalls += 1;
+        return onPs();
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+    return { psCalls: () => psCalls };
+  }
+
+  it("AC1: a ps fork killed by its own timeout reads unresponsive:true while tmux answers", async () => {
+    installPsMock(async () => {
+      throw psTimeoutKill();
+    });
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("ps failed:"),
+    });
+  });
+
+  it.each([
+    [
+      "exit 0, no matching row",
+      async () => ({ stdout: "1000 1 1000 1000 pts/0 1 zsh", stderr: "" }),
+    ],
+    [
+      "nonzero exit (killed:false)",
+      async () => {
+        throw Object.assign(new Error("bad column spec"), { killed: false, signal: null });
+      },
+    ],
+    [
+      "maxBuffer overrun (killed undefined)",
+      async () => {
+        throw Object.assign(new Error("maxBuffer exceeded"), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        });
+      },
+    ],
+  ])("AC2: ps %s reads unresponsive:false", async (_label, onPs) => {
+    installPsMock(onPs);
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+      ...(_label === "exit 0, no matching row"
+        ? {}
+        : { diagnostic: expect.stringContaining("ps failed:") }),
+    });
+  });
+
+  it("AC3: a ps timeout kill costs one ps fork per TTL window and the boolean wrapper rejects unknown", async () => {
+    const mock = installPsMock(async () => {
+      throw psTimeoutKill();
+    });
+    const { probeTmuxProcessMatch, isProcessRunningInTmux } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"])).resolves.toMatchObject({
+      unresponsive: true,
+    });
+    await expect(isProcessRunningInTmux("api-1", ["node"])).rejects.toMatchObject({
+      name: "TmuxProbeUnknownError",
+      message: expect.stringContaining("ps failed:"),
+    });
+    expect(mock.psCalls()).toBe(1);
+  });
+
+  // AC10 (amendment 1): probeTmuxProcessMatch({fresh:true}) forks its OWN
+  // list-panes -a, independent of the caller's pane read. Only that second
+  // fork is killed here; the first answers.
+  it("AC10: a timeout-killed SECOND list-panes -a fork (fresh probe) reads unresponsive:true", async () => {
+    let listPanesCalls = 0;
+    let psCalls = 0;
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-windows")) {
+        return { stdout: "api-1 1700000000", stderr: "" };
+      }
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        listPanesCalls += 1;
+        if (listPanesCalls === 2) {
+          throw psTimeoutKill();
+        }
+        return { stdout: fleetPaneLine("api-1", 0), stderr: "" };
+      }
+      if (file === "ps") {
+        psCalls += 1;
+        return { stdout: "1000 1 1000 1000 pts/0 51200 node agent", stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+    const { getTmuxPanePresence, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(getTmuxPanePresence("api-1", { fresh: true })).resolves.toEqual({
+      dead: false,
+      unresponsive: false,
+    });
+    await expect(probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("tmux list-panes failed:"),
+    });
+    expect(listPanesCalls).toBe(2);
+    expect(psCalls).toBe(0);
+  });
+
+  it("probeTmuxProcessMatch fresh read issues ONE list-panes fork and reports unresponsive when it is timeout-killed", async () => {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        throw Object.assign(new Error("tmux timed out"), { killed: true, signal: "SIGTERM" });
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("api-1", ["node"], { fresh: true })).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: true,
+      diagnostic: expect.stringContaining("list-panes failed: tmux timed out"),
+    });
+    expect(
+      callsFor(
+        (file, args) => file === "tmux" && args.includes("list-panes") && args.includes("-a"),
+      ),
+    ).toBe(1);
   });
 });

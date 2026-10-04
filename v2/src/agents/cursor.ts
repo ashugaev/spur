@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { ProviderReasoningEffort } from "../types.js";
 import { agentExecutableCommand } from "./executable.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
@@ -198,27 +199,66 @@ if (process.env[ENV_VAR] !== "1") {
   process.exit(0);
 }
 
-let raw = "";
-process.stdin.on("data", (chunk) => {
-  raw += chunk;
-});
-process.stdin.on("end", () => {
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    deny();
-    process.exit(0);
-    return;
-  }
+const NO_INPUT_TIMEOUT_MS = 4000;
 
-  const command = String((payload && payload.command) || "");
+function parseHookCommand(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  if (typeof payload.command !== "string") {
+    return null;
+  }
+  return payload.command;
+}
+
+let settled = false;
+function finish(command) {
+  if (settled) return;
+  settled = true;
+  clearTimeout(noInputTimer);
   if (commandDeniesGitWrite(command)) {
     deny();
   } else {
     allow();
   }
   process.exit(0);
+}
+
+function denyUnparseable() {
+  if (settled) return;
+  settled = true;
+  clearTimeout(noInputTimer);
+  deny();
+  process.exit(0);
+}
+
+let raw = "";
+process.stdin.setEncoding("utf8");
+
+const noInputTimer = setTimeout(() => {
+  denyUnparseable();
+}, NO_INPUT_TIMEOUT_MS);
+
+process.stdin.on("data", (chunk) => {
+  clearTimeout(noInputTimer);
+  raw += chunk;
+  try {
+    const payload = JSON.parse(raw);
+    const command = parseHookCommand(payload);
+    if (command === null) {
+      denyUnparseable();
+      return;
+    }
+    finish(command);
+  } catch {
+    // wait for more data if payload is fragmented
+  }
+});
+
+process.stdin.on("end", () => {
+  if (!settled) {
+    denyUnparseable();
+  }
 });
 `;
 
@@ -326,6 +366,16 @@ interface CursorHookEntry {
   [key: string]: unknown;
 }
 
+function isSpurManagedRestrictWritesGuard(command: unknown): boolean {
+  if (typeof command !== "string" || !command.includes("/.spur/cursor/")) {
+    return false;
+  }
+  return command.split(/\s+/).some((token) => {
+    const base = token.split("/").pop() ?? token;
+    return base === CURSOR_GIT_GUARD_FILENAME;
+  });
+}
+
 /**
  * Merges a `beforeShellExecution` guard entry into `<worktreePath>/.cursor/hooks.json`
  * without clobbering existing hooks (e.g. the repo's `stop` array) or other
@@ -352,7 +402,11 @@ async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string)
   const existingEntries = Array.isArray(hooks["beforeShellExecution"])
     ? (hooks["beforeShellExecution"] as CursorHookEntry[])
     : [];
-  const preserved = existingEntries.filter((entry) => entry.command !== scriptPath);
+  const preserved = existingEntries.filter((entry) => {
+    if (entry.command === scriptPath) return false;
+    if (isSpurManagedRestrictWritesGuard(entry.command)) return false;
+    return true;
+  });
   hooks["beforeShellExecution"] = [
     ...preserved,
     { command: scriptPath, timeout: 5, failClosed: true },
@@ -364,11 +418,26 @@ async function mergeCursorGitGuardHook(worktreePath: string, scriptPath: string)
   await rename(tmpPath, hooksPath);
 }
 
-export function buildCursorPlan(
-  prompt: string,
-  options?: { planMode?: boolean; model?: string },
-): AgentLaunchPlan {
-  const model = options?.model ?? DEFAULT_CURSOR_MODEL;
+interface CursorPlanOptions {
+  planMode?: boolean;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  cursorConfigDir?: string;
+}
+
+function cursorModel(model: string, effort?: ProviderReasoningEffort): string {
+  if (!effort) return model;
+  const parameters = model.match(/^(.*)\[([^\]]*)\]$/);
+  if (!parameters) return model;
+  const kept = (parameters[2] ?? "")
+    .split(",")
+    .map((parameter) => parameter.trim())
+    .filter((parameter) => parameter && !/^effort\s*=/.test(parameter));
+  return `${parameters[1]}[${[...kept, `effort=${effort}`].join(",")}]`;
+}
+
+export function buildCursorPlan(prompt: string, options?: CursorPlanOptions): AgentLaunchPlan {
+  const model = cursorModel(options?.model ?? DEFAULT_CURSOR_MODEL, options?.reasoningEffort);
   const modelArg = ` --model ${shellEscape(model)}`;
   const planArg = options?.planMode ? " --plan" : "";
   return {
@@ -381,11 +450,14 @@ export function buildCursorPlan(
 export function buildCursorResumePlan(
   chatId: string,
   binary = cursorCommand(),
-  options?: { planMode?: boolean },
+  options?: CursorPlanOptions,
 ): AgentResumePlan {
   const planArg = options?.planMode ? " --plan" : "";
+  const modelArg = options?.model
+    ? ` --model ${shellEscape(cursorModel(options.model, options.reasoningEffort))}`
+    : "";
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}${modelArg}`,
     readyMarkers: [CURSOR_RESUME_READY_MARKER],
   };
 }
@@ -393,7 +465,7 @@ export function buildCursorResumePlan(
 export async function buildCursorRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { planMode?: boolean; cursorConfigDir?: string },
+  options?: CursorPlanOptions,
 ): Promise<AgentLaunchPlan | null> {
   const chatId = await findCursorSessionId(
     worktreePath,

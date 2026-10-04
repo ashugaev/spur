@@ -19,14 +19,17 @@ function project(overrides: Partial<ProjectConfig>): ProjectConfig {
 }
 
 describe("resolveSpawnModel", () => {
-  it("returns the explicit request model regardless of agent", () => {
-    const result = resolveSpawnModel({
-      requestModel: "opus",
-      resolvedAgent: "cursor",
-      project: project({ defaultModels: { codex: "gpt-5.5" } }),
-    });
-    expect(result).toBe("opus");
-  });
+  it.each(["claude", "cursor"] as const)(
+    "returns the explicit request model for %s",
+    (resolvedAgent) => {
+      const result = resolveSpawnModel({
+        requestModel: "opus",
+        resolvedAgent,
+        project: project({ defaultModels: { claude: "sonnet", codex: "gpt-5.5" } }),
+      });
+      expect(result).toBe("opus");
+    },
+  );
 
   it("applies the defaultModels entry for the resolved agent", () => {
     const result = resolveSpawnModel({
@@ -55,22 +58,22 @@ describe("resolveSpawnModel", () => {
     expect(result).toBeUndefined();
   });
 
-  it("applies opus as the Claude default when none is configured", () => {
+  it("applies sonnet as the Claude default when none is configured", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "claude",
       project: project({ defaultModels: {} }),
     });
-    expect(result).toBe("opus");
+    expect(result).toBe("sonnet");
   });
 
-  it("lets an explicit Claude default model override Spur's opus default", () => {
+  it("lets a configured Claude opus default override Spur's sonnet default", () => {
     const result = resolveSpawnModel({
       requestModel: undefined,
       resolvedAgent: "claude",
-      project: project({ defaultModels: { claude: "sonnet" } }),
+      project: project({ defaultModels: { claude: "opus" } }),
     });
-    expect(result).toBe("sonnet");
+    expect(result).toBe("opus");
   });
 
   it("applies auto as the Cursor default when no Cursor default is configured", () => {

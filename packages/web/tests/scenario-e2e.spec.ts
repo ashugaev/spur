@@ -1,6 +1,15 @@
-import { devices, test, expect, type Locator, type Page } from "playwright/test";
 import { join } from "node:path";
-import { makeWorkingSession, mockSessions, type ProjectInfo } from "./fixtures.js";
+import {
+  devices,
+  test,
+  expect,
+  type Locator,
+  type Page,
+  makeWorkingSession,
+  mockSessions,
+  installApiRouteGuardsOnContext,
+  type ProjectInfo,
+} from "./fixtures.js";
 
 type WorkingSession = ReturnType<typeof makeWorkingSession>;
 
@@ -9,28 +18,6 @@ const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" 
 async function openSpawnModal(page: Page) {
   const session = makeWorkingSession({ id: "scenario-spawn-base", project: "my-project" });
   await mockSessions(page, [session], DEFAULT_PROJECTS);
-  await page.route("**/api/sessions**", async (route) => {
-    if (new URL(route.request().url()).pathname !== "/api/sessions") {
-      await route.fallback();
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sessions: [session],
-        projects: [
-          {
-            id: "my-project",
-            name: "my-project",
-            configured: true,
-            prefix: "my-project",
-            path: "",
-          },
-        ],
-      }),
-    });
-  });
   await page.goto("/");
   await page.getByRole("button", { name: "Spawn Session" }).click();
   await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
@@ -746,6 +733,7 @@ test.describe("scenario migration E2E: terminal voice", () => {
 test.describe("scenario migration E2E: terminal touch scroll", () => {
   test("OpenCode terminal touch scroll sends position-aware SGR input", async ({ browser }) => {
     const context = await browser.newContext({ ...devices["iPhone 13"] });
+    await installApiRouteGuardsOnContext(context);
     const page = await context.newPage();
     try {
       const session = makeWorkingSession({

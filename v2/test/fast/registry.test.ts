@@ -38,6 +38,7 @@ function configYaml(args: {
   sessionPrefix: string;
   instanceDefaultAgent?: "claude" | "codex";
   projectDefaultAgent?: "claude" | "codex";
+  webhookHost?: string;
   webhookPort?: number;
 }): string {
   return `server:
@@ -53,7 +54,7 @@ ${args.instanceDefaultAgent ? `defaultAgent: ${args.instanceDefaultAgent}\n` : "
 ${args.projectDefaultAgent ? `    defaultAgent: ${args.projectDefaultAgent}\n` : ""}${
     args.webhookPort === undefined
       ? ""
-      : `    sources:\n      incoming:\n        type: webhook\n        port: ${args.webhookPort}\n        path: /events\n        secret: 0123456789abcdef\n`
+      : `    sources:\n      incoming:\n        type: webhook\n${args.webhookHost === undefined ? "" : `        host: "${args.webhookHost}"\n`}        port: ${args.webhookPort}\n        path: /events\n        secret: 0123456789abcdef\n`
   }`;
 }
 
@@ -77,6 +78,7 @@ describe("registry.buildMergedConfig", () => {
         projectId: "api",
         projectPath: join(rootDir, "repo-a"),
         sessionPrefix: "api",
+        webhookHost: "::1",
         webhookPort: 8456,
       }),
     );
@@ -90,12 +92,13 @@ describe("registry.buildMergedConfig", () => {
         projectId: "web",
         projectPath: join(rootDir, "repo-b"),
         sessionPrefix: "web",
+        webhookHost: "0:0:0:0:0:0:0:1",
         webhookPort: 8456,
       }),
     );
 
     expect(() => buildMergedConfig(basePath, [basePath, extraPath])).toThrow(
-      "projects.web.sources.incoming duplicates webhook bind 127.0.0.1:8456 owned by projects.api.sources.incoming",
+      "projects.web.sources.incoming duplicates webhook bind ::1:8456 owned by projects.api.sources.incoming",
     );
   });
 
@@ -115,6 +118,7 @@ describe("registry.buildMergedConfig", () => {
         projectId: "api",
         projectPath: join(rootDir, "repo-a"),
         sessionPrefix: "api",
+        webhookHost: "::1",
         webhookPort: 8456,
       }),
     );
@@ -128,6 +132,7 @@ describe("registry.buildMergedConfig", () => {
         projectId: "web",
         projectPath: join(rootDir, "repo-b"),
         sessionPrefix: "web",
+        webhookHost: "0:0:0:0:0:0:0:1",
         webhookPort: 8456,
       }),
     );
@@ -139,7 +144,7 @@ describe("registry.buildMergedConfig", () => {
 
     expect(Object.keys(merged.config.projects)).toEqual(["api"]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("duplicates webhook bind");
+    expect(warnings[0]).toContain("duplicates webhook bind ::1:8456");
   });
 
   it("merges registered configs into one daemon project set", async () => {

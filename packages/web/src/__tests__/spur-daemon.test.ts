@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spurJsonInit, spurRequest, spurRequestJson } from "@/lib/spur-daemon";
+import {
+  spurJsonInit,
+  spurRequest,
+  spurRequestJson,
+  type SpurDaemonError,
+} from "@/lib/spur-daemon";
 
 const ORIG_DAEMON_URL = process.env["SPUR_DAEMON_URL"];
 
@@ -51,6 +56,21 @@ describe("spur-daemon", () => {
     );
 
     await expectRejectsWithMessage(spurRequestJson("/spawn"), "spawn rejected");
+  });
+
+  it("spurRequestJson preserves structured fields from a failed preview", async () => {
+    const payload = {
+      error: "Pre-flight exhausted the token budget",
+      preflightBatchId: "4c39ea91-df66-427f-b4ef-7b44fe7f6479",
+      preflightTokenUsageView: { status: "measured", totalTokens: 100 },
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 409 }));
+
+    await expect(spurRequestJson("/projects/api/preflight")).rejects.toMatchObject({
+      name: "SpurDaemonError",
+      status: 409,
+      payload,
+    } satisfies Partial<SpurDaemonError>);
   });
 
   it("spurRequestJson throws default message when error field absent", async () => {

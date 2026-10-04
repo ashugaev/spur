@@ -77,9 +77,10 @@ DO NOT
 
 VALIDATION
 
-`packages/web` has two mandatory test layers, both green before completion: Vitest unit/component (`pnpm --dir packages/web test`), Playwright E2E (`pnpm --dir packages/web exec playwright test` on the isolated-ui sidecar).
+  Follow manager's CI/local check ownership; keep Vitest unit/component and Playwright E2E coverage current.
 
-  Playwright E2E covers 100% of UI surfaces. Each new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
+  Add matching Playwright E2E coverage for each new or changed UI surface in `packages/web/tests/` in the same commit.
   Build must pass: `pnpm --dir packages/web build`.
-  Manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually. Use the official Playwright MCP agent (`playwright-test-generator`) for new E2E tests.
+  Manual browser check: use available browser tooling on branch's real isolated-ui sidecar; verify touched scenarios and secure-context behavior through its HTTPS URL when required.
+  Use `playwright-test-generator` for new E2E tests when exposed. If missing, write repository Playwright fixtures/browser tools and record the missing tool in validation notes.
   Capture screenshots for each touched state (idle, active, error, loading) and review them.

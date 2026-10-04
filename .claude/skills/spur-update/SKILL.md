@@ -18,13 +18,11 @@ LAYOUT
   update state  ~/.spur/rollback-state.json
   switch state  deploy-switch.json in the Spur data dir
 
-THREE PATHS, CHEAPEST FIRST
+REPAIR PATHS
 
   1  spur update [version] — installs, monitors, auto-rolls-back. Flags: `spur update --help`.
   2  bash <install>/scripts/install-and-restart.sh <version> — what the UI click runs. Prints nothing to the terminal; read the helper log.
-  3  npm install -g --prefix <prefix> @shugaev/spur@<version>, then <prefix>/bin/spur reinit — no monitor, no rollback.
-
-Paths 2 and 3 carry no health monitor. Verify by hand after either.
+  Verify identity after either path.
 
 DIAGNOSE FIRST
 
@@ -34,20 +32,21 @@ DIAGNOSE FIRST
   systemctl --user is-active spur-daemon spur-web
   tail -n 40 ~/.spur/logs/install-and-restart.log
 
-CLI version and package.json version disagree: a restart is pending.
+Compare live `/info.version` with package.json; CLI version alone proves no restart.
 
 VERIFY AFTER
 
   systemctl --user is-active spur-daemon spur-web
-  curl -fsS -o /dev/null -w 'daemon %{http_code}\n' http://127.0.0.1:4310/sessions
+  systemctl --user show spur-daemon -p MainPID --value
+  curl -fsS http://127.0.0.1:4310/info
   curl -fsS -o /dev/null -w 'web %{http_code}\n' http://127.0.0.1:<web-port>/
 
-Pass: both units active, daemon 200, web 200, `spur --version` equal to the target. Web port lives in spur-web.service as `Environment=PORT=`; read it there.
+Pass: both units active, web 200, `/info.version` equals target and installed package, `/info.pid` equals nonzero MainPID. Read web port from `Environment=PORT=` in spur-web.service.
 
 READINESS
 
   A registry holding many configs and sources leaves the daemon answering 503 for over 20 seconds after systemd reports the unit active. Poll both endpoints before calling a deploy failed.
-  reinit rc=1 with both units active means the readiness poll expired, not a dead unit. Re-poll; two 200s close the deploy.
+  reinit rc=1 requires identity checks even with both units active. A detached stale daemon can answer 200 while systemd cannot bind. Verify PID ownership before stopping a conflicting process; re-poll after recovery.
 
 TRAPS
 

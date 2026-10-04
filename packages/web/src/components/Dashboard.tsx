@@ -31,6 +31,7 @@ import { useFooterPopover } from "@/lib/footer-popover";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { buildSpawnOverrides, buildSpawnSessionPayload } from "@/lib/spawn-payload";
+import { initialReasoningIntent, type ReasoningIntent } from "@/lib/reasoning-effort";
 import { useToasts } from "@/hooks/useToasts";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
@@ -60,6 +61,7 @@ import { isBacklogItemActivelyWorked } from "@/lib/backlog-match";
 import { reconcileSessionMode, sessionModeOptions } from "@/lib/session-modes";
 import { AGENT_OPTIONS, type AgentName } from "@/lib/agents";
 import { isVoiceToggleHotkey } from "@/lib/submit-hotkeys";
+import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
 import {
   ATTENTION_LANE_META,
   ATTENTION_ZONE_ORDER,
@@ -80,6 +82,7 @@ import {
   type OpenPrActionRequiredPayload,
   type ProjectInfo,
   type SpurSessionView,
+  type SpurPreflightTokenUsageView,
   type SpurSessionsResponse,
   type UpdateProjectRequest,
   type UpdateProjectResponse,
@@ -237,13 +240,6 @@ function sameDeskActiveSessions(
       candidate.status !== "killed" &&
       candidate.status !== "completed",
   );
-}
-
-function completedIdsFromResponse(value: unknown): string[] {
-  if (typeof value !== "object" || value === null || !("completedIds" in value)) return [];
-  const completedIds = (value as { completedIds?: unknown }).completedIds;
-  if (!Array.isArray(completedIds)) return [];
-  return completedIds.filter((id): id is string => typeof id === "string");
 }
 
 function BacklogZone({
@@ -607,21 +603,23 @@ function ProjectMenu({
           className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100dvh-4rem)] min-w-[260px] max-w-[calc(100vw-1rem)] flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
           role="menu"
         >
-          <button
-            aria-checked={selectedProjectId === ""}
-            className={`mb-1 flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
-            onClick={() => {
-              popover.dismiss();
-              onSelectProject("");
-            }}
-            role="menuitemradio"
-            type="button"
-          >
-            <span aria-hidden="true" className="w-3 text-center">
-              {selectedProjectId === "" ? "✓" : ""}
-            </span>
-            <span>All Projects</span>
-          </button>
+          <div className="mb-1 transition hover:bg-[var(--color-hover-overlay)]">
+            <button
+              aria-checked={selectedProjectId === ""}
+              className={`flex w-full items-center gap-2 border px-2 py-1.5 text-left font-bold uppercase transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === "" ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
+              onClick={() => {
+                popover.dismiss();
+                onSelectProject("");
+              }}
+              role="menuitemradio"
+              type="button"
+            >
+              <span aria-hidden="true" className="w-3 text-center">
+                {selectedProjectId === "" ? "✓" : ""}
+              </span>
+              <span>All Projects</span>
+            </button>
+          </div>
           {projects.length === 0 ? (
             <p className="px-2 py-1.5 text-[var(--color-text-tertiary)]">No projects yet.</p>
           ) : (
@@ -630,12 +628,12 @@ function ProjectMenu({
                 <li
                   key={project.id}
                   role="none"
-                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-accent)]/10"
+                  className="group flex items-center gap-2 border-t border-[var(--color-border-subtle)] py-1.5 transition hover:bg-[var(--color-hover-overlay)]"
                 >
                   {project.configured ? (
                     <button
                       aria-checked={selectedProjectId === project.id}
-                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25" : "border-transparent text-[var(--color-text-primary)]"}`}
+                      className={`flex min-w-0 flex-1 items-center gap-2 border px-2 py-1.5 text-left transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] ${selectedProjectId === project.id ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-primary)]"}`}
                       onClick={() => {
                         popover.dismiss();
                         onSelectProject(project.id);
@@ -670,7 +668,7 @@ function ProjectMenu({
                   ) : null}
                   <button
                     aria-label={`Edit ${project.name}`}
-                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] group-hover:bg-[var(--color-accent)]/15 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-accent)]/20 hover:text-[var(--color-accent)]"
+                    className="border border-transparent px-1.5 py-1 text-[var(--color-text-tertiary)] transition group-hover:border-[var(--color-border-subtle)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-accent)]"
                     onClick={() => {
                       popover.dismiss();
                       onEdit(project);
@@ -1060,12 +1058,13 @@ export function Dashboard() {
     session: DashboardSession;
     payload: OpenPrActionRequiredPayload;
   } | null>(null);
-  const [openPrActionBusy, setOpenPrActionBusy] = useState(false);
+  const [openPrActionBusy, setOpenPrActionBusy] = useState<typeof openPrAction>(null);
   const [prCheckUnavailable, setPrCheckUnavailable] = useState<{
     session: DashboardSession;
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
-  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] = useState(false);
+  const [prCheckUnavailableBusy, setPrCheckUnavailableBusy] =
+    useState<typeof prCheckUnavailable>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -1073,6 +1072,9 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnModel, setSpawnModel] = useState<string | null>(null);
+  const [spawnReasoningIntent, setSpawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself. Submit
   // gates on this, not on `spawnModel === null` — a settled-empty catalog
   // also has a null model but is a valid, submittable state.
@@ -1083,6 +1085,17 @@ export function Dashboard() {
   const [spawnModelError, setSpawnModelError] = useState<string | null>(null);
   const [spawnSessionMode, setSpawnSessionMode] = useState<string | null>(null);
   const [spawnBranch, setSpawnBranch] = useState("");
+  const [spawnPreflightBatchId, setSpawnPreflightBatchId] = useState<string | null>(null);
+  const spawnPreflightBatchIdRef = useRef<string | null>(null);
+  const spawnPreflightOwnerRef = useRef({ project: "", queue: Promise.resolve() });
+  const [spawnPreflightUsage, setSpawnPreflightUsage] =
+    useState<SpurPreflightTokenUsageView | null>(null);
+  const [spawnPreflightStatus, setSpawnPreflightStatus] = useState<"idle" | "pending" | "error">(
+    "idle",
+  );
+  useEffect(() => {
+    spawnPreflightBatchIdRef.current = spawnPreflightBatchId;
+  }, [spawnPreflightBatchId]);
   const spawnBranchExplicitRef = useRef(false);
   const [branchExists, setBranchExists] = useState<BranchExistsResponse | null>(null);
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
@@ -1103,6 +1116,17 @@ export function Dashboard() {
   const spawnWorkspaceModeAuto = spawnWorkspaceModeConfirmedFor !== spawnProjectId;
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawnAttachments, setSpawnAttachments] = useState<FileAttachment[]>([]);
+  const spawnAttachmentsRef = useRef<FileAttachment[]>([]);
+  const spawnAttachmentReadsRef = useRef({ pending: 0 });
+  const [spawnAttachmentsPending, setSpawnAttachmentsPending] = useState(false);
+  const [spawnError, setSpawnError] = useState<string | null>(null);
+  const resetSpawnAttachments = useCallback(() => {
+    spawnAttachmentReadsRef.current = { pending: 0 };
+    spawnAttachmentsRef.current = [];
+    setSpawnAttachments([]);
+    setSpawnAttachmentsPending(false);
+    setSpawnError(null);
+  }, []);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnTrackerUrl, setSpawnTrackerUrl] = useState<string | null>(null);
@@ -1229,6 +1253,9 @@ export function Dashboard() {
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
+  const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const [lifecycleVersion, setLifecycleVersion] = useState(0);
+  const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
     data,
     isPending,
@@ -1236,15 +1263,34 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/sessions", { signal });
+      if (signal.aborted) throw new Error("Session read aborted");
       if (!response.ok) throw new Error(`sessions ${response.status}`);
-      return (await response.json()) as SpurSessionsResponse;
+      const result = (await response.json()) as SpurSessionsResponse;
+      if (signal.aborted) throw new Error("Session read aborted");
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) {
+        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+        if (current) return current;
+        throw new Error("Session read superseded");
+      }
+      publishTransitions();
+      return { ...result, sessions: accepted };
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
     refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
+  const effectiveRawSessions = useMemo(
+    () => lifecycleRef.current.project(rawSessions),
+    [lifecycleVersion, rawSessions],
+  );
   const availableBacklog = data?.backlog ?? [];
   const projects = data?.projects ?? [];
   // Single shared catalog source (react-query key ["tag-catalog"]) so the
@@ -1305,16 +1351,16 @@ export function Dashboard() {
   const filterProjectOptions = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const projectNameMap = useMemo(
-    () => buildSessionProjectLabelMap(projects, rawSessions),
-    [projects, rawSessions],
+    () => buildSessionProjectLabelMap(projects, effectiveRawSessions),
+    [effectiveRawSessions, projects],
   );
 
   const allSessions = useMemo(
     () =>
-      rawSessions.map((session) =>
+      effectiveRawSessions.map((session) =>
         toDashboardSession(session, projectNameMap.get(session.project)),
       ),
-    [projectNameMap, rawSessions],
+    [effectiveRawSessions, projectNameMap],
   );
 
   const projectSessions = useMemo(
@@ -1568,6 +1614,7 @@ export function Dashboard() {
     setSpawnPrompt(draft?.prompt ?? "");
     setSpawnAgent(draft?.agent ?? "claude");
     setSpawnModel(draft?.model ?? null);
+    setSpawnReasoningIntent(draft?.reasoningIntent ?? initialReasoningIntent(false));
     setSpawnSessionMode(draft?.sessionMode ?? null);
     setSpawnBranch(draft?.branch ?? "");
     spawnBranchExplicitRef.current = draft?.branchIsExplicit ?? false;
@@ -1585,7 +1632,19 @@ export function Dashboard() {
     setSpawnWorkspaceMode(draft?.workspaceMode ?? "worktree");
     setSpawnDefaultBranch(draft?.defaultBranch ?? "");
     setSpawnTrackerUrl(draft?.trackerUrl ?? null);
-    setSpawnAttachments([]);
+    const restoresPreflight = draft?.preflightBatchProjectId === nextProjectId;
+    const restoredBatchId = restoresPreflight ? (draft.preflightBatchId ?? null) : null;
+    if (
+      spawnPreflightOwnerRef.current.project !== nextProjectId ||
+      restoredBatchId !== spawnPreflightBatchIdRef.current
+    ) {
+      spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
+    }
+    spawnPreflightBatchIdRef.current = restoredBatchId;
+    setSpawnPreflightBatchId(restoredBatchId);
+    setSpawnPreflightUsage(null);
+    setSpawnPreflightStatus("idle");
+    resetSpawnAttachments();
   };
 
   useEffect(() => {
@@ -1610,6 +1669,13 @@ export function Dashboard() {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
+    if (normalizedProjectId !== spawnProjectId) {
+      spawnPreflightOwnerRef.current = { project: normalizedProjectId, queue: Promise.resolve() };
+      spawnPreflightBatchIdRef.current = null;
+      setSpawnPreflightBatchId(null);
+      setSpawnPreflightUsage(null);
+      setSpawnPreflightStatus("idle");
+    }
     // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
     // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
     // project alone re-derives it — a confirmation made for the previous
@@ -1646,6 +1712,8 @@ export function Dashboard() {
       prompt: spawnPrompt,
       agent: spawnAgent,
       model: spawnModel,
+      reasoningIntent:
+        spawnReasoningIntent.kind === "explicit" ? spawnReasoningIntent : { kind: "default-new" },
       branch: spawnBranch,
       branchIsExplicit: spawnBranchExplicitRef.current,
       workspaceMode: spawnWorkspaceMode,
@@ -1657,12 +1725,15 @@ export function Dashboard() {
       steps: spawnSteps.map((step) => step.value),
       trackerUrl: spawnTrackerUrl,
       sessionMode: spawnSessionMode,
+      preflightBatchId: spawnPreflightBatchId,
+      preflightBatchProjectId: spawnPreflightBatchId ? spawnProjectId : null,
     };
   }, [
     spawnAgent,
     spawnBranch,
     spawnDefaultBranch,
     spawnModel,
+    spawnReasoningIntent,
     spawnPlanMode,
     spawnPrompt,
     spawnSelfDestruct,
@@ -1672,6 +1743,8 @@ export function Dashboard() {
     spawnTrackerUrl,
     spawnWorkspaceMode,
     spawnWorkspaceModeConfirmedFor,
+    spawnPreflightBatchId,
+    spawnProjectId,
   ]);
   const spawnDraftRef = useRef(spawnDraft);
   spawnDraftRef.current = spawnDraft;
@@ -1683,9 +1756,11 @@ export function Dashboard() {
   }, [spawnDraft, spawnOpen]);
 
   const closeSpawnModal = useCallback(() => {
+    if (spawningRef.current) return;
     writeSpawnDraft(spawnDraftRef.current);
+    resetSpawnAttachments();
     setSpawnOpen(false);
-  }, []);
+  }, [resetSpawnAttachments]);
 
   useEffect(() => {
     if (!spawnOpen) return;
@@ -1732,18 +1807,21 @@ export function Dashboard() {
 
   const markSessionOpened = useCallback(
     async (sessionId: string) => {
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/opened`, {
         method: "POST",
         cache: "no-store",
       });
       if (!response.ok) throw new Error(`opened ${response.status}`);
       const openedSession = (await response.json()) as SpurSessionView;
+      const accepted = lifecycleRef.current.acceptUpdate(openedSession, read);
+      if (!accepted) return;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         if (!current) return current;
         return {
           ...current,
           sessions: current.sessions.map((session) =>
-            session.id === openedSession.id ? openedSession : session,
+            session.id === accepted.id ? accepted : session,
           ),
         };
       });
@@ -1764,36 +1842,109 @@ export function Dashboard() {
   useEffect(() => {
     const project = spawnProjectId.trim();
     const prompt = spawnPrompt.trim();
-    if (!project || !prompt) return;
+    if (!project || !prompt) {
+      setSpawnPreflightStatus("idle");
+      return;
+    }
     // Same gate as submit: while still on the auto-derived workspace mode,
     // an in-flight or failed spawn-defaults request means spawnWorkspaceMode
     // is still the hardcoded "worktree" fallback, not the project's real
     // default. Firing preflight against it would compute a branch suggestion
     // for the wrong mode. Re-runs (and re-debounces) once the defaults settle.
-    if (spawnWorkspaceModeUnresolved) return;
+    if (spawnWorkspaceModeUnresolved) {
+      setSpawnPreflightStatus("idle");
+      return;
+    }
 
+    setSpawnPreflightStatus("pending");
     let cancelled = false;
     const timer = setTimeout(() => {
-      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-      const payload: Record<string, unknown> = {
-        projectId: project,
-        prompt,
-        agent: spawnAgent,
-        overrides,
+      const owner = spawnPreflightOwnerRef.current;
+      const persistBatchId = (id: string) => {
+        spawnPreflightBatchIdRef.current = id;
+        setSpawnPreflightBatchId(id);
+        writeSpawnDraft({
+          ...spawnDraftRef.current,
+          preflightBatchId: id,
+          preflightBatchProjectId: project,
+        });
       };
-
-      fetch("/api/preflight", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((result: { branch: string | null } | null) => {
-          if (!cancelled && result?.branch && !spawnBranchExplicitRef.current) {
-            setSpawnBranch(result.branch);
+      owner.queue = owner.queue.then(async () => {
+        if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
+        try {
+          let batchId = spawnPreflightBatchIdRef.current;
+          if (!batchId) {
+            const allocation = await fetch(
+              `/api/projects/${encodeURIComponent(project)}/preflight-batches`,
+              { method: "POST" },
+            );
+            const result: unknown = await allocation.json();
+            if (
+              !allocation.ok ||
+              typeof result !== "object" ||
+              result === null ||
+              !("preflightBatchId" in result) ||
+              typeof result.preflightBatchId !== "string" ||
+              !result.preflightBatchId
+            ) {
+              throw new Error("Failed to allocate pre-flight usage batch");
+            }
+            if (owner !== spawnPreflightOwnerRef.current) return;
+            batchId = result.preflightBatchId;
+            persistBatchId(batchId);
           }
-        })
-        .catch(() => {});
+          if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
+          const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
+          const payload: Record<string, unknown> = {
+            projectId: project,
+            prompt,
+            agent: spawnAgent,
+            overrides,
+            preflightBatchId: batchId,
+          };
+
+          await fetch("/api/preflight", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+            .then(async (response) => ({
+              ok: response.ok,
+              result: (await response.json().catch(() => null)) as {
+                branch?: string | null;
+                error?: string;
+                preflightBatchId?: string;
+                preflightTokenUsageView?: SpurPreflightTokenUsageView;
+              } | null,
+            }))
+            .then(({ ok, result }) => {
+              if (owner !== spawnPreflightOwnerRef.current) return;
+              if (!result) {
+                if (!cancelled) setSpawnPreflightStatus("error");
+                return;
+              }
+              const batchChanged =
+                result.preflightBatchId !== undefined &&
+                result.preflightBatchId !== spawnPreflightBatchIdRef.current;
+              if (result.preflightBatchId) persistBatchId(result.preflightBatchId);
+              const usage = result.preflightTokenUsageView;
+              if (batchChanged) {
+                setSpawnPreflightUsage(usage ?? null);
+              } else if (usage) {
+                setSpawnPreflightUsage((current) =>
+                  current && current.attemptCount > usage.attemptCount ? current : usage,
+                );
+              }
+              if (cancelled) return;
+              setSpawnPreflightStatus(ok && !result.error ? "idle" : "error");
+              if (ok && !result.error && result.branch && !spawnBranchExplicitRef.current)
+                setSpawnBranch(result.branch);
+            });
+        } catch {
+          if (!cancelled && owner === spawnPreflightOwnerRef.current)
+            setSpawnPreflightStatus("error");
+        }
+      });
     }, 500);
 
     return () => {
@@ -1842,18 +1993,22 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || spawningRef.current) return;
+    if (!nextProjectId || spawningRef.current || spawnAttachmentReadsRef.current.pending > 0)
+      return;
 
     spawningRef.current = true;
     setSpawning(true);
+    setSpawnError(null);
     try {
+      await spawnPreflightOwnerRef.current.queue;
       const payload = buildSpawnSessionPayload({
         projectId: nextProjectId,
         prompt: nextPrompt,
         agent: spawnAgent,
         model: spawnModel,
+        reasoningIntent: spawnReasoningIntent,
         mode: effectiveSessionMode,
-        attachments: spawnAttachments,
+        attachments: spawnAttachmentsRef.current,
         branch: spawnBranch,
         planMode: spawnPlanMode,
         selfDestruct: spawnSelfDestruct,
@@ -1862,8 +2017,10 @@ export function Dashboard() {
         trackerUrl: spawnTrackerUrl,
         workspaceMode: spawnWorkspaceMode,
         defaultBranch: spawnDefaultBranch,
+        preflightBatchId: spawnPreflightBatchIdRef.current,
       });
 
+      const read = lifecycleRef.current.beginRead();
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1874,21 +2031,30 @@ export function Dashboard() {
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
+      const accepted = lifecycleRef.current.acceptUpdate(session, read);
       clearSpawnDraft();
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = (current?.sessions ?? []).filter(
-          (existingSession) => existingSession.id !== session.id,
-        );
-        return {
-          ...(current ?? {}),
-          sessions: [session, ...currentSessions],
-          projects: current?.projects ?? [],
-        };
-      });
+      if (accepted)
+        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+          const currentSessions = (current?.sessions ?? []).filter(
+            (existingSession) => existingSession.id !== accepted.id,
+          );
+          return {
+            ...(current ?? {}),
+            lifecycleInstanceId: current?.lifecycleInstanceId ?? accepted.lifecycle.instanceId,
+            sessions: [accepted, ...currentSessions],
+            projects: current?.projects ?? [],
+          };
+        });
       setSpawnPrompt("");
       setSpawnModel(null);
+      setSpawnReasoningIntent(initialReasoningIntent(false));
       setSpawnSessionMode(null);
       setSpawnBranch("");
+      spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
+      spawnPreflightBatchIdRef.current = null;
+      setSpawnPreflightBatchId(null);
+      setSpawnPreflightUsage(null);
+      setSpawnPreflightStatus("idle");
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
@@ -1897,13 +2063,13 @@ export function Dashboard() {
       setSpawnWorkspaceModeConfirmedFor(null);
       setSpawnWorkspaceMode("worktree");
       setSpawnDefaultBranch("");
-      setSpawnAttachments([]);
+      resetSpawnAttachments();
       setSpawnPinnedProjectId(null);
       setSpawnTrackerUrl(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
     } catch (spawnError) {
-      showErrorToast(errorMessage(spawnError, "Failed to spawn Spur session"));
+      setSpawnError(errorMessage(spawnError, "Failed to spawn Spur session"));
     } finally {
       spawningRef.current = false;
       setSpawning(false);
@@ -2046,11 +2212,14 @@ export function Dashboard() {
         throw new Error(payload?.error ?? `Failed to update project (${response.status})`);
       }
       const updated = (await response.json()) as UpdateProjectResponse;
-      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => ({
-        ...current,
-        sessions: current?.sessions ?? [],
-        projects: updated.projects,
-      }));
+      queryClient.setQueryData<SpurSessionsResponse>(
+        sessionsQueryKey,
+        (current) =>
+          current && {
+            ...current,
+            projects: updated.projects,
+          },
+      );
       setEditingProject(null);
       setProjectActionError(null);
     } catch (updateError) {
@@ -2120,42 +2289,94 @@ export function Dashboard() {
     [tagCatalog, handleApplyTags],
   );
 
-  const handleRestoreSession = async (session: DashboardSession) => {
-    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+  const reserveTransitions = (
+    sessions: readonly SpurSessionView[],
+    action: "complete" | "restore",
+  ) => {
+    const owner = lifecycleRef.current.reserve(sessions, action);
+    publishTransitions();
+    return owner;
+  };
 
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          currentSession.id === session.id
-            ? {
-                ...currentSession,
-                status: "running",
-                state: "working",
-                runtimeAlive: true,
-              }
-            : currentSession,
-        ),
-      };
-    });
+  const reconcileAttempt = async (owner: LifecycleIntent) => {
+    if (!lifecycleRef.current.isCurrent(owner)) return;
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+    const read = lifecycleRef.current.beginRead();
+    try {
+      const response = await fetch("/api/sessions", { cache: "no-store" });
+      if (!response.ok)
+        throw new Error(await readApiErrorMessage(response, "Failed to reconcile Spur session"));
+      const result = (await response.json()) as SpurSessionsResponse;
+      const accepted = lifecycleRef.current.accept(
+        result.lifecycleInstanceId ?? "",
+        result.sessions,
+        read,
+      );
+      if (!accepted) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, {
+        ...result,
+        sessions: accepted,
+      });
+    } catch (error) {
+      if (!lifecycleRef.current.isCurrent(owner)) return;
+      lifecycleRef.current.releaseUnmatched(owner);
+      showErrorToast(errorMessage(error, "Failed to reconcile Spur session"));
+    }
+    publishTransitions();
+  };
+
+  const handleRestoreSession = async (session: DashboardSession) => {
+    const source = rawSessions.find((candidate) => candidate.id === session.id);
+    if (!source) return;
+    const owner = reserveTransitions([source], "restore");
+    if (!owner) return;
+    await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
 
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operationId: owner.operationId }),
       });
+      const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to restore Spur session"));
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner);
+          return;
+        }
+        throw new Error(responseErrorMessage(payload, "Failed to restore Spur session"));
+      }
+      const restored = payload as SpurSessionView;
+      await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
+      const accepted = lifecycleRef.current.acceptMutation(restored, owner);
+      if (accepted) {
+        queryClient.setQueryData<SpurSessionsResponse>(
+          sessionsQueryKey,
+          (current) =>
+            current && {
+              ...current,
+              sessions: [...current.sessions.filter((row) => row.id !== session.id), accepted],
+            },
+        );
+        publishTransitions();
       }
     } catch (restoreError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
+      await reconcileAttempt(owner);
+      if (!lifecycleRef.current.isCurrent(owner)) return;
       showErrorToast(errorMessage(restoreError, "Failed to restore Spur session"));
       throw restoreError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
@@ -2168,7 +2389,15 @@ export function Dashboard() {
     },
   ): Promise<boolean> => {
     const prAction = options?.prAction;
-    const activeDeskSessions = sameDeskActiveSessions(allSessions, session);
+    const activeDeskSessions = sameDeskActiveSessions(
+      rawSessions.map((row) => toDashboardSession(row, projectNameMap.get(row.project))),
+      session,
+    );
+    if (
+      lifecycleRef.current.pending(session.id) ||
+      activeDeskSessions.some((candidate) => lifecycleRef.current.pending(candidate.id))
+    )
+      return false;
     const activeSubagentCount = activeDeskSessions.filter(
       (candidate) => candidate.id !== session.id,
     ).length;
@@ -2182,29 +2411,16 @@ export function Dashboard() {
       if (!ok) return false;
     }
     const activeDeskIds = new Set(activeDeskSessions.map((candidate) => candidate.id));
+    const owner = reserveTransitions(
+      rawSessions.filter((row) => activeDeskIds.has(row.id)),
+      "complete",
+    );
+    if (!owner) return false;
     await queryClient.cancelQueries({ queryKey: sessionsQueryKey });
-    const previousResponse = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-
-    queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        sessions: current.sessions.map((currentSession) =>
-          activeDeskIds.has(currentSession.id)
-            ? {
-                ...currentSession,
-                status: "completed",
-                state: "stopped",
-                runtimeAlive: false,
-                tmuxSession: null,
-              }
-            : currentSession,
-        ),
-      };
-    });
 
     try {
       const body = {
+        operationId: owner.operationId,
         scope: "desk",
         ...(prAction ? { prAction } : {}),
         ...(options?.skipPrCheck ? { skipPrCheck: true } : {}),
@@ -2215,20 +2431,29 @@ export function Dashboard() {
         body: JSON.stringify(body),
       });
       const payload = await readResponsePayload(response);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       if (!response.ok) {
+        if (
+          response.status === 503 &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "code" in payload &&
+          payload.code === "session_lifecycle_snapshot_changed"
+        ) {
+          await reconcileAttempt(owner);
+          return false;
+        }
         if (isOpenPrActionRequiredPayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
           // Only one dashboard dialog is ever mounted.
           setPrCheckUnavailable(null);
           setOpenPrAction({ session, payload });
           return false;
         }
         if (isGithubPrCheckUnavailablePayload(payload)) {
-          if (previousResponse) {
-            queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-          }
+          await reconcileAttempt(owner);
+          if (!lifecycleRef.current.isCurrent(owner)) return false;
           // The two PR dialogs are alternatives for one complete attempt. Leaving
           // the sibling mounted stacks both, and the stale one survives a later
           // success and re-fires /complete on a terminal session.
@@ -2238,67 +2463,50 @@ export function Dashboard() {
         }
         throw new Error(responseErrorMessage(payload, "Failed to complete Spur session"));
       }
-      const completedIds = completedIdsFromResponse(payload);
-      if (completedIds.length > 0) {
-        const completedIdSet = new Set(completedIds);
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-          if (!current) return current;
-          return {
-            ...current,
-            sessions: current.sessions.map((currentSession) =>
-              completedIdSet.has(currentSession.id)
-                ? {
-                    ...currentSession,
-                    status: "completed",
-                    state: "stopped",
-                    runtimeAlive: false,
-                    tmuxSession: null,
-                  }
-                : currentSession,
-            ),
-          };
-        });
-      }
-      return true;
+      await reconcileAttempt(owner);
+      return lifecycleRef.current.isCurrent(owner);
     } catch (completeError) {
-      if (previousResponse) {
-        queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, previousResponse);
-      }
+      await reconcileAttempt(owner);
+      if (!lifecycleRef.current.isCurrent(owner)) return false;
       showErrorToast(errorMessage(completeError, "Failed to complete Spur session"));
       throw completeError;
     } finally {
-      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      if (lifecycleRef.current.isCurrent(owner)) {
+        await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+      }
     }
   };
 
   const handleOpenPrAction = async (prAction: OpenPrAction) => {
     if (!openPrAction) return;
-    setOpenPrActionBusy(true);
+    const dialog = openPrAction;
+    setOpenPrActionBusy(dialog);
     try {
       // Clear only on a real completion: a second failure re-opens a dialog,
       // and dismissing it here would drop the user back to a bare row.
-      if (await handleCompleteSession(openPrAction.session, { prAction, retry: true })) {
-        setOpenPrAction(null);
+      if (await handleCompleteSession(dialog.session, { prAction, retry: true })) {
+        setOpenPrAction((current) => (current === dialog ? null : current));
       }
     } catch {
       // handleCompleteSession already toasted; keep the dialog reachable.
     } finally {
-      setOpenPrActionBusy(false);
+      setOpenPrActionBusy((current) => (current === dialog ? null : current));
     }
   };
 
   const handlePrCheckUnavailable = async (options: { skipPrCheck?: true }) => {
     if (!prCheckUnavailable) return;
-    setPrCheckUnavailableBusy(true);
+    const dialog = prCheckUnavailable;
+    setPrCheckUnavailableBusy(dialog);
     try {
-      if (await handleCompleteSession(prCheckUnavailable.session, { ...options, retry: true })) {
-        setPrCheckUnavailable(null);
+      if (await handleCompleteSession(dialog.session, { ...options, retry: true })) {
+        setPrCheckUnavailable((current) => (current === dialog ? null : current));
       }
     } catch {
       // handleCompleteSession already toasted. Keep the dialog open so Skip
       // stays reachable instead of dropping the user back to a bare row.
     } finally {
-      setPrCheckUnavailableBusy(false);
+      setPrCheckUnavailableBusy((current) => (current === dialog ? null : current));
     }
   };
 
@@ -2327,23 +2535,31 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnFiles = useCallback(
-    (files: FileList | File[] | null) => {
-      void fileAttachmentsFromFiles(files)
-        .then((attachments) => {
-          if (attachments.length === 0) return;
-          let rejectedMessage: string | null = null;
-          setSpawnAttachments((current) => {
-            const result = mergeAttachmentsWithinLimit(current, attachments);
-            rejectedMessage = result.rejectedMessage;
-            return result.attachments;
-          });
-          if (rejectedMessage) showErrorToast(rejectedMessage);
-        })
-        .catch(() => {});
-    },
-    [showErrorToast],
-  );
+  const addSpawnFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files?.length) return;
+    const reads = spawnAttachmentReadsRef.current;
+    reads.pending += 1;
+    setSpawnAttachmentsPending(true);
+    setSpawnError(null);
+    void fileAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (reads !== spawnAttachmentReadsRef.current || attachments.length === 0) return;
+        const result = mergeAttachmentsWithinLimit(spawnAttachmentsRef.current, attachments);
+        spawnAttachmentsRef.current = result.attachments;
+        setSpawnAttachments(result.attachments);
+        if (result.rejectedMessage) setSpawnError(result.rejectedMessage);
+      })
+      .catch((error: unknown) => {
+        if (reads === spawnAttachmentReadsRef.current) {
+          setSpawnError(errorMessage(error, "Failed to read attachment"));
+        }
+      })
+      .finally(() => {
+        if (reads !== spawnAttachmentReadsRef.current) return;
+        reads.pending -= 1;
+        setSpawnAttachmentsPending(reads.pending > 0);
+      });
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -2664,7 +2880,7 @@ export function Dashboard() {
               agent={spawnAgent}
               agentAriaLabel="Spawn agent"
               attachments={spawnAttachments}
-              canClose
+              canClose={!spawning}
               clearLabel="Clear spawn prompt"
               history={{
                 entries: spawnHistory.entries,
@@ -2684,6 +2900,8 @@ export function Dashboard() {
                 },
                 model: {
                   value: spawnModel,
+                  reasoningIntent: spawnReasoningIntent,
+                  onReasoningChange: setSpawnReasoningIntent,
                   onChange: (next) => {
                     setSpawnModel(next);
                   },
@@ -2744,6 +2962,30 @@ export function Dashboard() {
                 },
                 branchNotesSlot: (
                   <>
+                    {spawnPreflightUsage || spawnPreflightStatus !== "idle" ? (
+                      <div aria-live="polite" className="space-y-1">
+                        {spawnPreflightUsage ? (
+                          <p className="text-[var(--color-text-tertiary)]">
+                            Pre-flight tokens:{" "}
+                            {spawnPreflightUsage.status === "measured" ||
+                            spawnPreflightUsage.status === "partial"
+                              ? spawnPreflightUsage.totalTokens.toLocaleString()
+                              : "unavailable"}
+                            {spawnPreflightUsage.status === "partial" ? " · partial" : ""}
+                          </p>
+                        ) : null}
+                        {spawnPreflightStatus === "pending" ? (
+                          <p role="status" className="text-[var(--color-text-secondary)]">
+                            Checking branch preview…
+                          </p>
+                        ) : null}
+                        {spawnPreflightStatus === "error" ? (
+                          <p role="alert" className="text-[var(--color-status-error)]">
+                            Branch preview failed. Token usage may still count.
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {normalizedBranchPreview && normalizedBranchPreview !== spawnBranch ? (
                       <p className="text-xs text-[var(--color-text-tertiary)]">
                         will create {normalizedBranchPreview}
@@ -2829,20 +3071,28 @@ export function Dashboard() {
               onAgentChange={(next) => {
                 setSpawnAgent(next);
                 setSpawnModel(null);
+                setSpawnReasoningIntent(initialReasoningIntent(false));
               }}
               onClose={closeSpawnModal}
               onPromptChange={(next) => {
                 setSpawnPrompt(next);
               }}
               onRemoveAttachment={(index) => {
-                setSpawnAttachments((current) =>
-                  current.filter((_, currentIndex) => currentIndex !== index),
+                const attachments = spawnAttachmentsRef.current.filter(
+                  (_, currentIndex) => currentIndex !== index,
                 );
+                spawnAttachmentsRef.current = attachments;
+                setSpawnAttachments(attachments);
+                setSpawnError(null);
               }}
+              error={
+                spawnError
+                  ? { message: spawnError, onDismiss: () => setSpawnError(null) }
+                  : undefined
+              }
               onSubmit={() => void handleSpawn()}
               prompt={spawnPrompt}
               promptAriaLabel="Prompt..."
-              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Prompt..."
               promptRef={spawnPromptRef}
               showCancel={false}
@@ -2854,6 +3104,7 @@ export function Dashboard() {
               submitBusyAriaLabel="Spawning session"
               submitDisabled={
                 spawning ||
+                spawnAttachmentsPending ||
                 !spawnProjectId.trim() ||
                 !spawnModelResolved ||
                 spawnWorkspaceModeUnresolved
@@ -2914,7 +3165,7 @@ export function Dashboard() {
           ) : null}
           {openPrAction ? (
             <OpenPrActionDialog
-              busy={openPrActionBusy}
+              busy={openPrActionBusy === openPrAction}
               onAction={(action) => void handleOpenPrAction(action)}
               onCancel={() => setOpenPrAction(null)}
               payload={openPrAction.payload}
@@ -2922,7 +3173,7 @@ export function Dashboard() {
           ) : null}
           {prCheckUnavailable ? (
             <GithubRateLimitDialog
-              busy={prCheckUnavailableBusy}
+              busy={prCheckUnavailableBusy === prCheckUnavailable}
               onCancel={() => setPrCheckUnavailable(null)}
               onRetry={() => void handlePrCheckUnavailable({})}
               onSkip={() => void handlePrCheckUnavailable({ skipPrCheck: true })}

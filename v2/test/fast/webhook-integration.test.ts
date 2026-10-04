@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AutoPingService } from "../../src/auto-ping.js";
 import { loadConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
 import { startConfiguredSources } from "../../src/event-sources/index.js";
@@ -84,6 +85,7 @@ projects:
     );
     const config = loadConfig(configPath);
     const bus = new EventBus();
+    const autoPing = new AutoPingService(dataDir);
     const envelopes: unknown[] = [];
     bus.subscribe((event) => envelopes.push(event));
     let resolveSpawn: ((value: { id: string }) => void) | undefined;
@@ -98,6 +100,7 @@ projects:
     const triggerController = startConfiguredTriggers({
       config,
       bus,
+      autoPing,
       sessionService: { spawn } as never,
       logger: { warn: vi.fn() },
     });
@@ -113,12 +116,16 @@ projects:
       expect(envelopes).toHaveLength(1);
       const envelope = envelopes[0] as {
         name: string;
+        occurrenceId: string;
         projectId: string;
         sourceId: string;
         data: { body: string; receivedAt: string };
       };
       expect(envelope).toEqual({
         name: "webhook:received",
+        occurrenceId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
         projectId: "api",
         sourceId: "incoming",
         data: {
@@ -137,6 +144,7 @@ projects:
       resolveSpawn?.({ id: "api-webhook" });
       await sourceController.stop();
       await triggerController.stop();
+      autoPing.dispose();
     }
   });
 });

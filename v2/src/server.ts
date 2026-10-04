@@ -2,10 +2,17 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { URL } from "node:url";
+import {
+  lifecycleErrorReceipt,
+  parseLifecycleOperationId,
+  SessionLifecycleError,
+} from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { listAgentModels } from "./agents/models.js";
+import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
+import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
   deploySwitchStatePath,
@@ -20,6 +27,7 @@ import {
   logSpurEvent,
   setEventLogConfig,
   type SpurLogEntry,
+  type SpurLogLevel,
 } from "./event-log.js";
 import {
   DEFAULT_USER_ACTION_LOG_CONFIG,
@@ -31,30 +39,43 @@ import {
   type UserActionOrigin,
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
-import { startConfiguredSources } from "./event-sources/index.js";
+import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { getReleases } from "./releases-cache.js";
 import {
+  AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidConfigPathError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
+  PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
+  SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
+  WakeDispatchConflictError,
+  WakeTargetMissingError,
 } from "./session-service.js";
-import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import {
+  dropsQueuedSend,
+  startConfiguredTriggers,
+  type TriggerGroupController,
+} from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
 import { getVersion } from "./version.js";
 import {
@@ -65,6 +86,7 @@ import {
   type ConnectProjectConfigRequest,
   type CreateProjectRequest,
   type DisconnectProjectConfigRequest,
+  type SessionLifecycleSnapshot,
   type KillSessionRequest,
   type OpenPrAction,
   type PreflightRequest,
@@ -73,6 +95,9 @@ import {
   type RestoreSessionRequest,
   type RunServiceRequest,
   type ScheduleSessionWakeRequest,
+  type DispatchSessionWakeRequest,
+  type UpdateSessionWakeMessageRequest,
+  type WakeTarget,
   type SendMessageRequest,
   type SourceReplyRequest,
   type StartSidecarRequest,
@@ -98,6 +123,10 @@ interface JsonError {
 interface ServiceLogger {
   info?: (message: string) => void;
   warn?: (message: string) => void;
+}
+
+class InvalidWakeRequestError extends Error {
+  readonly statusCode = 400;
 }
 
 class InvalidJsonBodyError extends Error {
@@ -139,6 +168,39 @@ export async function resolveTodoMutationActor(args: {
   }
   if (origin === "cli" || origin === "ui") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
+}
+
+async function authorizeAutoPingTarget(args: {
+  origin: UserActionOrigin;
+  callerHeader: string | string[] | undefined;
+  targetSessionId: string;
+  lookup: (sessionId: string) => Promise<{ id: string }>;
+}): Promise<void> {
+  try {
+    await args.lookup(args.targetSessionId);
+  } catch {
+    throw new AutoPingError("session_not_found", 404, "Auto-ping target session not found");
+  }
+  if (Array.isArray(args.callerHeader)) {
+    throw new AutoPingError("forbidden", 403, "Caller session header is invalid");
+  }
+  if (args.callerHeader) {
+    if (args.origin !== "cli" || args.callerHeader !== args.targetSessionId) {
+      throw new AutoPingError("forbidden", 403, "Caller session does not match auto-ping owner");
+    }
+    return;
+  }
+  if (args.origin !== "cli" && args.origin !== "ui") {
+    throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
+  }
+}
+
+function decodeAutoPingPathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new AutoPingError("invalid_request", 400, "Auto-ping route identifier is invalid");
+  }
 }
 
 // ToDo state gates the agent, never the person driving Spur: a CLI or UI
@@ -224,7 +286,11 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   }
 }
 
+const lifecycleErrors = new WeakMap<ServerResponse, SessionLifecycleSnapshot>();
+
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+  const lifecycle = lifecycleErrors.get(response);
+  if (lifecycle && isRecord(payload)) payload = { ...payload, lifecycle };
   // Compact, not pretty-printed: the listing payloads run to megabytes and the
   // 2-space indent was ~10% of every one of them, re-serialized on each poll.
   const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
@@ -237,6 +303,15 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 
 function sendError(response: ServerResponse, statusCode: number, message: string): void {
   sendJson(response, statusCode, { error: message } satisfies JsonError);
+}
+
+interface FailRequestOptions {
+  // Omitted: 5xx logs "error", anything lower logs "warn".
+  level?: SpurLogLevel;
+  method?: string | undefined;
+  path?: string | undefined;
+  // Present: sent verbatim as the response body instead of the `{ error }` shape.
+  payload?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -283,9 +358,56 @@ function parseSweepSidecarsRequest(raw: unknown): { reap: boolean } {
   return { reap: raw["reap"] === true };
 }
 
-function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeRequest {
+function parseWakeTarget(raw: unknown): WakeTarget {
+  if (raw === "scheduled" || raw === "interval" || raw === "daily") {
+    return raw;
+  }
+  throw new InvalidWakeRequestError("target must be scheduled, interval, or daily");
+}
+
+function rejectWakeScheduleFields(raw: Record<string, unknown>): void {
+  for (const field of ["at", "delayMs", "intervalMs", "dailyAt", "stopCondition"] as const) {
+    if (raw[field] !== undefined) {
+      throw new InvalidWakeRequestError(`${field} cannot be combined with target`);
+    }
+  }
+}
+
+function parseUpdateSessionWakeMessageRequest(
+  raw: Record<string, unknown>,
+): UpdateSessionWakeMessageRequest {
+  const target = parseWakeTarget(raw["target"]);
+  const message = raw["message"];
+  if (typeof message !== "string" || message.trim().length === 0) {
+    throw new InvalidWakeRequestError("message must be a non-empty string");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, message: message.trim() };
+}
+
+function parseDispatchSessionWakeRequest(raw: Record<string, unknown>): DispatchSessionWakeRequest {
+  const target = parseWakeTarget(raw["target"]);
+  if (raw["message"] !== undefined) {
+    throw new InvalidWakeRequestError("message cannot be combined with dispatch");
+  }
+  rejectWakeScheduleFields(raw);
+  return { target, dispatch: true };
+}
+
+type ParsedSessionWakeRequest =
+  | { mode: "schedule"; request: ScheduleSessionWakeRequest }
+  | { mode: "update"; request: UpdateSessionWakeMessageRequest }
+  | { mode: "dispatch"; request: DispatchSessionWakeRequest };
+
+function parseSessionWakeRequest(raw: unknown): ParsedSessionWakeRequest {
   if (!isRecord(raw)) {
-    return {};
+    return { mode: "schedule", request: {} };
+  }
+  if (raw["target"] !== undefined) {
+    if (raw["dispatch"] === true) {
+      return { mode: "dispatch", request: parseDispatchSessionWakeRequest(raw) };
+    }
+    return { mode: "update", request: parseUpdateSessionWakeMessageRequest(raw) };
   }
   const request: ScheduleSessionWakeRequest = {};
   const at = raw["at"];
@@ -315,7 +437,7 @@ function parseScheduleSessionWakeRequest(raw: unknown): ScheduleSessionWakeReque
   if (typeof message === "string") {
     request.message = message;
   }
-  return request;
+  return { mode: "schedule", request };
 }
 
 export function parseCompleteSessionRequest(raw: unknown): CompleteSessionRequest {
@@ -327,7 +449,9 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
+    ...(operationId ? { operationId } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
@@ -397,7 +521,12 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
-  return raw["force"] === true ? { force: true } : {};
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
+  return {
+    ...(operationId ? { operationId } : {}),
+    ...(raw["force"] === true ? { force: true } : {}),
+    ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
+  };
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -560,6 +689,11 @@ function mergeSpawnStateSubscriptions(body: SpawnSessionRequest): SpawnSessionRe
 export async function startServer(
   configPath?: string,
   logger: ServiceLogger = DEFAULT_LOGGER,
+  // Test-only (spur#859 B4): overrides the sidecar sweep's process-table
+  // read so a fixture can control it instead of scanning the real host —
+  // never set by a real caller (cli.ts's `daemon start` passes only the
+  // first two args). Kept off the wire: nothing over HTTP can reach this.
+  testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
   if (ghPathState.status === "unavailable") {
@@ -568,7 +702,11 @@ export async function startServer(
     );
   }
   assertConfigMayUseProdSlot(configPath);
-  const service = new SessionService(configPath, undefined, { deferBackgroundLoops: true });
+  const service = new SessionService(configPath, undefined, {
+    deferBackgroundLoops: true,
+    ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
+  });
+  const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
   const switchLedgerPath = updateLedgerPath(service.config.dataDir);
@@ -589,11 +727,33 @@ export async function startServer(
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
+  // Single owner of a failed request: the status sets the response code and the
+  // log level from one argument, so the two can never drift.
+  const failRequest = (
+    response: ServerResponse,
+    status: number,
+    message: string,
+    options: FailRequestOptions = {},
+  ): void => {
+    logEvent("http.request.failed", {
+      level: options.level ?? (status >= 500 ? "error" : "warn"),
+      ...(options.method ? { method: options.method } : {}),
+      ...(options.path ? { path: options.path } : {}),
+      message,
+    });
+    if ("payload" in options) {
+      sendJson(response, status, options.payload);
+      return;
+    }
+    sendError(response, status, message);
+  };
   const startAutomation = async (): Promise<void> => {
     const nextTriggers = startConfiguredTriggers({
       config: service.config,
       bus,
       sessionService: service,
+      autoPing,
+      memoryHoldEngaged: () => service.memoryHoldEngaged(),
       logger: {
         warn: logger.warn ?? writeStderr,
         ...(logger.info ? { info: logger.info } : {}),
@@ -614,9 +774,14 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
+            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn(request);
+          const { telegramOrigin, ...spawnRequest } = request;
+          const session = await service.spawn(
+            spawnRequest,
+            telegramOrigin ? { telegramOrigin } : undefined,
+          );
           return {
             id: session.id,
             project: session.project,
@@ -625,6 +790,7 @@ export async function startServer(
             ...(session.slots?.title ? { title: session.slots.title } : {}),
           };
         },
+        listProjects: async () => spawnableProjects(service.listProjects()),
       });
       const nextBacklogs = startConfiguredBacklogs({
         config: service.config,
@@ -738,20 +904,11 @@ export async function startServer(
     let errorMessage: string | undefined;
     try {
       if (!request.method) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          message: "Request method is required",
-        });
-        sendError(response, 400, "Request method is required");
+        failRequest(response, 400, "Request method is required");
         return;
       }
       if (!request.url) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          method: request.method,
-          message: "Request URL is required",
-        });
-        sendError(response, 400, "Request URL is required");
+        failRequest(response, 400, "Request URL is required", { method: request.method });
         return;
       }
 
@@ -988,7 +1145,9 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        sendJson(response, 200, await service.list({ includeCompleted, view }));
+        const sessions = await service.list({ includeCompleted, view });
+        response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
+        sendJson(response, 200, sessions);
         return;
       }
 
@@ -1012,7 +1171,10 @@ export async function startServer(
           return;
         }
         sendJson(response, 200, {
-          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+          agent,
+          ...(await listAgentModelCatalog(agent, {
+            codexHomePath: service.config.models.codexHome,
+          })),
         });
         return;
       }
@@ -1145,6 +1307,12 @@ export async function startServer(
           configPath: body.configPath,
           projects: service.listProjects(),
         });
+        return;
+      }
+
+      const preflightBatchProjectId = path.match(/^\/projects\/([^/]+)\/preflight-batches$/)?.[1];
+      if (method === "POST" && preflightBatchProjectId) {
+        sendJson(response, 200, await service.createPreflightBatch(preflightBatchProjectId));
         return;
       }
 
@@ -1411,6 +1579,70 @@ export async function startServer(
         return;
       }
 
+      const autoPingListMatch = path.match(/^\/sessions\/([^/]+)\/auto-ping-suppressions$/);
+      if (method === "GET" && autoPingListMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingListMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        sendJson(response, 200, { records: autoPing.list(targetSessionId) });
+        return;
+      }
+
+      const autoPingUnsubscribeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/unsubscribe$/,
+      );
+      if (method === "POST" && autoPingUnsubscribeMatch?.[1]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingUnsubscribeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
+        if (
+          !isRecord(body) ||
+          (body.scope !== "event" && body.scope !== "thread" && body.scope !== "subscription") ||
+          typeof body.handle !== "string"
+        ) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping unsubscribe body is invalid");
+        }
+        sendJson(
+          response,
+          200,
+          await autoPing.unsubscribe(targetSessionId, body.scope, body.handle),
+        );
+        return;
+      }
+
+      const autoPingResumeMatch = path.match(
+        /^\/sessions\/([^/]+)\/auto-ping-suppressions\/([^/]+)\/resume$/,
+      );
+      if (method === "POST" && autoPingResumeMatch?.[1] && autoPingResumeMatch[2]) {
+        const targetSessionId = decodeAutoPingPathSegment(autoPingResumeMatch[1]);
+        await authorizeAutoPingTarget({
+          origin,
+          callerHeader: request.headers["x-spur-caller-session"],
+          targetSessionId,
+          lookup: (sessionId) => service.get(sessionId),
+        });
+        const suppressionId = decodeAutoPingPathSegment(autoPingResumeMatch[2]);
+        const body = await readJsonBody<unknown>(request).catch(() => {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping body must be valid JSON");
+        });
+        if (!isRecord(body) || Object.keys(body).length !== 0) {
+          throw new AutoPingError("invalid_request", 400, "Auto-ping resume body must be empty");
+        }
+        sendJson(response, 200, await autoPing.resume(targetSessionId, suppressionId));
+        return;
+      }
+
       const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/(.+)$/);
       if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
         // An invalid percent-encoding in any segment (decodeURIComponent throws URIError)
@@ -1531,6 +1763,25 @@ export async function startServer(
         return;
       }
 
+      const launchSubmitSessionId = path.match(/^\/sessions\/([^/]+)\/launch\/submit$/)?.[1];
+      if (method === "POST" && launchSubmitSessionId) {
+        sendJson(response, 200, await service.submitPendingLaunch(launchSubmitSessionId));
+        return;
+      }
+
+      const submitFailedMatch = path.match(/^\/sessions\/([^/]+)\/submit-failed\/(retry|dismiss)$/);
+      if (method === "POST" && submitFailedMatch?.[1] && submitFailedMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.resolveSubmitFailure(
+            submitFailedMatch[1],
+            submitFailedMatch[2] === "retry" ? "retry" : "dismiss",
+          ),
+        );
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);
@@ -1540,8 +1791,14 @@ export async function startServer(
 
       const wakeSessionId = path.match(/^\/sessions\/([^/]+)\/wake$/)?.[1];
       if (method === "POST" && wakeSessionId) {
-        const body = parseScheduleSessionWakeRequest(await readJsonBody<unknown>(request));
-        sendJson(response, 200, await service.scheduleWake(wakeSessionId, body));
+        const parsed = parseSessionWakeRequest(await readJsonBody<unknown>(request));
+        if (parsed.mode === "update") {
+          sendJson(response, 200, await service.updateWakeMessage(wakeSessionId, parsed.request));
+        } else if (parsed.mode === "dispatch") {
+          sendJson(response, 200, await service.dispatchWake(wakeSessionId, parsed.request));
+        } else {
+          sendJson(response, 200, await service.scheduleWake(wakeSessionId, parsed.request));
+        }
         return;
       }
 
@@ -1628,14 +1885,34 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid restore request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.restore(restoreSessionId, body));
         return;
       }
 
       const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
       if (method === "POST" && reopenSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid reopen request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
@@ -1768,26 +2045,60 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
+      const lifecycle = lifecycleErrorReceipt(error);
+      if (lifecycle) lifecycleErrors.set(response, lifecycle);
+      if (error instanceof SessionLifecycleError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { error: message, ...error.payload },
+        });
+        return;
+      }
+      if (error instanceof AutoPingError) {
+        failRequest(response, error.status, message, {
+          method,
+          path,
+          payload: { error: { code: error.code, message } },
+        });
+        return;
+      }
+      if (error instanceof PreflightPreviewError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            error: message,
+            preflightBatchId: error.preflightBatchId,
+            preflightTokenUsageView: error.preflightTokenUsageView,
+          },
+        });
+        return;
+      }
       if (
+        error instanceof AgentReasoningEffortError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
         error instanceof InvalidSourceReplyInputError ||
         error instanceof InvalidSessionMemoryInputError ||
         error instanceof InvalidSessionSubscriptionInputError ||
+        error instanceof InvalidWakeRequestError ||
         error instanceof InvalidJsonBodyError ||
+        error instanceof WakeTargetMissingError ||
+        error instanceof WakeDispatchConflictError ||
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
-        error instanceof QueueDeliveryInFlightError
+        error instanceof QueueDeliveryInFlightError ||
+        error instanceof AgentExitedBeforeSendError ||
+        error instanceof SessionStartingError ||
+        error instanceof SessionEndedError ||
+        error instanceof ForeignAgentProcessError ||
+        error instanceof LaunchPromptPendingError ||
+        error instanceof SidecarProbeUnresponsiveError
       ) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendError(response, error.statusCode, message);
+        failRequest(response, error.statusCode, message, { method, path });
         return;
       }
       if (
@@ -1796,92 +2107,74 @@ export async function startServer(
         error instanceof GithubPrCheckUnavailableError ||
         error instanceof SessionNotRestorableError
       ) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: error.payload,
         });
-        sendJson(response, error.statusCode, error.payload);
         return;
       }
       if (error instanceof TodoOpenWorkError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessions: error.sessions,
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessions: error.sessions,
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof TodoEmptyLedgerError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          ...(error.sessionIds.length === 1
-            ? { sessionId: error.sessionIds[0] }
-            : { sessionIds: error.sessionIds }),
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            ...(error.sessionIds.length === 1
+              ? { sessionId: error.sessionIds[0] }
+              : { sessionIds: error.sessionIds }),
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof InvalidTodoRequestError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { code: error.code, error: error.message },
         });
-        sendJson(response, error.statusCode, { code: error.code, error: error.message });
         return;
       }
       if (error instanceof TodoTransitionConflictError) {
-        logEvent("http.request.failed", {
-          level: "warn",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessionId: error.sessionId,
-          itemId: error.itemId,
-          error: error.message,
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            itemId: error.itemId,
+            error: error.message,
+          },
         });
         return;
       }
       if (error instanceof TodoLedgerCorruptError) {
-        logEvent("http.request.failed", {
-          level: "error",
-          ...(method ? { method } : {}),
-          ...(path ? { path } : {}),
-          message,
-        });
-        sendJson(response, error.statusCode, {
-          code: error.code,
-          sessionId: error.sessionId,
-          error: error.message,
-          ...(error.line ? { line: error.line } : {}),
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            code: error.code,
+            sessionId: error.sessionId,
+            error: error.message,
+            ...(error.line ? { line: error.line } : {}),
+          },
         });
         return;
       }
-      logEvent("http.request.failed", {
-        level: "error",
-        ...(method ? { method } : {}),
-        ...(path ? { path } : {}),
-        message,
-      });
-      sendError(response, 500, message);
+      failRequest(response, 500, message, { method, path });
     } finally {
       try {
         if (method && path) {
@@ -1919,15 +2212,14 @@ export async function startServer(
     });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(service.config.server.port, service.config.server.host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
   try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(service.config.server.port, service.config.server.host, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
     await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1936,6 +2228,7 @@ export async function startServer(
       message: `Spur daemon failed during startup: ${message}`,
     });
     service.dispose();
+    autoPing.dispose();
     await closeServer();
     throw error;
   }
@@ -2057,6 +2350,7 @@ export async function startServer(
         // It also retires the per-session delivery loops, which park on their own
         // poll sleep and would otherwise keep typing into panes after shutdown.
         service.dispose();
+        autoPing.dispose();
         const closePromise = closeServer();
         const sourceController = sources;
         if (sourceController) {

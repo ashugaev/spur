@@ -36,6 +36,7 @@ const tagCatalog = [
 function sessionFixture(tags: string[]): SpurSessionView {
   return {
     id: "api-a1",
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     project: "api",
     agent: "claude",
     prompt: "Fix auth",

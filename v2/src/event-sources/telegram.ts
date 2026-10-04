@@ -5,11 +5,18 @@ import {
   deleteTelegramReplyTarget,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  findTelegramChoice,
+  findTelegramMessageSession,
   readTelegramReplyTarget,
+  recordTelegramMessages,
+  takeTelegramChoice,
+  telegramBindingKey,
   writeTelegramBindings,
+  writeTelegramOffer,
   writeTelegramReplyTarget,
 } from "../metadata.js";
 import {
+  TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
@@ -19,18 +26,22 @@ import {
 import type {
   SourceHandle,
   SourceModule,
+  SourceProjectListItem,
   SourceSpawnSessionRequest,
   SourceSessionListItem,
   SourceStartDeps,
 } from "./types.js";
+import { formatTelegramSessionLabel } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
+const SPAWN_PROJECT_CALLBACK_PREFIX = "spur_sproj:";
 const PROJECT_CALLBACK_PREFIX = "spur_project:";
 const PROJECTS_MENU_CALLBACK = "spur_projects";
 const PENDING_SPAWN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_SPAWNS = 100;
+const SPAWN_EXPIRED_TEXT = "Spawn expired. Run /spawn again.";
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "Show Spur bot help" },
@@ -43,7 +54,8 @@ const TELEGRAM_COMMANDS = [
 
 interface TelegramTextMessage {
   message_id: number;
-  message_thread_id?: number;
+  message_thread_id?: number | undefined;
+  is_topic_message?: true;
   text?: string;
   chat: {
     id: number;
@@ -51,6 +63,9 @@ interface TelegramTextMessage {
   from?: {
     id: number;
     username?: string;
+  };
+  reply_to_message?: {
+    message_id: number;
   };
   voice?: {
     file_id: string;
@@ -84,7 +99,11 @@ interface TelegramCallbackContext {
   callbackQuery?: {
     data?: string;
     message?: {
-      message_thread_id?: number;
+      message_id?: number;
+      date?: number;
+      message_thread_id?: number | undefined;
+      is_topic_message?: true;
+      text?: string;
       chat: {
         id: number;
       };
@@ -97,6 +116,9 @@ interface TelegramCallbackContext {
   answerCallbackQuery(text?: string): Promise<unknown>;
   editMessageText?(text: string, options?: unknown): Promise<unknown>;
   reply?(text: string, options?: unknown): Promise<unknown>;
+  api?: {
+    editMessageText(chatId: number, messageId: number, text: string): Promise<unknown>;
+  };
 }
 
 interface TelegramRuntime {
@@ -112,9 +134,19 @@ interface TelegramRuntime {
 
 type TelegramAgentName = "claude" | "codex" | "cursor" | "opencode";
 
+/**
+ * Discriminated by `project`: `undefined` means "awaiting a project pick" —
+ * `projects`/`nonce` back the currently displayed `spur_sproj:` keyboard and
+ * a callback with a mismatched nonce or index is rejected. Once `project` is
+ * set, the record is "awaiting a prompt" and free text spawns with it.
+ */
 interface TelegramPendingSpawn {
   agent: TelegramAgentName;
   expiresAt: number;
+  projects: string[];
+  nonce: string;
+  project?: string;
+  prompt?: string;
 }
 
 type TelegramCommand =
@@ -184,10 +216,6 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
     default:
       return null;
   }
-}
-
-function telegramBindingKey(chatId: number, messageThreadId?: number): string {
-  return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
 function mergePersistedBindings(
@@ -285,20 +313,30 @@ function prunePendingSpawns(runtime: TelegramRuntime): void {
   }
 }
 
-function takePendingSpawn(
+/**
+ * Reads the pending spawn without deleting it, TTL-checked first. Lets
+ * `routeTelegramPrompt` distinguish "awaiting a project pick" (record must
+ * survive free text) from "awaiting a prompt" (record is consumed by it,
+ * via an explicit `clearPendingSpawn`) before deciding what to do with it.
+ */
+function peekPendingSpawn(
   runtime: TelegramRuntime,
   chatId: number,
   messageThreadId: number | undefined,
   userId: number,
 ): TelegramPendingSpawn | "expired" | null {
-  const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
-  const pending = runtime.pendingSpawns.get(key);
-  if (!pending) {
-    prunePendingSpawns(runtime);
-    return null;
-  }
-  runtime.pendingSpawns.delete(key);
+  const pending = runtime.pendingSpawns.get(
+    telegramPendingSpawnKey(chatId, messageThreadId, userId),
+  );
+  if (!pending) return null;
   return pending.expiresAt >= Date.now() ? pending : "expired";
+}
+
+function telegramMessageThreadId(
+  message: Pick<TelegramTextMessage, "chat" | "message_thread_id" | "is_topic_message">,
+  candidate = message.message_thread_id,
+): number | undefined {
+  return message.chat.id < 0 && message.is_topic_message !== true ? undefined : candidate;
 }
 
 function isAllowed(
@@ -428,8 +466,8 @@ async function sendHelp(ctx: TelegramTextContext): Promise<void> {
       "/agents - list active agents",
       "/watch - choose an agent for this chat",
       "/watch <sessionId> - bind directly",
-      "/spawn - choose an agent, then send task",
-      "/spawn <agent> <task> - create an agent with a task",
+      "/spawn - choose an agent, then a project, then send task",
+      "/spawn <agent> <task> - choose a project, then create an agent with that task",
       "/unwatch - unbind this chat",
       "",
       "Plain text goes to the bound agent. Commands stay in Telegram.",
@@ -452,33 +490,103 @@ async function sendSpawnMenu(ctx: TelegramTextContext): Promise<void> {
   });
 }
 
-async function requestSpawnPrompt(
+function buildSpawnProjectKeyboard(
+  projects: SourceProjectListItem[],
+  nonce: string,
+): { text: string; callback_data: string }[][] {
+  return projects.map((project, index) => [
+    {
+      text: project.name,
+      callback_data: `${SPAWN_PROJECT_CALLBACK_PREFIX}${nonce}:${index}`,
+    },
+  ]);
+}
+
+function newSpawnNonce(): string {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * Entry point for both `/spawn <agent>` and the `spur_spawn:` callback: lists
+ * the spawnable projects, auto-picks when there's exactly one (no keyboard —
+ * every downstream reply names the project instead), otherwise stores a
+ * fresh `nonce`-tagged snapshot on the pending record and sends the picker.
+ * `prompt`, when supplied (`/spawn <agent> <task>`), is held on the record
+ * and fires the spawn as soon as a project is picked instead of asking for
+ * one.
+ */
+async function requestSpawnProject(
   runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply">,
   chatId: number,
   messageThreadId: number | undefined,
   userId: number,
   agent: TelegramAgentName,
+  prompt?: string,
 ): Promise<void> {
+  const deps = runtime.deps;
+  // Every `/spawn` (and `spur_spawn:` callback) attempt overwrites whatever
+  // pending record a previous attempt left behind, on every outcome —
+  // otherwise a live record from an earlier `/spawn` can survive an
+  // immediate single-project spawn below and let the NEXT free text spawn a
+  // second, unrequested agent.
+  clearPendingSpawn(runtime, chatId, messageThreadId, userId);
+  let projects: SourceProjectListItem[] | null;
+  try {
+    projects = deps.listProjects ? await deps.listProjects() : null;
+  } catch (error) {
+    await ctx.reply(`Cannot list projects: ${redactedErrorText(deps, error)}`);
+    return;
+  }
+  if (projects === null) {
+    await ctx.reply("Cannot list projects.");
+    return;
+  }
+  if (projects.length === 0) {
+    await ctx.reply("No projects configured.");
+    return;
+  }
   prunePendingSpawns(runtime);
-  runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
+  const key = telegramPendingSpawnKey(chatId, messageThreadId, userId);
+  if (projects.length === 1) {
+    const project = projects[0]?.id;
+    if (project === undefined) {
+      await ctx.reply("Cannot list projects.");
+      return;
+    }
+    if (prompt !== undefined) {
+      await bindSpawnedSession(runtime, ctx, chatId, messageThreadId, { agent, project, prompt });
+      return;
+    }
+    runtime.pendingSpawns.set(key, {
+      agent,
+      expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+      projects: [project],
+      nonce: "",
+      project,
+    });
+    await ctx.reply(`Send task prompt for new ${agent} Spur agent in ${project}.`);
+    return;
+  }
+  const nonce = newSpawnNonce();
+  runtime.pendingSpawns.set(key, {
     agent,
     expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+    projects: projects.map((project) => project.id),
+    nonce,
+    ...(prompt !== undefined ? { prompt } : {}),
   });
-  await ctx.reply(`Send task prompt for new ${agent} Spur agent.`);
+  await ctx.reply(`Select a project for the new ${agent} agent:`, {
+    reply_markup: { inline_keyboard: buildSpawnProjectKeyboard(projects, nonce) },
+  });
 }
-
-type TelegramSpawnRequest = Omit<SourceSpawnSessionRequest, "project"> & { project?: string };
 
 async function spawnTelegramSession(
   runtime: TelegramRuntime,
-  request: TelegramSpawnRequest,
+  request: SourceSpawnSessionRequest,
 ): Promise<SourceSessionListItem | null> {
   if (!runtime.deps.spawnSession) return null;
-  return runtime.deps.spawnSession({
-    ...request,
-    project: request.project ?? runtime.deps.projectId,
-  });
+  return runtime.deps.spawnSession(request);
 }
 
 export function wrapTelegramSpawnPrompt(taskText: string): string {
@@ -486,7 +594,8 @@ export function wrapTelegramSpawnPrompt(taskText: string): string {
     taskText,
     "",
     "Source: telegram. The requester only sees messages you send with:",
-    'spur source reply "<message>"',
+    '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
+    'Offer choices with `--button <label>` or `--button <label>=<value>`, repeatable: "$SPUR_SESSION_TOOL_DIR/spur" source reply "Deploy now?" --button "Yes" --button "Later=wait for me". A click arrives as an ordinary user message carrying the value. Prefer buttons when the answer is one pick from a few options. Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.',
     "Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.",
   ].join("\n");
 }
@@ -508,12 +617,48 @@ async function editOrReply(
   await ctx.reply(text);
 }
 
+/**
+ * Reassign the group's plain-message binding and retire displaced outbound
+ * target/offers. Group-main recorded replies still reach their sender.
+ */
+async function detachDisplacedSession(
+  runtime: TelegramRuntime,
+  ctx: Pick<TelegramTextContext, "reply">,
+  chatId: number,
+  messageThreadId: number | undefined,
+  taker: SourceSessionListItem,
+  displacedId: string,
+): Promise<void> {
+  const deps = runtime.deps;
+  try {
+    const target = readTelegramReplyTarget(deps.dataDir, displacedId);
+    if (target && isSameTelegramTarget(target, chatId, messageThreadId)) {
+      deleteTelegramReplyTarget(deps.dataDir, displacedId);
+    }
+    writeTelegramOffer(deps.dataDir, deps.projectId, deps.sourceId, {
+      sessionId: displacedId,
+      chatId,
+      choices: [],
+    });
+    const displaced = await findSession(deps, displacedId);
+    const label = (session: Pick<SourceSessionListItem, "id" | "title">): string =>
+      formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
+    await ctx.reply(
+      messageThreadId === undefined
+        ? `${label(taker)} receives plain messages in this chat. Reply to an agent's message to reach that agent.`
+        : `${label(taker)} took over this thread from ${label(displaced ?? { id: displacedId })}.`,
+    );
+  } catch (error) {
+    logPersistError(deps, error);
+  }
+}
+
 async function bindSpawnedSession(
   runtime: TelegramRuntime,
   ctx: Pick<TelegramTextContext, "reply" | "api">,
   chatId: number,
   messageThreadId: number | undefined,
-  request: TelegramSpawnRequest,
+  request: SourceSpawnSessionRequest,
 ): Promise<void> {
   const deps = runtime.deps;
   const status = await ctx.reply(`Spawning ${request.agent} agent...`);
@@ -522,6 +667,12 @@ async function bindSpawnedSession(
     const session = await spawnTelegramSession(runtime, {
       ...request,
       prompt: wrapTelegramSpawnPrompt(request.prompt ?? ""),
+      telegramOrigin: {
+        projectId: deps.projectId,
+        sourceId: deps.sourceId,
+        chatId,
+        ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+      },
     });
     if (!session) {
       await editOrReply(
@@ -532,8 +683,16 @@ async function bindSpawnedSession(
       );
       return;
     }
+    // Plain messages follow the binding; group-main replies can reach other senders.
+    const key = telegramBindingKey(chatId, messageThreadId);
+    if (chatId < 0 && !runtime.bindings.has(key)) mergePersistedBindings(runtime);
+    const displacedId = chatId < 0 ? runtime.bindings.get(key)?.sessionId : undefined;
     await bindTelegramThread(runtime, chatId, messageThreadId, session.id);
+    rememberSent(deps, session.id, chatId, statusMessageId);
     await editOrReply(ctx, chatId, statusMessageId, `Spawned and bound: ${session.id}.`);
+    if (displacedId !== undefined && displacedId !== session.id) {
+      await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
+    }
   } catch (error) {
     await editOrReply(
       ctx,
@@ -542,6 +701,49 @@ async function bindSpawnedSession(
       `Spawn failed: ${redactedErrorText(deps, error)}`,
     );
   }
+}
+
+/**
+ * Records an inbound Telegram touch as the session's reply target. Carries the
+ * unconsumed status message and the last reply stamp across the whole-file
+ * replace. A placeholder is kept for a private chat or a forum topic, never for
+ * a group main chat (its first reply must create the topic), and never leaves
+ * the chat and thread it was posted in.
+ */
+function recordTelegramReplyTarget(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  target: {
+    sessionId: string;
+    chatId: number;
+    messageThreadId?: number;
+    statusMessageId?: number;
+    /** Bind path: keep the previous inbound stamp while the chat and thread are unchanged. */
+    keepInboundStamp?: boolean;
+  },
+): void {
+  const previous = readTelegramReplyTarget(deps.dataDir, target.sessionId);
+  const sameTarget =
+    previous !== null && isSameTelegramTarget(previous, target.chatId, target.messageThreadId);
+  const carriedStatus = sameTarget ? previous.statusMessageId : undefined;
+  const lastInboundAt =
+    target.keepInboundStamp && sameTarget && previous.lastInboundAt !== undefined
+      ? previous.lastInboundAt
+      : new Date().toISOString();
+  const keepsNewStatus =
+    target.statusMessageId !== undefined &&
+    (target.chatId > 0 || target.messageThreadId !== undefined);
+  const statusMessageId = keepsNewStatus ? target.statusMessageId : carriedStatus;
+  writeTelegramReplyTarget(deps.dataDir, {
+    sessionId: target.sessionId,
+    projectId: deps.projectId,
+    sourceId: deps.sourceId,
+    chatId: target.chatId,
+    ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+    ...(sameTarget && previous.topicName !== undefined ? { topicName: previous.topicName } : {}),
+    ...(previous?.lastReplyAt !== undefined ? { lastReplyAt: previous.lastReplyAt } : {}),
+    lastInboundAt,
+  });
 }
 
 async function bindTelegramThread(
@@ -569,13 +771,13 @@ async function bindTelegramThread(
     logPersistError(deps, error);
     throw error;
   }
-  writeTelegramReplyTarget(deps.dataDir, {
+  // A bind is not an inbound message: it must not move lastInboundAt past an
+  // agent reply that already landed.
+  recordTelegramReplyTarget(deps, {
     sessionId,
-    projectId: deps.projectId,
-    sourceId: deps.sourceId,
     chatId,
     ...(messageThreadId !== undefined ? { messageThreadId } : {}),
-    lastInboundAt: new Date().toISOString(),
+    keepInboundStamp: true,
   });
 }
 
@@ -645,7 +847,9 @@ async function handleTelegramCallback(
 ): Promise<void> {
   const query = ctx.callbackQuery;
   const data = query?.data;
-  const message = query?.message;
+  const message = query?.message
+    ? { ...query.message, message_thread_id: telegramMessageThreadId(query.message) }
+    : undefined;
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!data || !message) return;
@@ -653,15 +857,26 @@ async function handleTelegramCallback(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
+  if (data.startsWith(TELEGRAM_CHOICE_CALLBACK_PREFIX)) {
+    await handleAgentChoiceCallback(
+      ctx,
+      runtime,
+      data.slice(TELEGRAM_CHOICE_CALLBACK_PREFIX.length),
+      message,
+      from,
+    );
+    return;
+  }
+
   if (data.startsWith(SPAWN_CALLBACK_PREFIX)) {
     const agent = data.slice(SPAWN_CALLBACK_PREFIX.length);
     if (!isTelegramAgentName(agent)) return;
     await ctx.answerCallbackQuery(`Selected ${agent}.`);
-    await requestSpawnPrompt(
+    await requestSpawnProject(
       runtime,
       {
-        reply: async (text: string) => {
-          await ctx.reply?.(text);
+        reply: async (text: string, options?: unknown) => {
+          await ctx.reply?.(text, options);
           return {};
         },
       },
@@ -670,6 +885,56 @@ async function handleTelegramCallback(
       from.id,
       agent,
     );
+    return;
+  }
+
+  if (data.startsWith(SPAWN_PROJECT_CALLBACK_PREFIX)) {
+    const [nonce, indexRaw] = data.slice(SPAWN_PROJECT_CALLBACK_PREFIX.length).split(":");
+    const chatId = message.chat.id;
+    const messageThreadId = message.message_thread_id;
+    const userId = from.id;
+    const peeked = peekPendingSpawn(runtime, chatId, messageThreadId, userId);
+    if (peeked === "expired") {
+      clearPendingSpawn(runtime, chatId, messageThreadId, userId);
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    if (!peeked || peeked.project !== undefined || peeked.nonce !== nonce) {
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    const index = indexRaw !== undefined && indexRaw !== "" ? Number(indexRaw) : NaN;
+    const project = Number.isInteger(index) ? peeked.projects[index] : undefined;
+    if (project === undefined) {
+      await ctx.answerCallbackQuery(SPAWN_EXPIRED_TEXT);
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const replyShim = {
+      reply: async (text: string) => {
+        const sent = await ctx.reply?.(text);
+        return (sent ?? {}) as TelegramSentMessage;
+      },
+      ...(ctx.api ? { api: ctx.api } : {}),
+    };
+    if (peeked.prompt !== undefined) {
+      clearPendingSpawn(runtime, chatId, messageThreadId, userId);
+      await bindSpawnedSession(runtime, replyShim, chatId, messageThreadId, {
+        agent: peeked.agent,
+        project,
+        prompt: peeked.prompt,
+      });
+      return;
+    }
+    prunePendingSpawns(runtime);
+    runtime.pendingSpawns.set(telegramPendingSpawnKey(chatId, messageThreadId, userId), {
+      agent: peeked.agent,
+      expiresAt: Date.now() + PENDING_SPAWN_TTL_MS,
+      projects: [],
+      nonce: "",
+      project,
+    });
+    await replyShim.reply(`Send task prompt for new ${peeked.agent} Spur agent in ${project}.`);
     return;
   }
 
@@ -760,11 +1025,101 @@ async function handleTelegramCallback(
   }
 }
 
+/**
+ * Delivers a click on an agent-offered button as an ordinary user message to
+ * the session that offered it. The token is single-use and carries the whole
+ * offer with it, so sibling buttons go dead on the first click.
+ */
+async function handleAgentChoiceCallback(
+  ctx: TelegramCallbackContext,
+  runtime: TelegramRuntime,
+  token: string,
+  message: NonNullable<NonNullable<TelegramCallbackContext["callbackQuery"]>["message"]>,
+  from: { id: number; username?: string },
+): Promise<void> {
+  const deps = runtime.deps;
+  const pending = findTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  if (!pending) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Liveness before consumption: a dead lookup must leave the offer clickable.
+  const session = await findSession(deps, pending.sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery("Session is no longer active.");
+    return;
+  }
+  if (session.inactive) {
+    await ctx.answerCallbackQuery(
+      `${formatTelegramSessionLabel(session.id, session.title?.trim() || undefined)} is not active.`,
+    );
+    return;
+  }
+  const choice = takeTelegramChoice(
+    deps.dataDir,
+    deps.projectId,
+    deps.sourceId,
+    token,
+    message.chat.id,
+  );
+  // Lost the race with a sibling click or a superseding reply.
+  if (!choice) {
+    await ctx.answerCallbackQuery("This choice is no longer active.");
+    return;
+  }
+  // Best-effort: Telegram expires callback queries, and a rejected answer must
+  // not swallow a click that was already consumed.
+  try {
+    await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
+    );
+  }
+  // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
+  if (ctx.editMessageText && message.text) {
+    try {
+      await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
+    } catch (error) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
+      );
+    }
+  }
+  // The clicked message is the truth about the thread: an offer sent before a
+  // forum topic existed carries none, and a stale one would strand the reply.
+  const messageThreadId =
+    message.date === 0
+      ? choice.messageThreadId
+      : telegramMessageThreadId(message, message.message_thread_id ?? choice.messageThreadId);
+  const clickMessage: TelegramTextMessage = {
+    message_id: message.message_id ?? 0,
+    ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    chat: { id: choice.chatId },
+    from,
+  };
+  // A click posts no status message of its own.
+  recordTelegramReplyTarget(deps, {
+    sessionId: choice.sessionId,
+    chatId: choice.chatId,
+    ...(messageThreadId !== undefined ? { messageThreadId } : {}),
+  });
+  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(clickMessage, choice.sessionId, choice.value));
+}
+
 async function handleTelegramText(
   ctx: TelegramTextContext,
   runtime: TelegramRuntime,
 ): Promise<void> {
-  const message = ctx.message;
+  const message = ctx.message
+    ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
+    : undefined;
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
   if (!message?.text || !message.text.trim()) return;
@@ -819,22 +1174,15 @@ async function handleTelegramText(
     return;
   }
   if (command?.kind === "spawn") {
-    if (!command.prompt) {
-      await requestSpawnPrompt(
-        runtime,
-        ctx,
-        message.chat.id,
-        message.message_thread_id,
-        from.id,
-        command.agent,
-      );
-      return;
-    }
-    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
-    await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
-      agent: command.agent,
-      prompt: command.prompt,
-    });
+    await requestSpawnProject(
+      runtime,
+      ctx,
+      message.chat.id,
+      message.message_thread_id,
+      from.id,
+      command.agent,
+      command.prompt,
+    );
     return;
   }
   if (command?.kind === "invalid_watch") {
@@ -848,7 +1196,11 @@ async function handleTelegramText(
       message.chat.id,
       message.message_thread_id,
     );
-    await ctx.reply(deleted ? "Unbound this Telegram thread." : "No Spur session bound here.");
+    await ctx.reply(
+      deleted
+        ? "Unbound this Telegram thread. An agent send can bind it again."
+        : "No Spur session bound here.",
+    );
     return;
   }
   if (message.text.trim().startsWith("/")) {
@@ -880,21 +1232,53 @@ async function routeTelegramPrompt(
   const deps = runtime.deps;
   const key = telegramBindingKey(message.chat.id, message.message_thread_id);
 
-  const pendingSpawn = takePendingSpawn(
+  const peekedSpawn = peekPendingSpawn(
     runtime,
     message.chat.id,
     message.message_thread_id,
     from.id,
   );
-  if (pendingSpawn) {
-    if (pendingSpawn === "expired") {
-      await ctx.reply("Spawn prompt expired. Run /spawn again.");
-      return;
-    }
+  if (peekedSpawn === "expired") {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
+    await ctx.reply(SPAWN_EXPIRED_TEXT);
+    return;
+  }
+  if (peekedSpawn && peekedSpawn.project !== undefined) {
+    clearPendingSpawn(runtime, message.chat.id, message.message_thread_id, from.id);
     await bindSpawnedSession(runtime, ctx, message.chat.id, message.message_thread_id, {
-      agent: pendingSpawn.agent,
+      agent: peekedSpawn.agent,
+      project: peekedSpawn.project,
       prompt: text,
     });
+    return;
+  }
+  // `peekedSpawn` here, if present, is an awaiting-project record: it never
+  // preempts a live bound session, but it must survive free text and skip
+  // autoSpawn when there's no session to deliver to (see routeTelegramPrompt
+  // doc comment above and spec revision 2 G2).
+  const hasAwaitingProject = peekedSpawn !== null;
+
+  // Private/group-main bot-message replies reach their sender without
+  // changing bindings or auto-spawning.
+  const repliedTo = message.reply_to_message?.message_id;
+  // Forum topics retain their binding, including after another session takes over.
+  const ownerId =
+    repliedTo === undefined || (message.chat.id < 0 && message.message_thread_id !== undefined)
+      ? null
+      : findTelegramMessageSession(
+          deps.dataDir,
+          deps.projectId,
+          deps.sourceId,
+          message.chat.id,
+          repliedTo,
+        );
+  if (ownerId !== null) {
+    const owner = await findSession(deps, ownerId);
+    if (!owner) {
+      await ctx.reply(`Spur session ${ownerId} is gone. Message not delivered.`);
+      return;
+    }
+    await deliverRoutedPrompt(deps, ctx, message, owner, text);
     return;
   }
 
@@ -904,6 +1288,10 @@ async function routeTelegramPrompt(
     binding = runtime.bindings.get(key);
   }
   if (!binding) {
+    if (hasAwaitingProject) {
+      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      return;
+    }
     const acquireResult = tryAcquireAutoSpawn(runtime, key);
     switch (acquireResult.status) {
       case "busy":
@@ -928,6 +1316,10 @@ async function routeTelegramPrompt(
   }
   const session = await findSession(deps, binding.sessionId);
   if (!session) {
+    if (hasAwaitingProject) {
+      await ctx.reply("Pick a project for the pending /spawn, or run /spawn again.");
+      return;
+    }
     const acquireResult = tryAcquireAutoSpawn(runtime, key);
     switch (acquireResult.status) {
       case "busy":
@@ -952,26 +1344,100 @@ async function routeTelegramPrompt(
     await ctx.reply(`Spur session ${binding.sessionId} is gone. Unbound. Use /watch or /spawn.`);
     return;
   }
+  await deliverRoutedPrompt(deps, ctx, message, session, text);
+}
+
+/**
+ * A message waits in the queue unless the agent is idle (waiting, or parked
+ * and woken by the send); the placeholder says so instead of claiming thought.
+ */
+function placeholderText(label: string, state: string): string {
+  if (state === "needs_input") {
+    return `Received. ${label} needs input in its terminal; your message is queued.`;
+  }
+  if (state === "working" || state === "rate_limited" || state === "error") {
+    return `Received. ${label} is busy; your message is queued.`;
+  }
+  return `Received. ${label} is thinking...`;
+}
+
+/**
+ * Hands a routed prompt to one live session: posts the thinking placeholder,
+ * records it as the reply target, then emits. A session that would drop the
+ * message gets a notice instead, so the user never waits on a dead agent.
+ */
+async function deliverRoutedPrompt(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  ctx: Pick<TelegramTextContext, "reply" | "api">,
+  message: TelegramTextMessage,
+  session: SourceSessionListItem,
+  text: string,
+): Promise<void> {
+  const label = formatTelegramSessionLabel(session.id, session.title?.trim() || undefined);
+  if (session.inactive) {
+    await ctx.reply(`${label} is not active. Message not delivered.`);
+    return;
+  }
   let statusMessageId: number | undefined;
   try {
-    statusMessageId = extractMessageId(await ctx.reply("Sent to Spur agent."));
+    statusMessageId = extractMessageId(await ctx.reply(placeholderText(label, session.state)));
   } catch (error) {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
     );
   }
-  writeTelegramReplyTarget(deps.dataDir, {
-    sessionId: binding.sessionId,
-    projectId: deps.projectId,
-    sourceId: deps.sourceId,
+  // Read and replaced in one synchronous step: a reply that claimed the old
+  // placeholder before this point is not superseded, and one that starts after
+  // it reads the new placeholder.
+  const superseded =
+    statusMessageId !== undefined ? supersededPlaceholder(deps, session.id, message) : undefined;
+  recordTelegramReplyTarget(deps, {
+    sessionId: session.id,
     chatId: message.chat.id,
-    ...(statusMessageId !== undefined && message.chat.id > 0 ? { statusMessageId } : {}),
     ...(message.message_thread_id !== undefined
       ? { messageThreadId: message.message_thread_id }
       : {}),
-    lastInboundAt: new Date().toISOString(),
+    ...(statusMessageId !== undefined ? { statusMessageId } : {}),
   });
-  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, binding.sessionId, text));
+  rememberSent(deps, session.id, message.chat.id, statusMessageId);
+  deps.emit(TELEGRAM_MESSAGE_EVENT, eventData(message, session.id, text));
+  if (superseded !== undefined && ctx.api) {
+    // Best-effort: the superseded placeholder stops claiming the agent is thinking.
+    try {
+      await ctx.api.editMessageText(message.chat.id, superseded, "Received.");
+    } catch {
+      // Already edited or deleted: nothing left to clear.
+    }
+  }
+}
+
+/** The unconsumed placeholder in this chat and thread, if the session has one. */
+function supersededPlaceholder(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  message: TelegramTextMessage,
+): number | undefined {
+  const previous = readTelegramReplyTarget(deps.dataDir, sessionId);
+  return previous && isSameTelegramTarget(previous, message.chat.id, message.message_thread_id)
+    ? previous.statusMessageId
+    : undefined;
+}
+
+/** Records a bot message so a user reply to it routes back to the session. */
+function rememberSent(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  sessionId: string,
+  chatId: number,
+  messageId: number | undefined,
+): void {
+  if (messageId === undefined) return;
+  try {
+    recordTelegramMessages(deps.dataDir, deps.projectId, deps.sourceId, { sessionId, chatId }, [
+      messageId,
+    ]);
+  } catch (error) {
+    logPersistError(deps, error);
+  }
 }
 
 function logRunnerError(deps: SourceStartDeps<TelegramSourceConfig>, error: unknown): void {
@@ -1147,7 +1613,9 @@ async function handleTelegramVoice(
 ): Promise<void> {
   const deps = runtime.deps;
   if (!(await rememberUpdate(runtime, ctx.update))) return;
-  const message = ctx.message;
+  const message = ctx.message
+    ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
+    : undefined;
   if (!message?.voice) return;
   const from = message.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;

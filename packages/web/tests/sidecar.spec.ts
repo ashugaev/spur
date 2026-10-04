@@ -1,5 +1,11 @@
-import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, makeSessionWithSidecar, mockTagCatalog } from "./fixtures.js";
+import {
+  test,
+  expect,
+  type Page,
+  makeWorkingSession,
+  makeSessionWithSidecar,
+  mockTagCatalog,
+} from "./fixtures.js";
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return Promise.all([
@@ -204,6 +210,46 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(sidecarTermBtn).toHaveCount(0);
   });
 
+  test("#822: dead-pane sidecar keeps the terminal button and shows start", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", false, {
+      id: "sc-dead-pane-1",
+      runtimeAlive: true,
+      tmuxSession: "spur-sc-dead-pane-1",
+      sidecars: [{ name: "dev", alive: false, deadPane: true }],
+    });
+    let startRequested = false;
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, (route) => {
+      startRequested = true;
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSessionWithSidecar("dev", true, { id: session.id })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    // Dead-pane status dot renders the same not-alive (grey) style as any
+    // dead sidecar, not the alive fill — discriminates the row from an
+    // alive one, since `deadPane` never accompanies `alive: true`.
+    await expect(sidecarSection.getByTestId("sidecar-status-dev")).toHaveClass(
+      /color-text-tertiary/,
+    );
+    await expect(sidecarSection.getByTestId("sidecar-status-dev")).not.toHaveClass(
+      /color-chip-alive/,
+    );
+    await expect(sidecarSection.getByRole("button", { name: /terminal/i })).toBeVisible();
+    await expect(sidecarSection.getByRole("link", { name: /open/i })).toHaveCount(0);
+
+    const startButton = sidecarSection.getByRole("button", { name: "Start sidecar dev" });
+    await expect(startButton).toBeVisible();
+    await startButton.click();
+
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    expect(startRequested).toBe(true);
+  });
+
   test("no sidecars section when sidecars array is empty", async ({ page }) => {
     const session = makeWorkingSession({ id: "sc-empty-1", sidecars: [] });
     await mockSessionDetail(page, session);
@@ -234,10 +280,10 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}--my-sidecar`));
   });
 
-  test("sidecar with matching slot link label shows Open link", async ({ page }) => {
+  test("ready URL shows Open without tmux and retains ordinary slot links", async ({ page }) => {
     const session = makeWorkingSession({
       id: "sc-open-1",
-      sidecars: [{ name: "isolated-ui", alive: true }],
+      sidecars: [{ name: "isolated-ui", alive: false, url: "https://ready.example.com/" }],
       slots: {
         title: "Session with sidecar UI",
         links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
@@ -251,7 +297,76 @@ test.describe("SC1: Sidecar terminal buttons", () => {
 
     const openLink = sidecarSection.getByRole("link", { name: /open/i });
     await expect(openLink).toBeVisible();
-    await expect(openLink).toHaveAttribute("href", "http://example.com:5601");
+    await expect(openLink).toHaveAttribute("href", "https://ready.example.com/");
+    await expect(sidecarSection.getByRole("button", { name: /terminal/i })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "isolated-ui", exact: true })).toHaveAttribute(
+      "href",
+      "http://example.com:5601",
+    );
+  });
+
+  test("stale slot URL cannot create sidecar Open", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sc-stale-slot",
+      sidecars: [{ name: "dev", alive: true }],
+      slots: { links: [{ label: "dev", url: "https://stale.example.com/" }] },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+    const section = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(section).toBeVisible();
+    await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute(
+      "href",
+      "https://stale.example.com/",
+    );
+  });
+
+  test("ready URL refresh adds Open and stop removes Open while preserving unmatched slot target", async ({
+    page,
+  }) => {
+    let ready = false;
+    let stopped = false;
+    const session = makeWorkingSession({
+      id: "sc-ready-refresh",
+      sidecars: [{ name: "dev", alive: true }],
+      slots: { links: [{ label: "dev", url: "https://legacy.example.com/" }] },
+    });
+    await mockTagCatalog(page);
+    const current = () => ({
+      ...session,
+      sidecars: [
+        {
+          ...session.sidecars?.[0],
+          name: "dev",
+          alive: !stopped,
+          ...(ready && !stopped ? { url: "https://ready.example.com/" } : {}),
+        },
+      ],
+    });
+    await page.route(`**/api/sessions/${session.id}`, (route) =>
+      route.fulfill({ json: current() }),
+    );
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/stop`, (route) => {
+      stopped = true;
+      return route.fulfill({ json: current() });
+    });
+    await page.goto(`/sessions/${session.id}`);
+    const section = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(section).toBeVisible();
+    await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
+    ready = true;
+    await expect(section.getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "https://ready.example.com/",
+      { timeout: 15000 },
+    );
+    await section.getByRole("button", { name: "Stop sidecar dev" }).click();
+    await expect(section.getByRole("link", { name: "Open" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "dev", exact: true })).toHaveAttribute(
+      "href",
+      "https://legacy.example.com/",
+    );
   });
 
   test("starting one sidecar keeps other sidecar start buttons enabled", async ({ page }) => {
@@ -297,11 +412,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
   }) => {
     const session = makeWorkingSession({
       id: "sc-order-1",
-      sidecars: [{ name: "isolated-ui", alive: true }],
-      slots: {
-        title: "Session with ordered sidecar actions",
-        links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
-      },
+      sidecars: [{ name: "isolated-ui", alive: true, url: "http://example.com:5601" }],
     });
     await mockSessionDetail(page, session);
     await gotoSessionDetail(page, session.id);

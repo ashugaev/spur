@@ -20,11 +20,11 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
-import { Command, type Help } from "commander";
+import { Command, Option, type Help } from "commander";
 import {
   connectProjectConfig,
   deleteJson,
@@ -93,14 +93,52 @@ import {
   readConfigRegistryFile,
 } from "./registry.js";
 import { listSessions } from "./metadata.js";
+import {
+  createArtifactRetentionDeps,
+  executeArtifactRetention,
+  listAnchorArtifacts,
+  planArtifactRetention,
+  type ArtifactRetentionReport,
+} from "./artifact-retention.js";
 import { createGcDeps, executeSessionGc, planSessionGc, type GcReport } from "./session-gc.js";
+import {
+  measureDiskBudget,
+  realDu,
+  writeDiskBudgetReport,
+  type DiskBudgetReport,
+} from "./disk-budget.js";
+import {
+  containmentRel,
+  createDiskGcDeps,
+  executeDiskGc,
+  measureBytes as measureDiskGcBytes,
+  planBrowserRevisionCandidates,
+  planBuildCacheGc,
+  planNpmCap,
+  planProfileGc,
+  singletonLockLivePid,
+  type DiskGcPlan,
+  type DiskGcReport,
+  type DiskGcReportCandidate,
+} from "./disk-gc.js";
+import { findBuildCacheDirs } from "./build-cache-scan.js";
+import { snapshotProcesses } from "./process-tree.js";
+import { readdir as readdirAsync, lstat as lstatAsync } from "node:fs/promises";
+import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import {
   SESSION_STATES,
+  isRespawnableStatus,
   isSessionState,
   type AppConfig,
+  type AutoPingResumeResponse,
+  type AutoPingScope,
+  type AutoPingSuppressionListResponse,
+  type AutoPingSuppressionView,
+  type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
+  type ProviderReasoningEffort,
   type RespawnSessionRequest,
   type RuntimeInfo,
   type RunServiceRequest,
@@ -119,10 +157,12 @@ import {
   type ServiceInstanceView,
   type SessionListItemView,
   type SessionView,
+  type SidecarStopView,
   type SharedMemoryEntryResponse,
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
+  type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
@@ -130,6 +170,7 @@ import {
   type SetSessionMemoryRequest,
   type SetSharedMemoryRequest,
   type UpdateSessionSlotsRequest,
+  type UpdateSessionSlotsResponse,
   type HandoffSessionRequest,
   type TodoMutationRequest,
   type TodoProjection,
@@ -408,7 +449,22 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  return `Sent ${response.source} reply for ${response.sessionId}.`;
+  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+}
+
+/** `<label>` or `<label>=<value>`; the value defaults to the label. */
+function parseButtonOption(
+  raw: string,
+  previous: SourceReplyButton[] | undefined,
+): SourceReplyButton[] {
+  const separator = raw.indexOf("=");
+  const text = (separator === -1 ? raw : raw.slice(0, separator)).trim();
+  const value = (separator === -1 ? raw : raw.slice(separator + 1)).trim();
+  if (!text || !value) {
+    throw new Error("--button takes <label> or <label>=<value>");
+  }
+  return [...(previous ?? []), { text, value }];
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
@@ -663,6 +719,69 @@ function postSessionAction(
   return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
+function resolveAutoPingSessionId(explicitSession: string | undefined): string {
+  const explicit = explicitSession?.trim();
+  const envSession = process.env["SPUR_SESSION"]?.trim();
+  if (envSession) {
+    if (explicit && explicit !== envSession) {
+      throw new Error("--session cannot target a different session than SPUR_SESSION");
+    }
+    return envSession;
+  }
+  if (!explicit) {
+    throw new Error("--session is required outside a Spur session");
+  }
+  return explicit;
+}
+
+function resolveAutoPingUnsubscribe(args: {
+  event?: string;
+  thread?: string;
+  subscription?: string;
+}): { scope: AutoPingScope; handle: string } {
+  const entries: Array<{ scope: AutoPingScope; handle: string }> = [];
+  if (args.event?.trim()) entries.push({ scope: "event", handle: args.event.trim() });
+  if (args.thread?.trim()) entries.push({ scope: "thread", handle: args.thread.trim() });
+  if (args.subscription?.trim()) {
+    entries.push({ scope: "subscription", handle: args.subscription.trim() });
+  }
+  if (entries.length !== 1) {
+    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  }
+  const entry = entries[0];
+  if (!entry) {
+    throw new Error("Use exactly one of --event, --thread, or --subscription");
+  }
+  return entry;
+}
+
+function renderAutoPingSuppression(record: AutoPingSuppressionView): string {
+  const parts = [
+    record.suppressionId,
+    record.scope,
+    record.destination.sessionId,
+    record.createdAt,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0);
+  return parts.join("\t");
+}
+
+function renderAutoPingList(response: AutoPingSuppressionListResponse): string {
+  if (response.records.length === 0) {
+    return dimText("No auto-ping suppressions.");
+  }
+  return response.records.map(renderAutoPingSuppression).join("\n");
+}
+
+function renderAutoPingUnsubscribe(response: AutoPingUnsubscribeResponse): string {
+  const prefix = response.created ? "Created" : "Already active";
+  return `${prefix} auto-ping ${response.record.scope} suppression ${response.record.suppressionId}.`;
+}
+
+function renderAutoPingResume(response: AutoPingResumeResponse, suppressionId: string): string {
+  const prefix = response.removed ? "Resumed" : "Already resumed";
+  return `${prefix} auto-ping suppression ${suppressionId}.`;
+}
+
 function parsePrActionOption(value: string): OpenPrAction {
   if (value === "leave_open" || value === "close") {
     return value;
@@ -702,6 +821,13 @@ type SubscribeCommandOptions = {
   remove?: string;
   json?: boolean;
 };
+
+function reasoningEffortOption(): Option {
+  return new Option(
+    "--reasoning-effort <level>",
+    "Reasoning effort for the resolved agent and model",
+  ).choices(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+}
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
@@ -999,6 +1125,8 @@ function formatProtectedReason(candidate: CacheCandidate): string {
       return `pinned browser revision (${reason.dirName})`;
     case "pin-unresolved":
       return "no browsers.json pin sources resolved";
+    case "referrer-unresolved":
+      return "a .links referrer is unresolvable; every browser revision is protected";
     case "pin-source":
       return "npx-package is a browsers.json pin source";
     case "spur-owned":
@@ -1174,16 +1302,62 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
       outcome && outcome.survivors.length > 0 ? `  survivors ${outcome.survivors.join(",")}` : "";
     // Tree total, not the root pid's own rss — the root alone understated
     // the measured 863333/863351 leak by 17x.
+    const attribution =
+      tree.kind === "orphan-daemon"
+        ? tree.liveness === "serving"
+          ? `daemon ${tree.configPath} — serving on ${tree.port} — stop it with 'spur --config ${tree.configPath} daemon stop'`
+          : tree.liveness === "unknown"
+            ? `daemon ${tree.configPath} — liveness unknown — verify manually before killing`
+            : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
+        : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${tree.sidecarName ?? "unattributed"}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}  tree [${tree.tree.join(",")}]${survivorsSuffix}`,
     );
   });
-  return lines.join("\n");
+  const totalRssKb = result.leaked.reduce((sum, tree) => sum + tree.treeRssKb, 0);
+  const totalLine = dimText(`Total would-free: ${formatBytes(totalRssKb * 1024)}`);
+  return [...lines, totalLine].join("\n");
 }
 
 // Test-only: exercises the sweep summary's status/survivors formatting
 // without spinning up a live CLI command or the daemon route it calls.
 export const _renderSidecarSweepResultForTests = renderSidecarSweepResult;
+
+// `sidecar stop`'s success line, per real outcome — never claims a reap that
+// did not happen (`sidecarStop.outcome`, session-service.ts's stopSidecar).
+function renderSidecarStopMessage(name: string, session: SidecarStopView): string {
+  const { sidecarStop } = session;
+  if (sidecarStop.outcome === "nothing-to-stop") {
+    return `Sidecar ${name} on ${session.id} was not running; nothing to stop.`;
+  }
+  if (sidecarStop.outcome === "partial") {
+    // ND-2: unverifiedPorts has two distinct causes (a probe that could not
+    // run, or a port excluded as ambiguous against a non-terminal sibling —
+    // see the sidecars/:name/stop route handler in server.ts) — this message
+    // names neither, rather than misattributing an ambiguous-ownership
+    // exclusion to a missing OS tool.
+    const unverifiedPorts = sidecarStop.unverifiedPorts ?? [];
+    if (sidecarStop.survivors.length === 0 && unverifiedPorts.length > 0) {
+      return `Stopped sidecar ${name} for ${session.id}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Report them: spur sidecar sweep`;
+    }
+    return `Stopped sidecar ${name} for ${session.id}, but ${sidecarStop.survivors.length} process(es) survived: ${sidecarStop.survivors.join(",")}. Report them: spur sidecar sweep`;
+  }
+  return `Stopped sidecar ${name} for ${session.id}.`;
+}
+
+// Test-only: exercises the stop message's per-outcome branching without a
+// live CLI command or the daemon route it calls.
+export const _renderSidecarStopMessageForTests = renderSidecarStopMessage;
+
+// `sidecar stop`'s process exit code, per real outcome — only a `partial`
+// reap (survivors left behind) is operator-actionable failure.
+function sidecarStopExitCode(session: SidecarStopView): number | undefined {
+  return session.sidecarStop.outcome === "partial" ? 1 : undefined;
+}
+
+// Test-only: exercises the stop exit-code mapping without a live CLI
+// command or the daemon route it calls.
+export const _sidecarStopExitCodeForTests = sidecarStopExitCode;
 
 // Bounds one interactive `spur gc` run; the daemon sweep has its own
 // sessionGc.maxGroupsPerSweep instead.
@@ -1246,6 +1420,168 @@ export function renderSessionGcResult(report: GcReport): string {
   return lines.join("\n");
 }
 
+export function renderDiskBudgetReport(report: DiskBudgetReport): string {
+  const lines = [boldText("Disk budget roots")];
+  for (const root of report.roots) {
+    lines.push(
+      `  ${accent(root.id.padEnd(24))}  ${root.status.padEnd(10)}  ${formatBytes(root.sizeBytes).padStart(10)}  reclaimedBy=${root.reclaimedBy}  ${dimText(root.path)}`,
+    );
+  }
+  lines.push("");
+  lines.push(`Total attributable: ${formatBytes(report.totals.attributableBytes)}`);
+  return lines.join("\n");
+}
+
+function renderDiskGcCandidateLine(label: string, candidate: DiskGcReportCandidate): string {
+  return `  ${accent(label.padEnd(11))}  ${formatBytes(candidate.sizeBytes).padStart(10)}  ${candidate.path}  ${dimText(candidate.reason)}`;
+}
+
+// B3: the operator reads this output to decide whether to run --execute, so
+// it must name every candidate path and its bytes in BOTH dry-run and
+// executed reports — a total with no paths does not meet "printing exactly
+// what it would remove".
+export function renderDiskGcReport(report: DiskGcReport): string {
+  const lines = [boldText("Disk GC")];
+  const removedBuildCache = new Set(report.buildCache.removed);
+  const removedProfiles = new Set(report.profiles.removed);
+
+  lines.push(
+    dimText(
+      `Build caches: ${report.buildCache.candidates.length} candidate(s), ${report.buildCache.removed.length} removed, ${report.buildCache.failures.length} failure(s). Profiles: ${report.profiles.candidates.length} candidate(s), ${report.profiles.removed.length} removed, ${report.profiles.failures.length} failure(s).`,
+    ),
+  );
+  for (const candidate of report.buildCache.candidates) {
+    const label = report.dryRun
+      ? "build-cache"
+      : removedBuildCache.has(candidate.path)
+        ? "removed"
+        : "blocked";
+    lines.push(renderDiskGcCandidateLine(label, candidate));
+  }
+  for (const failure of report.buildCache.failures) {
+    lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
+  }
+  for (const candidate of report.profiles.candidates) {
+    const label = report.dryRun
+      ? "mcp-profile"
+      : removedProfiles.has(candidate.path)
+        ? "removed"
+        : "blocked";
+    lines.push(renderDiskGcCandidateLine(label, candidate));
+  }
+  for (const failure of report.profiles.failures) {
+    lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
+  }
+  if (report.browserRevisions.candidates.length > 0) {
+    lines.push("");
+    lines.push(boldText("Browser revisions (--browser-revisions)"));
+    const removedRevisions = new Set(report.browserRevisions.removed);
+    for (const candidate of report.browserRevisions.candidates) {
+      const label = report.dryRun
+        ? "revision"
+        : removedRevisions.has(candidate.path)
+          ? "removed"
+          : "blocked";
+      lines.push(renderDiskGcCandidateLine(label, candidate));
+    }
+    for (const failure of report.browserRevisions.failures) {
+      lines.push(dimText(`  blocked      ${failure.path}  (${failure.message})`));
+    }
+  }
+
+  lines.push("");
+  lines.push(boldText("npm cache cap (~/.npm/_cacache)"));
+  switch (report.npmCap.status) {
+    case "not-over-cap":
+      lines.push(dimText("  under diskBudget.npmCacheMaxGb — nothing to do."));
+      break;
+    case "skipped-package-manager-active":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — skipped, a package manager process is running.`,
+        ),
+      );
+      break;
+    case "index-unreadable":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — index-v5 unreadable, cap not enforced.`,
+        ),
+      );
+      break;
+    case "planned":
+      lines.push(dimText(`  over cap by ${formatBytes(report.npmCap.overCapBytes)}.`));
+      for (const victim of report.npmCap.victims) {
+        lines.push(renderDiskGcCandidateLine("npm-key", victim));
+      }
+      for (const step of report.npmCap.ranSteps) {
+        lines.push(`  ${step}`);
+      }
+      lines.push(
+        dimText(
+          `${report.npmCap.cleanedKeys} key(s), ${formatBytes(report.npmCap.freedBytes)} freed. The whole-root wipe stays owned by \`spur cache --prune --yes\`.`,
+        ),
+      );
+      break;
+    case "execution-failed":
+      lines.push(
+        dimText(
+          `  over cap by ${formatBytes(report.npmCap.overCapBytes)} — npm step failed: ${report.npmCap.message}`,
+        ),
+      );
+      for (const victim of report.npmCap.victims) {
+        lines.push(renderDiskGcCandidateLine("npm-key", victim));
+      }
+      for (const step of report.npmCap.ranSteps) {
+        lines.push(`  ${step}`);
+      }
+      lines.push(
+        dimText(
+          `  before the failure: ${report.npmCap.cleanedKeys} key(s) cleaned, ${formatBytes(report.npmCap.freedBytes)} freed.`,
+        ),
+      );
+      break;
+  }
+
+  lines.push("");
+  lines.push(`Total freed: ${formatBytes(report.freedBytes)}`);
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing removed. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
+export function renderArtifactRetentionResult(report: ArtifactRetentionReport): string {
+  const lines = [
+    dimText(
+      `Scanned ${report.scanned.files} artifact(s) across ${report.scanned.anchors} anchor(s); planned ${report.anchors.length} (limit ${report.limit}, older than ${report.olderThanDays}d, max ${formatBytes(report.maxBytesPerSession)}, max ${report.maxFilesPerSession} file(s) per anchor).`,
+    ),
+    "",
+  ];
+  if (report.anchors.length === 0) {
+    lines.push(dimText("Nothing to prune."));
+    return lines.join("\n");
+  }
+  for (const anchor of report.anchors) {
+    const detail = anchor.error
+      ? `error: ${anchor.error}`
+      : anchor.blockReasons.length > 0
+        ? anchor.blockReasons.join(",")
+        : `${anchor.totalFiles} file(s), ${formatBytes(anchor.totalBytes)} on disk`;
+    lines.push(
+      `  ${accent(anchor.anchorId.padEnd(20))}  ${`${anchor.evictFiles} file(s)`.padEnd(14)}  ${formatBytes(anchor.evictBytes).padEnd(9)}  ${detail}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    `Totals: ${report.totals.evictFiles} artifact(s) selected, ${formatBytes(report.totals.freedBytes)} ${report.dryRun ? "would be freed" : "freed"}, ${report.totals.errors} error(s).`,
+  );
+  if (report.dryRun) {
+    lines.push(dimText("Dry run — nothing deleted. Re-run with --execute to apply."));
+  }
+  return lines.join("\n");
+}
+
 function parseSessionGcStatusesOption(value: string): SessionGcStatus[] {
   const parts = value
     .split(",")
@@ -1292,6 +1628,21 @@ function parseSlotLink(value: string): SessionLink {
     label: value.slice(0, index),
     url: value.slice(index + 1),
   };
+}
+
+// Guards against an older daemon replying with a plain SessionView (no
+// slotUpdate) despite the compile-time UpdateSessionSlotsResponse type —
+// this narrows the actual runtime value instead of trusting the cast.
+function slotUpdateMessage(session: unknown): string | undefined {
+  if (!session || typeof session !== "object" || !("slotUpdate" in session)) {
+    return undefined;
+  }
+  const slotUpdate = (session as { slotUpdate?: unknown }).slotUpdate;
+  if (!slotUpdate || typeof slotUpdate !== "object" || !("message" in slotUpdate)) {
+    return undefined;
+  }
+  const message = (slotUpdate as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
 }
 
 function currentSessionId(): string {
@@ -1426,6 +1777,20 @@ function helpNotes(command: Command): string[] {
       "Never collects a group with uncommitted changes, unpushed commits, an open PR, or any non-terminal member; blocked groups list their reason.",
       "Worktrees go through `git worktree remove` plus a repo prune; records move to `sessions-archive/` and leave the daemon's 2s tick.",
       "A collected `stopped` session can no longer be restored — `mv` its record back out of `sessions-archive/` to undo.",
+    ];
+  }
+  if (command.name() === "disk") {
+    return [
+      "Read-only: reports every Spur-attributable store plus host caches and worktree build caches, and writes `<dataDir>/disk-budget.json` for the daemon's warn sweep.",
+      "`reclaimedBy` names which command owns each root's deletion: `spur cache` owns ~/.npm/*, `disk-gc` owns playwright MCP profiles and worktree build caches, `artifacts-gc` owns `session-artifacts`, `spur gc` owns worktrees, `none` is never reclaimed by this host.",
+    ];
+  }
+  if (command.name() === "disk-gc") {
+    return [
+      "Dry run by default: no flags print the plan only. `--execute` removes stale playwright MCP profile dirs, worktree build caches in fully terminal worktrees, and cleans the oldest `~/.npm/_cacache` entries down to `diskBudget.npmCacheMaxGb`.",
+      "Never deletes a build cache in a worktree with any non-terminal session, or one whose worktreePath resolves outside `worktreeDir` (a `worktree: false` session's real checkout).",
+      "Never wipes `~/.npm/_cacache` itself — that stays `spur cache --prune --yes`'s job; this command only runs `npm cache clean <key>` on the oldest entries plus `npm cache verify`.",
+      "`--browser-revisions` additionally prunes unpinned playwright browser revisions via `spur cache`'s pin resolver (an unresolvable `.links` referrer protects every revision).",
     ];
   }
   if (command.name() === "spawn") {
@@ -2029,11 +2394,7 @@ async function runInteractiveSessionList(
   const respawnSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
-    if (
-      session.status !== "completed" &&
-      session.status !== "killed" &&
-      session.status !== "errored"
-    ) {
+    if (!isRespawnableStatus(session.status)) {
       statusMessage = brandLine(`Session ${session.id} is not in a terminal state.`);
       render();
       return;
@@ -2569,11 +2930,234 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("disk")
+    .description(
+      "Report Spur-attributable disk usage: report-only stores, host caches, and worktree build caches. Read-only; writes <dataDir>/disk-budget.json.",
+    )
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const config = loadConfig(configPath);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "measuring disk budget",
+        action: async () => {
+          const sessions = listSessions(config.dataDir);
+          const worktreePaths = [
+            ...new Set(
+              sessions
+                .map((s) => s.worktreePath.trim())
+                .filter(Boolean)
+                .filter((path) => containmentRel(config.worktreeDir, path) !== undefined),
+            ),
+          ];
+          const report = await measureDiskBudget(
+            { du: realDu },
+            { dataDir: config.dataDir, worktreeDir: config.worktreeDir, worktreePaths },
+          );
+          await writeDiskBudgetReport(config.dataDir, report);
+          return report;
+        },
+        render: renderDiskBudgetReport,
+      });
+    });
+
+  program
+    .command("artifacts-gc")
+    .description(
+      "Prune oversized agent-history artifacts per session workspace (dry run unless --execute).",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is deleted")
+    .option("--older-than <days>", "Age prune cutoff; applies only to completed/killed/stopped")
+    .option("--max-bytes <bytes>", "Agent-history bytes kept per workspace")
+    .option("--max-files <number>", "Agent-history files kept per workspace")
+    .option("--project <id>", "Only consider sessions of one configured project")
+    .option("--limit <number>", "Maximum workspaces to act on in one run")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const base = loadConfig(configPath);
+      const registry = readConfigRegistryFile(base.dataDir);
+      const config = buildMergedConfig(configPath, registry.configPaths, {
+        skipInvalid: true,
+      }).config;
+      const projectFilter = options.project?.trim();
+      if (projectFilter && !config.projects[projectFilter]) {
+        throw new Error(`Unknown project: ${projectFilter}`);
+      }
+      const retention = config.artifactRetention;
+      const olderThanDays =
+        options.olderThan === undefined
+          ? retention.olderThanDays
+          : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+      const maxBytesPerSession =
+        options.maxBytes === undefined
+          ? retention.maxBytesPerSession
+          : parsePositiveIntegerOption(String(options.maxBytes), "--max-bytes");
+      const maxFilesPerSession =
+        options.maxFiles === undefined
+          ? retention.maxFilesPerSession
+          : parsePositiveIntegerOption(String(options.maxFiles), "--max-files");
+      const limit =
+        options.limit === undefined
+          ? DEFAULT_GC_CLI_LIMIT
+          : parsePositiveIntegerOption(String(options.limit), "--limit");
+      const dryRun = !options.execute;
+      await outputResult({
+        json: Boolean(options.json),
+        label: dryRun ? "planning artifact retention" : "running artifact retention",
+        action: () => {
+          const plan = planArtifactRetention({
+            sessions: listSessions(config.dataDir),
+            now: new Date(),
+            olderThanDays,
+            maxBytesPerSession,
+            maxFilesPerSession,
+            limit,
+            ...(projectFilter ? { projectFilter } : {}),
+            listArtifacts: listAnchorArtifacts(config.dataDir),
+          });
+          return Promise.resolve(
+            executeArtifactRetention(plan, createArtifactRetentionDeps(config), { dryRun }),
+          );
+        },
+        render: renderArtifactRetentionResult,
+        exitCode: (report) => (report.totals.errors > 0 ? 1 : undefined),
+      });
+    });
+
+  program
+    .command("disk-gc")
+    .description(
+      "Reclaim stale browser MCP profile dirs and worktree build caches in terminal worktrees, and cap ~/.npm/_cacache with npm-native per-key `npm cache clean`. Dry run unless --execute.",
+    )
+    .option("--execute", "Apply the plan; without this flag nothing is removed")
+    .option(
+      "--browser-revisions",
+      "Also prune unpinned playwright browser revisions (delegates to `spur cache`'s pin resolver)",
+    )
+    .option("--older-than <days>", "Minimum age in days of a build-cache dir's newest file")
+    .option("--limit <number>", "Maximum worktrees to consider in one run")
+    .option("--json", "Print raw JSON")
+    .action(
+      async (
+        options: {
+          execute?: boolean;
+          browserRevisions?: boolean;
+          olderThan?: string;
+          limit?: string;
+          json?: boolean;
+        },
+        command,
+      ) => {
+        const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+        const config = loadConfig(configPath);
+        const instanceConfig = loadInstanceConfigReadOnly(configPath);
+        if (instanceConfig.status !== "ok") {
+          throw new Error(
+            `disk-gc requires a resolved instance config (status: ${instanceConfig.status}); run \`spur init\` first`,
+          );
+        }
+        const dryRun = !options.execute;
+        const olderThanDays =
+          options.olderThan === undefined
+            ? config.diskBudget.buildCacheOlderThanDays
+            : parseNonNegativeIntegerOption(String(options.olderThan), "--older-than");
+        const maxWorktrees =
+          options.limit === undefined
+            ? config.diskBudget.maxWorktreesPerSweep
+            : parsePositiveIntegerOption(String(options.limit), "--limit");
+        const home = homedir();
+        await outputResult({
+          json: Boolean(options.json),
+          label: dryRun ? "planning disk gc" : "running disk gc",
+          action: async () => {
+            const sessions = listSessions(config.dataDir);
+            const buildCache = await planBuildCacheGc({
+              sessions,
+              worktreeDir: config.worktreeDir,
+              now: new Date(),
+              olderThanDays,
+              maxWorktrees,
+              listBuildCacheDirs: findBuildCacheDirs,
+              measureBytes: measureDiskGcBytes,
+            });
+
+            const snapshot = await snapshotProcesses();
+            const processListReadable = snapshot.status === "ok" && snapshot.processes.length > 0;
+            const processes = snapshot.status === "ok" ? snapshot.processes : [];
+            const profiles = await planProfileGc({
+              roots: [
+                { rootId: "playwright-browsers", path: join(home, ".cache", "ms-playwright") },
+                {
+                  rootId: "playwright-mcp-profiles",
+                  path: join(home, ".cache", "ms-playwright-mcp"),
+                },
+              ],
+              now: new Date(),
+              processes,
+              myUid: process.getuid?.(),
+              listProfileDirs: async (rootPath) => {
+                try {
+                  return await readdirAsync(rootPath);
+                } catch {
+                  return [];
+                }
+              },
+              statProfile: async (path) => {
+                const st = await lstatAsync(path);
+                return { uid: st.uid, isSymlink: st.isSymbolicLink(), mtimeMs: st.mtimeMs };
+              },
+              measureBytes: measureDiskGcBytes,
+              singletonLockLivePid,
+            });
+
+            const browserRevisions = options.browserRevisions
+              ? await planBrowserRevisionCandidates(instanceConfig)
+              : [];
+
+            // B2: a destructive path must never trust a cached, possibly
+            // stale-or-absent measurement (disk-budget.json has no
+            // freshness check at all, unlike the daemon's warn sweep) — it
+            // measures `_cacache` itself via the same `du` the report uses.
+            const cacacheBytes = await realDu(join(home, ".npm", "_cacache"));
+            const npmCap =
+              cacacheBytes !== null
+                ? await planNpmCap(
+                    home,
+                    cacacheBytes,
+                    config.diskBudget.npmCacheMaxGb * 1024 * 1024 * 1024,
+                    processes,
+                    processListReadable,
+                  )
+                : ({ kind: "not-over-cap" } as const);
+
+            const plan: DiskGcPlan = {
+              generatedAt: new Date().toISOString(),
+              buildCache,
+              profiles,
+              browserRevisions,
+              npmCap,
+            };
+            const deps = await createDiskGcDeps(config, instanceConfig);
+            return executeDiskGc(plan, deps, {
+              dryRun,
+              browserRevisions: Boolean(options.browserRevisions),
+              npmCap: true,
+            });
+          },
+          render: renderDiskGcReport,
+        });
+      },
+    );
+
+  program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
+    .addOption(reasoningEffortOption())
     .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
@@ -2669,6 +3253,9 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
@@ -2899,9 +3486,16 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => {
           const pending = queuedMessageCount(session);
-          return pending > 0
-            ? `Queued message for ${session.id} (${pending} pending).`
-            : `Delivered message to ${session.id}.`;
+          const line =
+            pending > 0
+              ? `Queued message for ${session.id} (${pending} pending).`
+              : session.submitUnconfirmedAt
+                ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
+                : `Delivered message to ${session.id}.`;
+          const failed = session.submitFailedMessage;
+          return failed
+            ? `${line}\nAgent did not confirm: "${failed.message}". Retry or dismiss it in the web view.`
+            : line;
         },
         render: renderSessionCard,
       });
@@ -3133,6 +3727,81 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  const autoPingCommand = program
+    .command("auto-ping")
+    .description("Manage automatic trigger suppressions for a session.");
+  autoPingCommand
+    .command("unsubscribe")
+    .option("--event <handle>", "Event suppression handle")
+    .option("--thread <handle>", "Thread suppression handle")
+    .option("--subscription <handle>", "Subscription suppression handle")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      const requestOptions: { event?: string; thread?: string; subscription?: string } = {};
+      if (typeof options.event === "string") requestOptions.event = options.event;
+      if (typeof options.thread === "string") requestOptions.thread = options.thread;
+      if (typeof options.subscription === "string")
+        requestOptions.subscription = options.subscription;
+      const request = resolveAutoPingUnsubscribe(requestOptions);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "updating auto-ping suppressions",
+        action: () =>
+          postJson<AutoPingUnsubscribeResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/unsubscribe`,
+            request,
+            configPath,
+          ),
+        render: renderAutoPingUnsubscribe,
+      });
+    });
+  autoPingCommand
+    .command("list")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "loading auto-ping suppressions",
+        action: () =>
+          getJson<AutoPingSuppressionListResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions`,
+            configPath,
+          ),
+        render: renderAutoPingList,
+      });
+    });
+  autoPingCommand
+    .command("resume")
+    .argument("<suppressionId>", "Suppression id")
+    .option("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (suppressionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const sessionId = resolveAutoPingSessionId(options.session as string | undefined);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "resuming auto-ping suppression",
+        action: () =>
+          postJson<AutoPingResumeResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/auto-ping-suppressions/${encodeURIComponent(
+              suppressionId,
+            )}/resume`,
+            {},
+            configPath,
+          ),
+        render: (response) => renderAutoPingResume(response, suppressionId),
+      });
+    });
+
   program
     .command("kill")
     .description("Stop a session and discard its artifacts without marking it complete.")
@@ -3170,6 +3839,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("respawn")
     .description("Spawn a new session with the same config as a terminal session.")
     .argument("<sessionId>", "Session id")
+    .addOption(reasoningEffortOption())
     .option("--force", "Replace respawn source even with dirty worktree or unpushed commits")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
@@ -3181,7 +3851,12 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            respawnRequestBody({ forceKillSource: options.force === true }),
+            {
+              ...respawnRequestBody({ forceKillSource: options.force === true }),
+              ...(options.reasoningEffort !== undefined
+                ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+                : {}),
+            },
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
@@ -3244,12 +3919,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<sessionId>", "Session id")
     .requiredOption("--agent <name>", "Target agent: claude, codex, cursor, or opencode")
     .option("--model <id>", "Model id for the target agent")
+    .addOption(reasoningEffortOption())
     .option("--notes <text>", "Optional handoff notes for the next agent")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: HandoffSessionRequest = {
         agent: options.agent,
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(typeof options.model === "string" && options.model.trim()
           ? { model: options.model.trim() }
           : {}),
@@ -3767,8 +4446,13 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "updating slots",
         action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/slots`, payload, configPath),
-        success: (session) => `Updated slots for ${session.id}.`,
+          postJson<UpdateSessionSlotsResponse>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/slots`,
+            payload,
+            configPath,
+          ),
+        success: (session) => slotUpdateMessage(session) ?? `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -3838,13 +4522,14 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "stopping sidecar",
         action: () =>
-          postJson<SessionView>(
+          postJson<SidecarStopView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
             {},
             configPath,
           ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
+        success: (session) => renderSidecarStopMessage(options.name as string, session),
+        exitCode: sidecarStopExitCode,
         render: renderSessionCard,
       });
     });
@@ -3960,11 +4645,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Reply to the latest source message for a session.")
     .argument("<message...>", "Message to send")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option(
+      "--button <label[=value]>",
+      "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
+      parseButtonOption,
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
         messageParts: string[],
-        options: { session?: string; json?: boolean },
+        options: { session?: string; json?: boolean; button?: SourceReplyButton[] },
         command: Command,
       ) => {
         const configPath = prepareInstanceConfig(
@@ -3974,7 +4664,11 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!sessionId) {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
-        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        const buttons = options.button ?? [];
+        const payload: SourceReplyRequest = {
+          message: messageParts.join(" "),
+          ...(buttons.length > 0 ? { buttons } : {}),
+        };
         await outputResult({
           json: Boolean(options.json),
           label: "sending source reply",
@@ -4184,19 +4878,36 @@ export function createProgram(cliEntrypoint: string): Command {
 /**
  * Commander checks for -h/--help before it checks for an unknown command, so
  * `spur bogus --help` prints root help and exits 0 instead of reporting the
- * unknown command. Strip stray help flags off an unrecognized command word so
- * commander's own unknownCommand() handler runs instead, exiting 1 with its
- * did-you-mean suggestion. Known commands and help requests for them are left
- * untouched.
+ * unknown command. Strip stray help flags placed AFTER an unrecognized
+ * command word so commander's own unknownCommand() handler runs instead,
+ * exiting 1 with its did-you-mean suggestion. A help flag placed BEFORE the
+ * command word (`spur --help bogus`, `spur -h bogus`) is a root-help request
+ * and is left untouched, matching commander's own precedence. Known commands
+ * and help requests for them are left untouched too.
  */
 export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): string[] {
   const knownCommands = new Set(
     program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
   );
+  // Required-arg top-level options consume their next argv entry so its
+  // value is never mistaken for the command word — derived from
+  // program.options rather than hardcoding "--config" so a future top-level
+  // option is covered automatically. Matched by exact token only: the equals
+  // form (`--config=/p`) carries its own value and must not consume the
+  // following entry. No top-level optional-arg option exists today (an
+  // optional-arg option's own value can start with "-", so consuming it
+  // unconditionally would be wrong) — add that distinction here if one is
+  // ever registered, not before.
+  const requiredArgFlags = new Set(
+    program.options
+      .filter((option) => option.required)
+      .flatMap((option) => [option.short, option.long].filter((flag): flag is string => !!flag)),
+  );
   let commandWord: string | undefined;
+  let commandIndex = -1;
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index];
-    if (token === "--config") {
+    if (token !== undefined && requiredArgFlags.has(token)) {
       index += 1;
       continue;
     }
@@ -4204,16 +4915,22 @@ export function argvWithoutStrayHelpFlags(program: Command, argv: string[]): str
       continue;
     }
     commandWord = token;
+    commandIndex = index;
     break;
   }
   if (commandWord === undefined || knownCommands.has(commandWord)) {
     return argv;
   }
-  const hasHelpFlag = argv.slice(2).some((token) => token === "-h" || token === "--help");
-  if (!hasHelpFlag) {
+  const strayHelpIndices = new Set(
+    argv
+      .map((token, index) => ({ token, index }))
+      .filter(({ token, index }) => index > commandIndex && (token === "-h" || token === "--help"))
+      .map(({ index }) => index),
+  );
+  if (strayHelpIndices.size === 0) {
     return argv;
   }
-  return argv.filter((token) => token !== "-h" && token !== "--help");
+  return argv.filter((_token, index) => !strayHelpIndices.has(index));
 }
 
 export async function run(argv = process.argv): Promise<void> {

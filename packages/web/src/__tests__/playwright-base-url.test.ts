@@ -101,7 +101,10 @@ describe("resolvePlaywrightBaseUrl", () => {
 
   it("uses session metadata port when the sidecar command wrapper cannot report parent state", async () => {
     existsSyncMock.mockReturnValue(true);
-    execFileSyncMock.mockReturnValue(JSON.stringify([]));
+    execFileSyncMock.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") return "0\n";
+      return JSON.stringify([]);
+    });
     readFileSyncMock.mockImplementation((path: string) => {
       if (path === "/home/tester/.spur/sessions/.index.json") {
         return JSON.stringify({ "spur-9e73": "sessions/sp/spur-9e73.json" });
@@ -133,5 +136,146 @@ describe("resolvePlaywrightBaseUrl", () => {
     const { resolvePlaywrightBaseUrl } = await import("@/lib/playwright-base-url");
 
     expect(resolvePlaywrightBaseUrl({})).toBe("http://localhost:5555");
+  });
+
+  it("#822: does not fall back to the metadata path when the daemon reports isolated-ui not alive", async () => {
+    existsSyncMock.mockReturnValue(true);
+    execFileSyncMock.mockReturnValue(
+      JSON.stringify([
+        {
+          id: "spur-9e73",
+          sidecars: [{ name: "isolated-ui", alive: false }],
+          sidecarPorts: {
+            "isolated-ui": {
+              SPUR_RESERVED_PORT_UI: 5612,
+            },
+          },
+        },
+      ]),
+    );
+
+    const { resolvePlaywrightBaseUrl } = await import("@/lib/playwright-base-url");
+
+    expect(() =>
+      resolvePlaywrightBaseUrl({
+        SPUR_SESSION: "spur-9e73",
+        SPUR_SESSION_TOOL_DIR: "/tmp/spur-9e73",
+      }),
+    ).toThrow(/isolated-ui sidecar unavailable/);
+    expect(execFileSyncMock).not.toHaveBeenCalledWith(
+      "tmux",
+      expect.arrayContaining(["list-panes"]),
+      expect.anything(),
+    );
+  });
+
+  it("#822: still falls back to metadata when alive but the reserved port is missing", async () => {
+    existsSyncMock.mockReturnValue(true);
+    execFileSyncMock.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") return "0\n";
+      return JSON.stringify([
+        {
+          id: "spur-9e73",
+          sidecars: [{ name: "isolated-ui", alive: true }],
+          sidecarPorts: {},
+        },
+      ]);
+    });
+    readFileSyncMock.mockImplementation((path: string) => {
+      if (path === "/home/tester/.spur/sessions/.index.json") {
+        return JSON.stringify({ "spur-9e73": "sessions/sp/spur-9e73.json" });
+      }
+      if (path === "/home/tester/.spur/sessions/sp/spur-9e73.json") {
+        return JSON.stringify({
+          id: "spur-9e73",
+          sidecarPorts: {
+            "isolated-ui": {
+              SPUR_RESERVED_PORT_UI: 5612,
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const { resolvePlaywrightBaseUrl } = await import("@/lib/playwright-base-url");
+
+    expect(
+      resolvePlaywrightBaseUrl({
+        SPUR_SESSION: "spur-9e73",
+        SPUR_SESSION_TOOL_DIR: "/tmp/spur-9e73",
+      }),
+    ).toBe("http://127.0.0.1:5612");
+  });
+
+  it("#822: metadata fallback reports null when the tmux probe finds a dead pane", async () => {
+    existsSyncMock.mockReturnValue(true);
+    execFileSyncMock.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") return "1\n";
+      return JSON.stringify([]);
+    });
+    readFileSyncMock.mockImplementation((path: string) => {
+      if (path === "/home/tester/.spur/sessions/.index.json") {
+        return JSON.stringify({ "spur-9e73": "sessions/sp/spur-9e73.json" });
+      }
+      if (path === "/home/tester/.spur/sessions/sp/spur-9e73.json") {
+        return JSON.stringify({
+          id: "spur-9e73",
+          sidecarPorts: {
+            "isolated-ui": {
+              SPUR_RESERVED_PORT_UI: 5612,
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const { resolvePlaywrightBaseUrl } = await import("@/lib/playwright-base-url");
+
+    expect(() =>
+      resolvePlaywrightBaseUrl({
+        SPUR_SESSION: "spur-9e73",
+        SPUR_SESSION_TOOL_DIR: "/tmp/spur-9e73",
+      }),
+    ).toThrow(/isolated-ui sidecar unavailable/);
+    expect(execFileSyncMock).toHaveBeenCalledWith(
+      "tmux",
+      ["list-panes", "-t", "spur-9e73--isolated-ui", "-F", "#{pane_dead}"],
+      expect.objectContaining({ encoding: "utf8", stdio: "pipe" }),
+    );
+  });
+
+  it("#822: metadata fallback resolves the port when the tmux probe finds a running pane", async () => {
+    existsSyncMock.mockReturnValue(true);
+    execFileSyncMock.mockImplementation((cmd: string) => {
+      if (cmd === "tmux") return "0\n";
+      return JSON.stringify([]);
+    });
+    readFileSyncMock.mockImplementation((path: string) => {
+      if (path === "/home/tester/.spur/sessions/.index.json") {
+        return JSON.stringify({ "spur-9e73": "sessions/sp/spur-9e73.json" });
+      }
+      if (path === "/home/tester/.spur/sessions/sp/spur-9e73.json") {
+        return JSON.stringify({
+          id: "spur-9e73",
+          sidecarPorts: {
+            "isolated-ui": {
+              SPUR_RESERVED_PORT_UI: 5612,
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const { resolvePlaywrightBaseUrl } = await import("@/lib/playwright-base-url");
+
+    expect(
+      resolvePlaywrightBaseUrl({
+        SPUR_SESSION: "spur-9e73",
+        SPUR_SESSION_TOOL_DIR: "/tmp/spur-9e73",
+      }),
+    ).toBe("http://127.0.0.1:5612");
   });
 });

@@ -1,17 +1,17 @@
 ---
 name: manager
-description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
+description: Orchestrate repo tasks by routing each todo to agents and skills by property. Decompose, delegate, aggregate, close out. Mandatory for each repo task.
 ---
 
 MANAGER
 
-Delegate every action to an agent or skill; never read code, edit files, or run commands directly.
+Delegate each action to an agent or skill; never read code, edit files, or run commands directly.
 
 Agent/skill catalog with triggers: `AGENTS.md`/`CLAUDE.md`. Don't duplicate the catalog here.
 
 MODE
 
-  - `manager` is the default mode, strict: every task in this repo runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
+  - `manager` is the default mode, strict: each repo task runs it unless spawn requested another. Registry: `AGENTS.md`/`CLAUDE.md` MODES.
   - Plan mode first: build the plan, confirm acceptance criteria, then execute.
   - Spur ToDo (`$SPUR_TODO_COMMAND`) is the authoritative task list; `TodoWrite` is a private within-gate scratchpad, never the record. Output template below is the run report only.
 
@@ -22,18 +22,20 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
   0 direct                  `developer`
   1 self-plan               `architect` -> `spec-critic` -> `developer`
   2 strong-plan-cheap-exec  `researcher` -> `critic` -> `architect` -> `spec-critic` -> `developer`
-  3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off. See `docs/workflow-technical-updates.md`.
+  3 strong-end-to-end       `developer` on a strong-model override (Agent/Task `model` param), recon + implement in one context, no spec handed off
 
   Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
+  Telegram source, agent sends, or Telegram suffix touched   manager runs `telegram-e2e` after `tester`, before close-out
   New/changed visible `packages/web` UI                 manager runs `design-author` in the main Claude session before `architect` (only place `DesignSync` works, never a Task subagent); hard-stop before implementation; non-Claude runtime or no `DesignSync`: consume-only, else route to a Claude session, never stall
   Visible change in `packages/web`                      `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes
   `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, `.cursor/BUGBOT.md` touched   `skill-writer` (caveman pass) before `reviewer`
   New user-facing surface (command, flag, config field, source type, provider, event, install/deploy/CLI) or published docs touched   `docs` before `reviewer`; `developer` documents the surface and updates the owning doc, same change
-  Any code change                                        `reviewer` -> `tester`; `github` close-out (mandatory PR)
+  Any code change                                        `reviewer`; `github` close-out (mandatory PR)
+  Every task                                             `tester`; checks match scope
   Default close-out                                      `self-verify`
-  Wording-only docs or analysis                          close-out only
+  Wording-only docs or analysis                          `tester` -> close-out
 
-Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Reviewer and tester apply to any code change on top of the tier. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
+Recon before spec: architect (and the tier-3 agent) recons before writing the spec. Recon can raise the tier per the `shallow-scoring` escalation rule — re-route to the higher tier's team. Tier 0 has no recon or spec: a change that proves larger than one obvious edit mid-flight escalates to Tier 1+.
 
 CANONICAL GATE ORDER
 
@@ -49,15 +51,18 @@ PROCESS
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
-  4  Single-cycle gates: each gate runs once. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns once more. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns once more. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate once, no fix cycle first. Downstream gates run only when their input changed. Second pass still failing or still silent: name the gate in the run report's Missing section, no further retry.
+  4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.
 
 RULES
 
   - Collapse phases for trivial work; do not skip the skill.
-  - One manager step = one Spur ToDo item = one phase = one owner = one output; every dispatched gate comes from the ledger, never invented ad hoc.
+  - One manager step = one Spur ToDo item = one phase = one owner = one output; each dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
   - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
-  - Local checks only. Never wait for remote CI.
+  - Assign smoke and full automated suites to CI.
+  - Require agent-operated manual affected-behavior proof on a real isolated sidecar; run targeted local automated checks only when needed to verify changed boundary.
+  - Block release without successful manual proof and required CI checks, tied to final reviewed revision. CI query permission stays in `AGENTS.md`/`CLAUDE.md`.
+  - Never poll or wait for remote CI.
 
 CONTEXT HANDOFF
 

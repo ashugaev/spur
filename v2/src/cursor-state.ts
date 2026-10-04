@@ -1,4 +1,6 @@
-import { CURSOR_READY_MARKERS } from "./agents/cursor.js";
+import { CURSOR_READY_MARKERS, CURSOR_RESUME_READY_MARKER } from "./agents/cursor.js";
+
+const CURSOR_ALL_READY_MARKERS = [...CURSOR_READY_MARKERS, CURSOR_RESUME_READY_MARKER] as const;
 
 const CURSOR_WORKSPACE_TRUST_MARKERS = [
   "Workspace Trust Required",
@@ -40,7 +42,7 @@ export function cursorShowsWorkspaceTrustPrompt(pane: string): boolean {
 }
 
 export function cursorShowsReadyPrompt(pane: string): boolean {
-  const readyMarker = lastMatchingMarker(pane, CURSOR_READY_MARKERS);
+  const readyMarker = lastMatchingMarker(pane, CURSOR_ALL_READY_MARKERS);
   if (!readyMarker) {
     return false;
   }

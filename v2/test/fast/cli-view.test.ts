@@ -9,6 +9,7 @@ import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SessionView } from "../
 
 function session(overrides: Partial<SessionView>): SessionView {
   return {
+    lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
     id: "api-1",
     project: "api",
     workspaceId: "api-1",
@@ -35,6 +36,7 @@ function session(overrides: Partial<SessionView>): SessionView {
 
 function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
   return {
+    lifecycleInstanceId: "test-instance",
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: "0.1.0",
@@ -99,6 +101,25 @@ describe("cli-view.describeSession", () => {
     );
 
     expect(output).toContain("parked by idle timeout");
+    expect(output).not.toContain("stopped by user");
+  });
+
+  it("labels a token-budget stop", () => {
+    expect(
+      describeSession(session({ status: "stopped", stopReason: "token_budget", state: "stopped" })),
+    ).toContain("stopped by token budget");
+  });
+
+  it("labels a memory-shed session as paused by memory guard, not stopped by user", () => {
+    const output = describeSession(
+      session({
+        status: "stopped",
+        stopReason: "memory_shed",
+        state: "stopped",
+      }),
+    );
+
+    expect(output).toContain("paused by memory guard");
     expect(output).not.toContain("stopped by user");
   });
 

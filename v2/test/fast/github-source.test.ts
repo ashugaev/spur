@@ -152,6 +152,10 @@ function graphqlAuthor(user: unknown): { login: unknown } | null {
     : null;
 }
 
+// The account the daemon authenticates as, answered by the batch query's root
+// `viewer` field. Tests that care about review requests set it explicitly.
+let viewerLogin: string | null = "review-bot";
+
 async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> {
   if (args[0] !== "api" || !args.includes("graphql")) {
     return ghMock(cwd, ...args) as Promise<string>;
@@ -200,10 +204,18 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
   const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
   return JSON.stringify({
     data: {
+      ...(viewerLogin === null ? {} : { viewer: { login: viewerLogin } }),
       rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
       r: { a0: branchQuery ? { nodes: [node] } : node },
     },
   });
+}
+
+// PR-node shape for pending review requests, as `prView` overrides take it.
+function reviewRequests(...logins: string[]): Record<string, unknown> {
+  return {
+    reviewRequests: { nodes: logins.map((login) => ({ requestedReviewer: { login } })) },
+  };
 }
 function trackSeenComments(initial: readonly string[] = []): Set<string> {
   const seen = new Set<string>(initial);
@@ -233,6 +245,7 @@ describe("github source", () => {
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
     hasRecentSessionUserActionMock.mockReturnValue(false);
+    viewerLogin = "review-bot";
   });
 
   afterEach(() => {
@@ -266,9 +279,14 @@ describe("github source", () => {
 
     expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
     expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("failed to poll api-a1b2: gh offline"),
-    );
+    // Message shape now wraps the classified cause in a GitHubReviewBatchError
+    // (batch key + member count), so the raw "gh offline" is a substring, not the
+    // whole tail. Pin both substrings to the SAME call rather than asserting each
+    // independently, which any warn call could satisfy.
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const warnMessage = logger.warn.mock.calls[0]?.[0] as string;
+    expect(warnMessage).toContain("failed to poll api-a1b2: GitHub review batch");
+    expect(warnMessage).toContain("gh offline");
 
     handle.stop();
   });
@@ -698,6 +716,8 @@ describe("github source", () => {
       "github:comment",
       expect.objectContaining({
         signals: [expect.objectContaining({ key: "comment:9001" })],
+        prUrl: "https://github.com/acme/api/pull/42",
+        repo: "acme/api",
       }),
     );
     // Recording seen at generation time dropped the comment from the next snapshot,
@@ -861,6 +881,10 @@ describe("github source", () => {
         signals: [expect.objectContaining({ key: "review-comment:7001" })],
       }),
     );
+    const commentPayload = emit.mock.calls.find((call) => call[0] === "github:comment")?.[1] as
+      | { signals: Array<ReviewSignal & { providerThreadTarget?: unknown }> }
+      | undefined;
+    expect(commentPayload?.signals[0]).not.toHaveProperty("providerThreadTarget");
     expect(recordCommentSeenMock).not.toHaveBeenCalled();
     handle.stop();
   });
@@ -906,6 +930,41 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("unions restore replay with new comments and persists confirmed conflict clearance", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(true);
+    const emit = vi.fn();
+    mockLifecyclePoll(
+      prView({ mergeable: "CONFLICTING" }),
+      JSON.stringify([
+        { id: 999, state: "COMMENTED", body: "New actionable review", user: { login: "reviewer" } },
+      ]),
+    );
+    let handle = await startLifecycle(emit);
+    expect(emit.mock.calls.filter(([name]) => name === "github:merge_conflict")).toHaveLength(1);
+    expect(emit.mock.calls.filter(([name]) => name === "github:comment")).toHaveLength(1);
+    const conflict = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(conflict.mergeConflictClearId).toBeUndefined();
+    handle.stop();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", conflict]]));
+    mockLifecyclePoll(prView());
+    handle = await startLifecycle(emit);
+    const cleared = writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot;
+    expect(cleared.mergeConflictClearId).toEqual(expect.any(String));
+    handle.stop();
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", cleared]]));
+    mockLifecyclePoll(prView({ mergeable: "CONFLICTING" }));
+    handle = await startLifecycle(emit);
+    expect(
+      (writeReviewSourceSnapshotMock.mock.calls.at(-1)?.[5] as ReviewSnapshot).mergeConflictClearId,
+    ).toBe(cleared.mergeConflictClearId);
+    expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({
+      mergeConflictClearId: cleared.mergeConflictClearId,
+    });
+    handle.stop();
+  });
+
   function prView(overrides: Record<string, unknown> = {}): string {
     return JSON.stringify({
       number: 42,
@@ -936,7 +995,22 @@ describe("github source", () => {
     ghMock.mockReset();
   });
 
-  async function startLifecycle(emit: ReturnType<typeof vi.fn>) {
+  // Interval ticks never fire under vitest fake timers here (node:timers), so a
+  // second poll is driven explicitly through runOnStart().
+  async function startRepollable(emit: (name: string, data?: unknown) => void) {
+    return githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+  }
+
+  async function startLifecycle(emit: (name: string, data?: unknown) => void) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
@@ -977,6 +1051,143 @@ describe("github source", () => {
     expect(emit).not.toHaveBeenCalledWith("github:ready_for_review", expect.anything());
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     expect(snapshot.signals.has("ready_for_review")).toBe(false);
+    handle.stop();
+  });
+
+  it("emits github:review_requested when the viewer is newly requested", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [
+          expect.objectContaining({
+            key: "review_requested",
+            kind: "review_requested",
+            text: "Review requested from review-bot on this PR.",
+          }),
+        ],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("re-emits github:review_requested on a re-request after the review was submitted", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // Submitting a review clears the request; the author's re-request adds it back.
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    mockLifecyclePoll(
+      prView(reviewRequests()),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(emit).toHaveBeenCalledWith("github:review_requested", expect.anything());
+
+    emit.mockClear();
+    handle.runOnStart?.();
+    await flushPollCycle();
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(15);
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review_requested" })],
+      }),
+    );
+    handle.stop();
+  });
+
+  it("emits no github:review_requested for a submitted REQUEST_CHANGES review or a head push", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    // The viewer's own CHANGES_REQUESTED review is outbound, and a later push
+    // moves the head without ever re-requesting a review.
+    mockLifecyclePoll(
+      prView({ ...reviewRequests(), reviewDecision: "CHANGES_REQUESTED" }),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    mockLifecyclePoll(
+      prView({
+        ...reviewRequests(),
+        reviewDecision: "CHANGES_REQUESTED",
+        headRefOid: "bbbbbbb2222222222222",
+      }),
+      JSON.stringify([{ id: 7, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startRepollable(emit);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(ghMock).toHaveBeenCalledTimes(10);
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("review_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("emits no github:review_requested when another account is the requested reviewer", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView(reviewRequests("someone-else")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    handle.stop();
+  });
+
+  it("keeps github:merged and drops the review request on a merged PR", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(prView({ ...reviewRequests("review-bot"), state: "MERGED" }));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:merged",
+      expect.objectContaining({ signals: [expect.objectContaining({ kind: "merged" })] }),
+    );
+    expect(emit).not.toHaveBeenCalledWith("github:review_requested", expect.anything());
+    handle.stop();
+  });
+
+  it("polls a bound worktree:false session and emits its review request", async () => {
+    // int-review desks run worktree:false against a real checkout path. Poll
+    // eligibility keys off worktreePath existing, never the worktree flag.
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ worktree: false })]);
+    mockLifecyclePoll(prView(reviewRequests("review-bot")));
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    expect(emit).toHaveBeenCalledWith(
+      "github:review_requested",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "review_requested" })],
+      }),
+    );
     handle.stop();
   });
 
@@ -3326,6 +3537,184 @@ describe("github source", () => {
         expect.anything(),
       );
       expect(disabledEvents()).toHaveLength(1);
+
+      handle.stop();
+    });
+  });
+
+  describe("batch failure containment", () => {
+    it("keeps the review snapshot when the batch fails at envelope level", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: [{ message: "Something went wrong while executing your query." }],
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.poll.error",
+        ),
+      ).toBe(true);
+
+      handle.stop();
+    });
+
+    it.each([
+      ["a bare-string envelope error", () => ["boom"]],
+      ["a pathed error with no message", () => [{ type: "NOT_FOUND", path: ["r", "a0"] }]],
+    ])("keeps the review snapshot when the batch fails on %s", async (_name, buildErrors) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      ghTransportMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            rateLimit: { cost: 1, remaining: 4_800, resetAt: "2026-06-19T11:00:00.000Z" },
+            r: { a0: null },
+          },
+          errors: buildErrors(),
+        }),
+      );
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) => (entry as { event?: string }).event === "source.poll.error",
+        ),
+      ).toBe(true);
+
+      handle.stop();
+    });
+
+    it("logs one source.poll.error for a failed batch of three sessions", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const sessions = [0, 1, 2].map((offset) =>
+        makeSession({
+          id: `api-${offset}`,
+          workspaceId: `api-${offset}`,
+          pr: {
+            number: 40 + offset,
+            repo: "acme/api",
+            url: `https://github.com/acme/api/pull/${40 + offset}`,
+          },
+        }),
+      );
+      listSessionsMock.mockReturnValue(sessions);
+      const rawError = Object.assign(
+        new Error(
+          "Command failed: gh api --hostname github.com graphql -f query=query($owner:String!...) -F n0=1",
+        ),
+        {
+          stderr:
+            "gh: HTTP 503\nupstream connect error or disconnect/reset before headers. reset reason: connection termination",
+          stdout: "",
+        },
+      );
+      ghTransportMock.mockRejectedValueOnce(rawError);
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      const errorEventsAll = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string; message?: string })
+        .filter((entry) => entry.event === "source.poll.error");
+      expect(errorEventsAll).toHaveLength(1);
+      expect(errorEventsAll[0]?.message).toContain("acme/api");
+      expect(errorEventsAll[0]?.message).toContain("3 sessions");
+      expect(errorEventsAll[0]?.message).toContain("HTTP 503");
+      expect(errorEventsAll[0]?.message).not.toContain("query=");
+      expect(errorEventsAll[0]?.message).not.toContain("-F n0=");
+      expect(errorEventsAll[0]?.message).not.toContain("query(");
+
+      // I9: every member still backs off even though only one event was logged.
+      ghTransportMock.mockClear();
+      handle.runOnStart?.();
+      await flushPollCycle();
+      expect(ghTransportMock).not.toHaveBeenCalled();
+
+      handle.stop();
+    });
+
+    // S1: bound and unbound legs of the SAME repo run as two separate batch calls in
+    // one cycle (byRepo shares repoKey across both axes). Their dedupeKeys must stay
+    // distinct or one leg's failure would silently swallow the other's event.
+    it("logs two events when a bound-leg and unbound-leg batch fail on the same repo in one cycle", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      const boundOnly = makeSession({ id: "api-bound", workspaceId: "api-bound" });
+      const unboundOnly = makeUnboundSession({
+        id: "api-unbound",
+        workspaceId: "api-unbound",
+      });
+      listSessionsMock.mockReturnValue([boundOnly, unboundOnly]);
+      ghTransportMock
+        .mockRejectedValueOnce(new Error("gh offline bound"))
+        .mockRejectedValueOnce(new Error("gh offline unbound"));
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      handle.runOnStart?.();
+      await flushPollCycle();
+
+      const errorEventsAll = logSpurEventMock.mock.calls
+        .map(([, entry]) => entry as { event?: string })
+        .filter((entry) => entry.event === "source.poll.error");
+      expect(errorEventsAll).toHaveLength(2);
 
       handle.stop();
     });

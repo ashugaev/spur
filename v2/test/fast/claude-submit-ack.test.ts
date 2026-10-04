@@ -108,6 +108,32 @@ describe("captureClaudeSubmitBaseline", () => {
 });
 
 describe("scanClaudeJsonlForMessage", () => {
+  // Shapes copied from live claude transcripts (content redacted): a skill
+  // writes message/name/args, a built-in command name/message/args indented.
+  it.each([
+    {
+      typed: "/pr-comments-fix 986 check every thread",
+      content:
+        "<command-message>pr-comments-fix</command-message>\n<command-name>/pr-comments-fix</command-name>\n<command-args>986 check every thread</command-args>",
+    },
+    {
+      typed: "/compact",
+      content:
+        "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>",
+    },
+  ])("matches a slash command recorded as command tags: $typed", async ({ typed, content }) => {
+    const filePath = await makeJsonl("slash.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [{ type: "user", message: { role: "user", content } }]);
+    expect(await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, typed, "/tmp/w")).toBe(
+      true,
+    );
+    // Another command, or other args, is not this send's ack.
+    expect(
+      await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, `${typed} extra`, "/tmp/w"),
+    ).toBe(false);
+  });
+
   it("matches user message with content as string", async () => {
     const filePath = await makeJsonl("string-content.jsonl", []);
     findLatestSessionFileMock.mockResolvedValue(filePath);
@@ -294,5 +320,93 @@ describe("scanClaudeJsonlForMessage", () => {
       "/tmp/worktree",
     );
     expect(found).toBe(true);
+  });
+
+  // Trimmed real claude queue records: a send typed into a busy pane writes
+  // `enqueue` when Enter lands, then a content-less `dequeue` or a `remove` and a
+  // `queued_command` attachment carrying the same text once the turn absorbs it.
+  const QUEUE_SESSION = "5f59054b-5b77-4966-8287-943a327f9c5d";
+  const enqueueRecord = (content: string) => ({
+    type: "queue-operation",
+    operation: "enqueue",
+    timestamp: "2026-09-03T14:53:43.360Z",
+    sessionId: QUEUE_SESSION,
+    content,
+  });
+  const absorbedRecords = (content: string) => [
+    {
+      type: "queue-operation",
+      operation: "remove",
+      timestamp: "2026-09-03T14:53:48.616Z",
+      sessionId: QUEUE_SESSION,
+      content,
+      reason: "absorbed_mid_turn",
+    },
+    {
+      type: "attachment",
+      attachment: { type: "queued_command", prompt: content, commandMode: "prompt" },
+    },
+  ];
+
+  it("matches a send queued into a busy pane by its enqueue record", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "user", message: { role: "user", content: "launch prompt" } },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    const fs = await import("node:fs/promises");
+    const baseline = { file: filePath, size: (await fs.stat(filePath)).size };
+
+    await appendJsonl(filePath, [enqueueRecord("Automatic ping controls")]);
+
+    expect(
+      await scanClaudeJsonlForMessage(baseline, "Automatic ping controls", "/tmp/worktree"),
+    ).toBe(true);
+  });
+
+  it("does not ack a send whose only enqueue precedes the baseline", async () => {
+    const filePath = await makeJsonl("a.jsonl", [enqueueRecord("Automatic ping controls")]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    const fs = await import("node:fs/promises");
+    const baseline = { file: filePath, size: (await fs.stat(filePath)).size };
+
+    await appendJsonl(filePath, [
+      {
+        type: "queue-operation",
+        operation: "dequeue",
+        timestamp: "2026-09-03T14:53:48.600Z",
+        sessionId: QUEUE_SESSION,
+      },
+      ...absorbedRecords("Automatic ping controls"),
+    ]);
+
+    expect(
+      await scanClaudeJsonlForMessage(baseline, "Automatic ping controls", "/tmp/worktree"),
+    ).toBe(false);
+  });
+
+  it("matches an enqueue whose content uses the \\r separators claude records", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      enqueueRecord("Automatic ping controls:\r- event: unsubscribe\r- subscription: unsubscribe"),
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls:\n- event: unsubscribe\n- subscription: unsubscribe",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false for an enqueue whose text does not match the target", async () => {
+    const filePath = await makeJsonl("a.jsonl", [enqueueRecord("some other message")]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(false);
   });
 });

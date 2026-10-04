@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTempDir } from "../helpers/common.js";
 import {
   DEFAULT_DAEMON_PORT,
   makeTargets,
   parseWebUnitOptions,
   probeInfoWith,
+  probeDaemonIdentity,
   probeWith,
   resolveDaemonPort,
   resolveDaemonPortReadOnly,
@@ -20,12 +21,38 @@ const tempDirs: string[] = [];
 const initialSpurConfig = process.env["SPUR_CONFIG"];
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   if (initialSpurConfig === undefined) {
     delete process.env["SPUR_CONFIG"];
   } else {
     process.env["SPUR_CONFIG"] = initialSpurConfig;
   }
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe("probeDaemonIdentity", () => {
+  it.each([
+    { version: "1.2.0", pid: 42, expectedPid: 42, ok: true },
+    { version: "1.1.0", pid: 42, expectedPid: 42, ok: false },
+    { version: "1.2.0", pid: 99, expectedPid: 42, ok: false },
+    { version: "1.2.0", pid: undefined, expectedPid: 42, ok: false },
+    { version: "1.2.0", pid: 42, expectedPid: undefined, ok: false },
+    { version: "1.2.0", pid: 0, expectedPid: 0, ok: false },
+  ])(
+    "checks version=$version pid=$pid MainPID=$expectedPid",
+    async ({ version, pid, expectedPid, ok }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(JSON.stringify({ version, pid }))),
+      );
+      expect(
+        await probeDaemonIdentity(makeTargets({ daemon: 12345, web: 12346 }).daemon, {
+          version: "1.2.0",
+          pid: expectedPid,
+        }),
+      ).toEqual(ok ? { ok: true } : { ok: false, reason: "identity-mismatch" });
+    },
+  );
 });
 
 // Regression guard for the doctor read-only invariant: `spur doctor` must
@@ -50,7 +77,12 @@ describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)",
     expect(existsSync(configPath)).toBe(false);
   });
 
-  it("resolveDaemonPort DOES bootstrap-create the pinned instance config when it is missing", async () => {
+  // Since #846 only the default instance config path bootstraps, so a pinned
+  // `SPUR_CONFIG` that does not exist is refused rather than seeded. The
+  // refusal is swallowed by `resolveDaemonPortImpl`'s catch, so the resolved
+  // port is unchanged — `spur update` still reads 4310, it just no longer
+  // leaves a defaults-seeded config behind at the pinned path.
+  it("resolveDaemonPort does not bootstrap-create a pinned instance config that does not exist", async () => {
     const dir = await createTempDir("spur-daemon-port-write-");
     tempDirs.push(dir);
     const configPath = join(dir, "does-not-exist.yaml");
@@ -59,7 +91,7 @@ describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)",
     const port = resolveDaemonPort();
 
     expect(port).toBe(DEFAULT_DAEMON_PORT);
-    expect(existsSync(configPath)).toBe(true);
+    expect(existsSync(configPath)).toBe(false);
   });
 });
 

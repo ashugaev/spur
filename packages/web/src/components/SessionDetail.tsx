@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   type MouseEvent,
   type PointerEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -14,8 +15,16 @@ import {
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { BusyContent } from "@/components/BusyContent";
+import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
+import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
-import { ModelSelect } from "@/components/ModelSelect";
+import { ModelReasoningField } from "@/components/ModelReasoningField";
+import {
+  initialReasoningIntent,
+  serializeReasoningIntent,
+  type ReasoningIntent,
+} from "@/lib/reasoning-effort";
+import { TokenCount } from "@/components/TokenCount";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -24,13 +33,16 @@ import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
 import { OpenPrActionDialog } from "@/components/OpenPrActionDialog";
 import { RecoverActionDialog } from "@/components/RecoverActionDialog";
 import { SwitchAuthDialog } from "@/components/SwitchAuthDialog";
+import { TitleEditDialog } from "@/components/TitleEditDialog";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { Skeleton } from "@/components/Skeleton";
 import { SpawnModal } from "@/components/SpawnModal";
 import { TagEditor } from "@/components/TagEditor";
+import { WakeControls } from "@/components/WakeControls";
 import { TagsContext, type TagChange } from "@/components/TagsContext";
 import { useTagCatalog } from "@/hooks/useTagCatalog";
+import { useAnchoredMenu } from "@/hooks/useAnchoredMenu";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { StopSquareIcon, VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -88,6 +100,8 @@ import {
 } from "@/lib/json-payload";
 import { insertTextAtCursor } from "@/lib/textarea";
 import { useToasts } from "@/hooks/useToasts";
+import { usePoll } from "@/hooks/usePoll";
+import { SessionLifecycleConsumer, type LifecycleIntent } from "@/lib/session-lifecycle";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -106,6 +120,7 @@ import {
   isOpenPrActionRequiredPayload,
   isRestorable,
   isSessionNotRestorablePayload,
+  isTokenBudgetBlocked,
   isTerminalSession,
   toDashboardSession,
   type ConversationResponse,
@@ -115,7 +130,10 @@ import {
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
   type SpurSidecarPortConflict,
+  type SpurSidecarPortConflictCandidate,
+  type SpurSidecarStopResponse,
   type SpurSessionView,
+  type SpurUpdateSessionSlotsResponse,
 } from "@/lib/types";
 import { formatIntervalDuration, formatWakeCountdown, getWakeSummary } from "@/lib/wake-format";
 import { resolveActivityStatus } from "@/lib/terminal-status";
@@ -142,10 +160,22 @@ function displayLinkLabel(label: string, url: string): string {
   return label;
 }
 
-function splitSessionLinks(
-  links: DashboardSession["links"],
-  sidecarLinkLabels: Set<string>,
-): {
+// Two failing portIds can share an overlapping declared range and both name
+// the same numeric port as a candidate — one <option> per portId would
+// render duplicate values in the busy-port <select>. Keep the first
+// occurrence only.
+function dedupeConflictCandidatesByPort(
+  candidates: SpurSidecarPortConflictCandidate[],
+): SpurSidecarPortConflictCandidate[] {
+  const seen = new Set<number>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.port)) return false;
+    seen.add(candidate.port);
+    return true;
+  });
+}
+
+function splitSessionLinks(links: DashboardSession["links"]): {
   surfacedLinks: DashboardSession["links"];
   visibleLinks: DashboardSession["links"];
 } {
@@ -161,7 +191,7 @@ function splitSessionLinks(
       }
       continue;
     }
-    if (!sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url)) {
+    if (!surfacedUrls.has(link.url)) {
       visibleLinks.push(link);
     }
   }
@@ -173,25 +203,6 @@ function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
-    </svg>
-  );
-}
-
-function WakeIcon({ recurring }: { recurring: boolean }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M12 8v5l3 2" />
-      {recurring ? <path d="M4 12a8 8 0 0 1 13.5-5.8M20 12a8 8 0 0 1-13.5 5.8" /> : null}
     </svg>
   );
 }
@@ -235,6 +246,16 @@ function CopyIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function KebabIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} fill="currentColor" viewBox="0 0 16 16">
+      <circle cx="8" cy="2.5" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13.5" r="1.5" />
     </svg>
   );
 }
@@ -1595,7 +1616,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [busyRequestAction, setBusyAction] = useState<string | null>(null);
+  const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const rawSessionRef = useRef<SpurSessionView | null>(null);
+  const lifecycleActionRef = useRef<LifecycleIntent | null>(null);
+  const lifecycleReconcileRef = useRef<LifecycleIntent | null>(null);
+  const busyAction = lifecycleRef.current.pending(sessionId) ?? busyRequestAction;
   const [openPrAction, setOpenPrAction] = useState<{
     action: "complete" | "kill";
     body?: Record<string, unknown>;
@@ -1607,6 +1633,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     payload: GithubPrCheckUnavailablePayload;
   } | null>(null);
   const [recoverPayload, setRecoverPayload] = useState<SessionNotRestorablePayload | null>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sendingRef = useRef(false);
   const [sidecarPortConflict, setSidecarPortConflict] = useState<SpurSidecarPortConflict | null>(
     null,
@@ -1626,6 +1656,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnModel, setRespawnModel] = useState<string | null>(null);
+  const [respawnReasoningIntent, setRespawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself.
   // Submit gates on this, not on `respawnModel === null` — a settled-empty
   // catalog also has a null model but is a valid, submittable state.
@@ -1639,6 +1672,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [handoffNotes, setHandoffNotes] = useState("");
   const [handoffAgent, setHandoffAgent] = useState<AgentName | null>(null);
   const [handoffModel, setHandoffModel] = useState<string | null>(null);
+  const [handoffReasoningIntent, setHandoffReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   // Settled/unsettled model resolution, reported by ModelSelect itself.
   // Submit gates on this, not on `handoffModel === null` — a settled-empty
   // catalog also has a null model but is a valid, submittable state.
@@ -1659,6 +1695,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
   const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
   const [deskSpawnModel, setDeskSpawnModel] = useState<string | null>(null);
+  const [deskSpawnReasoningIntent, setDeskSpawnReasoningIntent] = useState<ReasoningIntent>(
+    initialReasoningIntent(false),
+  );
   const [deskSpawnModelResolved, setDeskSpawnModelResolved] = useState(false);
   const deskSpawnDefaults = useResolvedSpawnDefaults(
     deskSpawnOpen && session ? session.projectId : "",
@@ -1738,61 +1777,131 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [dismissToast]);
 
   useEffect(() => {
+    lifecycleRef.current = new SessionLifecycleConsumer();
+    rawSessionRef.current = null;
+    lifecycleActionRef.current = null;
+    lifecycleReconcileRef.current = null;
+    setBusyAction(null);
     setSession((current) => (current?.id === sessionId ? current : null));
     sessionRef.current = sessionRef.current?.id === sessionId ? sessionRef.current : null;
     setError(null);
     setConversation(null);
     setFromIndex(null);
     dismissLoadErrorToast();
+    return () => {
+      loadRequestIdRef.current += 1;
+      lifecycleRef.current = new SessionLifecycleConsumer();
+      lifecycleActionRef.current = null;
+      lifecycleReconcileRef.current = null;
+    };
   }, [dismissLoadErrorToast, sessionId]);
 
-  const loadSession = useCallback(async () => {
-    const requestedSessionId = sessionId;
-    const requestId = loadRequestIdRef.current + 1;
-    loadRequestIdRef.current = requestId;
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
-        cache: "no-store",
-      });
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to load session"));
-      }
-      const payload = (await response.json()) as SpurSessionView;
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const nextSession = toDashboardSession(payload);
-      setSession(nextSession);
-      setError(null);
-      dismissLoadErrorToast();
-    } catch (loadError) {
-      if (
-        requestId !== loadRequestIdRef.current ||
-        currentSessionIdRef.current !== requestedSessionId
-      ) {
-        return;
-      }
-      const message = errorMessage(loadError, "Failed to load session");
-      if (sessionRef.current?.id !== requestedSessionId) {
-        setSession(null);
-        setError(message);
-        return;
-      }
-      if (lastLoadErrorToastRef.current?.message === message) return;
-      dismissLoadErrorToast();
-      const id = showErrorToast(message);
-      lastLoadErrorToastRef.current = { id, message };
+  const publishLifecycleSession = useCallback((row: SpurSessionView) => {
+    rawSessionRef.current = row;
+    const projected = lifecycleRef.current.project([row])[0];
+    if (projected) setSession(toDashboardSession(projected));
+    const owner = lifecycleActionRef.current;
+    if (owner && !lifecycleRef.current.isCurrent(owner)) {
+      lifecycleActionRef.current = null;
+      setBusyAction(null);
+    } else if (owner && !lifecycleRef.current.pending(row.id)) {
+      setBusyAction(null);
     }
-  }, [dismissLoadErrorToast, sessionId, showErrorToast]);
+  }, []);
+
+  const fetchSession = useCallback(
+    async (signal: AbortSignal) => {
+      const requestedSessionId = sessionId;
+      const requestId = loadRequestIdRef.current + 1;
+      loadRequestIdRef.current = requestId;
+      const consumer = lifecycleRef.current;
+      const read = consumer.beginRead();
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
+          cache: "no-store",
+          signal,
+        });
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        if (!response.ok) {
+          if (response.status === 404) {
+            const baseline = await fetch("/api/runtime/info", { cache: "no-store", signal });
+            if (
+              signal.aborted ||
+              requestId !== loadRequestIdRef.current ||
+              currentSessionIdRef.current !== requestedSessionId
+            )
+              return;
+            if (baseline.ok) {
+              const info = (await baseline.json()) as { lifecycleInstanceId?: string };
+              if (
+                signal.aborted ||
+                requestId !== loadRequestIdRef.current ||
+                currentSessionIdRef.current !== requestedSessionId
+              )
+                return;
+              if (info.lifecycleInstanceId && consumer.accept(info.lifecycleInstanceId, [], read)) {
+                rawSessionRef.current = null;
+                sessionRef.current = null;
+                lifecycleActionRef.current = null;
+                lifecycleReconcileRef.current = null;
+                setBusyAction(null);
+                setSession(null);
+              }
+            }
+          }
+          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+        }
+        const payload = (await response.json()) as SpurSessionView;
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        if (!payload.lifecycle) throw new Error("Invalid session lifecycle snapshot");
+        const accepted = consumer.accept(payload.lifecycle.instanceId, [payload], read)?.[0];
+        if (!accepted) return;
+        const reconciling = lifecycleReconcileRef.current;
+        if (reconciling && accepted === payload) {
+          consumer.releaseUnmatched(reconciling);
+          lifecycleReconcileRef.current = null;
+        }
+        publishLifecycleSession(accepted);
+        setError(null);
+        dismissLoadErrorToast();
+      } catch (loadError) {
+        if (
+          signal.aborted ||
+          requestId !== loadRequestIdRef.current ||
+          currentSessionIdRef.current !== requestedSessionId
+        ) {
+          return;
+        }
+        const message = errorMessage(loadError, "Failed to load session");
+        if (sessionRef.current?.id !== requestedSessionId) {
+          setSession(null);
+          setError(message);
+          return;
+        }
+        if (lastLoadErrorToastRef.current?.message === message) return;
+        dismissLoadErrorToast();
+        const id = showErrorToast(message);
+        lastLoadErrorToastRef.current = { id, message };
+      }
+    },
+    [dismissLoadErrorToast, publishLifecycleSession, sessionId, showErrorToast],
+  );
+  const loadSession = usePoll(fetchSession, POLL_INTERVAL_MS);
+  const applySessionUpdate = useCallback(() => {
+    void loadSession();
+  }, [loadSession]);
 
   const tagCatalog = useTagCatalog();
   const applyTags = useCallback(
@@ -1817,14 +1926,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => ({ catalog: tagCatalog, applyTags }),
     [tagCatalog, applyTags],
   );
-
-  useEffect(() => {
-    void loadSession();
-    const timer = setInterval(() => {
-      void loadSession();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -1852,32 +1953,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     sessionId,
   ]);
 
-  const loadConversation = useCallback(async () => {
-    if (!session) {
-      setConversation(null);
-      return;
-    }
-    const query = fromIndex !== null ? `?from=${fromIndex}` : "";
-    try {
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
-        { cache: "no-store" },
-      );
-      if (res.ok) {
-        setConversation((await res.json()) as ConversationResponse);
-      } else {
+  const fetchConversation = useCallback(
+    async (signal: AbortSignal) => {
+      if (!session) {
         setConversation(null);
+        return;
       }
-    } catch {
-      setConversation(null);
-    }
-  }, [session?.agent, sessionId, fromIndex]);
-
-  useEffect(() => {
-    void loadConversation();
-    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadConversation]);
+      const query = fromIndex !== null ? `?from=${fromIndex}` : "";
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}/conversation${query}`,
+          { cache: "no-store", signal },
+        );
+        if (!res.ok) {
+          if (!signal.aborted) setConversation(null);
+          return;
+        }
+        const payload = (await res.json()) as ConversationResponse;
+        if (!signal.aborted) setConversation(payload);
+      } catch {
+        if (!signal.aborted) setConversation(null);
+      }
+    },
+    [session?.agent, sessionId, fromIndex],
+  );
+  const loadConversation = usePoll(fetchConversation, POLL_INTERVAL_MS);
 
   const handleLoadOlder = useCallback(() => {
     const startIndex = conversation?.startIndex ?? 0;
@@ -1941,11 +2041,72 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     });
   }, [session]);
 
+  // Send now / flush to an agent with no interrupt key while it works: the
+  // daemon queued the message at the head instead of typing it.
+  const showQueuedAheadToast = (payload: unknown) => {
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      (payload as { queuedAheadReason?: unknown }).queuedAheadReason === "no_interrupt"
+    ) {
+      const agent = session?.agent ?? "agent";
+      showSuccessToast(
+        `${agent.charAt(0).toUpperCase()}${agent.slice(1)} can't be interrupted — sends when the turn ends`,
+      );
+    }
+  };
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "reopen" | "complete" | "kill",
     body?: Record<string, unknown>,
     options: { skipKillConfirm?: boolean } = {},
   ) => {
+    const lifecycleAction = action === "complete" || action === "restore" || action === "reopen";
+    const consumer = lifecycleRef.current;
+    let owner: LifecycleIntent | null = null;
+    if (lifecycleAction) {
+      if (consumer.pending(sessionId)) return false;
+      if (!consumer.instanceId) {
+        const read = consumer.beginRead();
+        const requestedSessionId = sessionId;
+        try {
+          const response = await fetch("/api/runtime/info", { cache: "no-store" });
+          if (!response.ok)
+            throw new Error(await readApiErrorMessage(response, "Failed to load runtime info"));
+          const info = (await response.json()) as { lifecycleInstanceId?: string };
+          if (
+            currentSessionIdRef.current !== requestedSessionId ||
+            consumer !== lifecycleRef.current ||
+            !info.lifecycleInstanceId ||
+            !consumer.accept(info.lifecycleInstanceId, [], read)
+          )
+            return false;
+          await loadSession();
+        } catch (baselineError) {
+          if (
+            currentSessionIdRef.current === requestedSessionId &&
+            consumer === lifecycleRef.current &&
+            read.generation === consumer.generation
+          ) {
+            showErrorToast(errorMessage(baselineError, "Failed to load runtime info"));
+          }
+          return false;
+        }
+      }
+      const raw = rawSessionRef.current;
+      if (!raw || consumer !== lifecycleRef.current) return false;
+      owner = consumer.reserve([raw], action);
+      if (!owner) return false;
+      lifecycleActionRef.current = owner;
+      loadRequestIdRef.current += 1;
+      publishLifecycleSession(raw);
+    }
+    const isCurrentAction = () =>
+      currentSessionIdRef.current === sessionId &&
+      (!owner ||
+        (consumer === lifecycleRef.current &&
+          consumer.isCurrent(owner) &&
+          lifecycleActionRef.current === owner));
     if (
       action === "kill" &&
       !options.skipKillConfirm &&
@@ -1956,12 +2117,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
     setBusyAction(action);
     try {
+      const requestBody = owner ? { ...body, operationId: owner.operationId } : body;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
-        headers: body ? { "content-type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
+        headers: requestBody ? { "content-type": "application/json" } : undefined,
+        body: requestBody ? JSON.stringify(requestBody) : undefined,
       });
+      if (!isCurrentAction()) return false;
       const payload = await readResponsePayload(response);
+      if (!isCurrentAction()) return false;
       if (!response.ok) {
         if (
           (action === "complete" || action === "kill") &&
@@ -1984,6 +2148,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         throw new Error(responseErrorMessage(payload, `Failed to ${action} session`));
       }
+      if (
+        owner &&
+        payload !== null &&
+        typeof payload === "object" &&
+        "id" in payload &&
+        payload.id === sessionId
+      ) {
+        const accepted = consumer.acceptMutation(payload as SpurSessionView, owner);
+        if (accepted) publishLifecycleSession(accepted);
+      }
       if (action === "send") {
         const submittedMessage =
           body && typeof body["message"] === "string" ? body["message"].trim() : "";
@@ -1992,18 +2166,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         }
         setMessage("");
         setAttachments([]);
+        // A 200 Send now the agent never acked: typed, not confirmed; the
+        // banner holds further sends until the agent shows activity.
+        if (
+          payload !== null &&
+          typeof payload === "object" &&
+          typeof (payload as { submitUnconfirmedAt?: unknown }).submitUnconfirmedAt === "string"
+        ) {
+          showErrorToast("Sent, agent hasn't confirmed yet");
+        }
+        showQueuedAheadToast(payload);
       }
-      await loadSession();
+      if (!owner) await loadSession();
       return true;
     } catch (actionError) {
+      if (!isCurrentAction()) return false;
       showErrorToast(errorMessage(actionError, `Failed to ${action} session`));
       // The server may have already moved (e.g. reopen's rollback flips the
       // record back to completed on a failed restore) — refetch so the page
       // never shows a stale view after a failed action.
-      await loadSession();
+      if (!owner) await loadSession();
       return false;
     } finally {
-      setBusyAction(null);
+      if (isCurrentAction()) {
+        if (owner) {
+          lifecycleReconcileRef.current = owner;
+          await loadSession();
+          if (isCurrentAction() && rawSessionRef.current)
+            publishLifecycleSession(rawSessionRef.current);
+        }
+        if (isCurrentAction()) setBusyAction(null);
+      }
     }
   };
 
@@ -2024,6 +2217,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) {
         throw new Error(responseErrorMessage(payload, `Failed to ${action} queued message`));
       }
+      showQueuedAheadToast(payload);
       await loadSession();
     } catch (queueError) {
       showErrorToast(errorMessage(queueError, `Failed to ${action} queued message`));
@@ -2089,6 +2283,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           prompt: nextPrompt,
           agent: respawnAgent,
           model: respawnModel,
+          reasoningIntent: respawnReasoningIntent,
           attachments: respawnAttachments,
           startupAttachmentIds: respawnStartupAttachmentIds,
         },
@@ -2149,7 +2344,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         throw new Error(await readApiErrorMessage(response, "Failed to switch Claude account"));
       }
       const data = (await response.json()) as SpurSessionView;
-      setSession(toDashboardSession(data));
+      const accepted = lifecycleRef.current.acceptUpdate(data);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSwitchAuthOpen(false);
     } catch (switchAuthErr) {
       setSwitchAuthError(errorMessage(switchAuthErr, "Failed to switch Claude account"));
@@ -2165,6 +2362,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       AGENT_OPTIONS.find((candidate) => candidate !== session.agent) ?? session.agent;
     setHandoffAgent(defaultAgent);
     setHandoffModel(null);
+    setHandoffReasoningIntent(
+      initialReasoningIntent(defaultAgent === session.agent, session.reasoningEffort),
+    );
     setHandoffOpen(true);
   }, [session]);
 
@@ -2176,6 +2376,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       // Only the settled-empty-catalog case omits `model`; every other model
       // state (including a manual pick or a resolved default) sends it.
       if (handoffModel !== null) payload.model = handoffModel;
+      const reasoningEffort = serializeReasoningIntent(handoffReasoningIntent);
+      if (reasoningEffort !== undefined) payload.reasoningEffort = reasoningEffort;
       const notes = handoffNotes.trim();
       if (notes) payload.notes = notes;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
@@ -2200,6 +2402,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!session) return;
     setDeskSpawnAgent(session.agent);
     setDeskSpawnModel(null);
+    setDeskSpawnReasoningIntent(initialReasoningIntent(false));
     setDeskSpawnModelResolved(false);
     setDeskSpawnPrompt("");
     setDeskSpawnBranch(session.branch ?? "");
@@ -2220,6 +2423,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           prompt: nextPrompt,
           agent: deskSpawnAgent,
           model: deskSpawnModel,
+          reasoningIntent: deskSpawnReasoningIntent,
           attachments: deskSpawnAttachments,
           branch: deskSpawnBranch,
           planMode: deskSpawnPlanMode,
@@ -2272,7 +2476,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           const conflict = await readSidecarPortConflict(response.clone());
           if (conflict) {
             setSidecarPortConflict(conflict);
-            setSelectedClearPort(conflict.candidates[0]?.port ?? null);
+            // Never default onto a clearable:false candidate — it renders
+            // disabled in the dropdown, and submitting it is a silent
+            // repeat 409 (a port already claimed by a sibling portId in the
+            // same attempt never enters the clear path).
+            setSelectedClearPort(
+              conflict.candidates.find((candidate) => candidate.clearable !== false)?.port ?? null,
+            );
             return;
           }
         }
@@ -2280,10 +2490,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           await readApiErrorMessage(response, `Failed to ${action} sidecar ${sidecarName}`),
         );
       }
-      const payload = (await response.json()) as SpurSessionView;
-      setSession(toDashboardSession(payload));
+      const payload = (await response.json()) as SpurSessionView & Partial<SpurSidecarStopResponse>;
+      const accepted = lifecycleRef.current.acceptUpdate(payload);
+      if (accepted && accepted.id === currentSessionIdRef.current)
+        publishLifecycleSession(accepted);
       setSidecarPortConflict(null);
       setSelectedClearPort(null);
+      if (action === "stop" && payload.sidecarStop?.outcome === "partial") {
+        const { survivors, unverifiedPorts = [] } = payload.sidecarStop;
+        showErrorToast(
+          survivors.length === 0 && unverifiedPorts.length > 0
+            ? `Stopped sidecar ${sidecarName}, but port(s) ${unverifiedPorts.join(",")} could not be confirmed clear. Run \`spur sidecar sweep\`.`
+            : `Stopped sidecar ${sidecarName}, but ${survivors.length} process(es) survived. Run \`spur sidecar sweep\`.`,
+        );
+      }
     } catch (sidecarError) {
       showErrorToast(errorMessage(sidecarError, `Failed to ${action} sidecar ${sidecarName}`));
     } finally {
@@ -2399,9 +2619,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [error, session, title]);
 
   const promptView = useMemo(() => (session ? parseSessionPromptView(session) : null), [session]);
-
+  const openTitleEditor = useCallback(() => {
+    if (!session) return;
+    // Always prefill with the title currently shown in the <h1> — the
+    // derived/fallback string when the session has no stored title, not an
+    // empty input.
+    setTitleDraft(title);
+    setTitleEditing(true);
+  }, [session, title]);
+  const closeTitleEditor = useCallback(() => {
+    setTitleEditing(false);
+  }, []);
+  const sessionMenu = useAnchoredMenu({
+    open: sessionMenuOpen,
+    onClose: () => setSessionMenuOpen(false),
+    contentDeps: [],
+    preferredSide: "below",
+    align: "end",
+  });
+  const updateManualTitle = useCallback(
+    async (nextTitle: string | null) => {
+      if (!session || titleSaving) return;
+      setTitleSaving(true);
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: nextTitle }),
+        });
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, "Failed to update title"));
+        }
+        const payload = (await response.json()) as SpurUpdateSessionSlotsResponse;
+        const accepted = lifecycleRef.current.acceptUpdate(payload);
+        if (accepted && accepted.id === currentSessionIdRef.current)
+          publishLifecycleSession(accepted);
+        setTitleEditing(false);
+        setTitleDraft("");
+      } catch (titleError) {
+        showErrorToast(errorMessage(titleError, "Failed to update title"));
+      } finally {
+        setTitleSaving(false);
+      }
+    },
+    [session, sessionId, titleSaving, showErrorToast, publishLifecycleSession],
+  );
+  const saveTitleDraft = useCallback(() => {
+    const trimmed = titleDraft.trim();
+    void updateManualTitle(trimmed.length > 0 ? trimmed : null);
+  }, [titleDraft, updateManualTitle]);
   const displayState = useMemo(() => {
     if (!session) return undefined;
+    if (session.status === "budget_limited") return "budget_limited";
     if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
       return session.state;
     }
@@ -2409,6 +2678,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
+  // The daemon queues a send to a spawning session and refuses Send now (409).
+  const sessionStarting = session?.status === "spawning";
+  // The daemon refuses every immediate send (409) while the last prompt is
+  // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
+  const launchPending = Boolean(session?.submitUnconfirmedAt);
+  const sendNowBlocked = sessionStarting || launchPending;
   const hasSession = Boolean(session);
   const faviconLinkRef = useRef<HTMLLinkElement | null>(null);
 
@@ -2446,10 +2721,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
-  );
-  const sidecarLinkLabels = useMemo(
-    () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
-    [session],
   );
   const allArtifacts = session?.artifacts ?? [];
   const agentArtifacts = useMemo(
@@ -2526,10 +2797,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const { surfacedLinks, visibleLinks } = splitSessionLinks(
-    session?.links ?? [],
-    sidecarLinkLabels,
-  );
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(session?.links ?? []);
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {
@@ -2617,6 +2885,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     // the agent's catalog would stay selected and submittable). Passing
     // carry lets the resolver re-derive the same value, filtered.
     setRespawnModel(null);
+    setRespawnReasoningIntent(initialReasoningIntent(true, session.reasoningEffort));
     setRespawnOpen(true);
   }, [session]);
 
@@ -2671,10 +2940,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [showErrorToast, showSuccessToast],
   );
 
-  const conflictClearPort = selectedClearPort ?? sidecarPortConflict?.candidates[0]?.port ?? null;
+  // Same clearable:false skip as the 409 handler that sets selectedClearPort
+  // (readSidecarPortConflict's caller): if selectedClearPort is null (every
+  // candidate was clearable:false, so the handler set null), this fallback
+  // must not silently re-enable Clear/Retry onto a disabled option.
+  const conflictClearPort =
+    selectedClearPort ??
+    sidecarPortConflict?.candidates.find((candidate) => candidate.clearable !== false)?.port ??
+    null;
   const isClearingConflictPort =
     sidecarPortConflict !== null &&
     busyAction === `sidecar:start:${sidecarPortConflict.sidecarName}`;
+  const tokenBudgetBlocked = session ? isTokenBudgetBlocked(session) : false;
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1500px] flex-col px-4 py-4 sm:px-5 lg:px-6">
@@ -2706,6 +2983,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <h1 className="mt-2 min-w-0 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl [overflow-wrap:anywhere]">
               {title}
             </h1>
+            {titleEditing ? (
+              <TitleEditDialog
+                draft={titleDraft}
+                saving={titleSaving}
+                onDraftChange={setTitleDraft}
+                onSave={saveTitleDraft}
+                onCancel={closeTitleEditor}
+              />
+            ) : null}
             {promptView &&
             (promptView.task || promptView.handoff || promptView.selfDestructLabel) ? (
               <div className="mt-3 w-full space-y-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
@@ -2823,39 +3109,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
             <TagsContext.Provider value={tagsContextValue}>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {displayState ? <ActivityDot activity={displayState} /> : null}
+                {displayState ? (
+                  <ActivityDot activity={sessionStarting ? "starting" : displayState} />
+                ) : null}
                 {session.branch ? (
                   <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                     {session.branch}
                   </span>
                 ) : null}
-                {wakeSummary ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-status-attention)]"
-                    title={
-                      wakeSummary.kind === "interval"
-                        ? "Interval wake scheduled"
-                        : wakeSummary.kind === "daily"
-                          ? "Daily wake scheduled"
-                          : "Wake scheduled"
-                    }
-                  >
-                    <WakeIcon recurring={wakeSummary.kind !== "one-shot"} />
-                    <span>{wakeSummary.label.toLowerCase()}</span>
-                    <span className="font-mono text-[var(--color-text-primary)]">
-                      {wakeCountdown}
-                    </span>
-                    {wakeSummary.intervalMs ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        every {formatIntervalDuration(wakeSummary.intervalMs)}
-                      </span>
-                    ) : null}
-                    {wakeSummary.dailyAt ? (
-                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                        daily {wakeSummary.dailyAt.join(", ")}
-                      </span>
-                    ) : null}
-                  </span>
+                {session && getWakeSummary(session) ? (
+                  <WakeControls
+                    onRefresh={loadSession}
+                    onSessionUpdated={applySessionUpdate}
+                    session={session}
+                    showErrorToast={showErrorToast}
+                    showSuccessToast={showSuccessToast}
+                  />
                 ) : null}
                 {surfacedLinks.map((link) => (
                   <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
@@ -2941,7 +3210,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <BusyContent busy={busyAction === "pause"}>Pause</BusyContent>
               </button>
             ) : null}
-            {isRestorable(session) ? (
+            {isRestorable(session) && !tokenBudgetBlocked ? (
               <button
                 aria-busy={busyAction === "restore" || undefined}
                 aria-label={busyAction === "restore" ? "Restoring session" : undefined}
@@ -2951,6 +3220,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 <BusyContent busy={busyAction === "restore"}>Restore</BusyContent>
+              </button>
+            ) : null}
+            {isRestorable(session) && tokenBudgetBlocked ? (
+              <button
+                aria-busy={busyAction === "restore" || undefined}
+                aria-label={
+                  busyAction === "restore" ? "Approving and restoring session" : undefined
+                }
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("restore", { overrideTokenBudget: true })}
+                title="Ignore the token budget for this session and resume work"
+                className="border border-[var(--color-status-attention)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-attention)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+              >
+                <BusyContent busy={busyAction === "restore"}>Continue anyway</BusyContent>
               </button>
             ) : null}
             {canReopen(session) ? (
@@ -3019,6 +3303,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             >
               Logs
             </button>
+            <div className="relative" ref={sessionMenu.containerRef}>
+              <button
+                aria-expanded={sessionMenuOpen}
+                aria-haspopup="menu"
+                aria-label="More session actions"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => setSessionMenuOpen((value) => !value)}
+                ref={sessionMenu.buttonRef}
+                type="button"
+              >
+                <KebabIcon />
+              </button>
+              {sessionMenuOpen ? (
+                <div
+                  aria-label="Session actions"
+                  className="fixed z-30 w-44 border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] py-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                  ref={sessionMenu.menuRef}
+                  role="menu"
+                  style={sessionMenu.menuStyle}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                    onClick={() => {
+                      setSessionMenuOpen(false);
+                      openTitleEditor();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    Change title
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {/* Content */}
@@ -3043,7 +3361,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               {/* Queued messages */}
               {session.queuedMessages.messages.length > 0 ||
-              session.queuedMessages.awaitingPrompt ||
               (session.queuedMessages.pipelineMessages?.length ?? 0) > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -3069,7 +3386,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                   label={`Send queued message #${index + 1} now`}
                                   busyLabel={`Sending queued message #${index + 1}…`}
                                   busy={flushBusy}
-                                  disabled={busyAction !== null}
+                                  disabled={sendNowBlocked || busyAction !== null}
                                   onClick={() =>
                                     void handleQueueAction("flush", queuedMessage, index)
                                   }
@@ -3142,8 +3459,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   Message
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
-                {canSendMessage(session) ? (
+                {canSendMessage(session) && !tokenBudgetBlocked ? (
                   <div className="space-y-2">
+                    {launchPending ? (
+                      <PendingLaunchBanner sessionId={sessionId} onSubmitted={loadSession} />
+                    ) : null}
+                    {session.submitFailedMessage ? (
+                      <SubmitFailedBanner
+                        sessionId={sessionId}
+                        message={session.submitFailedMessage.message}
+                        onResolved={loadSession}
+                      />
+                    ) : null}
                     <FileAttachmentTextarea
                       attachments={attachments}
                       clearLabel="Clear message"
@@ -3158,7 +3485,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }
                         if (isPrimarySubmitHotkey(event)) {
                           event.preventDefault();
-                          void doSend({ queue: false, interrupt: true });
+                          void doSend(
+                            sendNowBlocked ? { queue: true } : { queue: false, interrupt: true },
+                          );
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -3180,6 +3509,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
                           <VoiceStatusHint voice={voice} />
+                        ) : sessionStarting ? (
+                          "Session is starting. Queued messages send after launch."
                         ) : null}
                       </span>
                       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3214,7 +3545,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           aria-label={busyAction === "send" ? "Sending message" : undefined}
                           type="button"
                           disabled={
-                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                            sendNowBlocked ||
+                            busyAction !== null ||
+                            (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
                           className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
@@ -3234,7 +3567,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="py-2 text-[var(--color-text-secondary)]">
-                    Not accepting input. Restore to continue.
+                    {tokenBudgetBlocked
+                      ? "Not accepting input. Token budget limit hit."
+                      : "Not accepting input. Restore to continue."}
                   </p>
                 )}
               </section>
@@ -3336,48 +3671,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </p>
                   ) : null}
                   {visibleArtifacts.length > 0 ? (
-                    artifactViewMode === "list" ? (
-                      <ArtifactList
-                        artifacts={visibleArtifacts}
-                        hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
-                        onPreview={setSelectedArtifactId}
-                        onSortChange={setArtifactListSort}
-                        sort={artifactListSort}
-                      />
-                    ) : (
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                        {visibleArtifacts.map((artifact) => {
-                          const artifactHref = artifactUrl(session.id, artifact.id);
-                          const previewState = artifactPreviewStates[artifact.id] ?? "loading";
-                          return (
-                            <ArtifactCard
-                              key={`${session.id}-${artifact.id}`}
-                              artifact={artifact}
-                              artifactHref={artifactHref}
-                              onPreview={setSelectedArtifactId}
-                              onPreviewError={(artifactId) =>
-                                setArtifactPreviewStates((current) => ({
-                                  ...current,
-                                  [artifactId]: "error",
-                                }))
-                              }
-                              onPreviewReady={(artifactId) =>
-                                setArtifactPreviewStates((current) => ({
-                                  ...current,
-                                  [artifactId]: "ready",
-                                }))
-                              }
-                              previewState={previewState}
-                              variant={
-                                artifactCategory === "attached" && artifact.kind === "image"
-                                  ? "attachedImage"
-                                  : "compact"
-                              }
-                            />
-                          );
-                        })}
-                      </div>
-                    )
+                    <div
+                      className="max-h-[min(36rem,55dvh)] overflow-y-auto overscroll-y-auto pr-1"
+                      data-artifact-collection
+                    >
+                      {artifactViewMode === "list" ? (
+                        <ArtifactList
+                          artifacts={visibleArtifacts}
+                          hrefFor={(artifactId) => artifactUrl(session.id, artifactId)}
+                          onPreview={setSelectedArtifactId}
+                          onSortChange={setArtifactListSort}
+                          sort={artifactListSort}
+                        />
+                      ) : (
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                          {visibleArtifacts.map((artifact) => {
+                            const artifactHref = artifactUrl(session.id, artifact.id);
+                            const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                            return (
+                              <ArtifactCard
+                                key={`${session.id}-${artifact.id}`}
+                                artifact={artifact}
+                                artifactHref={artifactHref}
+                                onPreview={setSelectedArtifactId}
+                                onPreviewError={(artifactId) =>
+                                  setArtifactPreviewStates((current) => ({
+                                    ...current,
+                                    [artifactId]: "error",
+                                  }))
+                                }
+                                onPreviewReady={(artifactId) =>
+                                  setArtifactPreviewStates((current) => ({
+                                    ...current,
+                                    [artifactId]: "ready",
+                                  }))
+                                }
+                                previewState={previewState}
+                                variant={
+                                  artifactCategory === "attached" && artifact.kind === "image"
+                                    ? "attachedImage"
+                                    : "compact"
+                                }
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   ) : (
                     <p className="py-2 text-[var(--color-text-secondary)]">None.</p>
                   )}
@@ -3421,29 +3761,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
               </h2>
               <dl className="space-y-2 text-[var(--color-text-secondary)]">
-                {[
-                  ["Created", formatAbsoluteTime(session.createdAt)],
-                  ["Last activity", formatRelativeTime(session.lastActivityAt)],
-                  ["Worktree", session.worktree ? "isolated" : "shared"],
-                  ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
-                  ["Workspace", session.workspaceExists ? "present" : "missing"],
-                  ...(wakeSummary && wakeCountdown
-                    ? ([
-                        ["Wake", wakeSummary.label],
-                        ["Next wake", wakeCountdown],
-                      ] as Array<[string, string]>)
-                    : []),
-                  ...(wakeSummary?.intervalMs
-                    ? ([["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                  ...(wakeSummary?.dailyAt
-                    ? ([["Wake daily at", wakeSummary.dailyAt.join(", ")]] as Array<
-                        [string, string]
-                      >)
-                    : []),
-                ].map(([label, value]) => (
+                {(
+                  [
+                    ["Created", formatAbsoluteTime(session.createdAt)],
+                    ["Last activity", formatRelativeTime(session.lastActivityAt)],
+                    ["Worktree", session.worktree ? "isolated" : "shared"],
+                    ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
+                    ["Workspace", session.workspaceExists ? "present" : "missing"],
+                    ["Tokens", <TokenCount session={session} sidebar />],
+                    ...(wakeSummary && wakeCountdown
+                      ? [
+                          ["Wake", wakeSummary.label],
+                          ["Next wake", wakeCountdown],
+                        ]
+                      : []),
+                    ...(wakeSummary?.intervalMs
+                      ? [["Wake interval", formatIntervalDuration(wakeSummary.intervalMs)]]
+                      : []),
+                    ...(wakeSummary?.dailyAt
+                      ? [["Wake daily at", wakeSummary.dailyAt.join(", ")]]
+                      : []),
+                  ] as Array<[string, ReactNode]>
+                ).map(([label, value]) => (
                   <div
                     key={label}
                     className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
@@ -3537,9 +3876,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 <div className="space-y-2">
                   {session.sidecars.map((sc) => {
-                    const sidecarOpenUrl = sc.alive
-                      ? session.links.find((link) => link.label === sc.name)?.url
-                      : undefined;
+                    const sidecarOpenUrl = sc.url;
                     return (
                       <div
                         key={sc.name}
@@ -3572,7 +3909,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             ) : null}
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
-                            {sc.alive && canAttach ? (
+                            {(sc.alive || sc.deadPane) && canAttach ? (
                               <button
                                 type="button"
                                 className="border border-[var(--color-border-strong)] px-2 py-0.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
@@ -3682,6 +4019,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {recoverPayload ? (
             <RecoverActionDialog
               busy={busyAction !== null}
+              canForceKill={!isTerminalSession(session)}
               onCancel={() => setRecoverPayload(null)}
               onForceKill={() => void handleRecoverForceKill()}
               onRespawn={() => void handleRecoverRespawn()}
@@ -3772,15 +4110,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       }
                       value={conflictClearPort ?? ""}
                     >
-                      {sidecarPortConflict.candidates.map((candidate) => (
-                        <option
-                          key={`${candidate.portId}:${candidate.port}`}
-                          value={candidate.port}
-                        >
-                          {candidate.portId}:{candidate.port}
-                          {candidate.owner ? ` — ${candidate.owner}` : ""}
-                        </option>
-                      ))}
+                      {dedupeConflictCandidatesByPort(sidecarPortConflict.candidates).map(
+                        (candidate) => {
+                          const label = candidate.reservedBy
+                            ? `reserved by ${candidate.reservedBy}`
+                            : candidate.holder
+                              ? `pid ${candidate.holder.pid}${candidate.holder.cwd ? ` (${candidate.holder.cwd})` : ""}`
+                              : candidate.owner && candidate.owner !== "external"
+                                ? candidate.owner
+                                : "holder unknown";
+                          return (
+                            <option
+                              key={`${candidate.portId}:${candidate.port}`}
+                              disabled={candidate.clearable === false}
+                              value={candidate.port}
+                            >
+                              {candidate.portId}:{candidate.port} — {label}
+                            </option>
+                          );
+                        },
+                      )}
                     </select>
                   </label>
                   <div className="flex justify-end gap-2">
@@ -3820,6 +4169,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           ) : null}
           {handoffOpen && session && handoffAgent ? (
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="handoff-modal-title"
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
                 if (event.target === event.currentTarget && busyAction !== "handoff") {
@@ -3842,7 +4194,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 }}
               >
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  <h2
+                    id="handoff-modal-title"
+                    className="font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]"
+                  >
                     Handoff
                   </h2>
                   <button
@@ -3868,22 +4223,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     Spur builds the main handoff prompt from this session&apos;s task, links,
                     branch, and workspace. Add optional notes below.
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <AgentSelect
                       ariaLabel="Handoff agent"
                       onChange={(next) => {
                         setHandoffAgent(next);
                         setHandoffModel(null);
+                        setHandoffReasoningIntent(
+                          next === session.agent
+                            ? { kind: "clear" }
+                            : initialReasoningIntent(false),
+                        );
                       }}
                       value={handoffAgent}
                     />
-                    <div className="min-w-40 flex-1">
-                      <ModelSelect
+                    <div className="contents">
+                      <ModelReasoningField
+                        submitting={busyAction === "handoff"}
                         agent={handoffAgent}
                         ariaLabel="Handoff model"
                         carry={{ agent: session.agent, model: session.model }}
                         onChange={setHandoffModel}
-                        onResolvedChange={setHandoffModelResolved}
+                        onValidityChange={setHandoffModelResolved}
+                        lifecycle
+                        reasoningLabel="Handoff reasoning"
+                        reasoningIntent={handoffReasoningIntent}
+                        onReasoningChange={setHandoffReasoningIntent}
+                        projectReasoningEffort={handoffSpawnDefaults.reasoningEffort}
                         spawnDefaults={handoffSpawnDefaults}
                         value={handoffModel}
                       />
@@ -3961,6 +4327,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 kind: "respawn",
                 model: {
                   value: respawnModel,
+                  reasoningIntent: respawnReasoningIntent,
+                  onReasoningChange: setRespawnReasoningIntent,
                   onChange: setRespawnModel,
                   spawnDefaults: respawnSpawnDefaults,
                   carry: { agent: session.agent, model: session.model },
@@ -4015,6 +4383,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAgentChange={(next) => {
                 setRespawnAgent(next);
                 setRespawnModel(null);
+                setRespawnReasoningIntent(
+                  next === session.agent ? { kind: "clear" } : initialReasoningIntent(false),
+                );
               }}
               onClose={() => setRespawnOpen(false)}
               onPromptChange={setRespawnPrompt}
@@ -4025,7 +4396,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
               onSubmit={() => void handleRespawn()}
               prompt={respawnPrompt}
-              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="Initial message..."
               promptRef={respawnPromptRef}
               showCancel
@@ -4056,6 +4426,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 kind: "desk",
                 model: {
                   value: deskSpawnModel,
+                  reasoningIntent: deskSpawnReasoningIntent,
+                  onReasoningChange: setDeskSpawnReasoningIntent,
                   onChange: setDeskSpawnModel,
                   spawnDefaults: deskSpawnDefaults,
                   carry: { agent: session.agent, model: session.model },
@@ -4074,6 +4446,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onAgentChange={(next) => {
                 setDeskSpawnAgent(next);
                 setDeskSpawnModel(null);
+                setDeskSpawnReasoningIntent(initialReasoningIntent(false));
                 setDeskSpawnModelResolved(false);
               }}
               onClose={() => setDeskSpawnOpen(false)}
@@ -4086,7 +4459,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               onSubmit={() => void handleDeskSpawn()}
               prompt={deskSpawnPrompt}
               promptAriaLabel="Desk agent prompt"
-              promptMinHeightClass="min-h-[24rem] sm:min-h-[28rem]"
               promptPlaceholder="First message"
               promptRef={deskSpawnPromptRef}
               showCancel
