@@ -34,7 +34,7 @@ import {
   renderHostSkillWarnings,
 } from "./host-skills.js";
 import { writeStderr } from "./io.js";
-import { listGitHubPollDisabledEntries, listSessions, readSession } from "./metadata.js";
+import { listGitHubPollDisabledEntries, listSessions } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
@@ -124,11 +124,15 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
 // Reports only entries that still gate polling: the session record exists and
 // (projectId, sourceId) is a currently configured github source. Registry files orphaned
 // by a removed session or renamed/removed source are ignored (never mutated here).
-export function checkGitHubPollDisabled(config: AppConfig): HostInstallCheck {
+export function checkGitHubPollDisabled(
+  config: Pick<AppConfig, "dataDir" | "projects">,
+): HostInstallCheck {
   const entries = listGitHubPollDisabledEntries(config.dataDir).filter(
     (entry) =>
       config.projects[entry.projectId]?.sources[entry.sourceId]?.type === "github" &&
-      readSession(config.dataDir, entry.sessionId) !== null,
+      // Existence only: readSession would write the session index and legacy
+      // rewrites, and throw on a corrupt record (doctor is read-only).
+      existsSync(join(config.dataDir, "sessions", entry.projectId, `${entry.sessionId}.json`)),
   );
   if (entries.length === 0) {
     return {

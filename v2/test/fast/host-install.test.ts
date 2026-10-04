@@ -2272,6 +2272,48 @@ describe("checkGitHubPollDisabled", () => {
     expect(check.detail).not.toContain("old-source");
   });
 
+  it("does not write the session index or touch the data dir for an unindexed session", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    await mkdir(join(dataDir, "sessions", "api"), { recursive: true });
+    // Legacy-shaped record on disk, never indexed: readSession would index it.
+    await writeFile(
+      join(dataDir, "sessions", "api", "api-unindexed.json"),
+      JSON.stringify({ id: "api-unindexed", project: "api" }),
+      "utf8",
+    );
+    recordGitHubPollDisabledSession(
+      dataDir,
+      "api",
+      "pr-watch",
+      "api-unindexed",
+      42,
+      1_750_000_000_000,
+    );
+
+    const files = (): Map<string, string> => {
+      const out = new Map<string, string>();
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else out.set(full, readFileSync(full, "utf-8"));
+        }
+      };
+      walk(dataDir);
+      return out;
+    };
+    const before = files();
+    const check = checkGitHubPollDisabled(
+      pollDisabledConfig(dataDir, { "pr-watch": { type: "github" } }),
+    );
+
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("api-unindexed");
+    expect(files()).toEqual(before);
+  });
+
   it("passes when every entry is orphaned", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-poll-disabled-"));
     tempDirs.push(rootDir);
@@ -2440,6 +2482,82 @@ describe("spur doctor --json: config-registry per-path listing", () => {
 
     const parsed = JSON.parse(output) as { hostChecks?: Array<{ id: string }> };
     expect(parsed.hostChecks?.some((check) => check.id === "github-poll-disabled")).toBe(true);
+  });
+
+  // Instance config has an empty `projects` map; the project lives in a
+  // connected spur.yaml the registry lists. A live disable must still show.
+  it("reports a live poll-disable for a project declared in a connected config", async () => {
+    const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, MINIMAL_UNIT_BODY);
+    process.env["HOME"] = fakeHome;
+
+    const rootDir = await mkdtemp(join(tmpdir(), "spur-doctor-cli-poll-scope-"));
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const repoDir = join(rootDir, "repo");
+    await mkdir(dataDir, { recursive: true });
+    await mkdir(worktreeDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    const projectConfigPath = join(rootDir, "project.yaml");
+    await writeFile(
+      projectConfigPath,
+      [
+        "projects:",
+        "  api:",
+        `    path: ${repoDir}`,
+        "    sessionPrefix: api",
+        "    sources:",
+        "      pr-watch:",
+        "        type: github",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(dataDir, "config-registry.json"),
+      JSON.stringify({ configPaths: [projectConfigPath], unconfiguredProjects: [] }),
+      "utf8",
+    );
+    await pinInstanceConfig(
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "",
+      ].join("\n"),
+    );
+    writeSession(dataDir, {
+      id: "api-live",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-live",
+      worktree: false,
+      worktreePath: "",
+      tmuxSession: "api-live",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-live", 42, 1_750_000_000_000);
+
+    const emptyWorkspaceRoot = await mkdtemp(join(tmpdir(), "spur-doctor-cli-workspace-"));
+    resolveDoctorRepoRootMock.mockResolvedValue(emptyWorkspaceRoot);
+
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    await createProgram("/tmp/dist/cli.js").parseAsync(["node", "spur", "doctor", "--json"]);
+    const output = writeSpy.mock.calls.map((call) => String(call[0])).join("");
+    writeSpy.mockRestore();
+
+    const parsed = JSON.parse(output) as {
+      hostChecks?: Array<{ id: string; ok: boolean; detail: string }>;
+    };
+    const check = parsed.hostChecks?.find((entry) => entry.id === "github-poll-disabled");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain("api/pr-watch api-live");
   });
 });
 
