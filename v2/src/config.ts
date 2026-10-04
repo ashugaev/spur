@@ -1205,7 +1205,7 @@ function bindHostsOverlap(left: string, right: string): boolean {
   const normalizedLeft = overlapBindHost(left);
   const normalizedRight = overlapBindHost(right);
   if (normalizedLeft.version === 0 || normalizedRight.version === 0) {
-    return normalizedLeft.host === normalizedRight.host;
+    return true;
   }
   if (
     (normalizedLeft.host === "::" && normalizedRight.version === 4) ||

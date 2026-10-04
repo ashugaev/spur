@@ -306,6 +306,34 @@ projects:
     );
   });
 
+  it.each([
+    ["localhost", "127.0.0.1"],
+    ["localhost", "::1"],
+    ["daemon.internal", "192.0.2.1"],
+  ])("rejects daemon hostname %s overlap with webhook host %s", async (serverHost, webhookHost) => {
+    const configPath = await writeConfig(`
+server:
+  host: ${serverHost}
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "${webhookHost}"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      `projects.backend.sources.incoming webhook bind ${
+        webhookHost.includes(":") ? `[${webhookHost}]` : webhookHost
+      }:8456 overlaps server bind ${serverHost}:8456`,
+    );
+  });
+
   it("rejects webhook wildcard overlap with the daemon bind", async () => {
     const configPath = await writeConfig(`
 server:

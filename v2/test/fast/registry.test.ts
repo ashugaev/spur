@@ -30,6 +30,7 @@ async function writeConfig(rootDir: string, name: string, body: string): Promise
 }
 
 function configYaml(args: {
+  host?: string;
   port: number;
   dataDir: string;
   worktreeDir: string;
@@ -42,7 +43,7 @@ function configYaml(args: {
   webhookPort?: number;
 }): string {
   return `server:
-  host: 127.0.0.1
+  host: ${args.host ?? "127.0.0.1"}
   port: ${args.port}
 dataDir: ${args.dataDir}
 worktreeDir: ${args.worktreeDir}
@@ -63,6 +64,43 @@ afterEach(async () => {
 });
 
 describe("registry.buildMergedConfig", () => {
+  it("rejects a registered webhook that may overlap a daemon hostname", async () => {
+    const rootDir = await createTempDir("spur-registry-webhook-daemon-hostname-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const basePath = await writeConfig(
+      rootDir,
+      "base.yaml",
+      configYaml({
+        host: "localhost",
+        port: 8456,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "api",
+      }),
+    );
+    const extraPath = await writeConfig(
+      rootDir,
+      "extra.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "web",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "web",
+        webhookPort: 8456,
+      }),
+    );
+
+    expect(() => buildMergedConfig(basePath, [basePath, extraPath])).toThrow(
+      "projects.web.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind localhost:8456",
+    );
+  });
+
   it("rejects duplicate webhook binds across registered configs", async () => {
     const rootDir = await createTempDir("spur-registry-webhook-dup-");
     tempDirs.push(rootDir);
