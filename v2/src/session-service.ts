@@ -10435,7 +10435,10 @@ export class SessionService {
   // records are not touched. The record is archived whatever the delete does.
   async discardFailedSpawn(sessionId: string): Promise<void> {
     const record = readSession(this.config.dataDir, sessionId);
+    // launchCommand stays empty until the agent launches: a launched session
+    // is not a never-started spawn leftover.
     if (!record || record.status !== "errored" || !record.triggerOrigin) return;
+    if (record.launchCommand !== "") return;
     if (record.branch === record.id) {
       try {
         await deleteLocalBranch(this.getProject(record.project).path, record.branch);

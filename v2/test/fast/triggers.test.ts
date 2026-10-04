@@ -6213,6 +6213,7 @@ describe("startConfiguredTriggers", () => {
           endedReason: "anchor_not_live",
         });
         expect(memberOf(records, 1)).not.toHaveProperty("nextRetryAt");
+        expect(memberOf(records, 1)?.attempts).toBe(1);
         vi.setSystemTime(Date.now() + WORK_ITEM_RETRY_INTERVAL_MS);
         bus.emit(workItemEvent());
         await vi.advanceTimersByTimeAsync(10);
@@ -6222,6 +6223,47 @@ describe("startConfiguredTriggers", () => {
         expect(
           isWorkItemRecordDue(record as WorkItemLifecycleRecord, Date.now() + 100 * 60 * MINUTE),
         ).toBe(false);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("does not respawn another trigger's stopped owner during a retry", async () => {
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle([
+          failedMember({ triggerId: "pick-up" }),
+          workItemMember({ triggerId: "second", sessionId: "api-5" }),
+        ]),
+      ]);
+      const base = workItemSpawnConfig({ autoComplete: false });
+      const config = {
+        ...base,
+        projects: {
+          api: {
+            ...base.projects.api,
+            triggers: {
+              ...base.projects.api.triggers,
+              second: base.projects.api.triggers["pick-up"],
+            },
+          },
+        },
+      };
+      const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+      const getMock = vi
+        .fn()
+        .mockResolvedValue({ id: "api-5", status: "stopped", state: "stopped" });
+      const { bus, controller } = await startTriggers(config, { spawn: spawnMock, get: getMock });
+
+      try {
+        bus.emit(workItemEvent());
+        await vi.advanceTimersByTimeAsync(10);
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+        expect(spawnMock.mock.calls[0]?.[1]).toEqual(workItemSpawnOptions(0));
+        expect(getMock).not.toHaveBeenCalledWith("api-5");
+        const second = records
+          .get("acme/api#42")
+          ?.members.find((member) => member.triggerId === "second");
+        expect(second).toMatchObject({ state: "running", sessionId: "api-5", attempts: 1 });
       } finally {
         await controller.stop();
       }

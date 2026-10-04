@@ -333,11 +333,14 @@ function claimWorkItemBlocks(
       member.state !== "completed" &&
       isWorkItemMemberDue(member, nowMs));
   // A retry spawns only the missing or due blocks; a block that reached
-  // running is never re-claimed alongside them.
+  // running is never re-claimed alongside them. While any member of the item is
+  // failed or spawning, a trigger with nothing missing or due of its own leaves
+  // its running members alone too: no cross-trigger replacement of an owner.
   const retryOnly =
     !consumesLegacy &&
     own.length > 0 &&
     (own.some((member) => member.endedReason !== undefined) ||
+      members.some((member) => member.state === "spawning" || member.state === "failed") ||
       blocks.some((_, blockIndex) => isRetryable(own.find((m) => m.blockIndex === blockIndex))));
   for (const [blockIndex, block] of blocks.entries()) {
     const existing = consumesLegacy
@@ -733,6 +736,7 @@ async function endDeskRetryWithoutLiveAnchor(
       return {
         ...rest,
         state: "failed",
+        attempts: entry.attemptsBefore,
         endedReason: "anchor_not_live",
         error: "desk anchor is not live",
       };

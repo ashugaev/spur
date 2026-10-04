@@ -4429,7 +4429,11 @@ describe("SessionService", () => {
         service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin }),
       ).rejects.toThrow();
 
-      expect(sessions.get("api-1")).toMatchObject({ status: "errored", triggerOrigin });
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        launchCommand: "",
+        triggerOrigin,
+      });
       service.dispose();
     });
 

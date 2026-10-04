@@ -148,6 +148,17 @@ describe("discardFailedSpawn", () => {
     expect(await branches(f, "api-1")).toContain("api-1");
   });
 
+  it("keeps the branch and record of a session that launched", async () => {
+    const f = await createFixture();
+    await git(f.repoPath, "branch", "api-1");
+    writeSession(f.dataDir, erroredRecord("api-1", { launchCommand: "claude --resume" }));
+
+    await f.discard("api-1");
+
+    expect(readSession(f.dataDir, "api-1")).not.toBeNull();
+    expect(await branches(f, "api-1")).toContain("api-1");
+  });
+
   it("archives a record whose branch was never created, without an error", async () => {
     const f = await createFixture();
     writeSession(f.dataDir, erroredRecord("api-1"));
