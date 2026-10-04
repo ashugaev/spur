@@ -3,7 +3,12 @@ import { autoPingRouteFingerprint, type AutoPingService } from "./auto-ping.js";
 import { writeStderr } from "./io.js";
 import { renderSpawnPrompt } from "./prompt-template.js";
 import { logSpurEvent, logUserInputEvent, type SpurLogEntry } from "./event-log.js";
-import { createSendBatchParser, restoreSendBatch, type SendBatch } from "./send-batches.js";
+import {
+  createSendBatchParser,
+  restoreSendBatch,
+  type SendBatch,
+  type SendBatchItem,
+} from "./send-batches.js";
 import {
   deletePendingSendBatch,
   deletePendingSendBatchConditional,
@@ -34,6 +39,7 @@ import type { EventBus } from "./event-bus.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
+  LaunchPromptPendingError,
   SessionAdmissionDeniedError,
   SessionRateLimitedError,
   type SessionService,
@@ -78,6 +84,8 @@ interface PendingBatch {
   revision: number;
   routeLeaseId: string;
   retryAccounting: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
+  admissionCapDenials?: number | undefined;
 }
 
 // Rate-limit suppression is deliberately excluded from the failure/backoff
@@ -112,6 +120,12 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 // busy pane, queue behind another send's withPaneWriteLock (session-service.ts),
 // so worst case elapsed time is unbounded, not just the backoff sum.
 const DELIVERY_RETRY_BASE_MS = 10_000;
+// A person is waiting on an interactive batch (Telegram): it waits for the
+// agent to be idle this long, not the 30s review window. Two seconds still
+// merges a message split into several by the client.
+const INTERACTIVE_SEND_WINDOW_MS = 2_000;
+// The one-shot flush timer fires just past the gate so the tick is not needed.
+const INTERACTIVE_FLUSH_MARGIN_MS = 50;
 const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
 const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
@@ -127,7 +141,7 @@ const ACTIVE_WORK_ITEM_STATES = new Set<SessionView["state"]>([
 // "still alive, just blocked" shape as rate_limited. Scoped to
 // status === "running" because a genuinely closed session (status stopped,
 // errored, or killed) can also carry state "error", and that case IS closed.
-function isLiveServerErrorWedge(session: SessionView): boolean {
+function isLiveServerErrorWedge(session: Pick<SessionView, "state" | "status">): boolean {
   return session.status === "running" && session.state === "error";
 }
 
@@ -348,6 +362,9 @@ async function runSpawnTrigger(
           ...(block.steps !== undefined ? { steps: block.steps } : {}),
           ...(block.agent !== undefined ? { agent: block.agent } : {}),
           ...(block.model !== undefined ? { model: block.model } : {}),
+          ...(block.reasoningEffort !== undefined
+            ? { reasoningEffort: block.reasoningEffort }
+            : {}),
           ...(block.mode !== undefined ? { mode: block.mode } : {}),
           ...(block.branch !== undefined ? { branch: block.branch } : {}),
           ...(block.overrides !== undefined ? { overrides: block.overrides } : {}),
@@ -554,11 +571,16 @@ function isSendTrigger(
   return "send" in trigger;
 }
 
-function isDeliverableState(session: SessionView): boolean {
+/** Send window for a batch: the idle wait, capped for interactive batches. */
+function sendWindowMs(batch: SendBatch): number {
+  const idleWaitMs = getIdleWaitBeforeFlushMs();
+  return batch.interactive ? Math.min(idleWaitMs, INTERACTIVE_SEND_WINDOW_MS) : idleWaitMs;
+}
+
+function isDeliverableState(session: SessionView, windowMs: number): boolean {
   return (
     session.state === "stale" ||
-    (session.state === "waiting" &&
-      isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs()))
+    (session.state === "waiting" && isIdleEnoughToReceive(session.lastActivityAt, windowMs))
   );
 }
 
@@ -566,6 +588,21 @@ function isDeliverableState(session: SessionView): boolean {
 // interrupt, so it must stay deliverable rather than dropping the batch.
 function isClosedState(state: SessionView["state"]): boolean {
   return state === "stopped" || state === "error" || state === "killed";
+}
+
+/**
+ * True when a queued send to this session is dropped instead of delivered.
+ * A live server-error wedge and a stop written by the memory shed are exempt:
+ * the shed's own pause must not destroy the batch it exists to cover.
+ */
+export function dropsQueuedSend(
+  session: Pick<SessionView, "state" | "status" | "stopReason">,
+): boolean {
+  return (
+    isClosedState(session.state) &&
+    !isLiveServerErrorWedge(session) &&
+    !(session.state === "stopped" && session.stopReason === "memory_shed")
+  );
 }
 
 // The rate-limit reactivation wakeup and the server-error reactivation wakeup
@@ -611,7 +648,14 @@ function mergeIntoBatch(
   },
 ): PendingBatch {
   if (existing) {
-    existing.batch.merge(incoming);
+    const replaced = existing.batch.merge(incoming);
+    if (replaced) {
+      existing.admissionCapRetryAt = undefined;
+      existing.admissionCapDenials = undefined;
+      existing.retryAccounting = existing.retryAccounting.filter(
+        (entry) => !entry.itemKey.startsWith(replaced.retiredItemPrefix),
+      );
+    }
     existing.retryAccounting = reconcileRetryAccounting(existing.batch, existing.retryAccounting);
     return existing;
   }
@@ -623,7 +667,7 @@ function mergeIntoBatch(
     customPrompt,
     customPromptRecorded: false,
     batch: incoming,
-    notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
+    notBeforeAt: Date.now() + sendWindowMs(incoming),
     routeFingerprint: policy.routeFingerprint,
     destination: policy.destination,
     workId: randomUUID(),
@@ -702,6 +746,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   let flushTimer: NodeJS.Timeout | null = null;
   let autoCompleteTimer: NodeJS.Timeout | null = null;
   let stopped = false;
+  const interactiveFlushTimers = new Set<NodeJS.Timeout>();
 
   const leaseForRoute = (
     routeFingerprint: string,
@@ -785,8 +830,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         return { status: "suppressed" };
       }
       batch.batch = authoritativeBatch;
+      batch.admissionCapRetryAt = persisted.admissionCapRetryAt;
+      batch.admissionCapDenials = persisted.admissionCapDenials;
+      const now = Date.now();
+      if (batch.admissionCapRetryAt !== undefined && now < batch.admissionCapRetryAt) {
+        return { status: "suppressed" };
+      }
+      batch.admissionCapRetryAt = undefined;
       batch.batch.prune(deps.config.dataDir);
       const snapshotPruned = batch.batch.isEmpty();
+      let livePruned = false;
       batch.revision = persisted.revision ?? 0;
       batch.retryAccounting = reconcileRetryAccounting(
         batch.batch,
@@ -805,7 +858,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       const accounting = new Map(batch.retryAccounting.map((entry) => [entry.itemKey, entry]));
       const submission = restoreSendBatch(structuredClone(batch.batch.serialize()));
       if (!submission) return { status: "suppressed" };
-      const now = Date.now();
       submission.filterItems((item) => {
         const entry = accounting.get(item.itemKey);
         if (!entry || exhausted(entry)) return false;
@@ -819,20 +871,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           entry.nextAttemptAt = 0;
         return entry.nextAttemptAt <= now;
       });
+      const selectedComments = new Set(
+        submission
+          .retryItems()
+          .filter((item) => item.refreshComment)
+          .slice(0, 4)
+          .map((item) => item.itemKey),
+      );
+      submission.filterItems((item) => !item.refreshComment || selectedComments.has(item.itemKey));
+      const originalItems = submission.retryItems();
       const conflictClaims: string[] = [];
-      submission.filterItems((item) => {
-        if (!item.mergeConflict) return true;
-        const accepted = autoPing.claimMergeConflict(
-          batch.routeFingerprint,
-          item.mergeConflict.prNumber,
-          `${item.itemKey}:${item.fingerprint}`,
-          item.mergeConflict.clearId,
-        );
-        if (accepted) conflictClaims.push(item.itemKey);
-        else batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
-        return accepted;
-      });
-      const submitted = new Map(submission.retryItems().map((item) => [item.itemKey, item]));
       const allTerminal = (): boolean =>
         batch.batch.retryItems().every((item) => {
           const entry = accounting.get(item.itemKey);
@@ -848,8 +896,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           ...claim,
         });
         if (!deleted) return;
-        clearBatch(queueKey, batch, { keepInterrupted: interrupt, deletePersisted: false });
-        if (!batch.batch.isEmpty() || snapshotPruned) {
+        clearBatch(queueKey, batch, {
+          keepInterrupted: interrupt && !batch.batch.isEmpty(),
+          deletePersisted: false,
+        });
+        if (!batch.batch.isEmpty() || snapshotPruned || livePruned) {
           logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
             level: "warn",
             sessionId: batch.batch.sessionId,
@@ -858,7 +909,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             triggerId: batch.triggerId,
             message: `Dropped queued trigger update for ${batch.batch.sessionId} after ${attempts} attempts`,
             details: {
-              reason: snapshotPruned ? "snapshot_pruned" : "retry_exhausted",
+              reason: snapshotPruned
+                ? "snapshot_pruned"
+                : livePruned && batch.batch.isEmpty()
+                  ? "live_pruned"
+                  : "retry_exhausted",
               attempts,
               interrupt,
             },
@@ -869,9 +924,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         if (allTerminal()) dropTerminal();
         return { status: "suppressed" };
       }
-      for (const item of submitted.values()) {
+      const charge = (item: SendBatchItem): void => {
         const entry = accounting.get(item.itemKey);
-        if (!entry) continue;
+        if (!entry) return;
         entry.deliveryAttempts += 1;
         if (item.ciReminder) entry.ciAttempts += 1;
         entry.nextAttemptAt =
@@ -879,11 +934,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           (item.ciReminder
             ? CI_FAILED_RETRY_INTERVAL_MS
             : DELIVERY_RETRY_BASE_MS * 2 ** (entry.deliveryAttempts - 1));
+      };
+      for (const item of originalItems) {
+        if (selectedComments.has(item.itemKey)) charge(item);
       }
       const claimId = randomUUID();
-      const claimedRevision = (persisted.revision ?? 0) + 1;
-      const claimed = {
+      let claimedRevision = (persisted.revision ?? 0) + 1;
+      let claimed = {
         ...persisted,
+        admissionCapRetryAt: batch.admissionCapRetryAt,
+        admissionCapDenials: batch.admissionCapDenials,
         batch: batch.batch.serialize(),
         retryAccounting: batch.retryAccounting,
         revision: claimedRevision,
@@ -901,18 +961,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           claimed,
         )
       ) {
-        if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
         return { status: "suppressed" };
       }
       batch.revision = claimedRevision;
-      const persistResult = (): void => {
+      const persistResult = (suppressedHoldAt?: string): void => {
         const { claim: _claim, ...unclaimed } = claimed;
         void _claim;
         const record = {
           ...unclaimed,
+          admissionCapRetryAt: batch.admissionCapRetryAt,
+          admissionCapDenials: batch.admissionCapDenials,
           revision: claimedRevision + 1,
           batch: batch.batch.serialize(),
           retryAccounting: batch.retryAccounting,
+          ...(suppressedHoldAt !== undefined ? { suppressedHoldAt } : {}),
         };
         updatePendingSendBatchConditional(
           deps.config.dataDir,
@@ -922,11 +984,104 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         batch.revision = claimedRevision + 1;
         syncBatchOccurrenceReferences(queueKey, batch);
       };
+      if (selectedComments.size > 0 && submission.refresh) {
+        const results = await submission.refresh(deps.config.dataDir, session.pr);
+        const deleted = new Set(
+          results.filter((result) => result.status === "deleted").map((result) => result.key),
+        );
+        livePruned = deleted.size > 0;
+        const deletedKeys = new Set(
+          batch.batch
+            .retryItems()
+            .filter((item) => deleted.has(item.key))
+            .map((item) => item.itemKey),
+        );
+        batch.batch.filterItems((item) => !deleted.has(item.key));
+        batch.retryAccounting = batch.retryAccounting.filter(
+          (entry) => !deletedKeys.has(entry.itemKey),
+        );
+        for (const key of deletedKeys) accounting.delete(key);
+        const refreshedState = submission.serialize();
+        if (refreshedState.kind === "review" && refreshedState.prUrl) {
+          const recovered = restoreSendBatch({
+            ...batch.batch.serialize(),
+            prUrl: refreshedState.prUrl,
+            repo: refreshedState.repo,
+          });
+          if (recovered) batch.batch = recovered;
+        }
+        syncBatchOccurrenceReferences(queueKey, batch);
+        for (const result of results) {
+          if (result.status !== "failed") continue;
+          logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
+            level: "error",
+            sessionId: batch.batch.sessionId,
+            projectId: batch.projectId,
+            sourceId: batch.sourceId,
+            triggerId: batch.triggerId,
+            message: `Failed to resolve queued feedback ${result.key}: ${result.error}`,
+            details: { interrupt },
+          });
+        }
+      }
+      submission.filterItems((item) => {
+        if (!item.mergeConflict) return true;
+        const accepted = autoPing.claimMergeConflict(
+          batch.routeFingerprint,
+          item.mergeConflict.prNumber,
+          `${item.itemKey}:${item.fingerprint}`,
+          item.mergeConflict.clearId,
+        );
+        if (accepted) conflictClaims.push(item.itemKey);
+        else batch.batch.filterItems((retained) => retained.itemKey !== item.itemKey);
+        return accepted;
+      });
+      const submittedKeys = new Set(submission.retryItems().map((item) => item.itemKey));
+      const submitted = new Map(
+        originalItems
+          .filter((item) => submittedKeys.has(item.itemKey))
+          .map((item) => [item.itemKey, item]),
+      );
+      if (submission.isEmpty()) {
+        if (allTerminal()) dropTerminal({ revision: claimedRevision, claimId });
+        else persistResult();
+        return { status: "suppressed" };
+      }
+      for (const item of submitted.values()) {
+        if (!selectedComments.has(item.itemKey)) charge(item);
+      }
+      const updatedClaim = {
+        ...claimed,
+        revision: claimedRevision + 1,
+        batch: batch.batch.serialize(),
+        retryAccounting: batch.retryAccounting,
+      };
+      if (
+        !updatePendingSendBatchConditional(
+          deps.config.dataDir,
+          { workId: batch.workId, revision: claimedRevision, claimId },
+          updatedClaim,
+        )
+      ) {
+        if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
+        return { status: "suppressed" };
+      }
+      claimed = updatedClaim;
+      claimedRevision = updatedClaim.revision;
+      batch.revision = claimedRevision;
+      const refundSubmitted = (): void => {
+        const original = new Map(beforeAttempt.map((entry) => [entry.itemKey, entry]));
+        batch.retryAccounting = batch.retryAccounting.map((entry) =>
+          submitted.has(entry.itemKey) ? { ...(original.get(entry.itemKey) ?? entry) } : entry,
+        );
+      };
       try {
         await deps.sessionService.deliver(submission.sessionId, submission.format(), {
           interrupt,
           sensitivePromptSuffix: submission.formatAutoPingControls(),
         });
+        batch.admissionCapRetryAt = undefined;
+        batch.admissionCapDenials = undefined;
         if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
           logUserInputEvent(deps.config.dataDir, {
             sessionId: batch.batch.sessionId,
@@ -974,8 +1129,33 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               attempt: null,
             },
           });
-          batch.retryAccounting = beforeAttempt;
+          refundSubmitted();
           persistResult();
+          return { status: "suppressed" };
+        }
+        // Same shape as a rate limit: the session is alive and takes the batch
+        // once its last prompt is confirmed, so no attempt is spent. Logged
+        // once per hold: the persisted batch remembers the hold it logged.
+        if (error instanceof LaunchPromptPendingError) {
+          if (conflictClaims.length > 0) autoPing.refundMergeConflict(batch.routeFingerprint);
+          const holdAt = error.submitUnconfirmedAt;
+          if (holdAt === undefined || persisted.suppressedHoldAt !== holdAt) {
+            logTriggerEvent(deps.config.dataDir, "trigger.send.suppressed_launch_pending", {
+              level: "info",
+              sessionId: batch.batch.sessionId,
+              projectId: batch.projectId,
+              sourceId: batch.sourceId,
+              triggerId: batch.triggerId,
+              message: `Suppressed queued trigger update to ${batch.batch.sessionId}: last prompt not confirmed`,
+              details: {
+                interrupt,
+                attempt: null,
+                ...(holdAt !== undefined ? { submitUnconfirmedAt: holdAt } : {}),
+              },
+            });
+          }
+          refundSubmitted();
+          persistResult(holdAt);
           return { status: "suppressed" };
         }
         if (error instanceof SessionAdmissionDeniedError) {
@@ -998,7 +1178,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               },
             },
           );
-          batch.retryAccounting = beforeAttempt;
+          refundSubmitted();
+          if (error.reason === "cap") {
+            batch.admissionCapDenials = Math.min(
+              (batch.admissionCapDenials ?? 0) + 1,
+              DELIVERY_MAX_ATTEMPTS - 1,
+            );
+            batch.admissionCapRetryAt =
+              Date.now() + DELIVERY_RETRY_BASE_MS * 2 ** (batch.admissionCapDenials - 1);
+          }
           persistResult();
           return { status: "suppressed" };
         }
@@ -1060,6 +1248,34 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     });
   };
 
+  // One timer per new interactive batch: flush as soon as the send window and
+  // the agent's idle gate allow, instead of waiting for the 5s tick. Claim and
+  // attempt accounting stay in flushPending, so a timer and a tick that both
+  // fire deliver once. Never reschedules; a closed gate is left to the tick.
+  const scheduleInteractiveFlush = (
+    queueKey: string,
+    batch: PendingBatch,
+    session: SessionView,
+  ): void => {
+    const gateOpensAt = Math.max(
+      batch.notBeforeAt,
+      Date.parse(session.lastActivityAt) + sendWindowMs(batch.batch),
+    );
+    const delayMs = Math.max(0, gateOpensAt - Date.now() + INTERACTIVE_FLUSH_MARGIN_MS);
+    const workId = batch.workId;
+    const timer = setTimeout(() => {
+      interactiveFlushTimers.delete(timer);
+      if (stopped) return;
+      const current = pendingBatches.get(queueKey);
+      if (current?.workId !== workId) return;
+      enqueue(queueKey, async () => {
+        await flushPending(queueKey, current);
+      });
+    }, delayMs);
+    timer.unref();
+    interactiveFlushTimers.add(timer);
+  };
+
   const loadSessionOrClear = async (
     queueKey: string,
     batch: PendingBatch,
@@ -1093,16 +1309,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    // The memory shed pauses a session by writing status "stopped", which
-    // isClosedState treats as closed. Without this exemption the shed's own
-    // pausing would destroy the batch during the very episode this hold
-    // exists to cover; a session still "stopped" once the hold clears falls
-    // back to the ordinary closed_session drop below.
-    if (
-      isClosedState(session.state) &&
-      !isLiveServerErrorWedge(session) &&
-      !(session.state === "stopped" && memoryHoldEngaged())
-    ) {
+    // The memory shed pauses a session by writing status "stopped" with
+    // stopReason "memory_shed"; dropsQueuedSend exempts exactly that marker so
+    // the shed's own pause does not destroy the batch.
+    if (dropsQueuedSend(session)) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1150,7 +1360,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    const deliverable = isDeliverableState(session);
+    const deliverable = isDeliverableState(session, sendWindowMs(batch.batch));
     if (batch.eventName.endsWith(":ci_failed")) {
       const trigger = deps.config.projects[batch.projectId]?.triggers[batch.triggerId];
       const interrupt =
@@ -1211,6 +1421,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         const authoritativeBatch = restoreSendBatch(persisted.batch);
         if (authoritativeBatch && authoritativeBatch.sessionId === cached.batch.sessionId) {
           cached.batch = authoritativeBatch;
+          cached.admissionCapRetryAt = persisted.admissionCapRetryAt;
+          cached.admissionCapDenials = persisted.admissionCapDenials;
           cached.revision = persisted.revision ?? 0;
           cached.retryAccounting = reconcileRetryAccounting(
             cached.batch,
@@ -1260,6 +1472,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         sourceId: trigger.source,
         batch: batch.batch.serialize(),
         retryAccounting: batch.retryAccounting,
+        admissionCapRetryAt:
+          batch.admissionCapRetryAt !== undefined && batch.admissionCapRetryAt > Date.now()
+            ? batch.admissionCapRetryAt
+            : undefined,
+        admissionCapDenials: batch.admissionCapDenials,
+        ...(persisted?.suppressedHoldAt !== undefined
+          ? { suppressedHoldAt: persisted.suppressedHoldAt }
+          : {}),
       });
     });
     if (!batch) return;
@@ -1280,14 +1500,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
+    // Revision 1 is a new batch; a merge bumps it, and adds no second timer.
+    if (batch.revision === 1 && sendBatch.interactive) {
+      scheduleInteractiveFlush(queueKey, batch, session);
+    }
 
-    // Same shed-pause exemption as flushPending: while the memory hold is
-    // engaged a "stopped" session is deferred, not dropped.
-    if (
-      isClosedState(session.state) &&
-      !isLiveServerErrorWedge(session) &&
-      !(session.state === "stopped" && memoryHoldEngaged())
-    ) {
+    // Same shed-pause exemption as flushPending: a memory_shed session is
+    // deferred, not dropped.
+    if (dropsQueuedSend(session)) {
       clearBatch(queueKey, batch);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -1462,13 +1682,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         customPrompt: sendTrigger.send.prompt,
         customPromptRecorded: false,
         batch,
-        notBeforeAt: Date.now() + getIdleWaitBeforeFlushMs(),
+        notBeforeAt: Date.now() + sendWindowMs(batch),
         routeFingerprint,
         destination,
         workId,
         revision,
         routeLeaseId,
         retryAccounting: reconcileRetryAccounting(batch, record.retryAccounting ?? []),
+        admissionCapRetryAt: record.admissionCapRetryAt,
+        admissionCapDenials: record.admissionCapDenials,
       });
       const restored = pendingBatches.get(record.queueKey);
       if (restored) syncBatchOccurrenceReferences(record.queueKey, restored);
@@ -1635,6 +1857,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         clearInterval(flushTimer);
         flushTimer = null;
       }
+      for (const timer of interactiveFlushTimers) clearTimeout(timer);
+      interactiveFlushTimers.clear();
       if (autoCompleteTimer) {
         clearInterval(autoCompleteTimer);
         autoCompleteTimer = null;

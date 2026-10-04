@@ -23,6 +23,7 @@ const execFileAsync = promisify(execFile);
 const WORKSPACE_LOCK_RETRY_MS = 25;
 const WORKSPACE_LOCK_TIMEOUT_MS = 5 * 60_000;
 const WORKSPACE_LOCK_FILE = "spur-workspace.lock";
+const workspaceGitLockTails = new Map<string, Promise<void>>();
 // Doctor's per-project git probes (D2/D3) must never hang, unlike the much
 // longer worktree-creation lock timeout above — this bounds `isGitWorktree`/
 // `branchStatus` independently of that.
@@ -211,35 +212,59 @@ async function resolveWorkspaceLockPath(repoPath: string): Promise<string> {
 }
 
 async function withWorkspaceGitLock<T>(repoPath: string, run: () => Promise<T>): Promise<T> {
-  const lockPath = await resolveWorkspaceLockPath(repoPath);
-  const deadline = Date.now() + WORKSPACE_LOCK_TIMEOUT_MS;
-
-  for (;;) {
-    try {
-      const ownerContent = createLockFile(lockPath);
-      try {
-        return await run();
-      } finally {
-        releaseLockFile(lockPath, ownerContent);
-      }
-    } catch (error) {
-      if (errorCode(error) !== "EEXIST") {
-        throw error;
-      }
-
-      const owner = readLockOwner(lockPath);
-      if (owner !== null && reapDeadLock(lockPath, owner)) {
-        continue;
-      }
-
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for workspace git metadata lock: ${lockPath}`, {
-          cause: error,
-        });
-      }
-
-      await sleep(WORKSPACE_LOCK_RETRY_MS);
+  const queueKey = realpathSync(repoPath);
+  const previous = workspaceGitLockTails.get(queueKey) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  workspaceGitLockTails.set(queueKey, tail);
+  void tail.finally(() => {
+    if (workspaceGitLockTails.get(queueKey) === tail) {
+      workspaceGitLockTails.delete(queueKey);
     }
+  });
+
+  try {
+    await withTimeout(
+      previous,
+      WORKSPACE_LOCK_TIMEOUT_MS,
+      `Timed out waiting for workspace git metadata queue: ${queueKey}`,
+    );
+
+    const lockPath = await resolveWorkspaceLockPath(repoPath);
+    const deadline = Date.now() + WORKSPACE_LOCK_TIMEOUT_MS;
+
+    for (;;) {
+      try {
+        const ownerContent = createLockFile(lockPath);
+        try {
+          return await run();
+        } finally {
+          releaseLockFile(lockPath, ownerContent);
+        }
+      } catch (error) {
+        if (errorCode(error) !== "EEXIST") {
+          throw error;
+        }
+
+        const owner = readLockOwner(lockPath);
+        if (owner !== null && reapDeadLock(lockPath, owner)) {
+          continue;
+        }
+
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for workspace git metadata lock: ${lockPath}`, {
+            cause: error,
+          });
+        }
+
+        await sleep(WORKSPACE_LOCK_RETRY_MS);
+      }
+    }
+  } finally {
+    release();
   }
 }
 
@@ -531,16 +556,26 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   return worktreePath;
 }
 
-export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
+export async function removeWorktree(
+  repoPath: string,
+  worktreePath: string,
+  guard?: () => Promise<void> | void,
+): Promise<void> {
+  const guardState = { failed: false };
   try {
     await withWorkspaceGitLock(repoPath, async () => {
+      guardState.failed = true;
+      await guard?.();
+      guardState.failed = false;
       await git(repoPath, "worktree", "remove", "--force", worktreePath);
     });
     return;
-  } catch {
+  } catch (error) {
+    if (guardState.failed) throw error;
     // Fall back to direct removal below.
   }
 
+  await guard?.();
   try {
     rmSync(worktreePath, { recursive: true, force: true });
   } catch {
@@ -573,7 +608,11 @@ export function workspaceExists(worktreePath: string): boolean {
   }
 }
 
-export function probeWorkspace(worktreePath: string): { exists: boolean; missing: boolean } {
+export function probeWorkspace(worktreePath: string): {
+  exists: boolean;
+  missing: boolean;
+  diagnostic?: string;
+} {
   if (!worktreePath) {
     return { exists: false, missing: false };
   }
@@ -581,7 +620,12 @@ export function probeWorkspace(worktreePath: string): { exists: boolean; missing
     return { exists: statSync(worktreePath).isDirectory(), missing: false };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return { exists: false, missing: code === "ENOENT" };
+    if (code === "ENOENT") return { exists: false, missing: true };
+    return {
+      exists: false,
+      missing: false,
+      diagnostic: `workspace stat failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 

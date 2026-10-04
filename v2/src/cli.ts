@@ -25,7 +25,7 @@ import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
-import { Command, type Help } from "commander";
+import { Command, Option, type Help } from "commander";
 import {
   connectProjectConfig,
   deleteJson,
@@ -139,6 +139,7 @@ import {
   type AutoPingUnsubscribeResponse,
   type OpenPrAction,
   type ProjectConfigMutationResponse,
+  type ProviderReasoningEffort,
   type RespawnSessionRequest,
   type RuntimeInfo,
   type RunServiceRequest,
@@ -163,6 +164,7 @@ import {
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
   type SourcePollEnableResponse,
+  type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
   type SpawnSessionRequest,
@@ -449,7 +451,22 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
-  return `Sent ${response.source} reply for ${response.sessionId}.`;
+  const buttons = response.buttons ? ` with ${response.buttons} button(s)` : "";
+  return `Sent ${response.source} reply for ${response.sessionId}${buttons}.`;
+}
+
+/** `<label>` or `<label>=<value>`; the value defaults to the label. */
+function parseButtonOption(
+  raw: string,
+  previous: SourceReplyButton[] | undefined,
+): SourceReplyButton[] {
+  const separator = raw.indexOf("=");
+  const text = (separator === -1 ? raw : raw.slice(0, separator)).trim();
+  const value = (separator === -1 ? raw : raw.slice(separator + 1)).trim();
+  if (!text || !value) {
+    throw new Error("--button takes <label> or <label>=<value>");
+  }
+  return [...(previous ?? []), { text, value }];
 }
 
 function renderSourcePollEnableResponse(response: SourcePollEnableResponse): string {
@@ -815,6 +832,13 @@ type SubscribeCommandOptions = {
   remove?: string;
   json?: boolean;
 };
+
+function reasoningEffortOption(): Option {
+  return new Option(
+    "--reasoning-effort <level>",
+    "Reasoning effort for the resolved agent and model",
+  ).choices(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+}
 
 function appendOptionValue(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
@@ -1298,10 +1322,12 @@ function renderSidecarSweepResult(result: SidecarSweepResult): string {
             : `daemon ${tree.configPath} — verify it is genuinely dead before killing`
         : (tree.sidecarName ?? "unattributed");
     return dimText(
-      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}${survivorsSuffix}`,
+      `[${status}] pid ${tree.rootPid}  pgid ${tree.pgid}  rss ${Math.round(tree.treeRssKb / 1024)}MB  age ${ageMinutes}m  ${tree.worktreePath}  ${attribution}  tree [${tree.tree.join(",")}]${survivorsSuffix}`,
     );
   });
-  return lines.join("\n");
+  const totalRssKb = result.leaked.reduce((sum, tree) => sum + tree.treeRssKb, 0);
+  const totalLine = dimText(`Total would-free: ${formatBytes(totalRssKb * 1024)}`);
+  return [...lines, totalLine].join("\n");
 }
 
 // Test-only: exercises the sweep summary's status/survivors formatting
@@ -3143,6 +3169,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude, codex, cursor, or opencode")
+    .addOption(reasoningEffortOption())
     .option(
       "--model <id>",
       "Model id for the resolved agent (from --agent, else the default agent); must be valid for that agent",
@@ -3238,6 +3265,9 @@ export function createProgram(cliEntrypoint: string): Command {
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         ...(options.model !== undefined ? { model: options.model as string } : {}),
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(options.mode !== undefined ? { mode: options.mode as string } : {}),
         ...(options.plan ? { planMode: true } : {}),
         ...(options.restrictWrites ? { restrictWrites: true } : {}),
@@ -3468,9 +3498,16 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => {
           const pending = queuedMessageCount(session);
-          return pending > 0
-            ? `Queued message for ${session.id} (${pending} pending).`
-            : `Delivered message to ${session.id}.`;
+          const line =
+            pending > 0
+              ? `Queued message for ${session.id} (${pending} pending).`
+              : session.submitUnconfirmedAt
+                ? `Sent message to ${session.id}; the agent has not confirmed it yet.`
+                : `Delivered message to ${session.id}.`;
+          const failed = session.submitFailedMessage;
+          return failed
+            ? `${line}\nAgent did not confirm: "${failed.message}". Retry or dismiss it in the web view.`
+            : line;
         },
         render: renderSessionCard,
       });
@@ -3814,6 +3851,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("respawn")
     .description("Spawn a new session with the same config as a terminal session.")
     .argument("<sessionId>", "Session id")
+    .addOption(reasoningEffortOption())
     .option("--force", "Replace respawn source even with dirty worktree or unpushed commits")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
@@ -3825,7 +3863,12 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            respawnRequestBody({ forceKillSource: options.force === true }),
+            {
+              ...respawnRequestBody({ forceKillSource: options.force === true }),
+              ...(options.reasoningEffort !== undefined
+                ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+                : {}),
+            },
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
@@ -3888,12 +3931,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<sessionId>", "Session id")
     .requiredOption("--agent <name>", "Target agent: claude, codex, cursor, or opencode")
     .option("--model <id>", "Model id for the target agent")
+    .addOption(reasoningEffortOption())
     .option("--notes <text>", "Optional handoff notes for the next agent")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: HandoffSessionRequest = {
         agent: options.agent,
+        ...(options.reasoningEffort !== undefined
+          ? { reasoningEffort: options.reasoningEffort as ProviderReasoningEffort }
+          : {}),
         ...(typeof options.model === "string" && options.model.trim()
           ? { model: options.model.trim() }
           : {}),
@@ -4610,11 +4657,16 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Reply to the latest source message for a session.")
     .argument("<message...>", "Message to send")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option(
+      "--button <label[=value]>",
+      "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
+      parseButtonOption,
+    )
     .option("--json", "Print raw JSON")
     .action(
       async (
         messageParts: string[],
-        options: { session?: string; json?: boolean },
+        options: { session?: string; json?: boolean; button?: SourceReplyButton[] },
         command: Command,
       ) => {
         const configPath = prepareInstanceConfig(
@@ -4624,7 +4676,11 @@ export function createProgram(cliEntrypoint: string): Command {
         if (!sessionId) {
           throw new Error("source reply requires --session or SPUR_SESSION");
         }
-        const payload: SourceReplyRequest = { message: messageParts.join(" ") };
+        const buttons = options.button ?? [];
+        const payload: SourceReplyRequest = {
+          message: messageParts.join(" "),
+          ...(buttons.length > 0 ? { buttons } : {}),
+        };
         await outputResult({
           json: Boolean(options.json),
           label: "sending source reply",

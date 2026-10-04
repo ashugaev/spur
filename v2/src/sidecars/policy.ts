@@ -11,7 +11,8 @@
 //   3  !paneAlive && !hasRecordedIdentity                 -> keep  no_pane_no_identity
 //   4  connections === "established"                      -> keep  connections_established
 //   5  connections === "unknown"                           -> keep  probe_unknown
-//   6  !ownerExists                                       -> reap  owner_missing
+//   6  workspaceRetainedError                             -> keep  retained_error
+//      !ownerExists                                       -> reap  owner_missing
 //   7  !worktreeExists                                    -> reap  worktree_missing
 //   8  !workspaceRunning                                  -> reap  workspace_not_running
 //   9  lastActivityAtMs === null                          -> keep  activity_unknown
@@ -36,6 +37,8 @@ export interface SidecarReapCandidate {
   worktreeExists: boolean;
   /** Active-workspace semantics (any non-terminal member), including the owner itself. */
   workspaceRunning: boolean;
+  /** Any workspace member has retained error evidence or unreadable state. */
+  workspaceRetainedError?: boolean;
   hasRecordedIdentity: boolean;
   /** Max lastActivityAt over workspace members; null when unknown. */
   lastActivityAtMs: number | null;
@@ -69,6 +72,7 @@ export type SidecarKeepReason =
   | "no_pane_no_identity"
   | "connections_established"
   | "probe_unknown"
+  | "retained_error"
   | "activity_unknown"
   | "within_idle_ttl";
 
@@ -143,6 +147,9 @@ function decide(
   }
   if (candidate.connections === "unknown") {
     return { verdict: "keep", reason: "probe_unknown" };
+  }
+  if (candidate.workspaceRetainedError) {
+    return { verdict: "keep", reason: "retained_error" };
   }
   if (!candidate.ownerExists) {
     return { verdict: "reap", reason: "owner_missing" };

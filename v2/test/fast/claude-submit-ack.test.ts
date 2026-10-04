@@ -108,6 +108,32 @@ describe("captureClaudeSubmitBaseline", () => {
 });
 
 describe("scanClaudeJsonlForMessage", () => {
+  // Shapes copied from live claude transcripts (content redacted): a skill
+  // writes message/name/args, a built-in command name/message/args indented.
+  it.each([
+    {
+      typed: "/pr-comments-fix 986 check every thread",
+      content:
+        "<command-message>pr-comments-fix</command-message>\n<command-name>/pr-comments-fix</command-name>\n<command-args>986 check every thread</command-args>",
+    },
+    {
+      typed: "/compact",
+      content:
+        "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>",
+    },
+  ])("matches a slash command recorded as command tags: $typed", async ({ typed, content }) => {
+    const filePath = await makeJsonl("slash.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [{ type: "user", message: { role: "user", content } }]);
+    expect(await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, typed, "/tmp/w")).toBe(
+      true,
+    );
+    // Another command, or other args, is not this send's ack.
+    expect(
+      await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, `${typed} extra`, "/tmp/w"),
+    ).toBe(false);
+  });
+
   it("matches user message with content as string", async () => {
     const filePath = await makeJsonl("string-content.jsonl", []);
     findLatestSessionFileMock.mockResolvedValue(filePath);

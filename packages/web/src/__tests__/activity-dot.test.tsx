@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { ActivityDot } from "@/components/ActivityDot";
 
 describe("ActivityDot", () => {
+  it("renders a distinct budget limited label", () => {
+    render(<ActivityDot activity="budget_limited" />);
+    expect(screen.getByText("BUDGET LIMITED")).toBeInTheDocument();
+  });
   it("renders the working label", () => {
     render(<ActivityDot activity="working" />);
     expect(screen.getByText("working")).toBeInTheDocument();

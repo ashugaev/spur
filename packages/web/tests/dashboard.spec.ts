@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   test,
   expect,
@@ -21,9 +23,513 @@ import {
   type SpurSessionView,
 } from "./fixtures.js";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "../src/lib/self-destruct";
+import { TELEGRAM_REPLY_SUFFIX } from "../src/lib/session-prompt";
+import { MAX_ATTACHMENT_COUNT } from "../src/lib/file-attachments";
+import type { LifecycleAction, SessionLifecycleSnapshot } from "../src/lib/types";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+function lifecycleReceipt(
+  operationId: string,
+  targetIds: string[],
+  action: LifecycleAction,
+  phase: "pending" | "succeeded" | "failed",
+  revision = phase === "pending" ? 1 : 2,
+): SessionLifecycleSnapshot {
+  expect(operationId).toMatch(/^[\da-f-]{36}$/i);
+  return {
+    instanceId: "test-instance",
+    revision,
+    operation: {
+      operationId,
+      targetIds,
+      action,
+      phase,
+      outcomes: phase === "pending" ? [] : targetIds.map((sessionId) => ({ sessionId, phase })),
+    },
+  };
+}
+
+test.describe("Lifecycle reconciliation", () => {
+  test("complete stays hidden across three polls and stale settlement data", async ({
+    page,
+  }, testInfo) => {
+    const session = makeSessionWithPR({
+      id: "lifecycle-complete",
+      prompt: "Lifecycle complete",
+      slots: {
+        title: "Lifecycle complete",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    let rows = [session];
+    let polls = 0;
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
+    await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${session.id}`, (route) =>
+      route.fulfill({
+        json: { ...session, status: "completed", state: "stopped", runtimeAlive: false },
+      }),
+    );
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      rows = [
+        {
+          ...session,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "pending"),
+        },
+      ];
+      await held;
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
+      await route.fulfill({ json: { completedIds: [session.id], lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${session.id} as done` });
+    await done.click();
+    const before = polls;
+    for (let index = 0; index < 3; index += 1) {
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(done).toHaveCount(0);
+    }
+    expect(polls).toBeGreaterThanOrEqual(before + 3);
+    await page.reload();
+    await expect(done).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("complete-pending.png") });
+    release();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("complete-success.png") });
+  });
+
+  test("restore stays Working through omitted polls then follows returned Waiting and a later stop", async ({
+    page,
+  }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-restore", prompt: "Lifecycle restore" });
+    let waiting = makeWaitingSession({
+      ...stopped,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+    });
+    let rows = [stopped];
+    let current = waiting;
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: current }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      await held;
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [stopped.id], "restore", "succeeded"),
+      };
+      rows = [waiting];
+      await route.fulfill({ json: waiting });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    for (let index = 0; index < 3; index += 1) {
+      rows = index === 1 ? [] : [stopped];
+      await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+      await expect(restore).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: `Open web terminal for ${stopped.id}` }),
+      ).toBeVisible();
+    }
+    await page.screenshot({ path: testInfo.outputPath("restore-pending.png") });
+    release();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    rows = [waiting];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await page.screenshot({ path: testInfo.outputPath("restore-waiting.png") });
+    rows = [{ ...stopped, lifecycle: waiting.lifecycle }];
+    current = stopped;
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toBeVisible();
+  });
+
+  test("failure preserves a row added by polling and permits retry", async ({ page }, testInfo) => {
+    const stopped = makeStoppedSession({ id: "lifecycle-failure", prompt: "Lifecycle failure" });
+    const added = makeWorkingSession({
+      id: "lifecycle-added",
+      prompt: "Added during restore",
+      worktreePath: "/tmp/added",
+    });
+    let rows = [stopped];
+    await mockSessions(page, () => rows);
+    await page.route(`**/api/sessions/${stopped.id}`, (route) => route.fulfill({ json: stopped }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      calls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      if (calls === 1) await held;
+      const lifecycle = lifecycleReceipt(operationId, [stopped.id], "restore", "failed", calls * 2);
+      rows = rows.map((row) => (row.id === stopped.id ? { ...stopped, lifecycle } : row));
+      await route.fulfill({ status: 500, json: { error: "Restore failed", lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${stopped.id}` });
+    await restore.click();
+    rows = [stopped, added];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    release();
+    await expect(restore).toBeVisible();
+    await expect(page.getByText("Restore failed", { exact: true })).toBeVisible();
+    await expect(page.getByText("Added during restore")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("restore-failure.png") });
+    await restore.click();
+    await expect.poll(() => calls).toBe(2);
+  });
+
+  test("dead-runtime running restore reconciles current Waiting without reverting to Restore", async ({
+    page,
+  }) => {
+    const old = makeWorkingSession({
+      id: "lifecycle-dead-runtime",
+      prompt: "Dead runtime restore",
+      runtimeAlive: false,
+    });
+    let waiting = makeWaitingSession({ ...old, state: "waiting", runtimeAlive: true });
+    let rows = [old];
+    await mockSessions(page, () => rows);
+    let restoreCalls = 0;
+    await page.route(`**/api/sessions/${old.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      waiting = {
+        ...waiting,
+        lifecycle: lifecycleReceipt(operationId, [old.id], "restore", "succeeded"),
+      };
+      await route.fulfill({ json: waiting });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const restore = page.getByRole("button", { name: `Restore session ${old.id}` });
+    await restore.click();
+    await expect.poll(() => restoreCalls).toBe(1);
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+    rows = [waiting];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(restore).toHaveCount(0);
+  });
+
+  test("completed overlay follows a real reopen before terminal list confirmation", async ({
+    page,
+  }) => {
+    const old = makeSessionWithPR({
+      id: "lifecycle-reopened",
+      prompt: "Reopened completion",
+      slots: {
+        title: "Reopened completion",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    let current = {
+      ...old,
+      status: "completed" as SpurSessionView["status"],
+      state: "stopped" as SpurSessionView["state"],
+      runtimeAlive: false,
+    };
+    let rows = [old];
+    let polls = 0;
+    await mockSessions(page, () => {
+      polls += 1;
+      return rows;
+    });
+    await mockPrState(page, "merged");
+    await page.route(`**/api/sessions/${old.id}`, (route) => {
+      return route.fulfill({ json: current });
+    });
+    await page.route(`**/api/sessions/${old.id}/complete`, async (route) => {
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      const lifecycle = lifecycleReceipt(operationId, [old.id], "complete", "succeeded");
+      current = { ...current, lifecycle };
+      rows = [current];
+      await route.fulfill({ json: { completedIds: [old.id], lifecycle } });
+    });
+    await page.clock.install();
+    await page.goto("/");
+    const done = page.getByRole("button", { name: `Mark ${old.id} as done` });
+    await done.click();
+    await expect.poll(() => polls).toBeGreaterThanOrEqual(2);
+    await expect(done).toHaveCount(0);
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toHaveCount(0);
+    current = {
+      ...old,
+      status: "running",
+      state: "waiting",
+      runtimeAlive: true,
+      lifecycle: current.lifecycle,
+    };
+    rows = [current];
+    await page.clock.runFor(DASHBOARD_POLL_WAIT_MS);
+    await expect(done).toBeVisible();
+    await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+  });
+});
+
+test("token counts preserve exhaustion, rounding, and meaningful keyboard stops", async ({
+  page,
+}, testInfo) => {
+  const measured = makeWorkingSession({
+    id: "token-boundary",
+    tokenUsageView: {
+      status: "available",
+      provider: "codex",
+      inputTokens: 999500,
+      outputTokens: 0,
+      totalTokens: 999500,
+      exhausted: false,
+    },
+    tokenBudgetView: {
+      budget: 999500,
+      knownTotalTokens: 999500,
+      exhausted: true,
+      enforced: true,
+      warnOnly: true,
+    },
+  });
+  await mockSessions(page, [
+    measured,
+    makeWorkingSession({ id: "token-empty" }),
+    makeWorkingSession({
+      id: "token-unknown",
+      preflightTokenUsageView: {
+        status: "unknown",
+        attemptCount: 1,
+        unknownAttemptCount: 1,
+        providerIterationCount: 0,
+      },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 999,500", { exact: true });
+  await expect(count).toHaveText("1M");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-error);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Token budget reached");
+  await expect(page.getByRole("tooltip")).not.toContainText("Stopped by token budget");
+  await page.screenshot({ path: testInfo.outputPath("conflicting-exhaustion.png") });
+  const dashes = page.getByLabel("Tokens: unavailable", { exact: true });
+  await expect(dashes).toHaveCount(2);
+  const unknown = page.locator('[aria-label="Tokens: unavailable"][tabindex="0"]');
+  await expect(unknown).toHaveCount(1);
+  await unknown.focus();
+  await expect(page.getByRole("tooltip")).toContainText("Unknown attempts");
+  await page.screenshot({ path: testInfo.outputPath("unknown-preflight-focus.png") });
+  await expect(page.locator('[aria-label="Tokens: unavailable"]:not([tabindex])')).toHaveCount(1);
+  for (const status of ["stopped", "budget_limited"] as const) {
+    await mockSessions(page, [
+      {
+        ...measured,
+        status,
+        state: status,
+        tokenBudgetView: {
+          ...measured.tokenBudgetView,
+          warnOnly: false,
+        },
+      },
+    ]);
+    await page.reload();
+    await count.focus();
+    await expect(page.getByRole("tooltip")).toContainText(
+      status === "budget_limited" ? "Stopped by token budget" : "Token budget reached",
+    );
+  }
+  await mockSessions(page, [
+    {
+      ...measured,
+      tokenBudgetView: {
+        budget: 999500,
+        knownTotalTokens: 999500,
+        exhausted: false,
+        overridden: true,
+        enforced: false,
+        warnOnly: false,
+      },
+    },
+  ]);
+  await page.reload();
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+  await count.focus();
+  await expect(page.getByRole("tooltip")).toContainText("limit ignored");
+  await page.screenshot({ path: testInfo.outputPath("override.png") });
+});
+
+test("token count shows budget tone and isolated hover card, hides on mobile", async ({ page }) => {
+  await mockSessions(page, [
+    makeWorkingSession({
+      id: "token-count-dashboard",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 600,
+        outputTokens: 100,
+        totalTokens: 700,
+        exhausted: false,
+      },
+      preflightTokenUsageView: {
+        status: "measured",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        attemptCount: 1,
+        unknownAttemptCount: 0,
+        providerIterationCount: 1,
+        byProvider: {},
+      },
+      tokenBudgetView: { budget: 1000, knownTotalTokens: 800, exhausted: false, enforced: true },
+    }),
+  ]);
+  await page.goto("/");
+  const count = page.getByLabel("Tokens: 800", { exact: true });
+  await expect(count).toHaveText("800");
+  await expect(count).toHaveAttribute("style", "color: var(--color-status-attention);");
+  await count.hover();
+  await expect(page.getByRole("tooltip").getByRole("row", { name: "Total 100 700" })).toBeVisible();
+  await expect(page.locator(".data-row").first().getByRole("tooltip")).toHaveCount(1);
+  await page.mouse.move(0, 0);
+  await page
+    .locator(".data-row")
+    .first()
+    .hover({ position: { x: 5, y: 5 } });
+  await expect(page.getByRole("tooltip")).toBeHidden();
+  for (const width of [640, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await count.hover();
+    await expect
+      .poll(async () => {
+        const bounds = await page.getByRole("tooltip").boundingBox();
+        const viewportWidth = page.viewportSize()?.width ?? 0;
+        return bounds ? bounds.x >= 0 && bounds.x + bounds.width <= viewportWidth : false;
+      })
+      .toBe(true);
+  }
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "token-count"), { recursive: true });
+    await page.screenshot({ path: join(artifacts, "token-count", "dashboard-hover.png") });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(count).toBeHidden();
+});
+
+test("budget-limited dashboard row links to approval", async ({ page }) => {
+  await mockSessions(page, [
+    makeStoppedSession({
+      id: "budget-dashboard",
+      status: "budget_limited",
+      state: "budget_limited",
+    }),
+  ]);
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Budget limited" })).toHaveAttribute(
+    "href",
+    /sessions\/budget-dashboard/,
+  );
+  const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+  if (artifacts) {
+    mkdirSync(join(artifacts, "budget-approval-ui"), { recursive: true });
+    await page.screenshot({
+      path: join(artifacts, "budget-approval-ui", "dashboard.png"),
+      fullPage: true,
+    });
+  }
+});
+
+test("loads local JetBrains Mono faces in both dashboard themes", async ({ page }, testInfo) => {
+  const fontResponses: Array<{ url: string; status: number }> = [];
+  const failedFonts: string[] = [];
+  const googleRequests: string[] = [];
+  page.on("request", (request) => {
+    if (/^https:\/\/fonts\.(googleapis|gstatic)\.com\//.test(request.url()))
+      googleRequests.push(request.url());
+  });
+  page.on("response", (response) => {
+    if (response.request().resourceType() === "font")
+      fontResponses.push({ url: response.url(), status: response.status() });
+  });
+  page.on("requestfailed", (request) => {
+    if (request.resourceType() === "font") failedFonts.push(request.url());
+  });
+  await mockSessions(page, []);
+  await page.goto("/");
+  for (const theme of ["dark", "light"] as const) {
+    if (theme === "light")
+      await page.getByRole("button", { name: "Switch to light theme" }).click();
+    const typography = await page.evaluate(async () => {
+      const variable = getComputedStyle(document.documentElement)
+        .getPropertyValue("--font-jetbrains-mono")
+        .trim();
+      const family = variable
+        .split(",")[0]
+        .trim()
+        .replace(/^['"]|['"]$/g, "");
+      await Promise.all(
+        ["300", "400", "500", "700"].map((weight) =>
+          document.fonts.load(`${weight} 12px "${family}"`),
+        ),
+      );
+      await document.fonts.ready;
+      return {
+        family,
+        bodyFamily: getComputedStyle(document.body).fontFamily,
+        faces: Array.from(document.fonts)
+          .filter((face) => face.family.replace(/^['"]|['"]$/g, "") === family)
+          .map((face) => ({ weight: face.weight, style: face.style, status: face.status })),
+      };
+    });
+    expect(typography.family).not.toBe("");
+    expect(typography.bodyFamily).toContain(typography.family);
+    expect(typography.faces.sort((a, b) => Number(a.weight) - Number(b.weight))).toEqual(
+      ["300", "400", "500", "700"].map((weight) => ({ weight, style: "normal", status: "loaded" })),
+    );
+    await page.screenshot({
+      path: process.env.SPUR_SESSION_ARTIFACTS_DIR
+        ? join(process.env.SPUR_SESSION_ARTIFACTS_DIR, `jetbrains-mono-${theme}.png`)
+        : testInfo.outputPath(`jetbrains-mono-${theme}.png`),
+    });
+  }
+  const emittedFonts = fontResponses.filter((response) =>
+    new URL(response.url).pathname.startsWith("/_next/static/media/"),
+  );
+  expect(emittedFonts).toHaveLength(4);
+  for (const response of fontResponses) {
+    expect(response.status).toBe(200);
+    expect(new URL(response.url).origin).toBe(new URL(page.url()).origin);
+  }
+  for (const response of emittedFonts) expect(new URL(response.url).pathname).toMatch(/\.woff2$/);
+  expect(failedFonts).toEqual([]);
+  expect(googleRequests).toEqual([]);
+});
 
 test("failed update diagnosis reports Shepherd reuse and links the session", async ({ page }) => {
   await page.clock.install();
@@ -508,15 +1014,10 @@ test.describe("D1: Header renders correctly", () => {
   test("dashboard search matches canonical tasks and work items while preserving desks", async ({
     page,
   }) => {
-    const telegramSuffix = `
-
-Source: telegram. The requester only sees messages you send with:
-spur source reply "<message>"
-Your terminal output is invisible to them. Reply when you need input and when the task completes, with a short result summary.`;
     const root = makeWorkingSession({
       id: "search-desk-root",
-      prompt: `Repair settlement export${telegramSuffix}`,
-      originalTaskPrompt: `Repair settlement export${telegramSuffix}`,
+      prompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
+      originalTaskPrompt: `Repair settlement export${TELEGRAM_REPLY_SUFFIX}`,
       slots: {
         title: "Settlement repair",
         links: [{ label: "github-pr", url: "https://github.com/acme/payments/pull/742" }],
@@ -1176,6 +1677,30 @@ test.describe("D4: Terminal button state", () => {
     ).toHaveCount(0);
   });
 
+  test("token-budget exhausted session hides restore", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "restore-token-exhausted",
+      prompt: "Token exhausted",
+      stopReason: "token_budget",
+      tokenUsageView: {
+        status: "available",
+        provider: "codex",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        budget: 100,
+        exhausted: true,
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByText("Token exhausted")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
+    ).toHaveCount(0);
+  });
+
   test("errored restorable session shows restore instead of disabled terminal", async ({
     page,
   }) => {
@@ -1197,7 +1722,7 @@ test.describe("D4: Terminal button state", () => {
 
   test("clicking restore posts and refetches sessions", async ({ page }) => {
     const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
-    const restored = makeWorkingSession({
+    let restored = makeWorkingSession({
       ...stopped,
       status: "running",
       state: "working",
@@ -1210,11 +1735,17 @@ test.describe("D4: Terminal button state", () => {
     await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
     await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
       restoreCalls += 1;
+      const body = route.request().postDataJSON() as { operationId: string };
+      expect(body).toEqual({ operationId: expect.any(String) });
+      restored = {
+        ...restored,
+        lifecycle: lifecycleReceipt(body.operationId, [stopped.id], "restore", "succeeded"),
+      };
       restoredState = true;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: "{}",
+        body: JSON.stringify(restored),
       });
     });
     await page.goto("/");
@@ -1232,6 +1763,9 @@ test.describe("D4: Terminal button state", () => {
   test("restore failure leaves row visible and shows error", async ({ page }) => {
     const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
     await mockSessions(page, [session]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: session });
+    });
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
       await route.fulfill({
         status: 502,
@@ -1246,11 +1780,15 @@ test.describe("D4: Terminal button state", () => {
       .click();
 
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Dismiss toast" })).toHaveCount(1);
     await page.waitForTimeout(3000);
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toBeVisible();
     await page.getByRole("button", { name: "Dismiss toast" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "Restore failed" })).toHaveCount(0);
     await expect(page.getByText("Restore fails")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") }),
+    ).toBeVisible();
   });
 });
 
@@ -1305,7 +1843,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let rows = [session];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1328,11 +1867,16 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     });
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeRequestSeen = true;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       await completeHold;
+      const lifecycle = lifecycleReceipt(operationId, [session.id], "complete", "succeeded");
+      rows = [
+        { ...session, status: "completed", state: "stopped", runtimeAlive: false, lifecycle },
+      ];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle }),
       });
     });
 
@@ -1361,7 +1905,11 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
       },
     });
-    await mockSessions(page, [session]);
+    let current = session;
+    await mockSessions(page, () => [current]);
+    await page.route(`/api/sessions/${session.id}`, async (route) => {
+      await route.fulfill({ json: current });
+    });
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1382,12 +1930,18 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeAttempts += 1;
       completeBodies.push(route.request().postDataJSON());
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
       if (completeAttempts === 1) {
+        current = {
+          ...current,
+          lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "failed"),
+        };
         await route.fulfill({
           status: 409,
           contentType: "application/json",
           body: JSON.stringify({
             code: "open_pr_action_required",
+            lifecycle: current.lifecycle,
             sessionId: session.id,
             pr: {
               number: 42,
@@ -1398,10 +1952,18 @@ test.describe("D4b: Merged/closed-PR done button", () => {
         });
         return;
       }
+      current = {
+        ...session,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+        lifecycle: lifecycleReceipt(operationId, [session.id], "complete", "succeeded", 4),
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ ok: true }),
+        body: JSON.stringify({ completedIds: [session.id], lifecycle: current.lifecycle }),
       });
     });
 
@@ -1417,7 +1979,13 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.getByRole("button", { name: "Leave Pull Request Open" }).click();
 
     await expect.poll(() => completeAttempts).toBe(2);
-    expect(completeBodies).toEqual([{ scope: "desk" }, { scope: "desk", prAction: "leave_open" }]);
+    expect(completeBodies).toEqual([
+      { scope: "desk", operationId: expect.any(String) },
+      { scope: "desk", prAction: "leave_open", operationId: expect.any(String) },
+    ]);
+    expect(completeBodies[0]).not.toEqual(completeBodies[1]);
+    await expect(page.getByRole("dialog", { name: "Open Pull Request" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Open PR action row" }).first()).toHaveCount(0);
   });
 
   test("done click confirms active desk subagents and sends desk-scoped complete", async ({
@@ -1439,7 +2007,8 @@ test.describe("D4b: Merged/closed-PR done button", () => {
       prompt: "Desk helper",
       slots: { title: "Desk helper", links: [] },
     });
-    await mockSessions(page, [session, subagent]);
+    let rows = [session, subagent];
+    await mockSessions(page, () => rows);
     await page.route(/\/api\/pr-status\?/, (route) => {
       void route.fulfill({
         status: 200,
@@ -1458,10 +2027,24 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     let completeBody: unknown = null;
     await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
       completeBody = route.request().postDataJSON();
+      const { operationId } = completeBody as { operationId: string };
+      const lifecycle = lifecycleReceipt(
+        operationId,
+        [session.id, subagent.id],
+        "complete",
+        "succeeded",
+      );
+      rows = rows.map((row) => ({
+        ...row,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        lifecycle,
+      }));
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ completedIds: [session.id, subagent.id] }),
+        body: JSON.stringify({ completedIds: [session.id, subagent.id], lifecycle }),
       });
     });
     page.on("dialog", async (dialog) => {
@@ -1474,7 +2057,9 @@ test.describe("D4b: Merged/closed-PR done button", () => {
     await page.goto("/");
     await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
 
-    await expect.poll(() => completeBody).toEqual({ scope: "desk" });
+    await expect
+      .poll(() => completeBody)
+      .toEqual({ scope: "desk", operationId: expect.any(String) });
   });
 
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
@@ -2729,12 +3314,15 @@ test.describe("D7: Spawn modal", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await expect(textarea).toHaveValue("Keep me");
-    await expect(page.getByText(/Daemon down/i)).toBeVisible();
+    await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Daemon down/i);
   });
 
   test("spawn prompt accepts image attachments and forwards them in the request body", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     await mockSessions(
       page,
@@ -2765,7 +3353,12 @@ test.describe("D7: Spawn modal", () => {
     await textarea.fill("Prompt with image");
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
-      dt.items.add(new File(["PNG"], "spawn.png", { type: "image/png" }));
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 16;
+      const bytes = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]), (c) =>
+        c.charCodeAt(0),
+      );
+      dt.items.add(new File([bytes], "spawn.png", { type: "image/png" }));
       return dt;
     });
     await textarea.dispatchEvent("drop", { dataTransfer });
@@ -2782,10 +3375,466 @@ test.describe("D7: Spawn modal", () => {
       attachments: [{ name: "spawn.png", data: expect.any(String) }],
     });
   });
+
+  test.describe("spawn photo preparation", () => {
+    type ReadGate = Window & { finishPhotoReads: (fail?: boolean) => void; photoReadCount: number };
+
+    async function prepare(page: Page) {
+      await page.route("**/api/preflight", (route) =>
+        route.fulfill({ status: 200, json: { branch: "feature/photo-test" } }),
+      );
+      await mockSessions(
+        page,
+        [makeWorkingSession({ id: "photo-1", project: "my-project" })],
+        DEFAULT_PROJECTS,
+      );
+      await page.goto("/");
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+      await expect(page.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+    }
+
+    async function gateReads(page: Page) {
+      await page.evaluate(() => {
+        const original = FileReader.prototype.readAsDataURL;
+        const callbacks: Array<(fail: boolean) => void> = [];
+        const state = window as ReadGate;
+        state.photoReadCount = 0;
+        FileReader.prototype.readAsDataURL = function (blob: Blob) {
+          state.photoReadCount += 1;
+          callbacks.push((fail) => {
+            if (fail) this.dispatchEvent(new ProgressEvent("error"));
+            else original.call(this, blob);
+          });
+        };
+        state.finishPhotoReads = (fail = false) => {
+          FileReader.prototype.readAsDataURL = original;
+          callbacks.splice(0).forEach((callback) => callback(fail));
+        };
+      });
+    }
+
+    async function addPhoto(page: Page, gesture: "paste" | "drop", name = "photo.png") {
+      await page.getByPlaceholder("Prompt...").evaluate(
+        (textarea, options) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 16;
+          const bytes = Uint8Array.from(atob(canvas.toDataURL("image/png").split(",")[1]), (c) =>
+            c.charCodeAt(0),
+          );
+          const transfer = new DataTransfer();
+          transfer.items.add(new File([bytes], options.name, { type: "image/png" }));
+          textarea.dispatchEvent(
+            options.gesture === "paste"
+              ? new ClipboardEvent("paste", { bubbles: true, clipboardData: transfer })
+              : new DragEvent("drop", { bubbles: true, dataTransfer: transfer }),
+          );
+        },
+        { gesture, name },
+      );
+    }
+
+    for (const gesture of ["paste", "drop"] as const) {
+      test(`pending ${gesture} photo blocks spawn and shortcut until real reader resolves`, async ({
+        page,
+      }) => {
+        const requests: Record<string, unknown>[] = [];
+        await page.route("**/api/spawn", async (route) => {
+          requests.push(route.request().postDataJSON() as Record<string, unknown>);
+          await route.fulfill({
+            status: 201,
+            json: makeSpawningSession({ id: "photo-ack", project: "my-project" }),
+          });
+        });
+        await prepare(page);
+        await gateReads(page);
+        await addPhoto(page, gesture);
+        const spawn = page.getByRole("button", { name: /^spawn$/i });
+        await expect(spawn).toBeDisabled();
+        await page.getByPlaceholder("Prompt...").press("ControlOrMeta+Enter");
+        expect(requests).toHaveLength(0);
+        await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+        await page.evaluate(() => (window as ReadGate).finishPhotoReads());
+        await expect(page.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+        await expect(spawn).toBeEnabled();
+        await spawn.click();
+        await expect.poll(() => requests.length).toBe(1);
+        expect(requests[0]).toMatchObject({
+          attachments: [{ name: "photo.png", data: expect.any(String) }],
+        });
+      });
+    }
+
+    for (const width of [780, 390]) {
+      test(`in-flight spawn ignores close attempts and retains late failure at ${width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 844 });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const requests: Record<string, unknown>[] = [];
+        await page.route("**/api/spawn", async (route) => {
+          requests.push(route.request().postDataJSON() as Record<string, unknown>);
+          if (requests.length === 1) await gate;
+          await route.fulfill({ status: 502, json: { error: "Late spawn failure" } });
+        });
+        await prepare(page);
+        await page.getByPlaceholder("Prompt...").fill("Keep photo");
+        await addPhoto(page, "drop", "ready.png");
+        const dialog = page.getByRole("dialog");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect.poll(() => requests.length).toBe(1);
+        const close = dialog.getByRole("button", { name: "Close", exact: true });
+        await expect(close).toBeDisabled();
+        await close.dispatchEvent("click");
+        await dialog.dispatchEvent("click");
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        release();
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(
+          await alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          }),
+        ).toBe(true);
+        await expect(close).toBeEnabled();
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+        await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+        await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await dialog.getByRole("button", { name: /^spawn$/i }).click();
+        await expect(alert).toHaveText("Late spawn failure");
+        expect(requests[1]).toMatchObject({
+          prompt: "Keep photo",
+          attachments: [{ name: "ready.png" }],
+        });
+        await close.click();
+        await expect(dialog).toHaveCount(0);
+      });
+    }
+
+    test("in-flight spawn success still closes and resets the modal", async ({ page }) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/spawn", async (route) => {
+        await gate;
+        await route.fulfill({
+          status: 201,
+          json: makeSpawningSession({ id: "photo-success", project: "my-project" }),
+        });
+      });
+      await prepare(page);
+      await page.getByPlaceholder("Prompt...").fill("Clear photo");
+      await addPhoto(page, "paste", "ready.png");
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await dialog.getByRole("button", { name: /^spawn$/i }).click();
+      await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeVisible();
+      release();
+      await expect(dialog).toHaveCount(0);
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await expect(page.getByPlaceholder("Prompt...")).toHaveValue("");
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toHaveCount(0);
+    });
+
+    test("closed modal ignores stale photo reads", async ({ page }) => {
+      await prepare(page);
+      await gateReads(page);
+      await addPhoto(page, "paste", "obsolete.png");
+      await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: /spawn session/i }).click();
+      await page.evaluate(() => (window as ReadGate).finishPhotoReads());
+      await addPhoto(page, "drop", "current.png");
+      await expect(page.getByRole("button", { name: "Remove current.png" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Remove obsolete.png" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+    });
+
+    test("photo read failure and spawn failure retain ready selection for retry", async ({
+      page,
+    }) => {
+      const requests: Record<string, unknown>[] = [];
+      await page.route("**/api/spawn", async (route) => {
+        requests.push(route.request().postDataJSON() as Record<string, unknown>);
+        await route.fulfill(
+          requests.length === 1
+            ? { status: 502, json: { error: "Injected spawn failure" } }
+            : {
+                status: 201,
+                json: makeSpawningSession({ id: "photo-retry", project: "my-project" }),
+              },
+        );
+      });
+      await prepare(page);
+      await page.getByPlaceholder("Prompt...").fill("Keep photo");
+      await addPhoto(page, "drop", "ready.png");
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await gateReads(page);
+      await addPhoto(page, "paste", "broken.png");
+      await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+      await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Failed to read/);
+      await expect(page.getByRole("button", { name: "Remove ready.png" })).toBeVisible();
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(
+        "Injected spawn failure",
+      );
+      await expect(page.getByPlaceholder("Prompt...")).toHaveValue("Keep photo");
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect.poll(() => requests.length).toBe(2);
+      expect(requests[1]).toMatchObject({
+        prompt: "Keep photo",
+        attachments: [{ name: "ready.png" }],
+      });
+    });
+
+    test("photo picker permits removal and same-file reselection with repeated additions", async ({
+      page,
+    }) => {
+      const requests: Record<string, unknown>[] = [];
+      await page.route("**/api/spawn", async (route) => {
+        requests.push(route.request().postDataJSON() as Record<string, unknown>);
+        await route.fulfill({
+          status: 201,
+          json: makeSpawningSession({ id: "photo-picker", project: "my-project" }),
+        });
+      });
+      await prepare(page);
+      const data = await page.evaluate(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 16;
+        return canvas.toDataURL("image/png").split(",")[1];
+      });
+      const file = {
+        name: "picker.png",
+        mimeType: "image/png",
+        buffer: Buffer.from(data, "base64"),
+      };
+      const input = page.getByRole("dialog").locator('input[type="file"]');
+      await input.setInputFiles(file);
+      await expect(page.getByRole("button", { name: "Remove picker.png" })).toBeVisible();
+      await page.getByRole("button", { name: "Remove picker.png" }).click();
+      await input.setInputFiles(file);
+      await expect(page.getByRole("button", { name: "Remove picker.png" })).toBeVisible();
+      await addPhoto(page, "paste", "second.png");
+      await expect(page.getByRole("button", { name: "Remove second.png" })).toBeVisible();
+      await page.getByRole("button", { name: /^spawn$/i }).click();
+      await expect.poll(() => requests.length).toBe(1);
+      expect(requests[0]).toMatchObject({
+        attachments: [{ name: "picker.png" }, { name: "second.png" }],
+      });
+    });
+
+    for (const viewport of [
+      { width: 780, height: 493 },
+      { width: 390, height: 844 },
+    ]) {
+      test(`photo read and limit errors receive pointer events inside dialog at ${viewport.width}px`, async ({
+        page,
+      }) => {
+        await page.setViewportSize(viewport);
+        await prepare(page);
+        await gateReads(page);
+        await addPhoto(page, "paste");
+        await expect.poll(() => page.evaluate(() => (window as ReadGate).photoReadCount)).toBe(1);
+        await page.evaluate(() => (window as ReadGate).finishPhotoReads(true));
+        const dialog = page.getByRole("dialog");
+        const alert = dialog.getByRole("alert");
+        await expect(alert).toHaveText(/Failed to read attachment/);
+        const textReceivesPointer = () =>
+          alert.locator("span").evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return element.contains(
+              document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+            );
+          });
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        const data = await page.evaluate(() => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 16;
+          return canvas.toDataURL("image/png").split(",")[1];
+        });
+        await dialog.locator('input[type="file"]').setInputFiles(
+          Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, index) => ({
+            name: `limit-${index}.png`,
+            mimeType: "image/png",
+            buffer: Buffer.from(data, "base64"),
+          })),
+        );
+        await expect(alert).toHaveText(/Too many attachments/);
+        expect(await textReceivesPointer()).toBe(true);
+        await dialog.getByRole("button", { name: "Dismiss spawn error" }).click();
+        await expect(alert).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: /^spawn$/i })).toBeEnabled();
+      });
+    }
+  });
 });
 
 // D7b: Silent branch preflight
 test.describe("D7b: Silent branch preflight", () => {
+  test("keeps paid usage visible after failed previews", async ({ page }, testInfo) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    const batchIds: string[] = [];
+    let finishFirstPreview: (() => void) | undefined;
+    const firstPreviewPending = new Promise<void>((resolve) => {
+      finishFirstPreview = resolve;
+    });
+    const capture = async (name: string) => {
+      const artifacts = process.env.SPUR_SESSION_ARTIFACTS_DIR;
+      if (artifacts) mkdirSync(join(artifacts, "token-ui"), { recursive: true });
+      await page.screenshot({
+        path: artifacts ? join(artifacts, "token-ui", name) : testInfo.outputPath(name),
+      });
+    };
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 1) await firstPreviewPending;
+      const unknown = batchIds.length > 1;
+      await route.fulfill({
+        status: unknown ? 409 : 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: unknown ? "Pre-flight token usage is unknown" : "Provider failed after output",
+          preflightBatchId: body.preflightBatchId,
+          preflightTokenUsageView: unknown
+            ? {
+                status: "unknown",
+                attemptCount: 2,
+                unknownAttemptCount: 1,
+                providerIterationCount: 1,
+              }
+            : {
+                status: "measured",
+                attemptCount: 1,
+                unknownAttemptCount: 0,
+                providerIterationCount: 1,
+                byProvider: { codex: { totalTokens: 12 } },
+                inputTokens: 10,
+                outputTokens: 2,
+                totalTokens: 12,
+              },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First paid preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await expect(
+      page.getByRole("status").filter({ hasText: "Checking branch preview" }),
+    ).toBeVisible();
+    await capture("preflight-preview-loading.png");
+    finishFirstPreview?.();
+    await expect(page.getByText("Pre-flight tokens: 12")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
+    await expect(page.getByText("Provider failed after output")).toHaveCount(0);
+    await capture("preflight-preview-error-measured.png");
+    await prompt.fill("Second paid preview");
+    await expect(page.getByText("Pre-flight tokens: unavailable")).toBeVisible();
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Branch preview failed" }),
+    ).toBeVisible();
+    expect(batchIds).toHaveLength(2);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    await capture("preflight-preview-failed.png");
+  });
+
+  test("keeps one paid batch through measured and superseded previews", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    let allocations = 0;
+    const allocatedId = "20000000-0000-4000-8000-000000000001";
+    await page.route("**/api/projects/my-project/preflight-batches", async (route) => {
+      allocations += 1;
+      expect(route.request().postData()).toBeNull();
+      await route.fulfill({ json: { preflightBatchId: allocatedId } });
+    });
+    const batchIds: string[] = [];
+    let firstRequest: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      firstRequest = resolve;
+    });
+    await page.route("**/api/preflight", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId: string };
+      batchIds.push(body.preflightBatchId);
+      if (batchIds.length === 2) await firstPending;
+      const replacement = batchIds.length === 4;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          branch: "feature/preview",
+          preflightBatchId: replacement
+            ? "30000000-0000-4000-8000-000000000001"
+            : body.preflightBatchId,
+          preflightTokenUsageView: {
+            status: replacement ? "partial" : "measured",
+            attemptCount: replacement ? 1 : batchIds.length,
+            unknownAttemptCount: 0,
+            providerIterationCount: batchIds.length,
+            byProvider: {},
+            inputTokens: batchIds.length,
+            outputTokens: 0,
+            totalTokens: batchIds.length,
+          },
+        }),
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const prompt = page.locator("textarea").last();
+    await prompt.fill("First preview");
+    await expect.poll(() => batchIds.length).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 1", { exact: true })).toBeVisible();
+    await prompt.fill("Second preview");
+    await expect.poll(() => batchIds.length).toBe(2);
+    await prompt.fill("Supersede paid preview");
+    firstRequest?.();
+    await expect.poll(() => batchIds.length).toBe(3);
+    expect(batchIds[0]).toBe(allocatedId);
+    expect(batchIds[1]).toBe(batchIds[0]);
+    expect(batchIds[2]).toBe(batchIds[0]);
+    expect(allocations).toBe(1);
+    await expect(page.getByText("Pre-flight tokens: 3", { exact: true })).toBeVisible();
+    await prompt.fill("Recover corrupted batch");
+    await expect(page.getByText("Pre-flight tokens: 4 · partial", { exact: true })).toBeVisible();
+    let spawnedBatchId: string | undefined;
+    await page.route("**/api/spawn", async (route) => {
+      const body = route.request().postDataJSON() as { preflightBatchId?: string };
+      spawnedBatchId = body.preflightBatchId;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "preview-claimed" })),
+      });
+    });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+    await expect.poll(() => spawnedBatchId).toBe("30000000-0000-4000-8000-000000000001");
+  });
+
   test("preflight called and branch input auto-populated", async ({ page }) => {
     await mockSessions(
       page,
@@ -2900,6 +3949,9 @@ test.describe("D7d: Branch name normalization", () => {
   });
 
   test("garbage branch clears on blur and spawn fires without a branch", async ({ page }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     let requestBody: Record<string, unknown> | null = null;
     const sessions = [makeWorkingSession({ id: "branch-garbage-1", project: "my-project" })];
     await page.route("**/api/spawn", async (route) => {
@@ -2942,6 +3994,16 @@ test.describe("D7d: Branch name normalization", () => {
 });
 
 test.describe("D7c: Background spawn lifecycle", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/preflight", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: null }),
+      });
+    });
+  });
+
   test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
   }) => {
@@ -3468,6 +4530,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
   test("the user can retry manually after an ack failure without losing content or creating duplicate cards", async ({
     page,
   }) => {
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: null } }),
+    );
     const placeholder = makeSpawningSession({
       id: "spawn-bg-manual-retry-1",
       project: "my-project",
@@ -3478,6 +4543,10 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
     const sessions: SpurSessionView[] = [];
     let spawnCalls = 0;
+
+    await page.route("**/api/preflight", (route) =>
+      route.fulfill({ status: 200, json: { branch: placeholder.branch } }),
+    );
 
     await page.route("**/api/spawn", async (route) => {
       spawnCalls += 1;
@@ -3498,6 +4567,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     });
 
     await openSpawnModal(page, () => sessions);
+    const preflightResponse = page.waitForResponse("**/api/preflight");
     await fillSpawnForm(page, {
       prompt: placeholder.prompt,
       branch: placeholder.branch,
@@ -3516,6 +4586,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("checkbox", { name: "Plan" })).toBeChecked();
     await expect(page.getByText(/daemon down/i)).toBeVisible();
 
+    await preflightResponse;
     await spawnButton.click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
@@ -3576,6 +4647,7 @@ test.describe("D8: Loading feedback", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
+          lifecycleInstanceId: "test-instance",
           sessions: [],
           projects: [{ id: "my-project", name: "my-project", configured: true }],
           backlog: [],

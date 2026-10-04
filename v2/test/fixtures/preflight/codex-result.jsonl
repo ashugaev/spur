@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"019f0000-0000-7000-8000-000000000001"}
+{"type":"turn.completed","usage":{"input":120,"cached":40,"cache_write":10,"output":30,"reasoning":12}}

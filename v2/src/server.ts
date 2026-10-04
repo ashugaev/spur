@@ -2,8 +2,13 @@ import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { URL } from "node:url";
+import {
+  lifecycleErrorReceipt,
+  parseLifecycleOperationId,
+  SessionLifecycleError,
+} from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
-import { listAgentModels } from "./agents/models.js";
+import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
@@ -41,25 +46,36 @@ import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { getReleases } from "./releases-cache.js";
 import {
+  AgentExitedBeforeSendError,
   GithubPrCheckUnavailableError,
   InvalidClearPortError,
   InvalidConfigPathError,
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
+  PreflightPreviewError,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
   SessionService,
+  SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
   WakeDispatchConflictError,
   WakeTargetMissingError,
 } from "./session-service.js";
-import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
+import {
+  dropsQueuedSend,
+  startConfiguredTriggers,
+  type TriggerGroupController,
+} from "./triggers.js";
 import { updateLedgerPath } from "./update-ledger.js";
 import { getVersion } from "./version.js";
 import {
@@ -70,6 +86,7 @@ import {
   type ConnectProjectConfigRequest,
   type CreateProjectRequest,
   type DisconnectProjectConfigRequest,
+  type SessionLifecycleSnapshot,
   type KillSessionRequest,
   type OpenPrAction,
   type PreflightRequest,
@@ -269,7 +286,11 @@ async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): 
   }
 }
 
+const lifecycleErrors = new WeakMap<ServerResponse, SessionLifecycleSnapshot>();
+
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+  const lifecycle = lifecycleErrors.get(response);
+  if (lifecycle && isRecord(payload)) payload = { ...payload, lifecycle };
   // Compact, not pretty-printed: the listing payloads run to megabytes and the
   // 2-space indent was ~10% of every one of them, re-serialized on each poll.
   const body = Buffer.from(JSON.stringify(payload) + "\n", "utf8");
@@ -428,7 +449,9 @@ export function parseCompleteSessionRequest(raw: unknown): CompleteSessionReques
     throw new Error("Invalid complete scope");
   }
   const prAction = parseOpenPrAction(raw["prAction"]);
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
   return {
+    ...(operationId ? { operationId } : {}),
     ...(scope === "session" || scope === "desk" ? { scope } : {}),
     ...(prAction ? { prAction } : {}),
     ...(raw["skipPrCheck"] === true ? { skipPrCheck: true } : {}),
@@ -498,7 +521,12 @@ export function parseRestoreSessionRequest(raw: unknown): RestoreSessionRequest 
   if (!isRecord(raw)) {
     return {};
   }
-  return raw["force"] === true ? { force: true } : {};
+  const operationId = parseLifecycleOperationId(raw["operationId"]);
+  return {
+    ...(operationId ? { operationId } : {}),
+    ...(raw["force"] === true ? { force: true } : {}),
+    ...(raw["overrideTokenBudget"] === true ? { overrideTokenBudget: true } : {}),
+  };
 }
 
 // Bounds the wait for a trigger controller to drain its in-flight deliveries. Returns
@@ -753,9 +781,14 @@ export async function startServer(
             agent: session.agent,
             state: session.state,
             ...(session.slots?.title ? { title: session.slots.title } : {}),
+            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
           })),
         spawnSession: async (request) => {
-          const session = await service.spawn(request);
+          const { telegramOrigin, ...spawnRequest } = request;
+          const session = await service.spawn(
+            spawnRequest,
+            telegramOrigin ? { telegramOrigin } : undefined,
+          );
           return {
             id: session.id,
             project: session.project,
@@ -1119,7 +1152,9 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        sendJson(response, 200, await service.list({ includeCompleted, view }));
+        const sessions = await service.list({ includeCompleted, view });
+        response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
+        sendJson(response, 200, sessions);
         return;
       }
 
@@ -1143,7 +1178,10 @@ export async function startServer(
           return;
         }
         sendJson(response, 200, {
-          models: await listAgentModels(agent, { codexHomePath: service.config.models.codexHome }),
+          agent,
+          ...(await listAgentModelCatalog(agent, {
+            codexHomePath: service.config.models.codexHome,
+          })),
         });
         return;
       }
@@ -1276,6 +1314,12 @@ export async function startServer(
           configPath: body.configPath,
           projects: service.listProjects(),
         });
+        return;
+      }
+
+      const preflightBatchProjectId = path.match(/^\/projects\/([^/]+)\/preflight-batches$/)?.[1];
+      if (method === "POST" && preflightBatchProjectId) {
+        sendJson(response, 200, await service.createPreflightBatch(preflightBatchProjectId));
         return;
       }
 
@@ -1726,6 +1770,25 @@ export async function startServer(
         return;
       }
 
+      const launchSubmitSessionId = path.match(/^\/sessions\/([^/]+)\/launch\/submit$/)?.[1];
+      if (method === "POST" && launchSubmitSessionId) {
+        sendJson(response, 200, await service.submitPendingLaunch(launchSubmitSessionId));
+        return;
+      }
+
+      const submitFailedMatch = path.match(/^\/sessions\/([^/]+)\/submit-failed\/(retry|dismiss)$/);
+      if (method === "POST" && submitFailedMatch?.[1] && submitFailedMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.resolveSubmitFailure(
+            submitFailedMatch[1],
+            submitFailedMatch[2] === "retry" ? "retry" : "dismiss",
+          ),
+        );
+        return;
+      }
+
       const sourceReplySessionId = path.match(/^\/sessions\/([^/]+)\/source-reply$/)?.[1];
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);
@@ -1837,14 +1900,34 @@ export async function startServer(
 
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid restore request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.restore(restoreSessionId, body));
         return;
       }
 
       const reopenSessionId = path.match(/^\/sessions\/([^/]+)\/reopen$/)?.[1];
       if (method === "POST" && reopenSessionId) {
-        const body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        let body: RestoreSessionRequest;
+        try {
+          body = parseRestoreSessionRequest(await readJsonBody<unknown>(request));
+        } catch (error) {
+          sendError(
+            response,
+            400,
+            error instanceof Error ? error.message : "Invalid reopen request",
+          );
+          return;
+        }
         sendJson(response, 200, await service.reopen(reopenSessionId, body));
         return;
       }
@@ -1977,6 +2060,16 @@ export async function startServer(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errorMessage = message;
+      const lifecycle = lifecycleErrorReceipt(error);
+      if (lifecycle) lifecycleErrors.set(response, lifecycle);
+      if (error instanceof SessionLifecycleError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: { error: message, ...error.payload },
+        });
+        return;
+      }
       if (error instanceof AutoPingError) {
         failRequest(response, error.status, message, {
           method,
@@ -1985,7 +2078,20 @@ export async function startServer(
         });
         return;
       }
+      if (error instanceof PreflightPreviewError) {
+        failRequest(response, error.statusCode, message, {
+          method,
+          path,
+          payload: {
+            error: message,
+            preflightBatchId: error.preflightBatchId,
+            preflightTokenUsageView: error.preflightTokenUsageView,
+          },
+        });
+        return;
+      }
       if (
+        error instanceof AgentReasoningEffortError ||
         error instanceof SessionResourceNotFoundError ||
         error instanceof InvalidClearPortError ||
         error instanceof InvalidConfigPathError ||
@@ -1999,7 +2105,13 @@ export async function startServer(
         error instanceof SessionAdmissionDeniedError ||
         error instanceof SessionRateLimitedError ||
         error instanceof SessionNotReopenableError ||
-        error instanceof QueueDeliveryInFlightError
+        error instanceof QueueDeliveryInFlightError ||
+        error instanceof AgentExitedBeforeSendError ||
+        error instanceof SessionStartingError ||
+        error instanceof SessionEndedError ||
+        error instanceof ForeignAgentProcessError ||
+        error instanceof LaunchPromptPendingError ||
+        error instanceof SidecarProbeUnresponsiveError
       ) {
         failRequest(response, error.statusCode, message, { method, path });
         return;
@@ -2115,15 +2227,14 @@ export async function startServer(
     });
   };
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(service.config.server.port, service.config.server.host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
   try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(service.config.server.port, service.config.server.host, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
     await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

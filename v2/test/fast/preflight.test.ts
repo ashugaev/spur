@@ -3,6 +3,7 @@ import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CodexModule from "../../src/agents/codex.js";
 import type * as ModelsModule from "../../src/agents/models.js";
+import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
@@ -15,6 +16,13 @@ const { mockRm } = vi.hoisted(() => ({
 }));
 const { mockReadFile } = vi.hoisted(() => ({
   mockReadFile: vi.fn<typeof FsPromises.readFile>(),
+}));
+const { mockCopyCodexAgentDefinitions } = vi.hoisted(() => ({
+  mockCopyCodexAgentDefinitions: vi.fn(),
+}));
+const { mockExportOpenCodeSession, mockDeleteOpenCodeSession } = vi.hoisted(() => ({
+  mockExportOpenCodeSession: vi.fn(),
+  mockDeleteOpenCodeSession: vi.fn(),
 }));
 
 vi.mock("node:child_process", () => {
@@ -61,6 +69,7 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => {
   return {
     ...actual,
     codexCommand: () => "/mock/bin/codex",
+    copyCodexAgentDefinitions: mockCopyCodexAgentDefinitions,
   };
 });
 
@@ -76,7 +85,23 @@ vi.mock("../../src/agents/models.js", async (importOriginal) => {
   };
 });
 
-import { PreflightBranchValidationError, runSpawnPreflight } from "../../src/preflight.js";
+vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof OpenCodeModule>();
+  return {
+    ...actual,
+    opencodeCommand: () => "/mock/bin/opencode",
+    exportOpenCodeSession: mockExportOpenCodeSession,
+    deleteOpenCodeSession: mockDeleteOpenCodeSession,
+  };
+});
+
+import {
+  PreflightBranchValidationError,
+  parseClaudePreflightOutput,
+  parseCodexPreflightUsage,
+  parseCursorPreflightOutput,
+  runSpawnPreflight,
+} from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
   path: "/repo/api",
@@ -104,6 +129,178 @@ function getCodexOutputPath(args: string[]): string {
   return outputPath;
 }
 
+describe("structured preflight usage", () => {
+  it("counts Claude aggregate once and adds advisor usage once", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/claude-result.json", import.meta.url),
+      "utf8",
+    );
+    expect(parseClaudePreflightOutput(raw)).toEqual({
+      text: "feature/token-ledger",
+      providerIterationCount: 2,
+      usage: {
+        inputTokens: 155,
+        outputTokens: 43,
+        totalTokens: 198,
+        cacheReadInputTokens: 20,
+        cacheWriteInputTokens: 30,
+      },
+    });
+  });
+
+  it("falls back to Claude's flat cache write total when nested TTLs are absent", () => {
+    const raw = JSON.stringify({
+      result: "feature/cache-fallback",
+      usage: {
+        input_tokens: 10,
+        cache_creation_input_tokens: 7,
+        cache_read_input_tokens: 3,
+        cache_creation: {},
+        output_tokens: 2,
+      },
+    });
+    expect(parseClaudePreflightOutput(raw).usage).toMatchObject({
+      inputTokens: 20,
+      cacheWriteInputTokens: 7,
+      totalTokens: 22,
+    });
+  });
+
+  it("accepts Claude nested cache writes without a flat duplicate and rejects malformed details", () => {
+    const usage = {
+      input_tokens: 5,
+      cache_read_input_tokens: 2,
+      cache_creation: { ephemeral_5m_input_tokens: 3 },
+      output_tokens: 1,
+    };
+    expect(
+      parseClaudePreflightOutput(JSON.stringify({ result: "feature/x", usage })).usage,
+    ).toMatchObject({
+      inputTokens: 10,
+      cacheWriteInputTokens: 3,
+      totalTokens: 11,
+    });
+    expect(
+      parseClaudePreflightOutput(
+        JSON.stringify({ result: "feature/x", usage: { ...usage, cache_creation: "3" } }),
+      ).usage,
+    ).toBeUndefined();
+  });
+
+  it("counts nested Claude advisor iterations and rejects a malformed nested sample", () => {
+    const payload = {
+      result: "feature/advisor",
+      usage: {
+        input_tokens: 10,
+        cache_creation_input_tokens: 2,
+        cache_read_input_tokens: 3,
+        output_tokens: 4,
+        iterations: [
+          {
+            type: "advisor_message",
+            model: "advisor",
+            input_tokens: 5,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 1,
+            output_tokens: 2,
+          },
+        ],
+      },
+    };
+    expect(parseClaudePreflightOutput(JSON.stringify(payload))).toMatchObject({
+      providerIterationCount: 2,
+      usage: {
+        inputTokens: 22,
+        outputTokens: 6,
+        totalTokens: 28,
+      },
+    });
+    const iteration = payload.usage.iterations[0];
+    if (!iteration) throw new Error("missing advisor fixture");
+    iteration.input_tokens = -1;
+    expect(parseClaudePreflightOutput(JSON.stringify(payload)).usage).toBeUndefined();
+  });
+
+  it("rejects conflicting Codex aliases instead of choosing the first", () => {
+    expect(
+      parseCodexPreflightUsage(
+        JSON.stringify({ usage: { input: 10, input_tokens: 11, output: 1 } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseCodexPreflightUsage(
+        [
+          JSON.stringify({ usage: { input: 10, output: 1, total: 11 } }),
+          JSON.stringify({ usage: { input: 12, output: 1, total: 99 } }),
+        ].join("\n"),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("reads Codex terminal JSON usage without disabling ephemeral mode", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/codex-result.jsonl", import.meta.url),
+      "utf8",
+    );
+    expect(parseCodexPreflightUsage(raw)).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 12,
+    });
+  });
+
+  it("normalizes Cursor fresh and cached input from terminal JSON", () => {
+    const raw = readFileSync(
+      new URL("../fixtures/preflight/cursor-result.json", import.meta.url),
+      "utf8",
+    );
+    expect(parseCursorPreflightOutput(raw)).toEqual({
+      text: "feature/cursor-ledger",
+      usage: {
+        inputTokens: 90,
+        outputTokens: 20,
+        totalTokens: 110,
+        cacheReadInputTokens: 15,
+        cacheWriteInputTokens: 5,
+        reasoningOutputTokens: 4,
+      },
+    });
+  });
+
+  it("rejects malformed and overlapping structured token subsets", () => {
+    expect(
+      parseCodexPreflightUsage(
+        JSON.stringify({ usage: { input: 10, cached: 8, cache_write: 3, output: 1 } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseCursorPreflightOutput(
+        JSON.stringify({
+          result: "feature/x",
+          usage: { inputTokens: "10", outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        }),
+      ).usage,
+    ).toBeUndefined();
+    expect(
+      parseCursorPreflightOutput(
+        JSON.stringify({
+          result: "feature/x",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 99,
+          },
+        }),
+      ).usage,
+    ).toBeUndefined();
+  });
+});
+
 describe("runSpawnPreflight", () => {
   beforeEach(() => {
     mockExecFileAsync.mockReset();
@@ -112,10 +309,16 @@ describe("runSpawnPreflight", () => {
     mockRm.mockResolvedValue(undefined);
     mockReadFile.mockReset();
     mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockCopyCodexAgentDefinitions.mockReset();
+    mockCopyCodexAgentDefinitions.mockResolvedValue(undefined);
+    mockExportOpenCodeSession.mockReset();
+    mockDeleteOpenCodeSession.mockReset();
+    mockDeleteOpenCodeSession.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     delete process.env.CLAUDECODE;
+    vi.restoreAllMocks();
   });
 
   it("runs claude in print mode and parses a branch suggestion", async () => {
@@ -226,12 +429,37 @@ describe("runSpawnPreflight", () => {
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options?.env?.["CODEX_HOME"]).toMatch(/spur-preflight-[^/]+\/codex-home$/);
+    expect(mockCopyCodexAgentDefinitions).toHaveBeenCalledWith(options?.env?.["CODEX_HOME"]);
     expect(options).toEqual(
       expect.objectContaining({
         cwd: PROJECT.path,
         timeout: 60_000,
       }),
     );
+  });
+
+  it("cleans up and does not launch codex when agent definition staging fails", async () => {
+    const stagingError = new Error("agent definition copy failed");
+    mockCopyCodexAgentDefinitions.mockRejectedValueOnce(stagingError);
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).rejects.toBe(stagingError);
+
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(mockRm).toHaveBeenCalledWith(expect.stringMatching(/spur-preflight-[^/]+$/), {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   });
 
   it("appends configured codex args to codex preflight", async () => {
@@ -361,7 +589,7 @@ describe("runSpawnPreflight", () => {
       expect.arrayContaining([
         "-p",
         "--output-format",
-        "text",
+        "json",
         "--force",
         "--sandbox",
         "disabled",
@@ -605,6 +833,155 @@ describe("runSpawnPreflight", () => {
         prompt: "Fix Cursor runtime integration",
       }),
     ).rejects.toThrow(/cursor preflight failed \(exit code 1\): cursor-agent: update in progress/);
+  });
+
+  it("uses the exact OpenCode run session for export accounting and cleanup", async () => {
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: [
+        JSON.stringify({ sessionID: "session-sanitized", part: { type: "step_start" } }),
+        JSON.stringify({
+          sessionID: "session-sanitized",
+          part: { type: "text", text: "feature/opencode-ledger" },
+        }),
+      ].join("\n"),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+
+    const result = await runSpawnPreflight({
+      agent: "opencode",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Account for preflight tokens",
+    });
+
+    expect(result).toEqual({
+      branch: "feature/opencode-ledger",
+      usage: {
+        inputTokens: 50,
+        outputTokens: 29,
+        totalTokens: 79,
+        cacheReadInputTokens: 34,
+        cacheWriteInputTokens: 4,
+        reasoningOutputTokens: 6,
+      },
+    });
+    const [command, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect(command).toBe("/mock/bin/opencode");
+    expect(args).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--agent",
+      "build",
+      "--auto",
+      expect.stringContaining("Account for preflight tokens"),
+    ]);
+    expect(mockExportOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledWith("session-sanitized");
+  });
+
+  it("exports partial OpenCode usage after a failed run and retries export and cleanup", async () => {
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockRejectedValueOnce(
+      Object.assign(new Error("failed"), {
+        code: 1,
+        stdout: JSON.stringify({ sessionID: "partial-session", part: { type: "step_start" } }),
+        stderr: "failed",
+      }),
+    );
+    mockExportOpenCodeSession.mockRejectedValueOnce(new Error("export busy"));
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+    mockDeleteOpenCodeSession.mockRejectedValueOnce(new Error("delete busy"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Account for partial preflight tokens",
+      }),
+    ).rejects.toMatchObject({ usage: { totalTokens: 79 } });
+    expect(mockExportOpenCodeSession).toHaveBeenCalledTimes(2);
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(2);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains measured OpenCode usage when cleanup fails after retries", async () => {
+    const warning = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const exported = JSON.parse(
+      readFileSync(
+        new URL("../fixtures/agent-history/opencode/token-components.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: [
+        JSON.stringify({ sessionID: "cleanup-session", part: { type: "step_start" } }),
+        JSON.stringify({ sessionID: "cleanup-session", part: { type: "text", text: "feature/x" } }),
+      ].join("\n"),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockResolvedValueOnce(exported);
+    mockDeleteOpenCodeSession.mockRejectedValue(new Error("delete failed"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Account for cleanup failure",
+      }),
+    ).resolves.toMatchObject({ branch: "feature/x", usage: { totalTokens: 79 } });
+    expect(warning).toHaveBeenCalledWith(
+      "OpenCode pre-flight cleanup failed; retaining pre-flight result\n",
+    );
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a valid OpenCode branch when usage export and cleanup both fail", async () => {
+    const warning = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: JSON.stringify({
+        sessionID: "unreadable-usage",
+        part: { type: "text", text: "feature/x" },
+      }),
+      stderr: "",
+    });
+    mockExportOpenCodeSession.mockRejectedValue(new Error("export failed"));
+    mockDeleteOpenCodeSession.mockRejectedValue(new Error("delete failed"));
+    await expect(
+      runSpawnPreflight({
+        agent: "opencode",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Continue after meter failure",
+      }),
+    ).resolves.toEqual({ branch: "feature/x" });
+    expect(mockExportOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockDeleteOpenCodeSession).toHaveBeenCalledTimes(3);
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledWith(
+      "OpenCode pre-flight export failed; token usage unavailable\n",
+    );
   });
 
   it("surfaces a missing claude binary as command not found", async () => {

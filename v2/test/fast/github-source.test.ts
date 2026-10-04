@@ -730,6 +730,8 @@ describe("github source", () => {
       "github:comment",
       expect.objectContaining({
         signals: [expect.objectContaining({ key: "comment:9001" })],
+        prUrl: "https://github.com/acme/api/pull/42",
+        repo: "acme/api",
       }),
     );
     // Recording seen at generation time dropped the comment from the next snapshot,

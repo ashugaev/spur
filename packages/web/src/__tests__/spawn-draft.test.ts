@@ -13,6 +13,7 @@ const draft: SpawnDraft = {
   prompt: "Fix reconnect state loss",
   agent: "codex",
   model: "gpt-5.6-codex",
+  reasoningIntent: { kind: "default-new" },
   branch: "feature/spawn-draft",
   branchIsExplicit: true,
   workspaceMode: "worktree",
@@ -24,6 +25,8 @@ const draft: SpawnDraft = {
   steps: ["Implement", "Test"],
   trackerUrl: "https://example.com/issues/1",
   sessionMode: "manager",
+  preflightBatchId: "00000000-0000-4000-8000-000000000001",
+  preflightBatchProjectId: "api",
 };
 
 describe("spawn draft storage", () => {
@@ -35,7 +38,7 @@ describe("spawn draft storage", () => {
     writeSpawnDraft(draft, window.localStorage, NOW);
 
     expect(readSpawnDraft(window.localStorage, NOW)).toEqual(draft);
-    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain('"version":3');
+    expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toContain('"version":5');
   });
 
   it.each([
@@ -49,14 +52,14 @@ describe("spawn draft storage", () => {
       "a pre-existing v2 draft (superseded by the workspaceModeConfirmedFor fix)",
       JSON.stringify({ ...draft, version: 2, savedAt: NOW }),
     ],
-    ["stale", JSON.stringify({ ...draft, version: 3, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
+    ["stale", JSON.stringify({ ...draft, version: 4, savedAt: NOW - 31 * 24 * 60 * 60 * 1_000 })],
     [
       "a current-version draft holding the retired default workspace mode",
-      JSON.stringify({ ...draft, workspaceMode: "default", version: 3, savedAt: NOW }),
+      JSON.stringify({ ...draft, workspaceMode: "default", version: 4, savedAt: NOW }),
     ],
     [
       "a current-version draft with a non-string, non-null workspaceModeConfirmedFor",
-      JSON.stringify({ ...draft, workspaceModeConfirmedFor: 42, version: 3, savedAt: NOW }),
+      JSON.stringify({ ...draft, workspaceModeConfirmedFor: 42, version: 4, savedAt: NOW }),
     ],
   ])("discards %s storage", (_label, value) => {
     window.localStorage.setItem(SPAWN_DRAFT_STORAGE_KEY, value);
@@ -65,11 +68,57 @@ describe("spawn draft storage", () => {
     expect(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
+  it("migrates a v3 draft without claiming a pre-flight batch", () => {
+    const { preflightBatchId: _batchId, preflightBatchProjectId: _projectId, ...legacy } = draft;
+    window.localStorage.setItem(
+      SPAWN_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...legacy, version: 3, savedAt: NOW }),
+    );
+
+    expect(readSpawnDraft(window.localStorage, NOW)).toEqual({
+      ...legacy,
+      preflightBatchId: null,
+      preflightBatchProjectId: null,
+    });
+  });
+
+  it("migrates a v4 draft to live reasoning defaults", () => {
+    const { reasoningIntent: _intent, ...legacy } = draft;
+    window.localStorage.setItem(
+      SPAWN_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...legacy, version: 4, savedAt: NOW }),
+    );
+    expect(readSpawnDraft(window.localStorage, NOW)?.reasoningIntent).toEqual({
+      kind: "default-new",
+    });
+  });
+
+  it("persists an explicit level for capability revalidation on reopen", () => {
+    const explicitDraft: SpawnDraft = {
+      ...draft,
+      reasoningIntent: { kind: "explicit", level: "high" },
+    };
+    writeSpawnDraft(explicitDraft, window.localStorage, NOW);
+    expect(readSpawnDraft(window.localStorage, NOW)).toEqual(explicitDraft);
+  });
+
+  it.each([
+    { kind: "clear" },
+    { kind: "carried", level: "high" },
+    { kind: "explicit", level: "unknown" },
+  ])("rejects lifecycle or invalid reasoning intent %j in a fresh draft", (reasoningIntent) => {
+    window.localStorage.setItem(
+      SPAWN_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...draft, reasoningIntent, version: 5, savedAt: NOW }),
+    );
+    expect(readSpawnDraft(window.localStorage, NOW)).toBeNull();
+  });
+
   it("discards a stored draft with undefined sessionMode", () => {
     const { sessionMode: _sessionMode, ...draftWithoutSessionMode } = draft;
     window.localStorage.setItem(
       SPAWN_DRAFT_STORAGE_KEY,
-      JSON.stringify({ ...draftWithoutSessionMode, version: 3, savedAt: NOW }),
+      JSON.stringify({ ...draftWithoutSessionMode, version: 4, savedAt: NOW }),
     );
 
     expect(readSpawnDraft(window.localStorage, NOW)).toBeNull();
@@ -79,7 +128,7 @@ describe("spawn draft storage", () => {
   it("discards a stored draft with a non-string sessionMode", () => {
     window.localStorage.setItem(
       SPAWN_DRAFT_STORAGE_KEY,
-      JSON.stringify({ ...draft, sessionMode: 42, version: 3, savedAt: NOW }),
+      JSON.stringify({ ...draft, sessionMode: 42, version: 4, savedAt: NOW }),
     );
 
     expect(readSpawnDraft(window.localStorage, NOW)).toBeNull();

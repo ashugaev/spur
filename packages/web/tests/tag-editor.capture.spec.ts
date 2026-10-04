@@ -79,6 +79,7 @@ async function stubDashboard(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         sessions: SESSIONS,
+        lifecycleInstanceId: "test-instance",
         projects: [PROJECT],
         tags: CATALOG,
         daemonAlive: true,
@@ -121,6 +122,7 @@ test("agent detail tag chips", async ({ page }) => {
       contentType: "application/json",
       body: JSON.stringify({
         sessions: SESSIONS,
+        lifecycleInstanceId: "test-instance",
         projects: [PROJECT],
         tags: CATALOG,
         daemonAlive: true,

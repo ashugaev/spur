@@ -11,6 +11,7 @@ interface RouteContext {
 interface HandoffBody {
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: string | null;
   notes?: string;
 }
 
@@ -25,6 +26,7 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ error: "agent is required" }, { status: 400 });
     }
     const payload: Record<string, unknown> = { agent: body.agent };
+    if (body.reasoningEffort !== undefined) payload.reasoningEffort = body.reasoningEffort;
     if (typeof body.model === "string" && body.model.trim().length > 0) {
       payload.model = body.model.trim();
     }

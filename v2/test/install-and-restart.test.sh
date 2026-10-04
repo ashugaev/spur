@@ -13,6 +13,18 @@ trap 'rm -rf "$LOG_DIR"' EXIT
 
 LOG_FILE="$LOG_DIR/install-and-restart.log"
 LOCK_FILE="$LOG_DIR/install-and-restart.lock"
+REAL_NODE="$(command -v node)"
+export REAL_NODE
+mkdir -p "$LOG_DIR/probe-bin"
+cat >"$LOG_DIR/probe-bin/node" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--input-type=module" ]; then
+  exit "${SPUR_TEST_HEALTH_RC:-0}"
+fi
+exec "$REAL_NODE" "$@"
+EOF
+chmod +x "$LOG_DIR/probe-bin/node"
+export PATH="$LOG_DIR/probe-bin:$PATH"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -54,6 +66,10 @@ if grep -qi "node-pty" "$LOG_FILE"; then
 fi
 
 # Case 2: invalid version exits 2 and logs the rejection.
+if SPUR_TEST_HEALTH_RC=1 run_helper 1.2.3; then
+  fail "successful systemctl restart accepted a failed identity probe"
+fi
+
 rm -f "$LOG_FILE"
 set +e
 run_helper bogus

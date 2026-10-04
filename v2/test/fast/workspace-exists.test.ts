@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { probeWorkspace, workspaceExists } from "../../src/workspace.js";
+import { probeWorkspace, removeWorktree, workspaceExists } from "../../src/workspace.js";
 
 describe("workspaceExists", () => {
   const tempRoots: string[] = [];
@@ -43,4 +44,33 @@ describe("workspaceExists", () => {
     expect(workspaceExists(filePath)).toBe(false);
     expect(probeWorkspace(filePath)).toEqual({ exists: false, missing: false });
   });
+
+  it("reports non-ENOENT filesystem failures as unknown with their cause", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-workspace-exists-"));
+    tempRoots.push(root);
+    const alias = join(root, "loop");
+    await symlink(alias, alias);
+    expect(probeWorkspace(alias)).toEqual({
+      exists: false,
+      missing: false,
+      diagnostic: expect.stringContaining("ELOOP"),
+    });
+  });
+
+  it.each(["git", "fallback"])(
+    "preserves the directory when the %s removal guard refuses",
+    async (path) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-workspace-exists-"));
+      tempRoots.push(root);
+      if (path === "git") execFileSync("git", ["init", "--quiet", root]);
+      const worktreePath = join(root, "worktree");
+      await mkdir(worktreePath);
+      await expect(
+        removeWorktree(root, worktreePath, () => {
+          throw new Error("session error veto");
+        }),
+      ).rejects.toThrow("session error veto");
+      expect(workspaceExists(worktreePath)).toBe(true);
+    },
+  );
 });
