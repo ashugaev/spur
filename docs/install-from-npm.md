@@ -74,6 +74,8 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 `spur init` sets up private web access over your tailnet — your devices only, never public. Opt out with `--no-tailscale`.
 
+No auth key is no reason to opt out: plain `spur init` never waits on a login — it installs Tailscale, stays loopback-only, and leaves `sudo tailscale up` to the operator TODO. `--no-tailscale` skips the install, so that TODO step has no `tailscale` binary to run.
+
 Auth is yours — two ways to bring the tailnet up:
 
 - Human: `sudo tailscale up`, sign in at the printed URL.
