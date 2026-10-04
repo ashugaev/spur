@@ -155,6 +155,24 @@ describe("script output", () => {
 });
 
 describe("script source", () => {
+  it("runs consecutive scheduled ticks despite callback jitter after prior run completes", async () => {
+    mocks.run.mockResolvedValueOnce(ok([item("a")])).mockResolvedValueOnce(ok([item("b")]));
+    const { emit } = await start({ runOnStart: false });
+    vi.setSystemTime(60_001);
+    mocks.crons[0]?.tick();
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+
+    vi.setSystemTime(120_000);
+    mocks.crons[0]?.tick();
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(2));
+    expect(mocks.record).toHaveBeenCalledTimes(2);
+    expect(mocks.log).not.toHaveBeenCalledWith(
+      dir,
+      expect.objectContaining({ event: "source.script.run.skipped" }),
+    );
+  });
+
   it("creates private persistent state and passes identity env", async () => {
     const { handle } = await start();
     handle.runOnStart?.();

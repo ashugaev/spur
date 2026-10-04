@@ -7,7 +7,6 @@ import {
   type ScriptSourceConfig,
   type WorkItemEventData,
 } from "../types.js";
-import { deriveMinimumIntervalMs } from "./cron.js";
 import { runScriptProcess } from "./script-process.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 import { emitWorkItemBacklog, WORK_ITEM_FIRST_POLL_EMIT_CAP } from "./work-item-backlog.js";
@@ -116,7 +115,6 @@ async function startScriptSource(deps: SourceStartDeps<ScriptSourceConfig>): Pro
   const controller = new AbortController();
   let stopped = false;
   let pending: Promise<void> | undefined;
-  let lastStartedAt: number | null = null;
   const log = (
     event: string,
     level: "info" | "warn" | "error",
@@ -176,12 +174,10 @@ async function startScriptSource(deps: SourceStartDeps<ScriptSourceConfig>): Pro
   };
   const tick = (): void => {
     if (stopped || deps.signal.aborted) return;
-    const now = Date.now();
-    if (pending || (lastStartedAt !== null && now - lastStartedAt < minimumIntervalMs)) {
-      log("source.script.run.skipped", "info", { reason: pending ? "in_flight" : "cadence" });
+    if (pending) {
+      log("source.script.run.skipped", "info", { reason: "in_flight" });
       return;
     }
-    lastStartedAt = now;
     pending = sync()
       .catch((error: unknown) => {
         if (!stopped && !controller.signal.aborted) {
@@ -196,7 +192,6 @@ async function startScriptSource(deps: SourceStartDeps<ScriptSourceConfig>): Pro
       });
   };
   const cron = new Cron(deps.config.schedule, tick);
-  const minimumIntervalMs = deriveMinimumIntervalMs(cron, deps.config.schedule);
   const abort = (): void => {
     stopped = true;
     cron.stop();
