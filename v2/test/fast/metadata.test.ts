@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   archiveSessions,
   deletePendingSendBatch,
@@ -232,6 +232,48 @@ describe("work-item lifecycle registry", () => {
       [1, "failed"],
     ]);
     expect(record).toMatchObject({ state: "running", sessionId: "api-1" });
+  });
+
+  it("keeps createdAt and completedAt across later member writes", async () => {
+    const dataDir = await newDataDir();
+    const running = {
+      triggerId: "review",
+      blockIndex: 0,
+      state: "running" as const,
+      sessionId: "api-1",
+      claimedAt: itemBase.createdAt,
+      attempts: 1,
+      deferrals: 0,
+    };
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [running]);
+    const laterBase = { ...itemBase, createdAt: "2026-06-01T00:00:00.000Z" };
+    const failed = updateWorkItemMembers(dataDir, "api", "pr-watch", laterBase, (members) => [
+      ...members,
+      { ...running, blockIndex: 1, state: "failed" as const, error: "boom" },
+    ]);
+    expect(failed.createdAt).toBe(itemBase.createdAt);
+
+    const completed = updateWorkItemMembers(dataDir, "api", "pr-watch", laterBase, (members) =>
+      members.map((m) => ({ ...m, state: "completed" as const })),
+    );
+    expect(completed).toMatchObject({ state: "completed", createdAt: itemBase.createdAt });
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2027-01-01T00:00:00.000Z"));
+    try {
+      const again = updateWorkItemMembers(
+        dataDir,
+        "api",
+        "pr-watch",
+        laterBase,
+        (members) => members,
+      );
+      expect(again).toMatchObject({
+        state: "completed",
+        completedAt: (completed as { completedAt: string }).completedAt,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("migrates a legacy lifecycle record into one untriggered member", async () => {

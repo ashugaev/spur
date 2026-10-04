@@ -1768,7 +1768,8 @@ function writeWorkItemLifecycles(
 
 // One synchronous read-modify-write: concurrent callers (two triggers, a
 // source stamp) never clobber each other's members because nothing awaits
-// between the read and the write. `base` overwrites the record's item fields;
+// between the read and the write. `base` overwrites the record's item fields
+// except createdAt;
 // record-level state is derived from the mutated members.
 export function updateWorkItemMembers(
   dataDir: string,
@@ -1780,10 +1781,16 @@ export function updateWorkItemMembers(
   const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
   const existing = records.get(base.externalId);
   const lastRetryEmitAt = base.lastRetryEmitAt ?? existing?.lastRetryEmitAt;
+  // Timestamps are stamped once: a later write never resets createdAt (the
+  // auto-complete age) or completedAt.
   const next = buildWorkItemRecord(
-    { ...base, ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}) },
+    {
+      ...base,
+      createdAt: existing?.createdAt ?? base.createdAt,
+      ...(lastRetryEmitAt !== undefined ? { lastRetryEmitAt } : {}),
+    },
     mutate(existing?.members ?? []),
-    new Date().toISOString(),
+    existing?.state === "completed" ? existing.completedAt : new Date().toISOString(),
   );
   records.set(next.externalId, next);
   writeWorkItemLifecycles(dataDir, projectId, sourceId, records);

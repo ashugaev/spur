@@ -43,6 +43,7 @@ import {
   isWorkItemMemberDue,
   isWorkItemMemberExhausted,
   WORK_ITEM_RETRY_INTERVAL_MS,
+  WORK_ITEM_RETRY_MAX_ATTEMPTS,
   WORK_ITEM_RETRY_MAX_DEFERRALS,
   type WorkItemRecordBase,
 } from "./work-item-retry.js";
@@ -233,6 +234,9 @@ interface WorkItemClaimContext {
   triggerId: string;
   workItem: WorkItemEventData;
   autoComplete: boolean;
+  // Every spawn trigger configured for this source; a member whose trigger is
+  // not among them belongs to a renamed or removed trigger.
+  sourceSpawnTriggerIds: ReadonlySet<string>;
 }
 
 interface PlannedSpawnBlock {
@@ -309,7 +313,15 @@ function claimWorkItemBlocks(
     ctx.workItem.externalId,
   );
   const members = record?.members ?? [];
-  const own = members.filter((member) => member.triggerId === ctx.triggerId);
+  const isOrphan = (member: WorkItemMember): boolean =>
+    member.triggerId !== undefined &&
+    member.triggerId !== ctx.triggerId &&
+    !ctx.sourceSpawnTriggerIds.has(member.triggerId);
+  const ownMembers = members.filter((member) => member.triggerId === ctx.triggerId);
+  // Members of a renamed or removed trigger pass to the trigger that claims
+  // next, like a pre-upgrade member.
+  const adoptsOrphans = ownMembers.length === 0 && members.some(isOrphan);
+  const own = adoptsOrphans ? members.filter(isOrphan) : ownMembers;
   const legacy = members.find((member) => member.triggerId === undefined);
   if (record && own.length === 0 && !legacy) {
     return { planned: [], claimedAt, suppressed: { reason: "not_claimed_by_trigger" } };
@@ -318,6 +330,17 @@ function claimWorkItemBlocks(
   const consumesLegacy = own.length === 0 && legacy !== undefined;
   const planned: PlannedSpawnBlock[] = [];
   const skips: WorkItemSuppressed[] = [];
+  const isRetryable = (member: WorkItemMember | undefined): boolean =>
+    member === undefined ||
+    (member.state !== "running" &&
+      member.state !== "completed" &&
+      isWorkItemMemberDue(member, nowMs));
+  // A retry spawns only the missing or due blocks; a block that reached
+  // running is never re-claimed alongside them.
+  const retryOnly =
+    !consumesLegacy &&
+    own.length > 0 &&
+    blocks.some((_, blockIndex) => isRetryable(own.find((m) => m.blockIndex === blockIndex)));
   for (const [blockIndex, block] of blocks.entries()) {
     const existing = consumesLegacy
       ? legacy
@@ -331,6 +354,10 @@ function claimWorkItemBlocks(
         reason: "work_item_completed",
         ...(existing.sessionId !== undefined ? { ownerSessionId: existing.sessionId } : {}),
       });
+      continue;
+    }
+    if (existing.state === "running" && retryOnly) {
+      skips.push({ reason: "work_item_pending" });
       continue;
     }
     const replacesSessionId =
@@ -363,11 +390,15 @@ function claimWorkItemBlocks(
     ctx.sourceId,
     workItemRecordBase(ctx),
     (current) => [
-      ...current.filter(
-        (member) =>
-          !(consumesLegacy && member.triggerId === undefined) &&
-          !(member.triggerId === ctx.triggerId && plannedIndexes.has(member.blockIndex)),
-      ),
+      ...current
+        .map((member) =>
+          adoptsOrphans && isOrphan(member) ? { ...member, triggerId: ctx.triggerId } : member,
+        )
+        .filter(
+          (member) =>
+            !(consumesLegacy && member.triggerId === undefined) &&
+            !(member.triggerId === ctx.triggerId && plannedIndexes.has(member.blockIndex)),
+        ),
       ...planned.map(
         (entry): WorkItemMember => ({
           triggerId: ctx.triggerId,
@@ -496,6 +527,21 @@ async function resolveClaimedOwners(
   return planned.filter((entry) => remaining.has(entry));
 }
 
+// A session record that vanished is absent, not an error; any other load
+// failure propagates so the caller can release its claim.
+async function getWorkItemSessionIfPresent(
+  service: SessionService,
+  sessionId: string,
+): Promise<SessionView | undefined> {
+  try {
+    return await service.get(sessionId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isSessionNotFoundError(message)) return undefined;
+    throw error;
+  }
+}
+
 interface FoundWorkItemSession {
   sessionId: string;
   outcome: "adopt" | "completed";
@@ -516,7 +562,9 @@ async function findTaggedWorkItemSession(
       session.triggerOrigin.blockIndex === blockIndex,
   );
   for (const session of tagged) {
-    const outcome = classifyWorkItemOwner(await service.get(session.id));
+    const view = await getWorkItemSessionIfPresent(service, session.id);
+    if (!view) continue;
+    const outcome = classifyWorkItemOwner(view);
     if (outcome !== "replace") return { sessionId: session.id, outcome };
   }
   return undefined;
@@ -539,7 +587,8 @@ async function fillLegacyWorkItemBlocks(
     )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   for (const match of matches) {
-    const session = await service.get(match.id);
+    const session = await getWorkItemSessionIfPresent(service, match.id);
+    if (!session) continue;
     const outcome = classifyWorkItemOwner(session);
     if (outcome !== "replace") {
       candidates.push({
@@ -629,6 +678,62 @@ function workItemAnchorSessionId(ctx: WorkItemClaimContext): string | undefined 
     .sort((left, right) => left.blockIndex - right.blockIndex)[0]?.sessionId;
 }
 
+// A desk retry joins the live anchor. When the anchor completed or its
+// session is no longer live, the retried members end as exhausted (never due
+// again) and nothing spawns: only a failed or never-spawned anchor is retried.
+async function endDeskRetryWithoutLiveAnchor(
+  ctx: WorkItemClaimContext,
+  service: SessionService,
+  planned: PlannedSpawnBlock[],
+): Promise<PlannedSpawnBlock[]> {
+  const retrying = planned.filter((entry) =>
+    entry.previous.some((member) => member.state !== "running"),
+  );
+  if (retrying.length === 0) return planned;
+  const plannedIndexes = new Set(planned.map((entry) => entry.blockIndex));
+  const anchor = (
+    readWorkItemLifecycles(ctx.dataDir, ctx.projectId, ctx.sourceId).get(ctx.workItem.externalId)
+      ?.members ?? []
+  )
+    .filter(
+      (member) =>
+        member.triggerId === ctx.triggerId &&
+        !plannedIndexes.has(member.blockIndex) &&
+        (member.state === "running" || member.state === "completed"),
+    )
+    .sort((left, right) => left.blockIndex - right.blockIndex)[0];
+  if (anchor?.sessionId === undefined) return planned;
+  if (anchor.state === "running") {
+    const session = await getWorkItemSessionIfPresent(service, anchor.sessionId);
+    if (session && classifyWorkItemOwner(session) === "adopt") return planned;
+  }
+  for (const entry of retrying) {
+    patchWorkItemMember(ctx, entry.blockIndex, (member) => {
+      const { nextRetryAt: _nextRetryAt, replacesSessionId: _replaces, ...rest } = member;
+      return {
+        ...rest,
+        state: "failed",
+        attempts: WORK_ITEM_RETRY_MAX_ATTEMPTS,
+        error: "desk anchor is not live",
+      };
+    });
+    logTriggerEvent(ctx.dataDir, "trigger.spawn.retry_exhausted", {
+      level: "info",
+      sessionId: anchor.sessionId,
+      projectId: ctx.projectId,
+      sourceId: ctx.sourceId,
+      triggerId: ctx.triggerId,
+      message: `trigger.spawn.retry_exhausted for work item ${ctx.workItem.externalId} block ${entry.blockIndex}`,
+      details: {
+        externalId: ctx.workItem.externalId,
+        blockIndex: entry.blockIndex,
+        cause: "anchor_not_live",
+      },
+    });
+  }
+  return planned.filter((entry) => !retrying.includes(entry));
+}
+
 // Records a failed block and logs how it will be retried. An admission denial
 // is a deferral: the attempt counted at claim is refunded.
 function recordWorkItemSpawnFailure(
@@ -689,6 +794,7 @@ async function runSpawnTrigger(
   allowedTriggers: string[] | undefined,
   deskGroup: boolean | undefined,
   eventData: unknown,
+  sourceSpawnTriggerIds: ReadonlySet<string>,
   logger: TriggerLogger,
 ): Promise<void> {
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
@@ -719,6 +825,7 @@ async function runSpawnTrigger(
         triggerId,
         workItem: workItemData,
         autoComplete: autoComplete === true,
+        sourceSpawnTriggerIds,
       }
     : null;
 
@@ -742,7 +849,16 @@ async function runSpawnTrigger(
       }
       claimedAt = claim.claimedAt;
       planned = await resolveClaimedOwners(ctx, service, eventName, claim.planned, logger);
-      planned = await adoptExistingWorkItemSessions(ctx, service, eventName, planned);
+      try {
+        planned = await adoptExistingWorkItemSessions(ctx, service, eventName, planned);
+        if (deskGroup === true)
+          planned = await endDeskRetryWithoutLiveAnchor(ctx, service, planned);
+      } catch (error) {
+        // Nothing settled yet: free the claim now instead of leaving it
+        // spawning until it goes stale.
+        releaseWorkItemClaim(ctx, planned);
+        throw error;
+      }
     }
 
     let anchorSessionId = ctx ? workItemAnchorSessionId(ctx) : undefined;
@@ -751,7 +867,7 @@ async function runSpawnTrigger(
       const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
       if (isAnchorBlock && blockIndex > 0) {
         logger.warn(
-          `[trigger:${projectId}/${triggerId}] promoting spawn block ${blockIndex} to desk anchor: earlier anchor spawn failed`,
+          `[trigger:${projectId}/${triggerId}] promoting spawn block ${blockIndex} to desk anchor: no earlier block holds a running desk anchor`,
         );
       }
       try {
@@ -2169,6 +2285,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         trigger.source,
         "send" in trigger ? trigger.send.prompt : undefined,
       );
+      const sourceSpawnTriggerIds = new Set(
+        Object.entries(project.triggers)
+          .filter(([, other]) => !isSendTrigger(other) && other.source === trigger.source)
+          .map(([otherId]) => otherId),
+      );
       const unsubscribe = deps.bus.subscribe((event) => {
         if (stopped) return;
         if (event.projectId !== projectId) return;
@@ -2224,6 +2345,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             trigger.spawn.allowedTriggers,
             trigger.spawnDeskGroup,
             event.data,
+            sourceSpawnTriggerIds,
             logger,
           );
         };
