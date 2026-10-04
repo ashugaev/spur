@@ -1185,19 +1185,35 @@ function normalizeBindHost(host: string): string {
   return new URL(`http://[${host}]/`).hostname.slice(1, -1);
 }
 
+function ipv4MappedHost(host: string): string | undefined {
+  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (!match) return undefined;
+  const high = Number.parseInt(match[1] ?? "", 16);
+  const low = Number.parseInt(match[2] ?? "", 16);
+  if (high > 0xffff || low > 0xffff) return undefined;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+}
+
+function overlapBindHost(host: string): { host: string; version: number } {
+  const normalized = normalizeBindHost(host);
+  const mapped = ipv4MappedHost(normalized);
+  if (mapped !== undefined) return { host: mapped, version: 4 };
+  return { host: normalized, version: isIP(normalized) };
+}
+
 function bindHostsOverlap(left: string, right: string): boolean {
-  const normalizedLeft = normalizeBindHost(left);
-  const normalizedRight = normalizeBindHost(right);
-  const leftVersion = isIP(normalizedLeft);
-  const rightVersion = isIP(normalizedRight);
-  if (leftVersion === 0 || rightVersion === 0) return normalizedLeft === normalizedRight;
-  if (leftVersion !== rightVersion) return false;
+  const normalizedLeft = overlapBindHost(left);
+  const normalizedRight = overlapBindHost(right);
+  if (normalizedLeft.version === 0 || normalizedRight.version === 0) {
+    return normalizedLeft.host === normalizedRight.host;
+  }
+  if (normalizedLeft.version !== normalizedRight.version) return false;
   return (
-    normalizedLeft === normalizedRight ||
-    normalizedLeft === "0.0.0.0" ||
-    normalizedRight === "0.0.0.0" ||
-    normalizedLeft === "::" ||
-    normalizedRight === "::"
+    normalizedLeft.host === normalizedRight.host ||
+    normalizedLeft.host === "0.0.0.0" ||
+    normalizedRight.host === "0.0.0.0" ||
+    normalizedLeft.host === "::" ||
+    normalizedRight.host === "::"
   );
 }
 

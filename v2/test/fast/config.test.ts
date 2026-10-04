@@ -243,6 +243,27 @@ projects:
     );
   });
 
+  it("rejects IPv4-mapped webhook overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::ffff:127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind [::ffff:7f00:1]:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
   it("rejects webhook send triggers", async () => {
     const configPath = await writeConfig(`
 projects:
