@@ -96,11 +96,6 @@ function unwrapPastedContent(text: string): string {
 }
 
 function extractDeliveredText(parsed: Record<string, unknown>): string | null {
-  const text = extractRecordText(parsed);
-  return text === null ? null : unwrapPastedContent(text);
-}
-
-function extractRecordText(parsed: Record<string, unknown>): string | null {
   switch (parsed["type"]) {
     case "user":
       return extractUserMessageText(parsed);
@@ -139,7 +134,13 @@ async function scanFileForDeliveredText(
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractDeliveredText(parsed);
-        if (text !== null && normalize(text) === normalizedTarget) {
+        // Raw first: a short send that is itself a pasted_content block is
+        // recorded as typed, so unwrapping alone would miss it.
+        if (
+          text !== null &&
+          (normalize(text) === normalizedTarget ||
+            normalize(unwrapPastedContent(text)) === normalizedTarget)
+        ) {
           reader.close();
           return true;
         }

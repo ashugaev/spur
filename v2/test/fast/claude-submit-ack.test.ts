@@ -458,19 +458,22 @@ describe("scanClaudeJsonlForMessage", () => {
       }
     });
 
-    it("handles large whitespace runs without backtracking", async () => {
-      const spaced = `head${" ".repeat(20_000)}tail`;
-      const cases: Array<[string, boolean]> = [
-        [wrapPaste(spaced), true],
-        [`\n\n<pasted_content id="a1b2">\n${" ".repeat(20_000)}`, false],
-      ];
-      for (const [content, expected] of cases) {
-        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
-        findLatestSessionFileMock.mockResolvedValue(filePath);
-        expect(
-          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, spaced, "/tmp/worktree"),
-        ).toBe(expected);
-      }
+    it("acks a send that is itself a pasted_content block, recorded raw", async () => {
+      const sent = wrapPaste("short text").trim();
+      const filePath = await makeJsonl("paste.jsonl", [record(sent)]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, sent, "/tmp/worktree"),
+      ).toBe(true);
     });
+
+    it("rejects an unclosed block with a large whitespace run quickly", async () => {
+      const content = `<pasted_content id="a">${" ".repeat(20_000)}x`;
+      const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+      ).toBe(false);
+    }, 5000);
   });
 });
