@@ -594,6 +594,12 @@ describe("github source", () => {
       "pr-watch",
       "api-a1b2",
     );
+    expect(clearGitHubMergeConflictRestoreReplayMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
     handle.stop();
   });
 

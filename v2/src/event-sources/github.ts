@@ -355,16 +355,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
   };
 
-  const listPollableSessions = () =>
-    listSessions(deps.dataDir).filter((session) =>
-      isEligibleForSourcePoll(session, deps.projectId),
-    );
+  const listPollableSessions = (allSessions: ReturnType<typeof listSessions>) =>
+    allSessions.filter((session) => isEligibleForSourcePoll(session, deps.projectId));
 
   const shouldPollThisTick = (): boolean => {
     if (!adaptive) return true;
     if (Date.now() >= nextEligiblePollAtMs) return true;
     if (lastCycleCiActive) return true;
-    for (const session of listPollableSessions()) {
+    for (const session of listPollableSessions(listSessions(deps.dataDir))) {
       if (isSessionPollGated(session, Date.now())) continue;
       const existing = snapshots.get(session.id);
       if (session.pr && existing && hasTerminalSignal(existing.signals, session.pr.number))
@@ -428,9 +426,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     polling = true;
     try {
       const allSessions = listSessions(deps.dataDir);
-      const sessions = allSessions.filter((session) =>
-        isEligibleForSourcePoll(session, deps.projectId),
-      );
+      const sessions = listPollableSessions(allSessions);
       const currentSessionIds = new Set(sessions.map((session) => session.id));
       // Persisted per-session state prunes on absence from disk, never on poll
       // eligibility: a session that loses eligibility for one cycle (stopped into a
