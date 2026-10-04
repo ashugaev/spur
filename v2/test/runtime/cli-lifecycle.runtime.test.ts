@@ -5474,7 +5474,7 @@ projects:
     expect(thirdPort.trim()).toBe("4600");
   });
 
-  it("real sidecar HTTP probe publishes a link and complete or kill removes it", async () => {
+  it("real sidecar listener exposes a runtime URL and complete or kill removes it", async () => {
     const port = await findFreePort();
     const reservedRange = await findConsecutiveFreePorts();
     const context = await createRuntimeTestContext(port);
@@ -5527,23 +5527,29 @@ projects:
         }),
       });
 
-      const withLink = await pollUntil(
+      const withUrl = await pollUntil(
         () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
         {
           timeoutMs: 15_000,
           accept: (session) =>
-            session.slots?.links.some(
-              (link) => link.label === "dev" && link.url.startsWith("http://127.0.0.1:"),
-            ) === true,
+            session.sidecars.some((sidecar) => sidecar.name === "dev" && Boolean(sidecar.url)),
         },
       );
-      expect(withLink.slots?.links.some((link) => link.label === "dev")).toBe(true);
+      const readySidecar = withUrl.sidecars.find((sidecar) => sidecar.name === "dev");
+      if (!readySidecar?.url) throw new Error("Missing ready sidecar URL");
+      expect(readySidecar.url).toBe(
+        `http://127.0.0.1:${readySidecar.ports.find((reserved) => reserved.id === "http")?.port}`,
+      );
+      const response = await fetch(readySidecar.url, { signal: AbortSignal.timeout(2_000) });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("ready");
+      expect(withUrl.slots?.links.some((link) => link.label === "dev") ?? false).toBe(false);
 
       // Wait for the fixture to actually resolve the session's seeded Spur
-      // ToDo item before completing — the sidecar link landing is unrelated
+      // ToDo item before completing — sidecar readiness is unrelated
       // to the fixture's backgrounded add-then-complete todo round trip
       // (record_fixture_todo in helpers/runtime.ts), so completing right
-      // after the link appears can still 409 on an open item that hasn't
+      // after the URL appears can still 409 on an open item that hasn't
       // landed yet.
       await waitForCleanTodoLedger(context, spawned.id);
 
@@ -5557,7 +5563,13 @@ projects:
               body: JSON.stringify({ force: true }),
             });
 
+      expect(closed.status).toBe(action === "complete" ? "completed" : "killed");
+      expect(closed.sidecars.find((sidecar) => sidecar.name === "dev")?.url).toBeUndefined();
       expect(closed.slots?.links.some((link) => link.label === "dev") ?? false).toBe(false);
+      expect(await tmuxSessionExists(readySidecar.tmuxSession)).toBe(false);
+      await expect(
+        fetch(readySidecar.url, { signal: AbortSignal.timeout(2_000) }),
+      ).rejects.toThrow();
     }
   });
 

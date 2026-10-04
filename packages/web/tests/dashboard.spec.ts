@@ -1499,18 +1499,20 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(wakePanel.getByText("Ask user for status")).toBeVisible();
   });
 
-  test("running sidecar marker opens exact sidecar names and links available URLs", async ({
+  test("ready sidecar URL without tmux opens from dashboard and stale slots stay unlinked", async ({
     page,
   }) => {
+    let ready = true;
     const session = makeWorkingSession({
       id: "sidecar-marker-1",
       prompt: "Sidecar marker session",
-      runningSidecarNames: ["isolated-ui", "preview"],
+      runningSidecarNames: ["preview"],
+      sidecars: [{ name: "isolated-ui", alive: false, url: "http://127.0.0.1:5625/" }],
       slots: {
-        links: [{ label: "isolated-ui", url: "http://127.0.0.1:5625/" }],
+        links: [{ label: "preview", url: "https://stale.example.com/" }],
       },
     });
-    await mockSessions(page, [session]);
+    await mockSessions(page, () => [{ ...session, sidecars: ready ? session.sidecars : [] }]);
     await page.goto("/");
 
     await page.getByLabel("Running sidecars for sidecar-marker-1").click();
@@ -1523,6 +1525,11 @@ test.describe("D3: Session rows render with correct columns", () => {
     await expect(sidecarPanel.getByText("preview")).toBeVisible();
     await expect(sidecarPanel.getByRole("button")).toHaveCount(0);
     await expect(sidecarPanel.getByRole("link")).toHaveCount(1);
+    ready = false;
+    await expect(sidecarPanel.getByRole("link", { name: "isolated-ui" })).toHaveCount(0, {
+      timeout: 15000,
+    });
+    await expect(sidecarPanel.getByText("preview")).toBeVisible();
   });
 
   test("daily wake marker identifies fixed-time timer", async ({ page }) => {
