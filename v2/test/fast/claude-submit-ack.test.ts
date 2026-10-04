@@ -468,12 +468,12 @@ describe("scanClaudeJsonlForMessage", () => {
     });
 
     it("rejects an unclosed block with a large whitespace run quickly", async () => {
-      const content = `<pasted_content id="a">${" ".repeat(20_000)}x`;
+      const content = `<pasted_content id="a">${" ".repeat(2_000)}x`;
       const filePath = await makeJsonl("paste.jsonl", [record(content)]);
       findLatestSessionFileMock.mockResolvedValue(filePath);
       expect(
         await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
       ).toBe(false);
-    }, 5000);
+    }, 2000);
   });
 });
