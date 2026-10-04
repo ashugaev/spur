@@ -370,6 +370,19 @@ describe("webhookSourceModule", () => {
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
   });
 
+  it("does not let unauthenticated misses spend authenticated peer quota", async () => {
+    const { port } = await startSource();
+    for (let count = 0; count < WEBHOOK_MAX_REQUESTS_PER_PEER; count += 1) {
+      const response = await request({
+        port,
+        headers: { Authorization: "Bearer wrong-secret-value" },
+      });
+      expect(response.status).toBe(404);
+    }
+
+    await expect(request({ port })).resolves.toMatchObject({ status: 202 });
+  });
+
   it("caps concurrent requests per peer", async () => {
     const { port } = await startSource();
     const sockets: Socket[] = [];

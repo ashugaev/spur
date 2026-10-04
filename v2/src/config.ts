@@ -1182,7 +1182,7 @@ export function validateWebhookSourceBindings(projects: Record<string, ProjectCo
     for (const [sourceId, source] of Object.entries(project.sources)) {
       if (source.type !== "webhook") continue;
       const owner = `projects.${projectId}.sources.${sourceId}`;
-      const endpoint = `${source.host}:${source.port}`;
+      const endpoint = `${isIP(source.host) === 6 ? `[${source.host}]` : source.host}:${source.port}`;
       const existingOwner = owners.get(endpoint);
       if (existingOwner) {
         throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existingOwner}`);

@@ -98,7 +98,7 @@ describe("registry.buildMergedConfig", () => {
     );
 
     expect(() => buildMergedConfig(basePath, [basePath, extraPath])).toThrow(
-      "projects.web.sources.incoming duplicates webhook bind ::1:8456 owned by projects.api.sources.incoming",
+      "projects.web.sources.incoming duplicates webhook bind [::1]:8456 owned by projects.api.sources.incoming",
     );
   });
 
@@ -144,7 +144,7 @@ describe("registry.buildMergedConfig", () => {
 
     expect(Object.keys(merged.config.projects)).toEqual(["api"]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("duplicates webhook bind ::1:8456");
+    expect(warnings[0]).toContain("duplicates webhook bind [::1]:8456");
   });
 
   it("merges registered configs into one daemon project set", async () => {

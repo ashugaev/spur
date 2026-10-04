@@ -197,7 +197,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.sources.second duplicates webhook bind ::1:8456 owned by projects.backend.sources.first",
+      "projects.backend.sources.second duplicates webhook bind [::1]:8456 owned by projects.backend.sources.first",
     );
   });
 

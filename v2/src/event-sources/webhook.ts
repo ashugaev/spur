@@ -252,17 +252,7 @@ async function startWebhookSource(
       return;
     }
 
-    const admission = admit(peer);
-    if (!admission.accepted) {
-      closeResponse(
-        request,
-        response,
-        429,
-        admission.retryAfter === undefined ? {} : { "Retry-After": String(admission.retryAfter) },
-      );
-      return;
-    }
-
+    let admission: ReturnType<typeof admit> | undefined;
     try {
       if (sourceIsStopping()) {
         closeResponse(request, response, 503);
@@ -270,6 +260,16 @@ async function startWebhookSource(
       }
       if (request.url !== deps.config.path || !authorizationMatches(request)) {
         closeResponse(request, response, 404);
+        return;
+      }
+      admission = admit(peer);
+      if (!admission.accepted) {
+        closeResponse(
+          request,
+          response,
+          429,
+          admission.retryAfter === undefined ? {} : { "Retry-After": String(admission.retryAfter) },
+        );
         return;
       }
       if (mode === "unsupported") {
@@ -340,7 +340,7 @@ async function startWebhookSource(
       if (sourceIsStopping()) closeResponse(request, response, 503);
       else closeResponse(request, response, 500);
     } finally {
-      admission.release();
+      if (admission?.accepted) admission.release();
     }
   }
 
