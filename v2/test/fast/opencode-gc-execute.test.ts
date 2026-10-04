@@ -15,6 +15,7 @@ import {
   type OpenCodeGcExecutorDeps,
   type OpenCodeGcPlan,
 } from "../../src/opencode-gc.js";
+import { writeSession } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -182,6 +183,40 @@ describe("delete-time recheck uses the run's statuses", () => {
 
     expect(deps.deleteSession).toHaveBeenCalledTimes(1);
     expect(report.totals.sessionsDeleted).toBe(1);
+  });
+});
+
+describe("createOpenCodeGcDeps recheckDirectory statuses", () => {
+  it("forwards the run's statuses, not config.opencodeGc.statuses", async () => {
+    const root = await createTempDir("opencode-gc-recheck-statuses");
+    const dataDir = join(root, "data");
+    const worktree = join(root, "w", "a");
+    await mkdir(worktree, { recursive: true });
+    writeSession(dataDir, {
+      ...freshRecord("spur-a", "stopped"),
+      worktreePath: worktree,
+      agentSessionId: "ses_a",
+    });
+    const config = {
+      worktreeDir: root,
+      dataDir,
+      opencodeGc: { logLevel: "WARN", statuses: ["completed", "killed"] },
+    };
+    const deps = createOpenCodeGcDeps(config as never);
+    const entry = {
+      id: "ses_a",
+      directory: worktree,
+      canonicalDirectory: worktree,
+      directoryState: "resolved" as const,
+      deleteCwd: worktree,
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      ageDays: 40,
+      recordIds: ["spur-a"],
+    };
+
+    expect(await deps.recheckDirectory(entry, ["completed", "killed", "stopped"])).toBeNull();
+    // Control: the config-only statuses do block the same entry.
+    expect(await deps.recheckDirectory(entry, ["completed", "killed"])).not.toBeNull();
   });
 });
 
