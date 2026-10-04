@@ -106,6 +106,7 @@ import {
 } from "./agents/claude.js";
 import { extractGithubErrorText, isGitHubRateLimitError, runGhPollCycle } from "./gh.js";
 import {
+  CODEX_HOME_DIR,
   codexHookHomePath,
   findLatestCodexSessionFile,
   readCodexRolloutState,
@@ -9217,14 +9218,11 @@ export class SessionService {
       args.clearPort,
     );
 
-    const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
-    const sessionToolDir = existsSync(existingToolDir)
-      ? existingToolDir
-      : this.prepareSessionTools(
-          reservedSession.id,
-          reservedSession.agent,
-          reservedSession.project,
-        );
+    const sessionToolDir = this.prepareSessionTools(
+      reservedSession.id,
+      reservedSession.agent,
+      reservedSession.project,
+    );
     const sessionEnv = buildSessionEnv({
       agent: reservedSession.agent,
       projectId: reservedSession.project,
@@ -15861,7 +15859,7 @@ export class SessionService {
       SessionRecord,
       "id" | "project" | "workspaceId" | "deskId" | "startupAttachmentIds"
     >,
-    options?: { preserveStartup?: boolean },
+    options?: { preserveStartup?: boolean; preserveAgentHistory?: boolean },
   ): { ranCleanup: boolean } {
     const sessionId = session.id;
     // Per-session cleanup: unconditional, regardless of desk membership.
@@ -15879,8 +15877,11 @@ export class SessionService {
     // A desk sibling's own session-tools dir is per-session, so it goes now.
     // The anchor's doubles as the tool dir of the desk's shared sidecars, so
     // it is treated as shared state below.
+    // Completion keeps the native agent history (Codex rollouts live under
+    // the tool dir's codex-home) so reopen can resume the same thread.
+    const ownKeep = options?.preserveAgentHistory ? [CODEX_HOME_DIR] : [];
     if (sessionId !== anchorId) {
-      removeSessionSlotTool(this.config.dataDir, sessionId);
+      removeSessionSlotTool(this.config.dataDir, sessionId, ownKeep);
     }
     // Shared-desk cleanup: the anchor's artifacts dir and session-tools dir
     // are still in use by any other live desk member (an anchor-owned
@@ -15909,7 +15910,15 @@ export class SessionService {
     } else {
       deleteSessionArtifactsDir(this.config.dataDir, anchorId);
     }
-    removeSessionSlotTool(this.config.dataDir, anchorId);
+    // A completed anchor can be reopened, so its codex-home outlives whichever
+    // member tears the desk down last.
+    const anchorKeep =
+      anchorId === sessionId
+        ? ownKeep
+        : deskMembers.find((m) => m.id === anchorId)?.status === "completed"
+          ? [CODEX_HOME_DIR]
+          : [];
+    removeSessionSlotTool(this.config.dataDir, anchorId, anchorKeep);
     // Last member's teardown: the workspace's shared slots/pr state goes
     // with the rest of its shared state.
     deleteWorkspaceState(this.config.dataDir, anchorId);
@@ -16205,7 +16214,9 @@ export class SessionService {
         await this.cleanupSessionServices(session);
       }
       if (targetStatus === "completed") {
-        const { ranCleanup } = this.removeSessionArtifacts(session);
+        const { ranCleanup } = this.removeSessionArtifacts(session, {
+          preserveAgentHistory: true,
+        });
         // removeSessionArtifacts never preserves this session's own startup
         // ids when preserveStartup is unset (as here) — a live desk sibling
         // can only keep ITS OWN ids, not this session's. So whenever it ran
