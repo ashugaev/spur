@@ -687,7 +687,7 @@ async function bindSpawnedSession(
   chatId: number,
   messageThreadId: number | undefined,
   request: SourceSpawnSessionRequest,
-  options?: { current(): boolean; created(session: SourceSessionListItem): void },
+  options?: { current(): boolean; created(): void },
 ): Promise<TelegramSpawnOutcome> {
   const deps = runtime.deps;
   let submitted = false;
@@ -724,7 +724,7 @@ async function bindSpawnedSession(
       return { phase: "submitted_unknown", error: new Error("Spawn returned no session") };
     }
     created = session;
-    options?.created(session);
+    options?.created();
     if (!current()) {
       return { phase: "created", session, bound: false };
     }
