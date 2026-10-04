@@ -1207,6 +1207,12 @@ function bindHostsOverlap(left: string, right: string): boolean {
   if (normalizedLeft.version === 0 || normalizedRight.version === 0) {
     return normalizedLeft.host === normalizedRight.host;
   }
+  if (
+    (normalizedLeft.host === "::" && normalizedRight.version === 4) ||
+    (normalizedRight.host === "::" && normalizedLeft.version === 4)
+  ) {
+    return true;
+  }
   if (normalizedLeft.version !== normalizedRight.version) return false;
   return (
     normalizedLeft.host === normalizedRight.host ||
@@ -1220,8 +1226,9 @@ function bindHostsOverlap(left: string, right: string): boolean {
 export function validateWebhookSourceBindings(
   projects: Record<string, ProjectConfig>,
   daemonBind?: { host: string; port: number },
+  uiBind?: { host: string; port: number },
 ): void {
-  const owners = new Map<string, string>();
+  const existingBinds: Array<{ host: string; port: number; owner: string }> = [];
   for (const [projectId, project] of Object.entries(projects)) {
     for (const [sourceId, source] of Object.entries(project.sources)) {
       if (source.type !== "webhook") continue;
@@ -1236,11 +1243,22 @@ export function validateWebhookSourceBindings(
           `${owner} webhook bind ${endpoint} overlaps server bind ${webhookBindLabel(normalizeBindHost(daemonBind.host), daemonBind.port)}`,
         );
       }
-      const existingOwner = owners.get(endpoint);
-      if (existingOwner) {
-        throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existingOwner}`);
+      if (
+        uiBind !== undefined &&
+        source.port === uiBind.port &&
+        bindHostsOverlap(source.host, uiBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps ui bind ${webhookBindLabel(normalizeBindHost(uiBind.host), uiBind.port)}`,
+        );
       }
-      owners.set(endpoint, owner);
+      const existing = existingBinds.find(
+        (bind) => bind.port === source.port && bindHostsOverlap(bind.host, source.host),
+      );
+      if (existing) {
+        throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existing.owner}`);
+      }
+      existingBinds.push({ host: source.host, port: source.port, owner });
     }
   }
 }
@@ -2301,7 +2319,15 @@ function parseConfigFile(
     mode === "instance"
       ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
       : resolvedDefaults.serverPort;
-  validateWebhookSourceBindings(normalizedProjects, { host: serverHost, port: serverPort });
+  const uiPort =
+    mode === "instance"
+      ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
+      : resolvedDefaults.uiPort;
+  validateWebhookSourceBindings(
+    normalizedProjects,
+    { host: serverHost, port: serverPort },
+    { host: "127.0.0.1", port: uiPort },
+  );
 
   const tags = parseTags(root["tags"]);
 
@@ -2348,10 +2374,7 @@ function parseConfigFile(
           : resolvedDefaults.tmuxSocketName,
     },
     ui: {
-      port:
-        mode === "instance"
-          ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
-          : resolvedDefaults.uiPort,
+      port: uiPort,
     },
     models: {
       codexHome:
