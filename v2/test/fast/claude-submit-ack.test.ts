@@ -457,5 +457,20 @@ describe("scanClaudeJsonlForMessage", () => {
         ).toBe(false);
       }
     });
+
+    it("handles large whitespace runs without backtracking", async () => {
+      const spaced = `head${" ".repeat(20_000)}tail`;
+      const cases: Array<[string, boolean]> = [
+        [wrapPaste(spaced), true],
+        [`\n\n<pasted_content id="a1b2">\n${" ".repeat(20_000)}`, false],
+      ];
+      for (const [content, expected] of cases) {
+        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+        findLatestSessionFileMock.mockResolvedValue(filePath);
+        expect(
+          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, spaced, "/tmp/worktree"),
+        ).toBe(expected);
+      }
+    });
   });
 });

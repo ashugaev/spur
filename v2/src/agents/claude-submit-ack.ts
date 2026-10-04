@@ -89,7 +89,7 @@ function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
 // user and the enqueue record. Unwrap only when that block is the whole record
 // and the closing id matches the opening one.
 function unwrapPastedContent(text: string): string {
-  const inner = /^<pasted_content id="([^"]*)">\s*([\s\S]*?)\s*<\/pasted_content id="\1">$/.exec(
+  const inner = /^<pasted_content id="([^"]*)">\n([\s\S]*)\n<\/pasted_content id="\1">$/.exec(
     text.trim(),
   );
   return inner?.[2] ?? text;
