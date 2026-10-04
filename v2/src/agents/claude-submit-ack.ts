@@ -84,7 +84,23 @@ function extractEnqueuedText(parsed: Record<string, unknown>): string | null {
   return typeof content === "string" ? content : null;
 }
 
+// Claude >=2.1.277 records a long typed paste wrapped as
+// `\n\n<pasted_content id="x">\n<text>\n</pasted_content id="x">\n`, in both the
+// user and the enqueue record. Unwrap only when that block is the whole record
+// and the closing id matches the opening one.
+function unwrapPastedContent(text: string): string {
+  const inner = /^<pasted_content id="([^"]*)">\s*([\s\S]*?)\s*<\/pasted_content id="\1">$/.exec(
+    text.trim(),
+  );
+  return inner?.[2] ?? text;
+}
+
 function extractDeliveredText(parsed: Record<string, unknown>): string | null {
+  const text = extractRecordText(parsed);
+  return text === null ? null : unwrapPastedContent(text);
+}
+
+function extractRecordText(parsed: Record<string, unknown>): string | null {
   switch (parsed["type"]) {
     case "user":
       return extractUserMessageText(parsed);

@@ -409,4 +409,53 @@ describe("scanClaudeJsonlForMessage", () => {
       ),
     ).toBe(false);
   });
+
+  // Claude >=2.1.277 wraps typed pastes over ~800 chars in both record types.
+  const wrapPaste = (text: string, openId = "a1b2", closeId = openId) =>
+    `\n\n<pasted_content id="${openId}">\n${text}\n</pasted_content id="${closeId}">\n`;
+  const longText = `${"long paste line\n".repeat(60)}end`;
+  const pasteRecords: Array<{
+    name: string;
+    record: (content: string) => Record<string, unknown>;
+  }> = [
+    {
+      name: "user record",
+      record: (content) => ({ type: "user", message: { role: "user", content } }),
+    },
+    { name: "enqueue record", record: enqueueRecord },
+  ];
+
+  describe.each(pasteRecords)("pasted_content wrapper in $name", ({ record }) => {
+    it("acks wrapped and unwrapped text", async () => {
+      for (const content of [wrapPaste(longText), longText]) {
+        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+        findLatestSessionFileMock.mockResolvedValue(filePath);
+        expect(
+          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+        ).toBe(true);
+      }
+    });
+
+    it("does not ack a wrapped block holding different text", async () => {
+      const filePath = await makeJsonl("paste.jsonl", [record(wrapPaste("other text"))]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+      ).toBe(false);
+    });
+
+    it("does not unwrap mismatched ids or text around the block", async () => {
+      for (const content of [
+        wrapPaste(longText, "a1b2", "c3d4"),
+        `prefix ${wrapPaste(longText)}`,
+        `${wrapPaste(longText)}suffix`,
+      ]) {
+        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+        findLatestSessionFileMock.mockResolvedValue(filePath);
+        expect(
+          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+        ).toBe(false);
+      }
+    });
+  });
 });
