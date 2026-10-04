@@ -47,6 +47,15 @@ function sessionFilePath(dataDir: string, projectId: string, sessionId: string):
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 
+// Existence only: never reads, so no index or legacy-rewrite writes and no throw on a corrupt record.
+export function sessionRecordExists(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): boolean {
+  return existsSync(sessionFilePath(dataDir, projectId, sessionId));
+}
+
 function sessionIndexFilePath(dataDir: string): string {
   return join(dataDir, "sessions", ".index.json");
 }

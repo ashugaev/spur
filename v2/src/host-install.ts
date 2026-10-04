@@ -34,7 +34,7 @@ import {
   renderHostSkillWarnings,
 } from "./host-skills.js";
 import { writeStderr } from "./io.js";
-import { listGitHubPollDisabledEntries, listSessions } from "./metadata.js";
+import { listGitHubPollDisabledEntries, listSessions, sessionRecordExists } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
@@ -130,9 +130,8 @@ export function checkGitHubPollDisabled(
   const entries = listGitHubPollDisabledEntries(config.dataDir).filter(
     (entry) =>
       config.projects[entry.projectId]?.sources[entry.sourceId]?.type === "github" &&
-      // Existence only: readSession would write the session index and legacy
-      // rewrites, and throw on a corrupt record (doctor is read-only).
-      existsSync(join(config.dataDir, "sessions", entry.projectId, `${entry.sessionId}.json`)),
+      // Doctor is read-only: existence check, never readSession.
+      sessionRecordExists(config.dataDir, entry.projectId, entry.sessionId),
   );
   if (entries.length === 0) {
     return {
