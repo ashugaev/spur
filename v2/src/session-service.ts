@@ -3392,8 +3392,9 @@ export class SessionService {
   // remove. Never set outside a test; a production `startServer` never
   // passes it.
   private readonly sidecarSnapshotOverride: (() => Promise<ProcSnapshot>) | undefined;
-  // Set once by server.ts after startConfiguredSources returns (see
-  // setPollDisabledOverrideClearer). SessionService is constructed before any
+  // Registered once by startServer in server.ts (see setPollDisabledOverrideClearer)
+  // as a closure over its reassignable `sources`, so it survives reloadAutomation
+  // recreating sources. SessionService is constructed before any
   // source handle exists, so this can't be a constructor option; unset here
   // means enableSourcePoll falls back to the disk-only clear it always did.
   // Kept as this narrow closure, not a reference to SourceGroupController
@@ -3468,8 +3469,9 @@ export class SessionService {
     if (!options.deferBackgroundLoops) this.startBackgroundLoops();
   }
 
-  // Called once by server.ts's startAutomation, after startConfiguredSources
-  // returns a SourceGroupController. See pollDisabledOverrideClearer above.
+  // Called once by startServer in server.ts, before any source exists; the
+  // clearer resolves the current source group controller at call time. See
+  // pollDisabledOverrideClearer above.
   setPollDisabledOverrideClearer(
     clearer: (projectId: string, sourceId: string, sessionId: string) => number | null,
   ): void {

@@ -333,7 +333,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // handle's own event loop takes effect within one tick. Cleared when the session
   // rebinds away from that number or disappears (see the sweep at cycle end).
   let permanentPrNotFound = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
-  // I4: an unconditional start-time prune, independent of the per-cycle sweep below.
+  // An unconditional start-time prune, independent of the per-cycle sweep below.
   // Bounds the one genuinely unbounded leak path — authDisabled (see below) never
   // resets for the life of a handle, so under standing-bad-credentials the per-cycle
   // sweep in pollSignals never runs again until the next handle recreation.
@@ -350,7 +350,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     if (deadAtStartIds.length > 0) {
       // A genuinely independent fresh read, not the just-seeded cache above: feeding
       // writeGitHubPollDisabled from the cache (even a filtered copy of it) is the one
-      // whole-map-write shape R0b forbids. This read happens with no await since the
+      // whole-map-write shape that must be avoided. This read happens with no await since the
       // seed above, so it is byte-identical to the cache at this point anyway — this
       // buys textual/structural cleanliness, not a different on-disk result.
       const startupRegistry = readGitHubPollDisabled(deps.dataDir, deps.projectId, deps.sourceId);
@@ -379,7 +379,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   // record* mutation on the very next refresh — reproducing the measured defect
   // (repeat emits every tick) via a persistent write failure instead of a handle
   // restart. No clear-side entry: a failed clear leaves the stale disk entry, but
-  // the in-memory delete at :455/:461 already happened (isSessionPollGated's
+  // the in-memory delete in isSessionPollGated already happened (its
   // self-heal doesn't gate on the cache being write-clean), and overriding the next
   // refresh to re-delete it would suppress that refresh's own retry of the clear —
   // the disk entry would never heal even once writes recover. Cleared once a later
@@ -389,18 +389,18 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
   // Both wrap a synchronous fs write in try/catch and swallow-and-log, mirroring
   // logSpurEvent's own `catch {}` (event-log.ts:232-234). Mandatory, not defensive
-  // style: safeRecordPollDisabled runs inside the per-session catch block at :590 —
+  // style: safeRecordPollDisabled runs inside the per-session catch block in pollSignals —
   // an unguarded throw there escapes the session loop and lands on `void
-  // pollCycle(false)` with no unhandledRejection handler anywhere in v2/src (see
-  // review-providers/github.ts:1367-1371). safeClearPollDisabled runs from the
+  // pollCycle(false)` with no unhandledRejection handler anywhere in v2/src (the
+  // review provider's poll loop has the same shape). safeClearPollDisabled runs from the
   // self-heal at isSessionPollGated, reached synchronously from the plain
   // setInterval callback below — an unguarded throw there is an uncaught exception,
-  // not a rejection. A swallowed write failure degrades I1 to best-effort DURING THE
+  // not a rejection. A swallowed write failure degrades the disable to best-effort DURING THE
   // FAILURE WINDOW ONLY: pendingPollDisabledOverrides keeps the in-memory Map correct
   // across every refresh, so a persistently failing disk never re-arms more than the
   // one event already emitted before the first failure — it does not reproduce the
   // measured defect. No record* call is ever retried for that session: once the
-  // override reapplies the entry on refresh, the gate at :461/:734 sees it as already
+  // override reapplies the entry on refresh, isSessionPollGated sees it as already
   // disabled and never re-enters safeRecordPollDisabled. The override only drops via
   // a rebind (the self-heal clear path, which does retry its own write every cycle —
   // see safeClearPollDisabled below), the sweep pruning a disappeared session, or
@@ -913,10 +913,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       }
 
       // Prunes on absence from ALL sessions on disk (existingSessionIds), not
-      // eligibility (currentSessionIds) — I5: a stopped or stale-parked session keeps
+      // eligibility (currentSessionIds): a stopped or stale-parked session keeps
       // its entry. This is the one legitimate multi-key registry write: the map it
-      // writes is a FRESH readGitHubPollDisabled minus the dead ids, never the cache
-      // (R0b), and there is no await between that read and the write (I8) so no
+      // writes is a FRESH readGitHubPollDisabled minus the dead ids, never the cache,
+      // and there is no await between that read and the write so no
       // concurrent poll-enable can interleave and be clobbered.
       for (const sessionId of [...permanentPrNotFound.keys()]) {
         if (!existingSessionIds.has(sessionId)) permanentPrNotFound.delete(sessionId);
