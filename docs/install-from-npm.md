@@ -119,6 +119,8 @@ spur connect spur.yaml
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
+`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
+
 `<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
 
 `<new-branch>`: a branch not checked out in any worktree. The default branch fails.
