@@ -1102,8 +1102,7 @@ async function handleWorkbenchCallback(
         },
         {
           current: () => workbenchCurrent(runtime, card),
-          created: (session) => {
-            card.createdSessionId = session.id;
+          created: () => {
             if (workbenchCurrent(runtime, card)) runtime.workbench.remember(owner, fresh.project);
           },
         },

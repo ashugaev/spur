@@ -41,7 +41,6 @@ export interface LaunchCard extends CardBase {
   project?: string | undefined;
   agent?: AgentName | undefined;
   mode?: string | undefined;
-  createdSessionId?: string;
 }
 
 export interface InboxCard extends CardBase {
