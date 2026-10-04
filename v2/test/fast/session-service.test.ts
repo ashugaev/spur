@@ -4652,6 +4652,104 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("workbench launch options shares daemon/project/explicit agent precedence and configured modes", async () => {
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue(config);
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api" })).resolves.toMatchObject({
+      agent: "claude",
+      mode: null,
+      modes: [],
+    });
+    const project = service.config.projects.api;
+    if (!project) throw new Error("Missing fixture project");
+    project.defaultAgent = "codex";
+    project.modes = {
+      manager: { skill: "manager", default: true },
+      worker: { skill: "developer" },
+    };
+    await expect(service.launchOptions({ project: "api" })).resolves.toEqual({
+      project: "api",
+      agent: "codex",
+      model: null,
+      mode: "manager",
+      modes: ["manager", "worker"],
+    });
+    await expect(
+      service.launchOptions({ project: "api", agent: "opencode", mode: "worker" }),
+    ).resolves.toMatchObject({
+      agent: "opencode",
+      model: null,
+      mode: "worker",
+    });
+    await expect(service.launchOptions({ project: "api", mode: "removed" })).rejects.toThrow(
+      "Unknown mode",
+    );
+    await expect(service.launchOptions({ project: "removed" })).rejects.toThrow();
+  });
+
+  it("workbench launch options matches Cursor spawn's model rewritten by inherited reasoning", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          defaultAgent: "cursor",
+          defaultModels: { cursor: "family-high" },
+          reasoningEffort: { cursor: "xhigh" },
+        },
+      },
+    });
+    resolveAgentReasoningEffortMock.mockImplementation(
+      async (agent: string, model: string | undefined, effort: string) => {
+        expect(agent).toBe("cursor");
+        expect(["family-high", "family-xhigh"]).toContain(model);
+        expect(effort).toBe("xhigh");
+        return { model: "family-xhigh", reasoningEffort: "xhigh" };
+      },
+    );
+    createSessionStore();
+    const service = await createDisposedSessionService();
+    const displayed = await service.launchOptions({ project: "api" });
+    expect(displayed.model).toBe("family-xhigh");
+    if (displayed.model === null) throw new Error("Missing fixture launch model");
+    await service.spawn({
+      project: "api",
+      agent: displayed.agent,
+      model: displayed.model,
+      prompt: "task",
+    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.any(String),
+      expect.objectContaining({ model: displayed.model, reasoningEffort: "xhigh" }),
+    );
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith("cursor", "family-high", "xhigh", {
+      codexHomePath: service.config.models.codexHome,
+    });
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+      "cursor",
+      "family-xhigh",
+      "xhigh",
+      { codexHomePath: service.config.models.codexHome },
+    );
+  });
+
+  it("workbench launch options rejects unsupported inherited reasoning without dropping it", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: { api: { ...baseConfig().projects.api, reasoningEffort: { cursor: "xhigh" } } },
+    });
+    resolveAgentReasoningEffortMock.mockRejectedValueOnce(
+      new Error("unsupported reasoning effort"),
+    );
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api", agent: "cursor" })).rejects.toThrow(
+      "unsupported reasoning effort",
+    );
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces a missing OpenCode executable before creating a worktree", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
       new Error(

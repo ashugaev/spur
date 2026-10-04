@@ -272,7 +272,28 @@ describe("startConfiguredSources", () => {
 
     const startDeps = cronStartMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect("listProjects" in startDeps).toBe(false);
+    expect("workbench" in startDeps).toBe(false);
 
+    await controller.stop();
+  });
+
+  it("forwards the same optional workbench capability to source modules", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const workbench = {
+      launchOptions: vi.fn(),
+      listSessions: vi.fn(),
+      getSession: vi.fn(),
+      restoreSession: vi.fn(),
+    };
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      workbench,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].workbench).toBe(workbench);
     await controller.stop();
   });
 });

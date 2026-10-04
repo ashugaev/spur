@@ -46,6 +46,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 ## Telegram binding
 
 `/watch [sessionId]` binds chat/topic; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
+Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
 [`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
 Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
 `/spawn` changes plain-message recipient; group-main replies retain sender routing; forum takeover detaches old session — `v2/src/event-sources/telegram.ts`.

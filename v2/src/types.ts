@@ -1756,6 +1756,14 @@ export interface SpawnDefaultsResponse {
   worktree: boolean;
 }
 
+export interface SessionLaunchOptions {
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  mode: string | null;
+  modes: readonly string[];
+}
+
 export interface CreateProjectRequest {
   displayName: string;
   prefix: string;

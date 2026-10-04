@@ -71,17 +71,9 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-```
-spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]
-spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]
-spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]
-spur auto-ping list [--session <id>] [--json]
-spur auto-ping resume <suppressionId> [--session <id>] [--json]
-```
-
-One scope flag required: `--event` (one occurrence), `--thread` (provider thread), `--subscription` (route). Unredeemed handles expire after 30d; `--event` suppression lasts 24h post-work. `SPUR_SESSION` supplies the target inside a session; else pass `--session`. Error `grant_not_ready` means retry.
-
-Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source support: [configuration.md#events](configuration.md#events). Full rules: `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --event|--thread|--subscription <handle> [--session <id>] [--json]` requires one scope; event suppression lasts 24h, unredeemed handles expire after 30d.
+`spur auto-ping list [--session <id>] [--json]`; `spur auto-ping resume <suppressionId> [--session <id>] [--json]`; `SPUR_SESSION` supplies session inside agents; `grant_not_ready` requires retry.
+Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Scopes/events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
 
 ## send, queue
 
@@ -98,6 +90,8 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 ## source reply
 
 `spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`). Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Reply routing, binding and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+Telegram `/new <task>`: displayed project defaults, optional engine/mode Settings, runtime-only recent project; requester-owned cards expire after 10 min — `v2/src/event-sources/telegram.ts`, `v2/src/event-sources/telegram-workbench.ts`.
+Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, explicit Continue binds, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
 
 ## spur-slots
 
