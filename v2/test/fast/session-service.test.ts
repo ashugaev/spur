@@ -7977,8 +7977,11 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      "api-1\nhello",
-      expect.objectContaining({ topicName: expect.stringContaining("api-1 claude") }),
+      "hello",
+      expect.objectContaining({
+        sessionLabel: "api-1",
+        topicName: expect.stringContaining("api-1 claude"),
+      }),
     );
     expect(result).toEqual({
       ok: true,
@@ -8057,8 +8060,8 @@ describe("SessionService", () => {
       expect(sendTelegramReplyMock).toHaveBeenCalledWith(
         telegramSource,
         expect.objectContaining({ chatId: -1001 }),
-        "api-1 — Fix login\nhello",
-        expect.anything(),
+        "hello",
+        expect.objectContaining({ sessionLabel: "api-1 — Fix login" }),
       );
       expect(recordTelegramMessagesMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
@@ -8698,8 +8701,9 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.anything(),
-      "api-1\nDeploy now?",
+      "Deploy now?",
       expect.objectContaining({
+        sessionLabel: "api-1",
         buttons: [
           { text: "Yes", callbackData: `spur_choice:${stored[0]?.token}` },
           { text: "Later", callbackData: `spur_choice:${stored[1]?.token}` },
@@ -8819,8 +8823,8 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: 4242 }),
-      "api-1\nheads up",
-      expect.anything(),
+      "heads up",
+      expect.objectContaining({ sessionLabel: "api-1" }),
     );
     expect(result).toEqual(
       expect.objectContaining({ sessionId: "api-1", sourceId: "agentChat", chatId: 4242 }),

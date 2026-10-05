@@ -13719,22 +13719,18 @@ export class SessionService {
       });
     }
     this.claimTelegramPlaceholder(sessionId, target);
-    const result = await sendTelegramReply(
-      source,
-      target,
-      `${telegramSessionLabel(view)}\n${message}`,
-      {
-        topicName: telegramTopicName(view),
-        ...(choices.length > 0
-          ? {
-              buttons: choices.map((choice) => ({
-                text: choice.text,
-                callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
-              })),
-            }
-          : {}),
-      },
-    );
+    const result = await sendTelegramReply(source, target, message, {
+      sessionLabel: telegramSessionLabel(view),
+      topicName: telegramTopicName(view),
+      ...(choices.length > 0
+        ? {
+            buttons: choices.map((choice) => ({
+              text: choice.text,
+              callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
+            })),
+          }
+        : {}),
+    });
     // A buttonless reply supersedes the question it answers, so it retires the
     // pending offer — after the send, since a throw leaves the keyboard up.
     if (choices.length === 0) {
