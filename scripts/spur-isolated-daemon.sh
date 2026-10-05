@@ -152,6 +152,8 @@ ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 RUNTIME_TMP_FILE="$RUNTIME_FILE.tmp.$$"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
+export SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+export SPUR_ISOLATED_UI_ENDPOINT_FILE="$CONFIG_DIR/ui-endpoint.json"
 CLI_PATH="$V2_DIR/dist/cli.js"
 WRITE_CONFIG_PATH="$V2_DIR/bin/write-isolated-project-config.mjs"
 WRITE_INSTANCE_CONFIG_PATH="$V2_DIR/bin/write-isolated-instance-config.mjs"
@@ -162,6 +164,7 @@ REQUIRED_BUILD_OUTPUTS=(
   "$V2_DIR/dist/isolated-instance-config.js"
   "$V2_DIR/dist/isolated-project-config.js"
   "$V2_DIR/dist/isolated-telegram.js"
+  "$V2_DIR/dist/isolated-web-endpoint.js"
 )
 BUILD_INPUT_DIRS=(
   "$V2_DIR/src"
@@ -252,6 +255,7 @@ fi
 # partial environment.
 cat > "$RUNTIME_TMP_FILE" <<ENVFILE
 SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_UI_ENDPOINT_FILE="$SPUR_ISOLATED_UI_ENDPOINT_FILE"
 SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
 SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
 SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"

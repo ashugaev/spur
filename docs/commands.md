@@ -6,7 +6,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 ## Session tools and environment
 
-`$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook.
+`$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook. Launcher-owned `$SPUR_ISOLATED_CONFIG` + `$SPUR_ISOLATED_UI_ENDPOINT_FILE`: private ready-UI receipt, invalid after supervisor exit; `v2/src/isolated-web-endpoint.ts`.
 
 ## doctor
 

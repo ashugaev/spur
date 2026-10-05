@@ -71,6 +71,8 @@ setsid env -u npm_config_virtual_store_dir \
 WEB_PID=$!
 
 wait_for_http "http://127.0.0.1:$UI_PORT" 180
+node "$SCRIPT_DIR/../v2/bin/isolated-web-endpoint.mjs" \
+  "$SPUR_ISOLATED_CONFIG" "$SPUR_ISOLATED_UI_ENDPOINT_FILE" "$UI_PORT" "$$"
 for _ in $(seq 1 5); do
   restore_next_type_files
   sleep 1

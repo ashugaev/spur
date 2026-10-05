@@ -23,7 +23,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_SCRIPT_DIR = resolve(HERE, "../../../scripts");
 const REPO_ROOT = resolve(HERE, "../../..");
 const cleanupPaths: string[] = [];
-const DIST_FILE_NAMES = "cli.js isolated-instance-config.js isolated-project-config.js";
+const DIST_FILE_NAMES =
+  "cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js";
 const HOST_WRAPPER_SOURCE = "#!/usr/bin/env bash\necho host-wrapper\n";
 // Engines-conformant per the real root package.json (^20.19.0 || ^22.13.0 ||
 // >=24), copied into every fixture below, so the default PATH node clears
@@ -84,6 +85,12 @@ case "$1" in
     ;;
   "$SPUR_TEST_REPO/v2/bin/write-isolated-project-config.mjs")
     echo "project-helper" >> "$SPUR_TEST_LOG"
+    for ((index = 1; index <= $#; index++)); do
+      if [[ "\${!index}" == "--telegram-lock-output" ]]; then
+        next=$((index + 1))
+        : > "\${!next}"
+      fi
+    done
     ;;
   "$SPUR_TEST_REPO/v2/dist/cli.js")
     echo "daemon-start" >> "$SPUR_TEST_LOG"
@@ -257,6 +264,7 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     HOME: join(worktree.repoDir, "home"),
     PATH: `${worktree.pathDir}:${process.env["PATH"] ?? ""}`,
     SPUR_PROJECT_CONFIG_PATH: join(worktree.repoDir, "spur.yaml"),
+    SPUR_PROJECT: "test",
     SPUR_RESERVED_PORT_DAEMON: "4789",
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
@@ -295,6 +303,8 @@ describe("spur-isolated-daemon build guard", () => {
       "project-helper",
       "daemon-start",
     ]);
+    const runtime = readFileSync(join(worktree.toolDir, "isolated-env.sh"), "utf8");
+    expect(runtime).toMatch(/SPUR_ISOLATED_UI_ENDPOINT_FILE="[^\n]+\/ui-endpoint\.json"/);
   });
 
   it("removes a stale shared runtime before rebuilding on restart", async () => {
