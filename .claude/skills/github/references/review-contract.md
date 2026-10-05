@@ -11,10 +11,12 @@ ATTEMPT
 
   Separate local implementation verdict from live publication; no active PR leaves publication NOT REQUIRED, not BLOCKED.
   Local gates falsify spec/checks without shared receipts or GitHub writes; local APPROVED never counts as published approval.
-  Live caller supplies permitted shared receipt root and network/publication capability; probe effective access before work.
+  Require caller-owned App config; probe network/publication access after attempt registration.
+  Use caller's trusted `spur review-app` executable outside reviewed checkout for every transition.
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
   Capture repository, PR, lane, designated session, unique attempt, head H and base B.
   Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt. Request schema: v2/src/review-app.ts.
+  Prepare identity/H/B/digest before checkout/QA; add verdict/body/evidence to separate publication input afterward.
   Receipt fields: session, attempt, H, B, contractDigest, status, evidence, reviewId; use repository owner/name namespaces.
   Persist review failure through `spur review-app block`; new attempt required after review blocker. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
   Receipt write failure blocks; notify owner. Never recover eligibility from historical approval alone.
@@ -49,8 +51,7 @@ DELTA
 PUBLICATION
 
   Re-read H/B before publication; changed pair invalidates pass.
-  Require caller-owned App config and trusted executable outside reviewed checkout; never publish through PR-built code.
-  Publish through `spur review-app publish --app-config <file> --request <file> --json`; request schema: v2/src/review-app.ts.
+  Publish through `spur review-app publish --app-config <file> --request <file> --json`.
   Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
   Body: conclusion, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections.
   Code title: Code Review Conclusion. Browser title: Browser QA Conclusion. Use Objections: none only on clean pass.
