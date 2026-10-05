@@ -15,7 +15,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      codex: gpt-5-codex
+      codex: gpt-6.1-sol
       cursor: auto
     reasoningEffort:
       claude: medium
