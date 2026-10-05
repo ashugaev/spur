@@ -33,7 +33,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 `spur opencode-gc [--execute --older-than <days> --statuses <completed,killed,stopped> --limit <n> --no-sizes --json]` reclaims opencode's own store (root from `opencode db path`). Dry run unless `--execute`, daemon-free. Flags override `opencodeGc.*` ([configuration.md](configuration.md#field-reference)); `--no-sizes` skips `du`. Exits `1` on any error.
 
 - Units: store rows (`opencode session delete`, then one CLI-only `VACUUM`), snapshot leaves whose `[core] worktree` no longer exists, `log/opencode.log` above `opencodeGc.logMaxBytes` (tail kept as `opencode.log.1`, then truncated).
-- Selects a store session when a Spur record's `agentSessionId` equals its id and every such record is `completed`/`killed`.
+- Selects a store session when a Spur record's `agentSessionId` equals its id and every such record's status is in `opencodeGc.statuses` (default `completed,killed`; `--statuses` overrides).
 - Skip reasons: `protected_live_record`, `directory_gone_protected`, `live_process_holds_session`, `directory_unresolvable`, `no_record_match`, `too_recent`, `over_limit`; entry blocked on recheck: `changed_during_run`.
 - Plan refusals: `store_unresolved`, `enumeration_failed`, `enumeration_truncated`.
 - `VACUUM` skipped with reason: `dry_run`, `no_sessions_deleted`, `db_path_unresolved`, `free_space_unknown`, `insufficient_free_space` (needs 2x DB size free), `live_opencode_record`.
