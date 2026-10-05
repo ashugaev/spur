@@ -32,6 +32,8 @@ function fixture(): GateSnapshot {
       user: { id, type: "Bot" },
       state: "APPROVED",
       commit_id: H,
+      body: "Review conclusion",
+      submitted_at: "2026-10-05T12:00:00Z",
     })),
     comments: [11, 12].map((id) => ({
       id,
@@ -91,6 +93,30 @@ function fixture(): GateSnapshot {
 test("two actual App approvals and complete N/A coverage permit fork without consent", () => {
   expect(evaluateSnapshot(policy, 5, fixture()).status).toBe("APPROVED");
 });
+test.each(["newer-blocker", "missing-time", "tied-time"])(
+  "aggregate native chronology %s fails closed despite older review ID",
+  (scenario) => {
+    const snapshot = fixture();
+    snapshot.reviews.push({
+      id: 3,
+      user: { id: 11, type: "Bot" },
+      state: "CHANGES_REQUESTED",
+      commit_id: H,
+      body: "New blocker",
+      submitted_at:
+        scenario === "missing-time"
+          ? undefined
+          : scenario === "tied-time"
+            ? "2026-10-05T12:00:00Z"
+            : "2026-10-05T12:01:00Z",
+    });
+    const result = evaluateSnapshot(policy, 5, snapshot);
+    expect(result.status).toBe("BLOCKED");
+    expect(result.reason).toBe(
+      scenario === "newer-blocker" ? "changes-requested" : "malformed-evidence",
+    );
+  },
+);
 test("same-head CI from an older base cannot pass fresh lane attestations", () => {
   const snapshot = fixture();
   snapshot.runs[0] = {
@@ -217,10 +243,24 @@ test("missing classification, uncovered paths, unresolved threads and native dis
       snapshot.unresolved = 1;
     },
     (snapshot: GateSnapshot) => {
-      snapshot.reviews.push({ id: 99, user: { id: 11 }, state: "DISMISSED", commit_id: H });
+      snapshot.reviews.push({
+        id: 99,
+        user: { id: 11 },
+        state: "DISMISSED",
+        commit_id: H,
+        body: "Dismissed",
+        submitted_at: "2026-10-05T12:01:00Z",
+      });
     },
     (snapshot: GateSnapshot) => {
-      snapshot.reviews.push({ id: 99, user: { id: 50 }, state: "CHANGES_REQUESTED", commit_id: H });
+      snapshot.reviews.push({
+        id: 99,
+        user: { id: 50 },
+        state: "CHANGES_REQUESTED",
+        commit_id: H,
+        body: "Blocker",
+        submitted_at: "2026-10-05T12:01:00Z",
+      });
     },
   ]) {
     const snapshot = fixture();

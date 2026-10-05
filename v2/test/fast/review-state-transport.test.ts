@@ -51,7 +51,14 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure") {
   let offlineObserved = false,
     nativePosts = 0;
   let review:
-    | { id: number; body: string; state: string; commit_id: string; user: { login: string } }
+    | {
+        id: number;
+        body: string;
+        state: string;
+        commit_id: string;
+        submitted_at: string;
+        user: { login: string };
+      }
     | undefined;
   const transport: typeof fetch = async (url, options) => {
     const path = new URL(String(url)).pathname;
@@ -99,6 +106,7 @@ async function fixture(mode: "clean" | "denied" | "lost" | "final-failure") {
         body: payload.body,
         state: "APPROVED",
         commit_id: payload.commit_id,
+        submitted_at: "2026-10-05T12:00:00Z",
         user: { login: "code[bot]" },
       };
       return Response.json(review);

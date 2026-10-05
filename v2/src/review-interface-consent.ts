@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readJson, object, integer, GitHubApp } from "./github-app.js";
+import { readJson, object, integer, GitHubApp, effectiveNativeReview } from "./github-app.js";
 import {
   parseManifest,
   manifestDigest,
@@ -281,12 +281,8 @@ export async function reconcileInterfaceConsent(dataDir: string, sessionId: stri
     if (!comment || typeof comment.body !== "string")
       throw new Error("Interface lane attestation missing");
     const state = readStateBody(comment.body);
-    const review = reviews
-      .filter(
-        (row) =>
-          object(row.user).login === actor && row.state !== "COMMENTED" && row.state !== "PENDING",
-      )
-      .sort((a, b) => integer(b.id) - integer(a.id))[0];
+    if (!actor) throw new Error("Interface lane identity missing");
+    const review = effectiveNativeReview(reviews, { login: actor });
     if (
       state.lane !== lane ||
       state.repo !== record.repository ||

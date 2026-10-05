@@ -33,6 +33,38 @@ export async function readJson(path: string): Promise<unknown> {
     throw new ReviewAppError("invalid-json-file");
   }
 }
+export function effectiveNativeReview(
+  rows: unknown[],
+  actor: { login: string } | { id: number },
+): Record<string, unknown> | undefined {
+  const submitted = rows
+    .map(object)
+    .filter((review) => {
+      const user = object(review.user);
+      if ("login" in actor ? user.login !== actor.login : user.id !== actor.id) return false;
+      integer(review.id);
+      if (["COMMENTED", "PENDING"].includes(String(review.state))) return false;
+      if (
+        !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(String(review.state)) ||
+        typeof review.body !== "string" ||
+        typeof review.commit_id !== "string" ||
+        !/^[a-f0-9]{40}$/.test(review.commit_id) ||
+        typeof review.submitted_at !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(review.submitted_at) ||
+        !Number.isFinite(Date.parse(review.submitted_at))
+      )
+        throw new ReviewAppError("invalid-history");
+      return true;
+    })
+    .sort((a, b) => Date.parse(String(b.submitted_at)) - Date.parse(String(a.submitted_at)));
+  if (
+    submitted.length > 1 &&
+    Date.parse(String(submitted[0]?.submitted_at)) ===
+      Date.parse(String(submitted[1]?.submitted_at))
+  )
+    throw new ReviewAppError("ambiguous-history");
+  return submitted[0];
+}
 
 export interface AppCredentials {
   appId: number;

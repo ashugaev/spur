@@ -1,5 +1,12 @@
 import type { Command } from "commander";
-import { object, integer, string, readJson, ReviewAppError } from "./github-app.js";
+import {
+  object,
+  integer,
+  string,
+  readJson,
+  effectiveNativeReview,
+  ReviewAppError,
+} from "./github-app.js";
 import { baselineDigest, digest, manifestDigest } from "./review-interface.js";
 import { consentMarker, parseConsentState, readStateBody, stateMarker } from "./review-state.js";
 
@@ -117,9 +124,9 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       return blocked("pr-not-ready");
     if (snapshot.unresolved !== 0) return blocked("unresolved-threads");
     const effective = new Map<number, Record<string, unknown>>();
-    for (const row of [...snapshot.reviews].sort((a, b) => integer(a.id) - integer(b.id))) {
-      if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(String(row.state)))
-        effective.set(integer(object(row.user).id), row);
+    for (const actor of new Set(snapshot.reviews.map((row) => integer(object(row.user).id)))) {
+      const review = effectiveNativeReview(snapshot.reviews, { id: actor });
+      if (review) effective.set(actor, review);
     }
     if ([...effective.values()].some((row) => row.state === "CHANGES_REQUESTED"))
       return blocked("changes-requested");

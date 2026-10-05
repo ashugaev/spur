@@ -283,7 +283,7 @@ describe("semantic interface consent", () => {
           B,
           status: "APPROVED",
           evidenceDigest: "c".repeat(64),
-          reviewId: index + 1,
+          reviewId: index + 11,
           assessment: {
             status: "required",
             manifest,
@@ -303,8 +303,22 @@ describe("semantic interface consent", () => {
         });
       }
       const reviews = [
-        { id: 1, user: { login: "code[bot]" }, state: "APPROVED", commit_id: H },
-        { id: 2, user: { login: "browser[bot]" }, state: "APPROVED", commit_id: H },
+        {
+          id: 11,
+          user: { login: "code[bot]" },
+          state: "APPROVED",
+          commit_id: H,
+          body: "Code conclusion",
+          submitted_at: "2026-10-05T12:00:00Z",
+        },
+        {
+          id: 12,
+          user: { login: "browser[bot]" },
+          state: "APPROVED",
+          commit_id: H,
+          body: "Browser conclusion",
+          submitted_at: "2026-10-05T12:00:00Z",
+        },
       ];
       if (scenario === "newer-rejection")
         reviews.push({
@@ -312,6 +326,8 @@ describe("semantic interface consent", () => {
           user: { login: "code[bot]" },
           state: "CHANGES_REQUESTED",
           commit_id: H,
+          body: "New blocker with older numeric ID",
+          submitted_at: "2026-10-05T12:01:00Z",
         });
       let publicRecord: { id: number; user: { login: string }; body: string } | undefined;
       vi.spyOn(github.GitHubApp.prototype, "history").mockImplementation(async (path) =>
