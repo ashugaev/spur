@@ -3748,6 +3748,68 @@ describe("telegramSourceModule", () => {
     );
   });
 
+  it("registers the command menu on a new bot after source stop and restart", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const first = await startSource(dataDir);
+    const firstBot = required(first.bot);
+    await vi.waitFor(() => expect(firstBot.api.setChatMenuButton).toHaveBeenCalledTimes(1));
+    await first.handle.stop();
+
+    const second = await startSource(dataDir);
+    const secondBot = required(botInstances.at(-1));
+    expect(botInstances).toHaveLength(2);
+    expect(secondBot).not.toBe(firstBot);
+    await vi.waitFor(() => expect(secondBot.api.setChatMenuButton).toHaveBeenCalledTimes(1));
+    expect(firstBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+    expect(secondBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+    expect(secondBot.api.setMyCommands.mock.calls).toEqual(firstBot.api.setMyCommands.mock.calls);
+    expect(secondBot.api.setChatMenuButton).toHaveBeenCalledWith({
+      menu_button: { type: "commands" },
+    });
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(runMock.mock.calls[1]?.[0]).toBe(secondBot);
+    expect(first.stop).toHaveBeenCalledTimes(1);
+    expect(second.stop).not.toHaveBeenCalled();
+    await second.handle.stop();
+    expect(second.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["setMyCommands", "setChatMenuButton"] as const)(
+    "redacts %s menu setup failure while the runner continues",
+    async (method) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      getMeMock.mockImplementationOnce(async () => {
+        required(botInstances.at(-1)).api[method].mockRejectedValueOnce(
+          new Error(`${method} rejected token-123`),
+        );
+        return { username: "SpurProjectsBot" };
+      });
+      const { bot, handle, logger, stop } = await startSource(dataDir);
+      const startedBot = required(bot);
+      await vi.waitFor(() =>
+        expect(logger.warn).toHaveBeenCalledWith(
+          `[source:api/telegram] telegram commands setup failed: ${method} rejected <telegram-token>`,
+        ),
+      );
+      expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
+      expect(startedBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+      if (method === "setMyCommands") {
+        expect(startedBot.api.setChatMenuButton).not.toHaveBeenCalled();
+      } else {
+        expect(startedBot.api.setChatMenuButton).toHaveBeenCalledTimes(1);
+      }
+      expect(runMock).toHaveBeenCalledWith(startedBot, expect.anything());
+      expect(stop).not.toHaveBeenCalled();
+      const help = telegramContext({ text: "/help" });
+      await startedBot.emitText(help);
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/new"));
+      await handle.stop();
+      expect(stop).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("stops the runner when the source stops", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
