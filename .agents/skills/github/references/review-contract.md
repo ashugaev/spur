@@ -49,8 +49,8 @@ DELTA
 PUBLICATION
 
   Re-read H/B before publication; changed pair invalidates pass.
-  Submit GitHub REST POST /repos/{owner}/{repo}/pulls/{number}/reviews with commit_id=H and event APPROVE or REQUEST_CHANGES.
-  Use structured JSON/file input; gh pr review cannot pin commit. No unpinned fallback.
+  Require caller-owned App config; publish through `spur review-app publish --app-config <file> --request <file> --json`; request schema: v2/src/review-app.ts.
+  Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
   Body: conclusion, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections.
   Code title: Code Review Conclusion. Browser title: Browser QA Conclusion. Use Objections: none only on clean pass.
   Verify returned review ID/state/commit_id; retrieve submitted review and compare. Re-read PR H/B afterward.

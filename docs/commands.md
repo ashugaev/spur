@@ -3,6 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
+`review-app status|publish`: daemon-free reviewer App access and pinned native review publication; `v2/src/review-app.ts`.
 
 ## Session tools and environment
 
@@ -71,13 +72,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-```
-spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]
-spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]
-spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]
-spur auto-ping list [--session <id>] [--json]
-spur auto-ping resume <suppressionId> [--session <id>] [--json]
-```
+`spur auto-ping unsubscribe --event|--thread|--subscription <handle>`, `list`, `resume <suppressionId>`; `--session`, `--json`: `v2/src/cli.ts`.
 
 One scope flag required: `--event` (one occurrence), `--thread` (provider thread), `--subscription` (route). Unredeemed handles expire after 30d; `--event` suppression lasts 24h post-work. `SPUR_SESSION` supplies the target inside a session; else pass `--session`. Error `grant_not_ready` means retry.
 

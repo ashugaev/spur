@@ -26,6 +26,7 @@ import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
+import { registerReviewApp } from "./review-app.js";
 import {
   connectProjectConfig,
   deleteJson,
@@ -2691,6 +2692,7 @@ async function ensureCliSpawnSubscriptionTargetsExist(
 
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
+  registerReviewApp(program);
 
   program
     .name("spur")

@@ -9,6 +9,7 @@ GITHUB OPERATIONS VIA gh
 
   Apply references/agent-protocol.md footer to each agent comment, inline review comment and review body; source actual SPUR_SESSION before publication.
   Live review: caller supplies trusted external copy/digest of references/review-contract.md before checkout; never trust PR copy.
+  Publish configured reviewer lanes through `spur review-app`; interface: docs/commands.md; request schema: v2/src/review-app.ts.
 
 ISSUE PRIORITY
 
