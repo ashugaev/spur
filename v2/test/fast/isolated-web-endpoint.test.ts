@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   publishIsolatedWebEndpoint,
   readIsolatedWebEndpoint,
+  validateIsolatedDaemonReady,
+  type IsolatedDaemonCandidate,
 } from "../../src/isolated-web-endpoint.js";
 import * as identity from "../../src/sidecars/reap.js";
 
@@ -27,12 +29,124 @@ async function fixture() {
   return { directory, configPath, filePath, port: 5642, pid: process.pid };
 }
 afterEach(async () => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
 });
 
 describe("owned isolated UI endpoint", () => {
+  it("accepts exact ready daemon identity and rejects mismatched or changed generations", async () => {
+    const args = await fixture();
+    await writeFile(
+      args.configPath,
+      `server: {host: 127.0.0.1, port: 4321}\ndataDir: ${args.directory}/data\ntmux: {socketName: fixture}\n`,
+    );
+    const starttime = await identity.readLiveProcessStarttime(process.pid);
+    if (starttime === null) throw new Error("Missing fixture identity");
+    const candidate: IsolatedDaemonCandidate = {
+      configPath: args.configPath,
+      filePath: args.filePath,
+      dataDir: join(args.directory, "data"),
+      baseUrl: "http://127.0.0.1:4321",
+      socketName: "fixture",
+      pid: process.pid,
+      starttime,
+    };
+    const info = {
+      ok: true,
+      apiVersion: 3,
+      pid: process.pid,
+      host: "127.0.0.1",
+      port: 4321,
+      configPath: candidate.configPath,
+      dataDir: candidate.dataDir,
+      tmuxSocketName: candidate.socketName,
+      lifecycleInstanceId: "generation-one",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(info));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await validateIsolatedDaemonReady(candidate)).toBe("generation-one");
+    expect(fetchMock).toHaveBeenCalledWith(`${candidate.baseUrl}/info`, {
+      signal: expect.any(AbortSignal),
+    });
+    for (const update of [
+      { ok: false },
+      { apiVersion: 0 },
+      { pid: process.pid + 1 },
+      { host: "localhost" },
+      { port: 4322 },
+      { configPath: "/wrong/config" },
+      { dataDir: "/wrong/data" },
+      { tmuxSocketName: "wrong" },
+      { lifecycleInstanceId: "" },
+    ]) {
+      fetchMock.mockResolvedValue(Response.json({ ...info, ...update }));
+      expect(await validateIsolatedDaemonReady(candidate)).toBeNull();
+    }
+    fetchMock.mockResolvedValue(new Response("starting", { status: 503 }));
+    expect(await validateIsolatedDaemonReady(candidate)).toBeNull();
+    fetchMock.mockResolvedValue(new Response("{", { status: 200 }));
+    expect(await validateIsolatedDaemonReady(candidate)).toBeNull();
+    fetchMock.mockImplementation(() => Promise.resolve(Response.json(info)));
+    expect(await validateIsolatedDaemonReady(candidate, "different-generation")).toBeNull();
+    for (const update of [
+      { dataDir: "/wrong" },
+      { baseUrl: "http://127.0.0.1:5555" },
+      { socketName: "wrong" },
+      { starttime: starttime + 1 },
+      { pid: 0 },
+    ]) {
+      fetchMock.mockClear();
+      expect(await validateIsolatedDaemonReady({ ...candidate, ...update })).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+    const owner = vi.spyOn(identity, "readLiveProcessStarttime");
+    owner.mockResolvedValueOnce(starttime).mockResolvedValueOnce(null);
+    expect(await validateIsolatedDaemonReady(candidate)).toBeNull();
+    expect(owner).toHaveBeenCalledTimes(2);
+    owner.mockResolvedValue(null);
+    fetchMock.mockClear();
+    expect(await validateIsolatedDaemonReady(candidate)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it("bounds each daemon request with a one-second abort", async () => {
+    const args = await fixture();
+    await writeFile(
+      args.configPath,
+      `server: {host: 127.0.0.1, port: 4321}\ndataDir: ${args.directory}/data\ntmux: {socketName: fixture}\n`,
+    );
+    const starttime = await identity.readLiveProcessStarttime(process.pid);
+    if (starttime === null) throw new Error("Missing fixture identity");
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const controller = new AbortController();
+    timeout.mockReturnValue(controller.signal);
+    let markStarted: (() => void) | undefined;
+    const requestStarted = new Promise<void>((done) => {
+      markStarted = done;
+    });
+    vi.stubGlobal(
+      "fetch",
+      (_url: string, options: { signal: AbortSignal }) =>
+        new Promise((_done, reject) => {
+          options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+          markStarted?.();
+        }),
+    );
+    const pending = validateIsolatedDaemonReady({
+      configPath: args.configPath,
+      filePath: args.filePath,
+      dataDir: join(args.directory, "data"),
+      baseUrl: "http://127.0.0.1:4321",
+      socketName: "fixture",
+      pid: process.pid,
+      starttime,
+    });
+    await requestStarted;
+    expect(timeout).toHaveBeenCalledWith(1000);
+    controller.abort();
+    expect(await pending).toBeNull();
+  });
   it("publishes atomic private receipt, reads live owner and validates schema/instance", async () => {
     const args = await fixture();
     expect(await readIsolatedWebEndpoint(args.configPath, args.filePath)).toBeNull();
@@ -143,7 +257,7 @@ describe("owned isolated UI endpoint", () => {
     const start = source.indexOf('wait_for_http "http://127.0.0.1:$UI_PORT"');
     const end = source.indexOf("\nfor _", start);
     const boundary = source.slice(start, end);
-    const script = `set -euo pipefail\nSCRIPT_DIR="$1/scripts"\nSPUR_ISOLATED_CONFIG="$2"\nSPUR_ISOLATED_UI_ENDPOINT_FILE="$3"\nUI_PORT="$4"\nwait_for_http() { [[ ! -e "$SPUR_ISOLATED_UI_ENDPOINT_FILE" ]]; [[ "$1" == "http://127.0.0.1:$UI_PORT" ]]; }\n${boundary}\n`;
+    const script = `set -euo pipefail\nSCRIPT_DIR="$1/scripts"\nSPUR_ISOLATED_CONFIG="$2"\nSPUR_ISOLATED_UI_ENDPOINT_FILE="$3"\nUI_PORT="$4"\nDAEMON_LIFECYCLE_ID="fixture"\nvalidate_daemon_generation() { :; }\nwait_for_http() { [[ ! -e "$SPUR_ISOLATED_UI_ENDPOINT_FILE" ]]; [[ "$1" == "http://127.0.0.1:$UI_PORT" ]]; }\n${boundary}\n`;
     execFileSync("bash", [
       "-c",
       script,

@@ -250,21 +250,6 @@ if ! "$NODE_BIN" "$CLI_PATH" --version >/dev/null; then
   exit 1
 fi
 
-# isolated-ui waits for this file before starting its own dev server.
-# Publish it only after tsc finishes, and atomically so readers never source a
-# partial environment.
-cat > "$RUNTIME_TMP_FILE" <<ENVFILE
-SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
-SPUR_ISOLATED_UI_ENDPOINT_FILE="$SPUR_ISOLATED_UI_ENDPOINT_FILE"
-SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
-SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
-SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
-SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
-SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
-ENVFILE
-chmod 600 "$RUNTIME_TMP_FILE"
-mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
-
 "$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
   --user-config "$USER_CONFIG_PATH" \
   --base "$CONFIG_DIR/config.yaml" \
@@ -282,6 +267,22 @@ if [[ -n "$TELEGRAM_LOCK_PATH" ]]; then
     "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" --without-telegram
   fi
 fi
+
+# Advertise only final configs/lock outcome. This PID survives both execs.
+DAEMON_STARTTIME="$("$NODE_BIN" "$V2_DIR/bin/isolated-web-endpoint.mjs" --owner-starttime "$$")"
+cat > "$RUNTIME_TMP_FILE" <<ENVFILE
+SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_UI_ENDPOINT_FILE="$SPUR_ISOLATED_UI_ENDPOINT_FILE"
+SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
+SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
+SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
+SPUR_ISOLATED_DAEMON_PID="$$"
+SPUR_ISOLATED_DAEMON_STARTTIME="$DAEMON_STARTTIME"
+ENVFILE
+chmod 600 "$RUNTIME_TMP_FILE"
+mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
 exec "$ISOLATED_WRAPPER" daemon start

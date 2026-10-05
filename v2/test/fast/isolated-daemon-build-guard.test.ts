@@ -75,15 +75,17 @@ if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && "\${2:-}" == "--version" ]]; t
   fi
   exit 0
 fi
-if [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
+if [[ "$1" == "$SPUR_TEST_REPO/v2/dist/cli.js" && ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]]; then
   echo "node-before-runtime $1" >> "$SPUR_TEST_LOG"
   exit 83
 fi
 case "$1" in
   "$SPUR_TEST_REPO/v2/bin/write-isolated-instance-config.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
     echo "instance-helper" >> "$SPUR_TEST_LOG"
     ;;
   "$SPUR_TEST_REPO/v2/bin/write-isolated-project-config.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
     echo "project-helper" >> "$SPUR_TEST_LOG"
     for ((index = 1; index <= $#; index++)); do
       if [[ "\${!index}" == "--telegram-lock-output" ]]; then
@@ -94,6 +96,12 @@ case "$1" in
     ;;
   "$SPUR_TEST_REPO/v2/dist/cli.js")
     echo "daemon-start" >> "$SPUR_TEST_LOG"
+    exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_IDENTITY_SCRIPT"
+    ;;
+  "$SPUR_TEST_REPO/v2/bin/isolated-web-endpoint.mjs")
+    [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
+    shift
+    exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_ENDPOINT_HELPER" "$@"
     ;;
   *)
     echo "unexpected-node $1" >> "$SPUR_TEST_LOG"
@@ -153,6 +161,10 @@ function createFakeWorktree(): FakeWorktree {
   copyFileSync(join(REPO_ROOT, "package.json"), join(repoDir, "package.json"));
 
   const logPath = join(repoDir, "calls.log");
+  writeFileSync(
+    join(repoDir, "identity.mjs"),
+    `import { readFileSync } from "node:fs";\nimport { readLiveProcessStarttime } from ${JSON.stringify(join(REPO_ROOT, "v2/dist/sidecars/reap.js"))};\nconst runtime=readFileSync(process.env.SPUR_SESSION_TOOL_DIR+"/isolated-env.sh","utf8");\nconst pid=Number(runtime.match(/SPUR_ISOLATED_DAEMON_PID="(\\d+)"/)?.[1]);\nconst starttime=Number(runtime.match(/SPUR_ISOLATED_DAEMON_STARTTIME="(\\d+)"/)?.[1]);\nif(pid!==process.pid||starttime!==await readLiveProcessStarttime(process.pid))throw new Error("Daemon owner changed across exec");\n`,
+  );
   makeExecutable(
     join(pathDir, "pnpm"),
     `#!/usr/bin/env bash
@@ -269,6 +281,8 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REAL_NODE: process.execPath,
+    SPUR_TEST_IDENTITY_SCRIPT: join(worktree.repoDir, "identity.mjs"),
+    SPUR_TEST_ENDPOINT_HELPER: join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"),
     SPUR_TEST_REPO: worktree.repoDir,
     TMPDIR: worktree.tmpDir,
     ...extraEnv,

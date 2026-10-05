@@ -14,6 +14,8 @@ describe("published interface contracts", () => {
     const commands = await readRepoFile("docs/commands.md");
     expect(commands).toContain("SPUR_ISOLATED_CONFIG");
     expect(commands).toContain("SPUR_ISOLATED_UI_ENDPOINT_FILE");
+    expect(commands).toContain("SPUR_ISOLATED_DAEMON_PID");
+    expect(commands).toContain("SPUR_ISOLATED_DAEMON_STARTTIME");
     expect(await readRepoFile("docs/configuration.md")).toContain("v2/src/ports.ts");
   });
   it("names isolated Telegram fixture inputs, stdin seed, and readiness failures", async () => {

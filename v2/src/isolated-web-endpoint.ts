@@ -1,8 +1,9 @@
 import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isDefaultInstanceConfigPath } from "./config.js";
+import { isDefaultInstanceConfigPath, loadInstanceConfigReadOnly } from "./config.js";
 import { readLiveProcessStarttime } from "./sidecars/reap.js";
+import { SPUR_DAEMON_API_VERSION } from "./types.js";
 
 interface UiEndpoint {
   version: 1;
@@ -10,6 +11,78 @@ interface UiEndpoint {
   port: number;
   pid: number;
   starttime: number;
+}
+
+export interface IsolatedDaemonCandidate {
+  configPath: string;
+  filePath: string;
+  dataDir: string;
+  baseUrl: string;
+  socketName: string;
+  pid: number;
+  starttime: number;
+}
+
+export async function captureIsolatedDaemonStarttime(pid: number): Promise<number | null> {
+  return Number.isSafeInteger(pid) && pid > 0 ? readLiveProcessStarttime(pid) : null;
+}
+
+export async function validateIsolatedDaemonReady(
+  candidate: IsolatedDaemonCandidate,
+  expectedLifecycleInstanceId?: string,
+): Promise<string | null> {
+  try {
+    const canonical = await ownEndpointPath(candidate.configPath, candidate.filePath);
+    if (
+      !Number.isSafeInteger(candidate.starttime) ||
+      candidate.starttime < 0 ||
+      (await captureIsolatedDaemonStarttime(candidate.pid)) !== candidate.starttime
+    )
+      return null;
+    const loaded = loadInstanceConfigReadOnly(canonical);
+    if (loaded.status !== "ok") return null;
+    const config = loaded.config;
+    if (
+      config.server.host !== "127.0.0.1" ||
+      config.server.port > 65535 ||
+      candidate.baseUrl !== `http://127.0.0.1:${config.server.port}` ||
+      config.dataDir !== join(dirname(canonical), "data") ||
+      candidate.dataDir !== config.dataDir ||
+      candidate.socketName !== config.tmux.socketName
+    )
+      return null;
+    const response = await fetch(`${candidate.baseUrl}/info`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (!response.ok) return null;
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      return null;
+    }
+    if (typeof payload !== "object" || payload === null) return null;
+    const info = payload as Record<string, unknown>;
+    if (
+      info["ok"] !== true ||
+      info["apiVersion"] !== SPUR_DAEMON_API_VERSION ||
+      info["pid"] !== candidate.pid ||
+      info["host"] !== config.server.host ||
+      info["port"] !== config.server.port ||
+      info["configPath"] !== canonical ||
+      info["dataDir"] !== candidate.dataDir ||
+      info["tmuxSocketName"] !== candidate.socketName ||
+      typeof info["lifecycleInstanceId"] !== "string" ||
+      !info["lifecycleInstanceId"].trim() ||
+      (expectedLifecycleInstanceId !== undefined &&
+        info["lifecycleInstanceId"] !== expectedLifecycleInstanceId) ||
+      (await captureIsolatedDaemonStarttime(candidate.pid)) !== candidate.starttime
+    )
+      return null;
+    return info["lifecycleInstanceId"];
+  } catch {
+    return null;
+  }
 }
 
 async function ownEndpointPath(configPath: string, filePath: string): Promise<string> {

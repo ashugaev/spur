@@ -32,7 +32,7 @@ it("holds the launcher bot lock through exec, disables a contender, releases on 
   paths.push(path);
   const source = readFileSync(resolve("../scripts/spur-isolated-daemon.sh"), "utf8");
   const start = source.indexOf("# Hold the bot lock");
-  const end = source.indexOf('\necho "Isolated daemon starting', start);
+  const end = source.indexOf("\n# Advertise only final configs", start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const boundary = source.slice(start, end);
