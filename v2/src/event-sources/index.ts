@@ -10,6 +10,7 @@ import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { jiraSourceModule } from "./jira.js";
 import { sentrySourceModule } from "./sentry.js";
+import { scriptSourceModule } from "./script.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
 import type {
@@ -52,6 +53,7 @@ interface StartedSource {
 
 const SOURCE_MODULES = {
   cron: cronSourceModule,
+  script: scriptSourceModule,
   github: githubSourceModule,
   "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,

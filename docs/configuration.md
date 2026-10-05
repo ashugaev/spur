@@ -96,7 +96,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.reasoningEffort.{claude,codex,cursor,opencode}`: live launch defaults; explicit session override wins; omitted uses native default; OpenCode permits only selected variant for that model until effort changes or is removed; provider/model constraints in `v2/src/session-service.ts`, YAML validation in `v2/src/config.ts`.
 - `projects.<id>.preflight`/`.preflight.prompt`: branch or sentinel `NO_PROJECT_RULES`; retains structured preview/retry usage. Preflight batches expire after 30 days; spawn claims each batch once.
 - `projects.<id>.modes.<name>.{skill,default}`. See [Modes](#modes).
-- `projects.<id>.sources.<sourceId>.type` (required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram`), `.runOnStart` (`false`), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, agent-send fallback destination, must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
+- `projects.<id>.sources.<sourceId>.type` (required, `cron|script|github|github-ci|gitlab|jira|sentry|service|telegram`), `.runOnStart` (`false`), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, agent-send fallback destination, must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
+- `projects.<id>.sources.<sourceId>` with `type: script`: `command` argv, `schedule` cron, `timeoutMs` (`60000`), `env`, `emitExisting`/`runOnStart` (`false`); stdout items, limits, replay contract and `script:item.new` spawn event: `v2/src/event-sources/script.ts`, validation: `v2/src/config.ts`, process/environment: `v2/src/event-sources/script-process.ts`.
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
@@ -137,7 +138,7 @@ A session bound to a PR GitHub reports as nonexistent stops signal polling after
 
 ## Events
 
-Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira`, `script` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 
 Event names by source:
 
@@ -146,6 +147,7 @@ Event names by source:
 - `github-ci`: `github-ci:run.completed`.
 - `gitlab`: `gitlab:changes_requested`, `ci_failed`, `comment`, `merge_conflict`.
 - `jira`: `jira:work_item.new` (with `query`; else connection-only, backs `projects.<id>.backlog`). Template: `{{key}}` plus inherited `{{url}} {{number}} {{title}} {{repo}} {{externalId}}`.
+- `script`: `script:item.new`; template contract: `v2/src/event-sources/script.ts`.
 - `sentry`: `sentry:issue.new`.
 - `service`: `service:<ruleId>`.
 - `telegram`: `telegram:message`. Voice-note transcription: [voice.md](voice.md#telegram-voice-notes).

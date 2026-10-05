@@ -23,6 +23,7 @@ import {
 import {
   isStaleParked,
   WORK_ITEM_NEW_EVENT_NAMES,
+  SCRIPT_ITEM_NEW_EVENT,
   DELIVERY_MAX_ATTEMPTS,
   CI_FAILED_MAX_ATTEMPTS,
   type AppConfig,
@@ -371,7 +372,9 @@ async function runSpawnTrigger(
           ...(block.selfDestruct !== undefined ? { selfDestruct: block.selfDestruct } : {}),
           ...(blockRestrictWrites === true ? { restrictWrites: true } : {}),
           ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
-          ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
+          ...(workItemData && (eventName !== SCRIPT_ITEM_NEW_EVENT || workItemData.url !== "")
+            ? { slots: { links: [{ label: "pr", url: workItemData.url }] } }
+            : {}),
           ...(deskGroup === true && anchorSessionId !== undefined
             ? { reuseWorkspaceSessionId: anchorSessionId }
             : {}),
