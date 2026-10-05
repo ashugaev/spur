@@ -79,6 +79,14 @@ describe("private isolated Telegram fixture", () => {
       "Invalid TELEGRAM_TEST_CHAT_ID",
     ],
     [JSON.stringify({ ...fields, TELEGRAM_BOT_TOKEN: "production-secret" }), "Unexpected"],
+    [
+      JSON.stringify({ ...fields, TELEGRAM_TEST_CHAT_ID: "-100123,456" }),
+      "Invalid TELEGRAM_TEST_CHAT_ID",
+    ],
+    [
+      JSON.stringify({ ...fields, TELEGRAM_TEST_ALLOWED_CHATS: "456" }),
+      "Invalid TELEGRAM_TEST_CHAT_ID",
+    ],
   ])("rejects incomplete or malformed seed with names only", (input, message) => {
     expect(() => loadIsolatedTelegram(repo(), input)).toThrow(message);
   });
@@ -94,6 +102,74 @@ describe("private isolated Telegram fixture", () => {
     rmSync(fixture);
     chmodSync(join(fixture, ".."), 0o755);
     expect(() => loadIsolatedTelegram(path)).toThrow("unsafe");
+  });
+  it("rejects configured token collisions before persistence and preserves an existing fixture", () => {
+    const path = repo();
+    const input = join(path, "spur.yaml");
+    const output = join(path, "project.yaml");
+    const args = [
+      resolve("bin/write-isolated-project-config.mjs"),
+      "--input",
+      input,
+      "--output",
+      output,
+      "--worktree",
+      path,
+      "--project",
+      "test",
+    ];
+    writeFileSync(
+      input,
+      `projects:\n  test:\n    path: ${path}\n  other:\n    path: ~/other\n    sources: {prod: {type: telegram, token: '${fields.TELEGRAM_TEST_BOT_TOKEN}'}}\n`,
+    );
+    const rejected = spawnSync(process.execPath, [...args, "--telegram-env-stdin"], {
+      input: JSON.stringify(fields),
+      encoding: "utf8",
+    });
+    expect(rejected.status).toBe(1);
+    expect(rejected.stderr).toBe("Telegram TEST token matches a configured Telegram source\n");
+    expect(rejected.stderr).not.toContain(fields.TELEGRAM_TEST_BOT_TOKEN);
+    expect(loadIsolatedTelegram(path)).toBeUndefined();
+    loadIsolatedTelegram(path, JSON.stringify(fields));
+    const fixture = isolatedTelegramFixturePath(path);
+    const original = readFileSync(fixture, "utf8");
+    const retained = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(retained.status).toBe(1);
+    expect(retained.stderr).toBe(rejected.stderr);
+    expect(readFileSync(fixture, "utf8")).toBe(original);
+  });
+  it("keeps unknown selected projects source-free but rejects their seed before persistence", () => {
+    const path = repo();
+    const input = join(path, "spur.yaml");
+    const output = join(path, "project.yaml");
+    writeFileSync(
+      input,
+      `projects:\n  test:\n    path: ${path}\n    sources: {prod: {type: telegram, token: production-secret}}\n`,
+    );
+    const args = [
+      resolve("bin/write-isolated-project-config.mjs"),
+      "--input",
+      input,
+      "--output",
+      output,
+      "--worktree",
+      path,
+      "--project",
+      "review",
+    ];
+    const seeded = spawnSync(process.execPath, [...args, "--telegram-env-stdin"], {
+      input: JSON.stringify(fields),
+      encoding: "utf8",
+    });
+    expect(seeded.status).toBe(1);
+    expect(seeded.stderr).toBe("Unknown isolated project\n");
+    expect(loadIsolatedTelegram(path)).toBeUndefined();
+    loadIsolatedTelegram(path, JSON.stringify(fields));
+    const launched = spawnSync(process.execPath, args, { encoding: "utf8" });
+    expect(launched.status).toBe(0);
+    expect(launched.stdout).toContain("NOT_CONNECTED/unknown-project");
+    expect(Object.keys(loadProjectConfig(output).projects["test"]?.sources ?? {})).toEqual([]);
+    expect(readFileSync(output, "utf8")).not.toContain(fields.TELEGRAM_TEST_BOT_TOKEN);
   });
   it("shares retained input across git worktrees", () => {
     const path = repo();
@@ -156,6 +232,8 @@ describe("private isolated Telegram fixture", () => {
       encoding: "utf8",
     });
     expect(first).not.toContain(fields.TELEGRAM_TEST_BOT_TOKEN);
+    expect(first).toContain("Telegram TEST fixture validated");
+    expect(first).not.toContain("Telegram TEST configured");
     expect(first).not.toContain(fields.TELEGRAM_TEST_CHAT_ID);
     expect(args.join(" ")).not.toContain(fields.TELEGRAM_TEST_BOT_TOKEN);
     execFileSync(process.execPath, args, { env });

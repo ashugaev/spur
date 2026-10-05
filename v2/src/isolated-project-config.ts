@@ -71,6 +71,40 @@ function isProjectConfigDocument(value: unknown): value is RawProjectConfigDocum
   return typeof value === "object" && value !== null;
 }
 
+function parseProjectConfig(
+  sourceConfig: string,
+): RawProjectConfigDocument & { projects: Record<string, RawProjectConfig> } {
+  const parsed = parseYaml(sourceConfig) as unknown;
+  if (!isProjectConfigDocument(parsed) || !parsed.projects) {
+    throw new Error("Project config must define projects");
+  }
+  return { ...parsed, projects: parsed.projects };
+}
+
+export function isolatedTelegramProjectBoundary(
+  inputPath: string,
+  project: string,
+): { selected: boolean; configuredTokens: string[] } {
+  const parsed = parseProjectConfig(readFileSync(inputPath, "utf8"));
+  const configuredTokens = Object.values(parsed.projects).flatMap((candidate) => {
+    const sources = candidate["sources"];
+    if (typeof sources !== "object" || sources === null) return [];
+    return Object.values(sources).flatMap((source: unknown) => {
+      if (
+        typeof source !== "object" ||
+        source === null ||
+        !("type" in source) ||
+        source.type !== "telegram" ||
+        !("token" in source) ||
+        typeof source.token !== "string"
+      )
+        return [];
+      return [source.token.trim()];
+    });
+  });
+  return { selected: Object.hasOwn(parsed.projects, project), configuredTokens };
+}
+
 export function projectUsesCurrentRepository(
   currentWorktreePath: string,
   projectPath: unknown,
@@ -89,10 +123,7 @@ export function buildIsolatedProjectConfig(
   currentBranch?: string,
   options?: { project: string; telegram?: IsolatedTelegramCredentials },
 ): string {
-  const parsed = parseYaml(sourceConfig) as unknown;
-  if (!isProjectConfigDocument(parsed) || !parsed.projects) {
-    throw new Error("Project config must define projects");
-  }
+  const parsed = parseProjectConfig(sourceConfig);
   if (options && !parsed.projects[options.project]) throw new Error("Unknown isolated project");
 
   const nextProjects = Object.fromEntries(

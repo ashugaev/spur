@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
-import { writeIsolatedProjectConfig } from "../dist/isolated-project-config.js";
+import {
+  isolatedTelegramProjectBoundary,
+  writeIsolatedProjectConfig,
+} from "../dist/isolated-project-config.js";
 import { isolatedTelegramLockPath, loadIsolatedTelegram } from "../dist/isolated-telegram.js";
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -34,10 +37,12 @@ if (!inputPath || !outputPath || !currentWorktreePath) {
 try {
   const seed = args.includes("--telegram-env-stdin") ? readFileSync(0, "utf8") : undefined;
   if (seed !== undefined && !project) throw new Error("Telegram TEST seed requires --project");
+  const boundary = project ? isolatedTelegramProjectBoundary(inputPath, project) : undefined;
+  if (seed !== undefined && !boundary?.selected) throw new Error("Unknown isolated project");
   let telegram;
-  if (project && !args.includes("--without-telegram")) {
+  if (boundary?.selected && !args.includes("--without-telegram")) {
     try {
-      telegram = loadIsolatedTelegram(currentWorktreePath, seed);
+      telegram = loadIsolatedTelegram(currentWorktreePath, seed, boundary.configuredTokens);
     } catch (error) {
       if (
         seed === undefined ||
@@ -53,13 +58,13 @@ try {
     outputPath,
     currentWorktreePath,
     currentBranch,
-    ...(project ? { options: { project, telegram } } : {}),
+    ...(boundary?.selected ? { options: { project, telegram } } : {}),
   });
   if (lockOutput)
     writeFileSync(lockOutput, telegram ? isolatedTelegramLockPath(telegram) : "", { mode: 0o600 });
   if (project)
     globalThis.process.stdout.write(
-      `${telegram ? "Telegram TEST configured" : args.includes("--without-telegram") ? "Telegram TEST disabled" : "Telegram NOT_CONNECTED/missing-fixture"}\n`,
+      `${telegram ? "Telegram TEST fixture validated" : !boundary?.selected ? "Telegram NOT_CONNECTED/unknown-project" : args.includes("--without-telegram") ? "Telegram TEST disabled" : "Telegram NOT_CONNECTED/missing-fixture"}\n`,
     );
 } catch (error) {
   const message =

@@ -109,10 +109,13 @@ export function isolatedTelegramFixturePath(worktree: string): string {
 export function loadIsolatedTelegram(
   worktree: string,
   seed?: string,
+  configuredTokens: readonly string[] = [],
 ): IsolatedTelegramCredentials | undefined {
   const path = isolatedTelegramFixturePath(worktree);
   const directory = join(path, "..");
   const seeded = seed === undefined ? undefined : validate(seed);
+  if (seeded && configuredTokens.includes(seeded.token))
+    throw new Error("Telegram TEST token matches a configured Telegram source");
   if (seeded) privateDirectory(directory);
   else {
     try {
@@ -158,6 +161,8 @@ export function loadIsolatedTelegram(
   }
   if (seeded && JSON.stringify(seeded) !== JSON.stringify(credentials))
     throw new Error("Telegram TEST fixture already contains different credentials");
+  if (configuredTokens.includes(credentials.token))
+    throw new Error("Telegram TEST token matches a configured Telegram source");
   return credentials;
 }
 

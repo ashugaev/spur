@@ -87,6 +87,10 @@ case "$1" in
   "$SPUR_TEST_REPO/v2/bin/write-isolated-project-config.mjs")
     [[ ! -f "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" ]] || exit 85
     echo "project-helper" >> "$SPUR_TEST_LOG"
+    if [[ "\${SPUR_TEST_REAL_PROJECT_WRITER:-}" == "1" ]]; then
+      shift
+      exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_PROJECT_WRITER" "$@"
+    fi
     for ((index = 1; index <= $#; index++)); do
       if [[ "\${!index}" == "--telegram-lock-output" ]]; then
         next=$((index + 1))
@@ -283,6 +287,7 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     SPUR_TEST_REAL_NODE: process.execPath,
     SPUR_TEST_IDENTITY_SCRIPT: join(worktree.repoDir, "identity.mjs"),
     SPUR_TEST_ENDPOINT_HELPER: join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"),
+    SPUR_TEST_PROJECT_WRITER: join(REPO_ROOT, "v2/bin/write-isolated-project-config.mjs"),
     SPUR_TEST_REPO: worktree.repoDir,
     TMPDIR: worktree.tmpDir,
     ...extraEnv,
@@ -306,6 +311,19 @@ afterEach(() => {
 });
 
 describe("spur-isolated-daemon build guard", () => {
+  it("starts source-free when the session project is absent from repository config", async () => {
+    const worktree = createFakeWorktree();
+    await execFileAsync("git", ["init", "-q"], { cwd: worktree.repoDir });
+    const calls = await runIsolatedDaemon(worktree, {
+      SPUR_PROJECT: "review",
+      SPUR_TEST_REAL_PROJECT_WRITER: "1",
+    });
+    expect(calls).toContain("daemon-start");
+    const runtime = readFileSync(join(worktree.toolDir, "isolated-env.sh"), "utf8");
+    const config = runtime.match(/SPUR_ISOLATED_PROJECT_CONFIG="([^\n]+)"/)?.[1];
+    expect(config).toBeDefined();
+    expect(readFileSync(config ?? "", "utf8")).toBe("projects: {}\n");
+  });
   it("keeps the shared runtime unpublished until a missing v2 build finishes", async () => {
     const worktree = createFakeWorktree();
 
