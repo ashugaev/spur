@@ -4,13 +4,28 @@ import { expect, test, vi } from "vitest";
 import { GateGitHub } from "../../src/review-gate.js";
 import { produceGates, verifyWake } from "../../src/review-gate-producer.js";
 
-test.each(["denied", "malformed", "snapshot-denied"])(
+test.each(["denied", "malformed", "merge-not-found"])(
   "candidate %s cannot abandon later head invalidation",
   async (fault) => {
     const api = new GateGitHub("fixture");
-    vi.spyOn(api, "pages").mockResolvedValue([{ number: 1 }, { number: 2 }]);
+    vi.spyOn(api, "pages").mockImplementation(async (path) =>
+      path.endsWith("/pulls?state=open") ? [{ number: 1 }, { number: 2 }] : [],
+    );
     const writes: { path: string; payload: unknown }[] = [];
     vi.spyOn(api, "request").mockImplementation(async (path, method, payload) => {
+      if (path === "/graphql")
+        return {
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [],
+                  pageInfo: { hasNextPage: false },
+                },
+              },
+            },
+          },
+        };
       if (method === "POST" || method === "PATCH") {
         writes.push({ path, payload });
         if (method === "POST")
@@ -22,8 +37,13 @@ test.each(["denied", "malformed", "snapshot-denied"])(
         if (fault === "malformed") return { head: null };
       }
       if (path.endsWith("/pulls/1") || path.endsWith("/pulls/2"))
-        return { head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) } };
-      throw new Error("snapshot 403");
+        return {
+          head: { sha: "a".repeat(40) },
+          base: { sha: "b".repeat(40) },
+          ...(path.endsWith("/pulls/1") ? { merge_commit_sha: "c".repeat(40) } : {}),
+        };
+      if (path.includes("/commits/")) throw new Error("404");
+      throw new Error("unexpected API");
     });
     await expect(
       produceGates(api, {
