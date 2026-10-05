@@ -586,8 +586,28 @@ const CLAUDE_IDENTITY_ENV_KEYS = new Set([
   "CLAUDE_CODE_CHILD_SESSION",
 ]);
 
-function buildEnvArgs(env?: Record<string, string>): string[] {
-  const envArgs: string[] = [];
+// Keys tmux itself sets in every pane. tmux discards a `-e` value for these
+// (probed on tmux 3.4), so exporting them from the launcher would change the
+// pane's $SHELL, $TERM and cwd-derived PWD instead of reproducing today's env.
+const TMUX_MANAGED_ENV_KEYS = new Set([
+  "SHELL",
+  "TERM",
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
+  "TMUX",
+  "TMUX_PANE",
+  "PWD",
+]);
+
+const SH_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// The env a new pane receives: the daemon's non-empty process.env overlaid by
+// the per-call env. Values reach the pane through an env file (see
+// writePaneEnvFile), never tmux/systemd-run argv, which any local user can
+// read from /proc. Keys sh cannot export (an inherited `BASH_FUNC_x%%`) are
+// skipped: failing the spawn on one would break every launch. A NUL byte
+// cannot be exported or passed on argv; fail fast, naming only the key.
+function buildPaneEnv(env?: Record<string, string>): Record<string, string> {
   const mergedEnv = {
     ...Object.fromEntries(
       Object.entries(process.env).filter(
@@ -596,18 +616,52 @@ function buildEnvArgs(env?: Record<string, string>): string[] {
     ),
     ...(env ?? {}),
   };
-  const sessionEnv = Object.fromEntries(
-    Object.entries(mergedEnv).filter(([key]) => !CLAUDE_IDENTITY_ENV_KEYS.has(key)),
-  );
-  for (const [key, value] of Object.entries(sessionEnv)) {
-    envArgs.push("-e", `${key}=${value}`);
+  const paneEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(mergedEnv)) {
+    if (
+      CLAUDE_IDENTITY_ENV_KEYS.has(key) ||
+      TMUX_MANAGED_ENV_KEYS.has(key) ||
+      !SH_IDENTIFIER.test(key)
+    ) {
+      continue;
+    }
+    if (value.includes("\0")) {
+      throw new Error(`Pane env value for ${key} contains a NUL byte`);
+    }
+    paneEnv[key] = value;
   }
-  return envArgs;
+  return paneEnv;
 }
 
-// Test-only: buildEnvArgs is otherwise only reachable through
+// Test-only: buildPaneEnv is otherwise only reachable through
 // createTmuxSession/createTmuxCommandSession, which fork real tmux.
-export const _buildEnvArgsForTests = buildEnvArgs;
+export const _buildPaneEnvForTests = buildPaneEnv;
+
+// Owner-only sh launcher: unlinks itself first, exports the env, then execs
+// the pane command. `command export` because a readonly name (PPID) makes a
+// bare `export` exit a POSIX-mode shell. Unique name + wx, so nothing ever
+// reuses or rewrites the path; chmod makes the mode umask-proof.
+function writePaneEnvFile(dir: string, paneEnv: Record<string, string>): string {
+  mkdirSync(dir, { recursive: true });
+  const envFile = join(dir, `${PANE_ENV_FILE_PREFIX}${randomUUID()}`);
+  const lines = [
+    `rm -f -- ${shellEscape(envFile)}`,
+    ...Object.entries(paneEnv).map(([key, value]) => `command export ${key}=${shellEscape(value)}`),
+    'exec "$@"',
+  ];
+  try {
+    writeFileSync(envFile, `${lines.join("\n")}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    chmodSync(envFile, 0o600);
+  } catch (error) {
+    rmSync(envFile, { force: true });
+    throw error;
+  }
+  return envFile;
+}
+
+function paneEnvLauncher(envFile: string): string {
+  return `exec sh ${shellEscape(envFile)}`;
+}
 
 function exactSessionTarget(sessionName: string): string {
   return `=${sessionName}`;
@@ -1029,6 +1083,7 @@ function invalidateFleetProbeCaches(): void {
 }
 
 export const AGENT_LAUNCH_SCRIPT_NAME = "agent-launch.sh";
+const PANE_ENV_FILE_PREFIX = ".spur-pane-env.";
 
 export async function createTmuxSession(input: {
   sessionName: string;
@@ -1038,20 +1093,28 @@ export async function createTmuxSession(input: {
   launchScriptDir: string;
   env?: Record<string, string>;
 }): Promise<void> {
+  const paneEnv = buildPaneEnv(input.env);
   const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
-  await runTmuxNewSession([
-    ...withTmuxSocketArgs([]),
-    "-f",
-    TMUX_CONFIG_PATH,
-    "new-session",
-    "-d",
-    "-s",
-    input.sessionName,
-    "-c",
-    input.cwd,
-    ...buildEnvArgs(input.env),
-    buildAgentPaneShellCommand(scriptPath),
-  ]);
+  // Env file lives in the session tool dir, so it goes away with the session
+  // if the pane never starts; the pane deletes it on start otherwise.
+  const envFile = writePaneEnvFile(input.launchScriptDir, paneEnv);
+  try {
+    await runTmuxNewSession([
+      ...withTmuxSocketArgs([]),
+      "-f",
+      TMUX_CONFIG_PATH,
+      "new-session",
+      "-d",
+      "-s",
+      input.sessionName,
+      "-c",
+      input.cwd,
+      buildAgentPaneShellCommand(scriptPath, envFile),
+    ]);
+  } catch (error) {
+    rmSync(envFile, { force: true });
+    throw error;
+  }
   invalidateFleetProbeCaches();
 }
 
@@ -1085,10 +1148,13 @@ function writeAgentLaunchScript(dir: string, launchCommand: string): string {
 // waits visibly in the pane instead of corrupting the command. Sourcing the
 // script keeps the agent a direct child of the pane shell, and the pane
 // drops to the same login shell when the agent exits.
-export function buildAgentPaneShellCommand(scriptPath: string): string {
+// The env file launcher runs first, so the env lands before any rc file, as
+// tmux `-e` did. "$SHELL" is expanded by tmux's default-shell before the
+// launcher runs, so the shell choice is unchanged.
+export function buildAgentPaneShellCommand(scriptPath: string, envFile: string): string {
   // tmux sets SHELL in every pane's environment to the shell it starts.
   const shell = '"$SHELL"';
-  return `exec ${shell} -lic ${shellEscape(`. ${shellEscape(scriptPath)}; exec ${shell} -l`)}`;
+  return `${paneEnvLauncher(envFile)} ${shell} -lic ${shellEscape(`. ${shellEscape(scriptPath)}; exec ${shell} -l`)}`;
 }
 
 // Non-agent panes (sidecars, project services, the Claude OAuth login pane)
@@ -1096,12 +1162,13 @@ export function buildAgentPaneShellCommand(scriptPath: string): string {
 // agent pane) — so this sanitize must never move there: agent sessions keep
 // receiving the npm prefix/globalconfig pin, non-agent panes lose it so a
 // pane that sources `~/.nvm/nvm.sh` doesn't trip nvm's own incompatibility
-// guards. `env -u` (not stripping the keys out of `input.env`/`buildEnvArgs`)
-// because `buildEnvArgs` merges the daemon's whole `process.env` — which can
+// guards. `env -u` (not stripping the keys out of `input.env`/`buildPaneEnv`)
+// because `buildPaneEnv` merges the daemon's whole `process.env` — which can
 // itself carry the pin (`update.ts`'s in-process reinit pin,
 // `install-and-restart.sh`'s exported one) — ahead of any per-call `env`, and
-// tmux `-e` can only set a variable, never unset one already in the pane's
-// environment.
+// the tmux global env can carry it too; the env file launcher can only export
+// a variable, never unset one already in the pane's environment. `env -u`
+// runs after the launcher's exports, so it strips the pin from both.
 export function buildCommandSessionShellCommand(launchCommand: string): string {
   const unsetFlags = NPM_PIN_SANITIZE_ENV_KEYS.flatMap((key) => ["-u", key]);
   // Wrap in `sh -lc` without `exec` so shell builtins (cd, set, export, ...)
@@ -1126,6 +1193,7 @@ export async function createTmuxCommandSession(input: {
 }): Promise<void> {
   const paneTarget = exactPaneTarget(input.sessionName);
   const shellCommand = buildCommandSessionShellCommand(input.launchCommand);
+  const paneEnv = buildPaneEnv(input.env);
 
   // Two-step launch so `remain-on-exit on` is set BEFORE the user command
   // runs. If we pass the shell-command directly to `new-session`, a command
@@ -1143,7 +1211,6 @@ export async function createTmuxCommandSession(input: {
     input.sessionName,
     "-c",
     input.cwd,
-    ...buildEnvArgs(input.env),
   ]);
   // The detached session now exists; bust the fleet caches so a just-created
   // session is immediately visible to tmuxSessionExists/pane probes.
@@ -1152,7 +1219,23 @@ export async function createTmuxCommandSession(input: {
   // caches holding a snapshot taken before this session existed.
   input.onCreated?.();
   await tmux("set-option", "-p", "-t", paneTarget, "remain-on-exit", "on");
-  await tmux("respawn-pane", "-k", "-t", paneTarget, shellCommand);
+  // The env file is written last, right before the respawn that consumes it,
+  // so no earlier step that can throw leaves a secret file behind. The
+  // transient default shell from new-session runs without the file's env and
+  // is killed by `respawn-pane -k`.
+  const envFile = writePaneEnvFile(resolveTempDir(), paneEnv);
+  try {
+    await tmux(
+      "respawn-pane",
+      "-k",
+      "-t",
+      paneTarget,
+      `${paneEnvLauncher(envFile)} ${shellCommand}`,
+    );
+  } catch (error) {
+    rmSync(envFile, { force: true });
+    throw error;
+  }
 }
 
 async function pasteLiteral(
