@@ -6384,12 +6384,12 @@ export class SessionService {
   }
 
   private async stopForTokenBudget(view: Pick<SessionRecord, "id">): Promise<boolean> {
-    return this.withWorkspaceLifecycleLocks(view.id, async () => {
-      const candidate = readSession(this.config.dataDir, view.id);
-      if (!candidate || candidate.status !== "running" || hasRetainedSessionError(candidate)) {
-        return false;
-      }
-      return this.withPaneWriteLock(candidate.tmuxSession, async () => {
+    const candidate = readSession(this.config.dataDir, view.id);
+    if (!candidate || candidate.status !== "running" || hasRetainedSessionError(candidate)) {
+      return false;
+    }
+    return this.withPaneWriteLock(candidate.tmuxSession, () =>
+      this.withWorkspaceLifecycleLocks(view.id, async () => {
         const readEligible = (): SessionRecord | undefined => {
           const current = readSession(this.config.dataDir, candidate.id);
           if (
@@ -6475,8 +6475,8 @@ export class SessionService {
           details: { used: (preflight?.totalTokens ?? 0) + (finalUsage?.totalTokens ?? 0), budget },
         });
         return true;
-      });
-    });
+      }),
+    );
   }
 
   private holdBudgetLimitedLaunch(session: SessionRecord): SessionRecord | undefined {
@@ -14493,40 +14493,56 @@ export class SessionService {
   // prompt already in the composer, never type over it. The marker clears
   // when the agent's transcript shows it took the prompt.
   async submitPendingLaunch(sessionId: string): Promise<SessionView> {
-    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
-      const session = readSession(this.config.dataDir, sessionId);
-      if (!session) {
-        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      }
-      assertSendableStatus(session);
-      if (!submitPending(session)) {
-        throw new LaunchPromptPendingError(`No unconfirmed prompt for ${sessionId}`);
-      }
-      await this.withPaneWriteLock(session.tmuxSession, async () => {
-        const alive = await agentProcessAlive(
-          {
-            tmuxSession: session.tmuxSession,
-            agent: session.agent,
-            launchCommand: session.launchCommand,
-          },
-          { fresh: true },
-        );
-        if (!alive) {
-          throw new AgentExitedBeforeSendError(
-            `Agent process for ${sessionId} is not running; launch prompt not submitted`,
-          );
+    const hint = readSession(this.config.dataDir, sessionId);
+    if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    return this.withPaneWriteLock(hint.tmuxSession, async () => {
+      const prepared = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+        const session = readSession(this.config.dataDir, sessionId);
+        if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+        assertSendableStatus(session);
+        if (!submitPending(session)) {
+          throw new LaunchPromptPendingError(`No unconfirmed prompt for ${sessionId}`);
         }
-        const writeStartedAt = Date.now();
-        await sendSubmitKeyToTmux(session.tmuxSession);
-        this.recordPaneWrite(session, writeStartedAt);
+        if (session.tmuxSession !== hint.tmuxSession) {
+          throw new Error(`Session ${sessionId} changed before pending prompt submission`);
+        }
+        return {
+          session,
+          stamp: this.lifecycleStamp(session),
+          generation: await this.capturePaneGeneration(session),
+        };
       });
+      const alive = await agentProcessAlive(prepared.session, { fresh: true });
+      if (!alive) {
+        throw new AgentExitedBeforeSendError(
+          `Agent process for ${sessionId} is not running; launch prompt not submitted`,
+        );
+      }
+      const submitted = await this.withSessionLifecycleLocks(
+        this.lifecycleIdsFor(prepared.session),
+        async () => {
+          const current = readSession(this.config.dataDir, sessionId);
+          if (
+            !current ||
+            !submitPending(current) ||
+            !this.lifecycleStateMatches(current, prepared.stamp) ||
+            !(await this.paneGenerationMatches(current, prepared.generation))
+          ) {
+            throw new Error(`Session ${sessionId} changed before pending prompt submission`);
+          }
+          const writeStartedAt = Date.now();
+          await sendSubmitKeyToTmux(current.tmuxSession);
+          this.recordPaneWrite(current, writeStartedAt);
+          return current;
+        },
+      );
       this.logEvent("session.spawn.launch_submitted", {
         level: "info",
         sessionId,
-        projectId: session.project,
+        projectId: submitted.project,
         message: `Pressed submit over the pending launch prompt for ${sessionId}`,
       });
-      return this.enrich(readSession(this.config.dataDir, sessionId) ?? session);
+      return this.enrich(readSession(this.config.dataDir, sessionId) ?? submitted);
     });
   }
 

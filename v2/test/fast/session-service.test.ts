@@ -1416,6 +1416,7 @@ type SessionServiceInternals = {
   deliveryRuns: Map<string, Promise<void>>;
   runDeliveryLoop(sessionId: string): Promise<void>;
   tokenBudgetActivationError(session: SessionRecord): string | undefined;
+  stopForTokenBudget(view: Pick<SessionRecord, "id">): Promise<boolean>;
   queueDeliveryInFlight: Set<string>;
   tryDeliverQueuedMessage(sessionId: string): Promise<boolean>;
   deliverPrepared(
@@ -9955,6 +9956,215 @@ describe("SessionService", () => {
   });
 
   describe("issue #907 pane-first delivery transaction", () => {
+    it.each(["submit", "pause", "replacement"] as const)(
+      "keeps ToDo live during pending-submit liveness and respects %s (issue #907 R17)",
+      async (transition) => {
+        const sessions = createSessionStore();
+        const session = runningSession({
+          agentSessionId: "pinned",
+          submitUnconfirmedAt: "2026-03-18T10:00:00.000Z",
+        });
+        sessions.set("api-1", session);
+        await useRealTodoLedger();
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const internals = sessionServiceInternals(service);
+        let releaseProbe!: () => void;
+        const probeGate = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        let probeHeld = false;
+        isProcessRunningInTmuxMock.mockImplementationOnce(async () => {
+          probeHeld = true;
+          await probeGate;
+          return true;
+        });
+        const submit = service.submitPendingLaunch("api-1").then(
+          (view) => ({ view }),
+          (error: unknown) => ({ error }),
+        );
+        await vi.waitFor(() => expect(probeHeld).toBe(true));
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        await expect(service.readTodo("api-1")).resolves.toMatchObject({ items: [] });
+        await expect(
+          service.mutateTodo(
+            "api-1",
+            {
+              action: "add",
+              text: "Probe overlap",
+              reason: "R17",
+            },
+            { kind: "human", origin: "cli" },
+          ),
+        ).resolves.toMatchObject({ counts: { open: 1 } });
+        if (transition === "pause") {
+          await expect(service.pause("api-1")).resolves.toMatchObject({ status: "stopped" });
+        } else if (transition === "replacement") {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.ppid });
+        }
+        releaseProbe();
+        if (transition === "submit") {
+          await expect(submit).resolves.toMatchObject({ view: { id: "api-1" } });
+          expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+        } else {
+          await expect(submit).resolves.toMatchObject({
+            error: expect.objectContaining({
+              message: "Session api-1 changed before pending prompt submission",
+            }),
+          });
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      },
+    );
+
+    it("settles restore, pending submit and ToDo when restore owns the pane (issue #907 R17)", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          status: "stopped",
+          agentSessionId: "pinned",
+          submitUnconfirmedAt: "2026-03-18T10:00:00.000Z",
+        }),
+      );
+      await useRealTodoLedger();
+      mockExitedThenRestoredProcess();
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn(async () => ({ found: true, lastScannedFile: null })),
+      });
+      const service = await createDisposedSessionService({ realPaneGeneration: true });
+      const internals = sessionServiceInternals(service);
+      let releaseReady!: () => void;
+      const readyGate = new Promise<void>((resolve) => {
+        releaseReady = resolve;
+      });
+      let readyHeld = false;
+      waitForTmuxReadyMock.mockImplementationOnce(async () => {
+        readyHeld = true;
+        await readyGate;
+      });
+      const settled = { restore: false, submit: false, todo: false };
+      const restore = service.restore("api-1").then((view) => {
+        settled.restore = true;
+        return view;
+      });
+      await vi.waitFor(() => expect(readyHeld).toBe(true));
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeDefined();
+      const ownerLock = internals.paneWriteLocks.get("api-1");
+      const submit = service.submitPendingLaunch("api-1").then(
+        (view) => {
+          settled.submit = true;
+          return { view };
+        },
+        (error: unknown) => {
+          settled.submit = true;
+          return { error };
+        },
+      );
+      await vi.waitFor(() => expect(internals.paneWriteLocks.get("api-1")).not.toBe(ownerLock));
+      const todo = service.readTodo("api-1").then((projection) => {
+        settled.todo = true;
+        return projection;
+      });
+      releaseReady();
+      await vi.waitFor(() => expect(settled).toEqual({ restore: true, submit: true, todo: true }));
+      await expect(restore).resolves.toMatchObject({ status: "running" });
+      await expect(submit).resolves.toMatchObject({
+        error: expect.objectContaining({ message: "No unconfirmed prompt for api-1" }),
+      });
+      await expect(todo).resolves.toMatchObject({ items: [] });
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+    });
+
+    it("settles delivery, budget stop and ToDo after budget exhaustion during acknowledgement (issue #907 R17)", async () => {
+      const config = {
+        ...baseConfig(),
+        projects: { api: { ...baseConfig().projects.api, tokenBudget: 100 } },
+      };
+      loadConfigMock.mockReturnValue(config);
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agentSessionId: "pinned" }));
+      await useRealTodoLedger();
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService({ realPaneGeneration: true });
+      const internals = sessionServiceInternals(service);
+      let releaseAck!: () => void;
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      let ackHeld = false;
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+        ackHeld = true;
+        await ackGate;
+        return { found: true, lastScannedFile: null };
+      });
+      const settled = { delivery: false, stop: false, todo: false };
+      const delivery = service
+        .send("api-1", { message: "last allowed input", queue: false })
+        .then((view) => {
+          settled.delivery = true;
+          return view;
+        });
+      await vi.waitFor(() => expect(ackHeld).toBe(true));
+      const ownerLock = internals.paneWriteLocks.get("api-1");
+      const current = sessions.get("api-1");
+      if (!current) throw new Error("Missing delivery fixture");
+      sessions.set("api-1", {
+        ...current,
+        preflightTokenUsage: {
+          status: "measured",
+          attemptCount: 1,
+          unknownAttemptCount: 0,
+          providerIterationCount: 1,
+          byProvider: { claude: { inputTokens: 100, outputTokens: 0, totalTokens: 100 } },
+          inputTokens: 100,
+          outputTokens: 0,
+          totalTokens: 100,
+        },
+      });
+      const stopping = internals.stopForTokenBudget({ id: "api-1" }).then((stopped) => {
+        settled.stop = true;
+        return stopped;
+      });
+      await vi.waitFor(() => expect(internals.paneWriteLocks.get("api-1")).not.toBe(ownerLock));
+      const todo = service
+        .mutateTodo(
+          "api-1",
+          {
+            action: "add",
+            text: "Budget overlap",
+            reason: "R17 regression",
+          },
+          { kind: "human", origin: "cli" },
+        )
+        .then((projection) => {
+          settled.todo = true;
+          return projection;
+        });
+      releaseAck();
+      await vi.waitFor(() => expect(settled).toEqual({ delivery: true, stop: true, todo: true }));
+      await expect(delivery).resolves.toMatchObject({ id: "api-1" });
+      await expect(stopping).resolves.toBe(true);
+      await expect(todo).resolves.toMatchObject({ counts: { open: 1 } });
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "budget_limited",
+        stopReason: "token_budget",
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+      expect(internals.paneWriteLocks.size).toBe(0);
+      await expect(service.readTodo("api-1")).resolves.toMatchObject({ counts: { open: 1 } });
+    });
+
     it.each(["unavailable pane", "absent pane", "unreadable starttime"] as const)(
       "fails closed before input with %s at prepare (AC7)",
       async (failure) => {
