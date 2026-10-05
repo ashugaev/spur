@@ -6747,13 +6747,6 @@ export class SessionService {
             await this.maybeNudgeForgottenReply(view);
           }
           if (view.state === "working") this.maybeSendTelegramTyping(view.id);
-          if (
-            view.status === "running" &&
-            view.state === "waiting" &&
-            !this.isInRestoreWarmup(session.id)
-          ) {
-            this.scheduleTodoNudge(session);
-          }
           // Gated on genuine transcript activity (resolveParkActivityAt), not
           // view.lastActivityAt: that value is the UI-facing max of agent
           // activity AND every routine record write, so gating on it directly
@@ -6779,6 +6772,13 @@ export class SessionService {
           ) {
             await this.parkStaleSession(view);
             continue;
+          }
+          if (
+            view.status === "running" &&
+            view.state === "waiting" &&
+            !this.isInRestoreWarmup(session.id)
+          ) {
+            this.scheduleTodoNudge(session);
           }
           const attention: AttentionState | null =
             view.state === "needs_input"
@@ -14290,6 +14290,7 @@ export class SessionService {
       });
       return { view, attempt: null };
     }
+    const activationStamp = this.lifecycleStamp(session);
     await this.ensureReadyForQueuedSend(sessionId);
     const activeRecord = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const readySession = readSession(this.config.dataDir, sessionId);
@@ -14302,7 +14303,9 @@ export class SessionService {
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       assertSendableStatus(latest);
       return this.appendQueuedMessage(
-        latest,
+        this.lifecycleStampMatches(latest, activationStamp)
+          ? { ...latest, status: "running" }
+          : latest,
         finalMessage,
         latest.queuedMessages?.awaitingPrompt === true ||
           sendState !== "waiting" ||
@@ -14320,6 +14323,12 @@ export class SessionService {
   private async ensureReadyForQueuedSend(sessionId: string): Promise<void> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    this.assertTokenBudgetAllowsActivation(hint);
+    const runtime = await this.readRuntimeSnapshot(hint);
+    if (runtime.processAlive && !runtime.probeUnresponsive) {
+      await this.captureAgentSessionId(hint, 0);
+      return;
+    }
     await this.withPaneWriteLock(hint.tmuxSession, async () => {
       const lifecycleIds = this.lifecycleIdsFor(hint);
       const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
@@ -14725,7 +14734,12 @@ export class SessionService {
       }
       return null;
     }
-    if (current.tmuxSession !== paneKey || !isRestorableStatus(current.status)) return null;
+    if (current.tmuxSession !== paneKey || !isRestorableStatus(current.status)) {
+      if (intent.kind === "direct") {
+        throw new Error(`Session ${sessionId} changed before message delivery`);
+      }
+      return null;
+    }
     this.assertTokenBudgetAllowsActivation(current);
     if (intent.kind !== "queued-drain" && submitPending(current)) {
       const held = (await this.classifySessionRecord(current)).session;
