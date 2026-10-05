@@ -1070,6 +1070,7 @@ async function handleAgentChoiceCallback(
     );
     return;
   }
+  let choice: ReturnType<typeof takeTelegramChoice> = null;
   if (pending.interfaceConsent) {
     try {
       const policy = await consentPolicy(deps.config.allowedUsers);
@@ -1088,15 +1089,42 @@ async function handleAgentChoiceCallback(
         (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
       )
         throw new Error("Interface approval task changed");
-      const decision = decideConsent(record, {
+      const active = findTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      const current = readInterfaceConsent(deps.dataDir, pending.sessionId);
+      const currentSession = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !active?.interfaceConsent ||
+        !current ||
+        current.generation !== record.generation ||
+        current.challenge !== record.challenge ||
+        !currentSession ||
+        currentSession.project !== record.projectId ||
+        currentSession.branch !== record.branch
+      )
+        throw new Error("Interface approval superseded");
+      const decision = decideConsent(current, {
         session: pending.sessionId,
         sourceId: deps.sourceId,
         projectId: deps.projectId,
         chatId: message.chat.id,
         actor: from.id,
-        challenge: pending.interfaceConsent.challenge,
-        decision: pending.interfaceConsent.decision,
+        challenge: active.interfaceConsent.challenge,
+        decision: active.interfaceConsent.decision,
       });
+      choice = takeTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      if (!choice) throw new Error("Interface approval choice retired");
       writeInterfaceConsent(deps.dataDir, decision);
       // Failed external publication keeps the durable outbox for the next lifecycle call.
       await reconcileInterfaceConsent(deps.dataDir, pending.sessionId).catch(() => {
@@ -1109,7 +1137,7 @@ async function handleAgentChoiceCallback(
       return;
     }
   }
-  const choice = takeTelegramChoice(
+  choice ??= takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
     deps.sourceId,

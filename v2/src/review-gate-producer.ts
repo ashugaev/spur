@@ -41,45 +41,64 @@ export async function verifyWake(
 }
 export async function produceGates(api: GateGitHub, policy: GatePolicy): Promise<void> {
   const prs = await api.pages(`/repos/${policy.repository}/pulls?state=open`);
+  let incomplete = false;
   for (const candidate of prs) {
-    const number = integer(candidate.number);
-    const pr = object(await api.request(`/repos/${policy.repository}/pulls/${number}`));
-    const H = string(object(pr.head).sha),
-      B = string(object(pr.base).sha);
+    let checkId: number | undefined;
     const path = `/repos/${policy.repository}/check-runs`;
-    const check = object(
-      await api.request(path, "POST", {
-        name: "Spur Approval Gate",
-        head_sha: H,
-        status: "in_progress",
-        external_id: `${number}:${H}:${B}`,
-      }),
-    );
-    if (
-      check.name !== "Spur Approval Gate" ||
-      check.head_sha !== H ||
-      object(check.app).slug !== "github-actions"
-    )
-      throw new ReviewAppError("unverified-check-writer");
-    const before = await readGateSnapshot(api, policy, number);
-    const result = evaluateSnapshot(policy, number, before);
-    const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
-    const fresh =
-      result.fingerprint === after.fingerprint &&
-      result.H === H &&
-      result.B === B &&
-      result.H === after.H &&
-      result.B === after.B;
-    const approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
-    await api.request(`${path}/${integer(check.id)}`, "PATCH", {
-      status: "completed",
-      conclusion: approved ? "success" : "failure",
-      output: {
-        title: approved ? "All approval gates pass" : "Approval blocked",
-        summary: fresh ? after.reason : "Evidence changed during evaluation",
-      },
-    });
+    try {
+      const number = integer(candidate.number);
+      const pr = object(await api.request(`/repos/${policy.repository}/pulls/${number}`));
+      const H = string(object(pr.head).sha),
+        B = string(object(pr.base).sha);
+      const check = object(
+        await api.request(path, "POST", {
+          name: "Spur Approval Gate",
+          head_sha: H,
+          status: "in_progress",
+          external_id: `${number}:${H}:${B}`,
+        }),
+      );
+      if (
+        check.name !== "Spur Approval Gate" ||
+        check.head_sha !== H ||
+        object(check.app).slug !== "github-actions"
+      )
+        throw new ReviewAppError("unverified-check-writer");
+      checkId = integer(check.id);
+      const before = await readGateSnapshot(api, policy, number);
+      const result = evaluateSnapshot(policy, number, before);
+      const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
+      const fresh =
+        result.fingerprint === after.fingerprint &&
+        result.H === H &&
+        result.B === B &&
+        result.H === after.H &&
+        result.B === after.B;
+      const approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
+      await api.request(`${path}/${integer(check.id)}`, "PATCH", {
+        status: "completed",
+        conclusion: approved ? "success" : "failure",
+        output: {
+          title: approved ? "All approval gates pass" : "Approval blocked",
+          summary: fresh ? after.reason : "Evidence changed during evaluation",
+        },
+      });
+    } catch {
+      incomplete = true;
+      if (checkId !== undefined) {
+        try {
+          await api.request(`${path}/${checkId}`, "PATCH", {
+            status: "completed",
+            conclusion: "failure",
+            output: { title: "Approval blocked", summary: "Candidate evidence unavailable" },
+          });
+        } catch {
+          /* An unconfirmed completion leaves the candidate's check in progress. */
+        }
+      }
+    }
   }
+  if (incomplete) throw new ReviewAppError("gate-reconciliation-incomplete");
 }
 export async function runProducer(env: NodeJS.ProcessEnv): Promise<void> {
   const repo = string(env.GITHUB_REPOSITORY);

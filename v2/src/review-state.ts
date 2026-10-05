@@ -106,6 +106,20 @@ export interface ConsentState {
   decision: "approved" | "rejected" | "revoked";
   generation: number;
 }
+type ConsentScope = Pick<
+  ConsentState,
+  "repo" | "pr" | "branch" | "baseBranch" | "manifestDigest" | "baselineDigest"
+>;
+export function sameConsentScope(a: ConsentScope, b: ConsentScope): boolean {
+  return (
+    a.repo === b.repo &&
+    a.pr === b.pr &&
+    a.branch === b.branch &&
+    a.baseBranch === b.baseBranch &&
+    a.manifestDigest === b.manifestDigest &&
+    a.baselineDigest === b.baselineDigest
+  );
+}
 export function parseConsentState(value: unknown): ConsentState {
   const data = object(value);
   if (data.version !== 1 || !["approved", "rejected", "revoked"].includes(String(data.decision)))
@@ -127,16 +141,20 @@ export function parseConsentState(value: unknown): ConsentState {
     generation: integer(data.generation),
   };
 }
-export async function publishConsentState(app: GitHubApp, value: ConsentState): Promise<void> {
+export async function publishConsentState(
+  app: GitHubApp,
+  value: ConsentState,
+  session = value.task,
+): Promise<void> {
   const state = parseConsentState(value);
-  const body = `${consentMarker}${JSON.stringify(state)}\n\nWritten by Spur · ${state.task}`;
+  const body = `${consentMarker}${JSON.stringify(state)}\n\nWritten by Spur · ${session}`;
   const access = await app.authenticate();
   const exact = (value: unknown) => {
     const row = object(value);
     return row.body === body && object(row.user).login === access.actor;
   };
   const path = `/repos/${state.repo}/issues/${state.pr}/comments`;
-  const previous = (await app.history(path))
+  const history = (await app.history(path))
     .map(object)
     .filter(
       (row) =>
@@ -144,7 +162,28 @@ export async function publishConsentState(app: GitHubApp, value: ConsentState): 
         typeof row.body === "string" &&
         row.body.startsWith(consentMarker),
     )
-    .sort((a, b) => integer(b.id) - integer(a.id))[0];
+    .filter((row) => {
+      try {
+        return sameConsentScope(
+          parseConsentState(
+            JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
+          ),
+          state,
+        );
+      } catch {
+        throw new ReviewAppError("invalid-consent-state");
+      }
+    });
+  for (const row of history) {
+    const current = parseConsentState(
+      JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
+    );
+    if (current.task !== state.task && state.decision === "approved")
+      throw new ReviewAppError("consent-authority-handoff-required");
+    if (current.task === state.task && current.generation > state.generation)
+      throw new ReviewAppError("consent-superseded");
+  }
+  const previous = history.sort((a, b) => integer(b.id) - integer(a.id))[0];
   if (previous) {
     let current: ConsentState;
     try {
@@ -154,8 +193,6 @@ export async function publishConsentState(app: GitHubApp, value: ConsentState): 
     } catch {
       throw new ReviewAppError("invalid-consent-state");
     }
-    if (current.task === state.task && current.generation > state.generation)
-      throw new ReviewAppError("consent-superseded");
     if (exact(previous)) return;
     if (current.task === state.task && current.generation === state.generation)
       throw new ReviewAppError("consent-conflict");

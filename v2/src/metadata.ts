@@ -2307,7 +2307,8 @@ export function takeTelegramChoice(
 }
 
 export function readInterfaceConsent(dataDir: string, sessionId: string): InterfaceConsent | null {
-  const path = join(dataDir, "sessions", sessionId, "interface-consent.json");
+  const authority = workspaceIdOf(readSession(dataDir, sessionId) ?? { id: sessionId });
+  const path = join(dataDir, "sessions", authority, "interface-consent.json");
   if (!existsSync(path)) return null;
   let value: unknown;
   try {
@@ -2315,11 +2316,16 @@ export function readInterfaceConsent(dataDir: string, sessionId: string): Interf
   } catch {
     throw new Error("Unreadable interface consent record");
   }
-  return parseConsent(value);
+  const record = parseConsent(value);
+  if (record.authority !== authority) throw new Error("Interface consent authority mismatch");
+  return record;
 }
 
 export function writeInterfaceConsent(dataDir: string, record: InterfaceConsent): void {
-  writePrivateJsonFile(join(dataDir, "sessions", record.session, "interface-consent.json"), record);
+  writePrivateJsonFile(
+    join(dataDir, "sessions", record.authority, "interface-consent.json"),
+    record,
+  );
 }
 
 export function readTelegramReplyTarget(

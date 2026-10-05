@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   decideConsent,
   parseConsent,
@@ -55,6 +58,92 @@ const click = (challenge: string) => ({
   actor: 10,
   challenge,
   decision: "approved" as const,
+});
+it("desk requesters share one consent generation; old requester cannot recover revoked authority", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "spur-consent-authority-"));
+  try {
+    for (const id of ["task", "sibling"]) {
+      metadata.writeSession(dataDir, {
+        id,
+        workspaceId: "task",
+        project: "project",
+        agent: "codex",
+        prompt: "fixture",
+        branch: "feature/change",
+        worktree: true,
+        worktreePath: "/fixture",
+        tmuxSession: id,
+        launchCommand: "fixture",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } satisfies SessionRecord);
+    }
+    const first = {
+      ...proposal(),
+      decision: "approved" as const,
+      delivery: "sent" as const,
+      decidedAt: new Date().toISOString(),
+    };
+    metadata.writeInterfaceConsent(dataDir, first);
+    const second = proposeConsent(
+      { ...first, session: "sibling" },
+      metadata.readInterfaceConsent(dataDir, "sibling"),
+    );
+    const revoked = decideConsent(
+      { ...second, delivery: "sent" },
+      {
+        ...click(second.challenge),
+        session: "sibling",
+        decision: "revoked",
+      },
+    );
+    metadata.writeInterfaceConsent(dataDir, revoked);
+    expect(metadata.readInterfaceConsent(dataDir, "task")).toEqual(revoked);
+    await reconcileInterfaceConsent(dataDir, "task");
+    expect(metadata.readInterfaceConsent(dataDir, "sibling")).toEqual(revoked);
+    const fresh = proposeConsent({ ...second, session: "sibling" }, revoked);
+    const approved = decideConsent(
+      { ...fresh, delivery: "sent" },
+      {
+        ...click(fresh.challenge),
+        session: "sibling",
+      },
+    );
+    expect(approved.generation).toBe(3);
+    expect(approved.decision).toBe("approved");
+    metadata.writeInterfaceConsent(dataDir, approved);
+    expect(metadata.readInterfaceConsent(dataDir, "task")).toEqual(approved);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+it("preserves first PR/task binding when renewal uses fresh source payload", () => {
+  const previous = { ...proposal(), boundPr: { number: 5, headRepository: "owner/repo" } };
+  const input = {
+    session: "task",
+    repository: "owner/repo",
+    branch: "feature/change",
+    baseBranch: "main",
+    projectId: "project",
+    sourceId: "telegram",
+    chatId: -100,
+    approverUserId: 10,
+    manifest,
+  };
+  const renewed = proposeConsent(input, previous);
+  expect(renewed.boundPr).toEqual(previous.boundPr);
+  expect(renewed.generation).toBe(previous.generation + 1);
+  expect(() => proposeConsent({ ...input, session: "other-task" }, previous)).toThrow(
+    "task binding changed",
+  );
+  const sibling = proposeConsent({ ...input, session: "other-task", authority: "task" }, previous);
+  expect(sibling.boundPr).toEqual(previous.boundPr);
+  expect(sibling.generation).toBe(2);
+  const newBranch = proposeConsent({ ...sibling, branch: "feature/next" }, sibling);
+  expect(newBranch.boundPr).toBeUndefined();
+  expect(newBranch.generation).toBe(3);
+  expect(newBranch.authority).toBe("task");
 });
 
 describe("semantic interface consent", () => {
@@ -220,6 +309,7 @@ describe("semantic interface consent", () => {
       expect(publish).toHaveBeenCalledWith(
         expect.any(github.GitHubApp),
         expect.objectContaining({ decision: "revoked", task: "task", generation: 1 }),
+        "task",
       );
       expect(write).toHaveBeenCalledWith(
         "unused",

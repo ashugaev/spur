@@ -12,11 +12,13 @@ import { parseConfig } from "./review-app.js";
 import { readInterfaceConsent, writeInterfaceConsent, readSession } from "./metadata.js";
 import { readStateBody, stateMarker, publishConsentState } from "./review-state.js";
 import { resolveWorkspaceState } from "./workspace-store.js";
+import { workspaceIdOf } from "./session-desk.js";
 
 export type ConsentDecision = "approved" | "rejected" | "revoked";
 export interface InterfaceConsent {
   version: 1;
   session: string;
+  authority: string;
   repository: string;
   branch: string;
   baseBranch: string;
@@ -77,15 +79,28 @@ export function proposeConsent(
     | "decision"
     | "delivery"
     | "outbox"
-  >,
+    | "authority"
+  > & { authority?: string },
   previous: InterfaceConsent | null,
   now = Date.now(),
 ): InterfaceConsent {
   const manifest = parseManifest(input.manifest);
   if (manifest.repository !== input.repository || manifest.baseBranch !== input.baseBranch)
     throw new Error("Interface proposal repository/base mismatch");
+  const authority = input.authority ?? input.session;
+  if (
+    previous &&
+    (previous.authority !== authority ||
+      previous.repository !== input.repository ||
+      previous.projectId !== input.projectId)
+  )
+    throw new Error("Interface proposal task binding changed");
+  const { boundPr: _boundPr, ...proposal } = input;
+  const sameBranch = previous?.branch === input.branch && previous.baseBranch === input.baseBranch;
   return {
-    ...input,
+    ...proposal,
+    authority,
+    ...(sameBranch && previous.boundPr ? { boundPr: previous.boundPr } : {}),
     manifest,
     version: 1,
     manifestDigest: manifestDigest(manifest),
@@ -149,6 +164,7 @@ export function parseConsent(value: unknown): InterfaceConsent {
   const manifest = parseManifest(data.manifest);
   for (const field of [
     "session",
+    "authority",
     "repository",
     "branch",
     "baseBranch",
@@ -198,10 +214,16 @@ export async function reconcileInterfaceConsent(dataDir: string, sessionId: stri
   const session = storedSession
     ? { ...storedSession, pr: resolveWorkspaceState(dataDir, storedSession).pr }
     : null;
-  if (!record || record.decision === "pending" || record.outbox === "published" || !session?.pr)
+  if (
+    !record ||
+    record.session !== sessionId ||
+    record.decision === "pending" ||
+    record.outbox === "published" ||
+    !session?.pr
+  )
     return;
   if (
-    record.session !== session.id ||
+    record.authority !== workspaceIdOf(session) ||
     record.projectId !== session.project ||
     record.repository !== session.pr.repo ||
     record.branch !== session.branch
@@ -312,19 +334,23 @@ export async function reconcileInterfaceConsent(dataDir: string, sessionId: stri
   const fresh = object(await code.request(pullPath));
   if (object(fresh.head).sha !== head.sha || object(fresh.base).sha !== base.sha)
     throw new Error("Interface PR moved");
-  await publishConsentState(code, {
-    version: 1,
-    repo: record.repository,
-    pr: session.pr.number,
-    task: record.session,
-    branch: record.branch,
-    baseBranch: record.baseBranch,
-    manifestDigest: record.manifestDigest,
-    baselineDigest: record.baselineDigest,
-    challenge: record.challenge,
-    decision: record.decision,
-    generation: record.generation,
-  });
+  await publishConsentState(
+    code,
+    {
+      version: 1,
+      repo: record.repository,
+      pr: session.pr.number,
+      task: record.authority,
+      branch: record.branch,
+      baseBranch: record.baseBranch,
+      manifestDigest: record.manifestDigest,
+      baselineDigest: record.baselineDigest,
+      challenge: record.challenge,
+      decision: record.decision,
+      generation: record.generation,
+    },
+    record.session,
+  );
   const settled = readInterfaceConsent(dataDir, sessionId);
   if (
     !settled ||

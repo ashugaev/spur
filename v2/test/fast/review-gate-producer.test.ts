@@ -1,8 +1,48 @@
 import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { GateGitHub } from "../../src/review-gate.js";
-import { verifyWake } from "../../src/review-gate-producer.js";
+import { produceGates, verifyWake } from "../../src/review-gate-producer.js";
+
+test.each(["denied", "malformed", "snapshot-denied"])(
+  "candidate %s cannot abandon later head invalidation",
+  async (fault) => {
+    const api = new GateGitHub("fixture");
+    vi.spyOn(api, "pages").mockResolvedValue([{ number: 1 }, { number: 2 }]);
+    const writes: { path: string; payload: unknown }[] = [];
+    vi.spyOn(api, "request").mockImplementation(async (path, method, payload) => {
+      if (method === "POST" || method === "PATCH") {
+        writes.push({ path, payload });
+        if (method === "POST")
+          return { id: writes.length, ...(payload as object), app: { slug: "github-actions" } };
+        return {};
+      }
+      if (path.endsWith("/pulls/1")) {
+        if (fault === "denied") throw new Error("403");
+        if (fault === "malformed") return { head: null };
+      }
+      if (path.endsWith("/pulls/1") || path.endsWith("/pulls/2"))
+        return { head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) } };
+      throw new Error("snapshot 403");
+    });
+    await expect(
+      produceGates(api, {
+        repository: "owner/repo",
+        baseBranch: "main",
+        codeActor: 11,
+        browserActor: 12,
+        ciWorkflowId: 1,
+        ciJobs: ["Quality"],
+      }),
+    ).rejects.toThrow("gate-reconciliation-incomplete");
+    expect(
+      writes.some(({ payload }) =>
+        (payload as { external_id?: string }).external_id?.startsWith("2:"),
+      ),
+    ).toBe(true);
+    expect(writes.at(-1)?.payload).toMatchObject({ status: "completed", conclusion: "failure" });
+  },
+);
 
 test.each(["pull_request_review", "pull_request"])(
   "validates readonly %s relay from authenticated run/workflow rather than name or PR association",

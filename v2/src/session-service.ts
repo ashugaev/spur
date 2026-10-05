@@ -13712,6 +13712,7 @@ export class SessionService {
       consent = proposeConsent(
         {
           session: sessionId,
+          authority: workspaceIdOf(session),
           repository,
           branch,
           baseBranch: project.defaultBranch,

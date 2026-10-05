@@ -8,7 +8,13 @@ import {
   ReviewAppError,
 } from "./github-app.js";
 import { baselineDigest, digest, manifestDigest } from "./review-interface.js";
-import { consentMarker, parseConsentState, readStateBody, stateMarker } from "./review-state.js";
+import {
+  consentMarker,
+  parseConsentState,
+  readStateBody,
+  stateMarker,
+  sameConsentScope,
+} from "./review-state.js";
 
 export interface GatePolicy {
   repository: string;
@@ -190,12 +196,28 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     )
       return blocked("interface-disagreement");
     if (first.status === "required") {
+      const scope = {
+        repo: policy.repository,
+        pr: number,
+        branch: string(head.ref),
+        baseBranch: string(base.ref),
+        manifestDigest: manifestDigest(first.manifest),
+        baselineDigest: baselineDigest(first.manifest),
+      };
       const latest = snapshot.comments
         .filter(
           (row) =>
             integer(object(row.user).id) === policy.codeActor &&
             typeof row.body === "string" &&
             row.body.startsWith(consentMarker),
+        )
+        .filter((row) =>
+          sameConsentScope(
+            parseConsentState(
+              JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
+            ),
+            scope,
+          ),
         )
         .sort((a, b) => integer(b.id) - integer(a.id))[0];
       if (!latest || object(latest.user).type !== "Bot") return blocked("consent-missing");
@@ -214,6 +236,8 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
           const prior = parseConsentState(
             JSON.parse(row.body.slice(consentMarker.length).split("\n")[0] ?? ""),
           );
+          if (!sameConsentScope(prior, scope)) continue;
+          if (prior.task !== consent.task) return blocked("consent-task-conflict");
           if (prior.task === consent.task && prior.generation > consent.generation) consent = prior;
         }
       } catch {

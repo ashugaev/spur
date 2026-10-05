@@ -7,6 +7,9 @@ import type {
 } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
+import * as consentModule from "../../src/review-interface-consent.js";
+import * as workspaceModule from "../../src/workspace.js";
+import type { SessionRecord } from "../../src/types.js";
 import {
   findTelegramChoice,
   findTelegramMessageSession,
@@ -282,6 +285,124 @@ describe("telegramSourceModule", () => {
   afterEach(async () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
+  it.each(["renewal", "buttonless"])(
+    "retired consent callback cannot overwrite authority after %s while branch lookup awaits",
+    async (replacement) => {
+      const dataDir = await createTempDir("spur-consent-race-");
+      tempDirs.push(dataDir);
+      const record = {
+        ...consentModule.proposeConsent(
+          {
+            session: "api-1",
+            repository: "owner/repo",
+            branch: "feature/example",
+            baseBranch: "main",
+            projectId: "api",
+            sourceId: "telegram",
+            chatId: -1001,
+            approverUserId: 123,
+            manifest: {
+              version: 1,
+              repository: "owner/repo",
+              baseBranch: "main",
+              surfaces: [
+                { kind: "CLI", id: "run", before: ["old"], after: ["new"], constraints: [] },
+              ],
+            },
+          },
+          null,
+        ),
+        delivery: "sent" as const,
+      };
+      metadataModule.writeInterfaceConsent(dataDir, record);
+      metadataModule.writeSession(dataDir, {
+        id: "api-1",
+        project: "api",
+        branch: "feature/example",
+        worktreePath: "/fixture",
+        agent: "codex",
+        prompt: "fixture",
+        worktree: true,
+        tmuxSession: "fixture",
+        launchCommand: "fixture",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } satisfies SessionRecord);
+      const choice = {
+        token: "old",
+        offerId: "old",
+        sessionId: "api-1",
+        chatId: -1001,
+        text: "Approve",
+        value: "approved",
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+        interfaceConsent: { challenge: record.challenge, decision: "approved" as const },
+      };
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [choice],
+      });
+      vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+        repositories: ["owner/repo"],
+        approverUserId: 123,
+      });
+      const reconcile = vi
+        .spyOn(consentModule, "reconcileInterfaceConsent")
+        .mockResolvedValue(undefined);
+      let entered!: () => void, release!: (branch: string) => void;
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.spyOn(workspaceModule, "readCurrentBranch").mockImplementation(async () => {
+        entered();
+        return new Promise<string>((resolve) => {
+          release = resolve;
+        });
+      });
+      try {
+        const { bot, emit } = await startSource(dataDir);
+        if (!bot) throw new Error("missing bot");
+        const callback = bot.emitCallback({
+          callbackQuery: {
+            data: "spur_choice:old",
+            from: { id: 123 },
+            message: { message_id: 7, chat: { id: -1001 } },
+          },
+          answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        });
+        await waiting;
+        const renewed =
+          replacement === "renewal"
+            ? { ...consentModule.proposeConsent(record, record), delivery: "sent" as const }
+            : record;
+        if (replacement === "renewal") metadataModule.writeInterfaceConsent(dataDir, renewed);
+        writeTelegramOffer(dataDir, "api", "telegram", {
+          sessionId: "api-1",
+          chatId: -1001,
+          choices:
+            replacement === "renewal"
+              ? [
+                  {
+                    ...choice,
+                    token: "new",
+                    offerId: "new",
+                    interfaceConsent: { challenge: renewed.challenge, decision: "approved" },
+                  },
+                ]
+              : [],
+        });
+        release("feature/example");
+        await callback;
+        expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(renewed);
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
 
   it("binds a Telegram thread with /watch and emits bound messages", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");

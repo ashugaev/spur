@@ -176,12 +176,10 @@ test.each(["clean", "moved", "read-denied"])(
       throw new Error("unexpected API path");
     });
     if (mode === "read-denied")
-      await expect(produceGates(api, policy)).rejects.toThrow("gate-http-403");
+      await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
     else await produceGates(api, policy);
     expect(writes[0]?.status).toBe("in_progress");
-    expect(writes.at(-1)?.conclusion).toBe(
-      mode === "clean" ? "success" : mode === "moved" ? "failure" : undefined,
-    );
+    expect(writes.at(-1)?.conclusion).toBe(mode === "clean" ? "success" : "failure");
   },
 );
 test.each(["pending", "failure", "cancelled", "skipped", "neutral", "missing", "stale"])(
@@ -327,4 +325,10 @@ test("required semantics need matching consent; internal same-file edits reuse a
     body: `${consentMarker}${JSON.stringify(consent)}`,
   });
   expect(evaluateSnapshot(policy, 5, snapshot).reason).toBe("consent-not-approved");
+  snapshot.comments.push({
+    id: 33,
+    user: { id: 11, type: "Bot" },
+    body: `${consentMarker}${JSON.stringify({ ...consent, generation: 3, challenge: "three" })}`,
+  });
+  expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("APPROVED");
 });
