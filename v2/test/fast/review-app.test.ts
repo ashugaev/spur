@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, writeFile, rm, readFile, symlink } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile, symlink, link, stat } from "node:fs/promises";
 import type * as FileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,6 +121,7 @@ test.each(["clean", "race", "denial", "ambiguous", "wrong-actor"])(
         const payload = JSON.parse(String(options.body)) as { body: string; commit_id: string };
         review = {
           id: 9,
+          submitted_at: "2026-10-05T10:00:00Z",
           state: "APPROVED",
           body: payload.body,
           commit_id: payload.commit_id,
@@ -167,6 +168,7 @@ async function lifecycleFixture() {
   await prepareReview(config, request, draft.session);
   interface Review {
     id: number;
+    submitted_at: string;
     state: string;
     body: string;
     commit_id: string;
@@ -207,6 +209,7 @@ async function lifecycleFixture() {
       };
       const review = {
         id: history.length + 1,
+        submitted_at: new Date(Date.UTC(2026, 9, 5, 10, 0, history.length)).toISOString(),
         state: payload.event === "APPROVE" ? "APPROVED" : "CHANGES_REQUESTED",
         body: payload.body,
         commit_id: payload.commit_id,
@@ -338,6 +341,7 @@ test("current native verdict supersedes historical exact approval even without n
   await publishReview(f.config, f.request, draft.session, f.transport);
   f.history.push({
     id: 2,
+    submitted_at: "2026-10-05T12:00:00Z",
     state: "CHANGES_REQUESTED",
     body: "new blocking verdict",
     commit_id: draft.H,
@@ -543,4 +547,100 @@ test.each([
   ).rejects.toThrow("receipt-state-invalid");
   expect(await readFile(f.request.receipt, "utf8")).toBe(bytes);
   expect(f.posts()).toBe(0);
+});
+
+test.each(["symlink", "hardlink", "readable"])(
+  "exclusive staging ignores stale %s temp without following it",
+  async (variant) => {
+    const f = await lifecycleFixture();
+    const request = { ...f.request, attempt: "stale-temp-test" };
+    const sentinel = join(f.dir, "sentinel");
+    await writeFile(sentinel, "SENTINEL", { mode: 0o600 });
+    const stale = `${request.receipt}.${request.attempt}.tmp`;
+    if (variant === "symlink") await symlink(sentinel, stale);
+    else if (variant === "hardlink") await link(sentinel, stale);
+    else await writeFile(stale, "STALE", { mode: 0o644 });
+    expect((await prepareReview(f.config, request, draft.session)).status).toBe("PENDING");
+    expect(await readFile(sentinel, "utf8")).toBe("SENTINEL");
+    expect((await stat(request.receipt)).mode & 0o077).toBe(0);
+  },
+);
+
+test("invalid same-actor history rejects before native mutation", async () => {
+  const f = await lifecycleFixture();
+  f.history.push({
+    id: NaN,
+    submitted_at: "2026-10-05T12:00:00Z",
+    state: "APPROVED",
+    body: "bad",
+    commit_id: draft.H,
+    user: { login: "code[bot]" },
+  });
+  expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+    "BLOCKED",
+  );
+  expect(f.posts()).toBe(0);
+});
+
+test("failed evidence invalidates stored APPROVED authority without overwriting bytes", async () => {
+  const f = await lifecycleFixture();
+  await publishReview(f.config, f.request, draft.session, f.transport);
+  const prior = JSON.parse(await readFile(f.request.receipt, "utf8")) as Record<string, unknown>;
+  const bytes = JSON.stringify({ ...prior, evidence: [{ status: "failed", evidence: "failure" }] });
+  await writeFile(f.request.receipt, bytes);
+  await expect(
+    prepareReview(f.config, { ...f.request, attempt: "new" }, draft.session),
+  ).rejects.toThrow("receipt-state-invalid");
+  expect(await readFile(f.request.receipt, "utf8")).toBe(bytes);
+});
+
+test.each(["later-block", "later-approval", "missing", "tied"])(
+  "native %s chronology uses submission time and blocks unknown ordering",
+  async (mode) => {
+    const f = await lifecycleFixture();
+    await publishReview(f.config, f.request, draft.session, f.transport);
+    const exact = f.history[0];
+    if (!exact) throw new Error("missing fixture review");
+    exact.id = mode === "later-approval" ? 50 : 100;
+    if (mode === "later-approval") exact.submitted_at = "2026-10-05T12:00:00Z";
+    if (mode === "missing") Reflect.deleteProperty(exact, "submitted_at");
+    f.history.push({
+      id: mode === "later-approval" ? 100 : 50,
+      state: "CHANGES_REQUESTED",
+      body: "blocking verdict",
+      commit_id: draft.H,
+      user: { login: "code[bot]" },
+      submitted_at:
+        mode === "later-approval"
+          ? "2026-10-05T09:00:00Z"
+          : mode === "tied"
+            ? exact.submitted_at
+            : "2026-10-05T12:00:00Z",
+    });
+    expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+      mode === "later-approval" ? "APPROVED" : "BLOCKED",
+    );
+    expect(f.posts()).toBe(1);
+  },
+);
+
+test("readback token refresh cannot rotate App identity and persist approval", async () => {
+  const f = await lifecycleFixture();
+  let rotating = false;
+  const transport: typeof fetch = async (url, options) => {
+    const path = new URL(String(url)).pathname;
+    if (path.endsWith("/reviews/1") && !rotating) {
+      rotating = true;
+      return new Response("expired", { status: 401 });
+    }
+    if (rotating && path === "/app") return Response.json({ id: 1, slug: "rotated" });
+    return f.transport(url, options);
+  };
+  expect(await publishReview(f.config, f.request, draft.session, transport)).toMatchObject({
+    status: "BLOCKED",
+    reason: "identity-changed",
+    reviewId: 1,
+    mutationStarted: true,
+  });
+  expect(f.posts()).toBe(1);
 });

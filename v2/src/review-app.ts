@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
@@ -238,12 +238,23 @@ async function transitionReview(
   };
   let ownsAttempt = false;
   const save = async () => {
-    const temp = `${canonical}.${request.attempt}.tmp`;
+    let stage: string | undefined;
     try {
-      await writeFile(temp, JSON.stringify(receipt, null, 2), { mode: 0o600 });
+      stage = await mkdtemp(join(dirname(canonical), ".review-"));
+      const temp = join(stage, "receipt.json");
+      await writeFile(temp, JSON.stringify(receipt, null, 2), {
+        mode: 0o600,
+        flag: "wx",
+        flush: true,
+      });
       await rename(temp, canonical);
     } catch {
       throw new ReviewAppError("receipt-write");
+    } finally {
+      if (stage)
+        await rm(stage, { recursive: true, force: true }).catch(() => {
+          throw new ReviewAppError("receipt-temp-cleanup");
+        });
     }
   };
   const fresh = async (actor: string) => {
@@ -327,6 +338,8 @@ async function transitionReview(
         (prior.mutationStarted && prior.inputDigest === null) ||
         (prior.reviewId !== null && !prior.mutationStarted) ||
         (prior.reviewBlocked && prior.status !== "BLOCKED") ||
+        (prior.status === "APPROVED" &&
+          prior.evidence.some((value) => object(value).status !== "passed")) ||
         (["APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status)) &&
           (prior.inputDigest === null ||
             prior.reviewId === null ||
@@ -394,6 +407,36 @@ async function transitionReview(
     await save();
     // Reconcile before mutation too: rerunning a completed attempt must not duplicate its review.
     const history = await app.history(`${path}/reviews`);
+    const effective = (rows: unknown[]) => {
+      const submitted = rows
+        .map(object)
+        .filter((review) => {
+          const user = object(review.user);
+          if (user.login !== access.actor) return false;
+          integer(review.id);
+          if (["COMMENTED", "PENDING"].includes(String(review.state))) return false;
+          if (
+            !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(String(review.state)) ||
+            typeof review.body !== "string" ||
+            typeof review.commit_id !== "string" ||
+            !/^[a-f0-9]{40}$/.test(review.commit_id) ||
+            typeof review.submitted_at !== "string" ||
+            !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(review.submitted_at) ||
+            !Number.isFinite(Date.parse(review.submitted_at))
+          )
+            throw new ReviewAppError("invalid-history");
+          return true;
+        })
+        .sort((a, b) => Date.parse(String(b.submitted_at)) - Date.parse(String(a.submitted_at)));
+      if (
+        submitted.length > 1 &&
+        Date.parse(String(submitted[0]?.submitted_at)) ===
+          Date.parse(String(submitted[1]?.submitted_at))
+      )
+        throw new ReviewAppError("ambiguous-history");
+      return submitted[0];
+    };
+    effective(history);
     const attemptReviews = history.filter((value) => {
       const review = object(value);
       return (
@@ -404,15 +447,6 @@ async function transitionReview(
     });
     if (attemptReviews.some((value) => !matching(value)))
       throw new ReviewAppError("attempt-conflict");
-    const effective = (rows: unknown[]) =>
-      rows
-        .map(object)
-        .filter(
-          (review) =>
-            object(review.user).login === access.actor &&
-            ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(String(review.state)),
-        )
-        .sort((a, b) => integer(b.id) - integer(a.id))[0];
     const existing = history.filter(matching);
     let published: unknown;
     if (existing.length > 1) throw new ReviewAppError("duplicate-attempt");
@@ -494,6 +528,11 @@ export function registerReviewApp(program: Command): void {
         const request = parseAttempt(await readJson(options.request));
         const result = await transitionReview(config, request, process.env["SPUR_SESSION"], action);
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (
+          (action === "prepare" && result.status !== "PENDING") ||
+          (action === "block" && result.reason !== "review-blocked")
+        )
+          process.exitCode = 1;
       });
   }
   command
