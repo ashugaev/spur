@@ -233,6 +233,7 @@ async function transitionReview(
         : null,
     appId: config[request.lane].appId,
     reviewBlocked: false,
+    mutationStarted: false,
     supersededAttempts: [] as string[],
   };
   let ownsAttempt = false;
@@ -270,12 +271,68 @@ async function transitionReview(
         prior.PR !== request.pr ||
         prior.lane !== request.lane ||
         !Array.isArray(prior.supersededAttempts) ||
-        !prior.supersededAttempts.every((value) => typeof value === "string") ||
+        !prior.supersededAttempts.every(
+          (value) => typeof value === "string" && /^[a-zA-Z0-9_.-]+$/.test(value),
+        ) ||
+        new Set(prior.supersededAttempts).size !== prior.supersededAttempts.length ||
+        prior.supersededAttempts.includes(prior.attempt) ||
         typeof prior.attempt !== "string" ||
+        !/^[a-zA-Z0-9_.-]+$/.test(prior.attempt) ||
+        typeof prior.session !== "string" ||
+        !/^[a-zA-Z0-9_.-]+$/.test(prior.session) ||
+        typeof prior.H !== "string" ||
+        !/^[a-f0-9]{40}$/.test(prior.H) ||
+        typeof prior.B !== "string" ||
+        !/^[a-f0-9]{40}$/.test(prior.B) ||
+        typeof prior.contractDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(prior.contractDigest) ||
         typeof prior.reviewBlocked !== "boolean" ||
+        typeof prior.mutationStarted !== "boolean" ||
+        typeof prior.reason !== "string" ||
+        (prior.localVerdict !== null &&
+          prior.localVerdict !== "APPROVED" &&
+          prior.localVerdict !== "CHANGES_REQUESTED") ||
+        !Array.isArray(prior.evidence) ||
+        !prior.evidence.every((value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+          const row = object(value);
+          return (
+            (row.status === "passed" || row.status === "failed") &&
+            typeof row.evidence === "string" &&
+            row.evidence.length > 0
+          );
+        }) ||
+        (prior.coverage !== null &&
+          (() => {
+            if (
+              !prior.coverage ||
+              typeof prior.coverage !== "object" ||
+              Array.isArray(prior.coverage)
+            )
+              return true;
+            const coverage = object(prior.coverage);
+            return (
+              typeof coverage.challenger !== "string" ||
+              !/^[a-zA-Z0-9_.-]+$/.test(coverage.challenger) ||
+              coverage.challenger === prior.session ||
+              typeof coverage.output !== "string" ||
+              !coverage.output ||
+              coverage.omissionsClosed !== true
+            );
+          })()) ||
+        (prior.reviewId !== null &&
+          (!Number.isSafeInteger(prior.reviewId) || Number(prior.reviewId) <= 0)) ||
         !Number.isSafeInteger(prior.appId) ||
+        Number(prior.appId) <= 0 ||
+        (prior.mutationStarted && prior.inputDigest === null) ||
+        (prior.reviewId !== null && !prior.mutationStarted) ||
+        (prior.reviewBlocked && prior.status !== "BLOCKED") ||
         (["APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status)) &&
-          prior.inputDigest === null) ||
+          (prior.inputDigest === null ||
+            prior.reviewId === null ||
+            prior.localVerdict !== prior.status ||
+            prior.coverage === null ||
+            prior.evidence.length === 0)) ||
         (prior.inputDigest !== null &&
           (typeof prior.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(prior.inputDigest))) ||
         !["PENDING", "BLOCKED", "APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status))
@@ -303,6 +360,8 @@ async function transitionReview(
         )
           throw new ReviewAppError("attempt-conflict");
         if (action === "block") receipt.inputDigest = prior.inputDigest;
+        receipt.mutationStarted = prior.mutationStarted;
+        receipt.reviewId = prior.reviewId === null ? null : integer(prior.reviewId);
       } else {
         if (action !== "prepare") throw new ReviewAppError("attempt-not-current");
         receipt.supersededAttempts = [...receipt.supersededAttempts, prior.attempt];
@@ -362,7 +421,11 @@ async function transitionReview(
         throw new ReviewAppError("native-verdict-superseded");
       published = existing[0];
     } else {
+      if (receipt.mutationStarted || receipt.reviewId !== null)
+        throw new ReviewAppError("publication-uncertain");
       await fresh(access.actor);
+      receipt.mutationStarted = true;
+      await save();
       try {
         published = await app.request(`${path}/reviews`, "POST", {
           commit_id: request.H,
@@ -370,6 +433,14 @@ async function transitionReview(
           body,
         });
       } catch (error) {
+        if (
+          error instanceof ReviewAppError &&
+          ["http-400", "http-401", "http-403", "http-404", "http-422"].includes(error.category)
+        ) {
+          receipt.mutationStarted = false;
+          await save();
+          throw error;
+        }
         if (
           !(error instanceof ReviewAppError) ||
           !["ambiguous-write", "http-500", "http-502", "http-503", "http-504"].includes(
@@ -383,10 +454,12 @@ async function transitionReview(
       }
     }
     const id = integer(object(published).id);
+    receipt.mutationStarted = true;
+    receipt.reviewId = id;
+    await save();
     const readback = await app.request(`${path}/reviews/${id}`);
     if (!matching(published) || !matching(readback) || integer(object(readback).id) !== id)
       throw new ReviewAppError("review-mismatch");
-    receipt.reviewId = id;
     await fresh(access.actor);
     const current = effective(await app.history(`${path}/reviews`));
     if (!current || current.id !== id || !matching(current))

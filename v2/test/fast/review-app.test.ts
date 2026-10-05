@@ -1,8 +1,9 @@
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, writeFile, rm, readFile, symlink } from "node:fs/promises";
+import type * as FileSystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   parseConfig,
   parseRequest,
@@ -12,7 +13,24 @@ import {
 } from "../../src/review-app.js";
 
 const dirs: string[] = [];
+const faults = vi.hoisted(() => ({ approvedWrite: false }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FileSystem>();
+  return {
+    ...actual,
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      if (
+        faults.approvedWrite &&
+        typeof args[1] === "string" &&
+        args[1].includes('"status": "APPROVED"')
+      )
+        throw new Error("fixture final save denied");
+      return actual.writeFile(...args);
+    },
+  };
+});
 afterEach(async () => {
+  faults.approvedWrite = false;
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 const draft = {
@@ -379,4 +397,150 @@ test("concurrent directory aliases share one canonical lane lock", async () => {
   }
   expect((await first).status).toBe("APPROVED");
   expect(f.posts()).toBe(1);
+});
+
+test.each(["network", "http-403", "http-404"])(
+  "unknown committed POST stays reconciliation-only after %s and hidden history",
+  async (failure) => {
+    const f = await lifecycleFixture();
+    let hidden = false,
+      reconciliationFails = true;
+    const transport: typeof fetch = async (url, options) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith("/reviews") && options?.method === "POST") {
+        expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
+          mutationStarted: true,
+          status: "BLOCKED",
+        });
+        await f.transport(url, options);
+        throw new Error("lost response after commit");
+      }
+      if (path.endsWith("/reviews") && f.posts() > 0) {
+        if (reconciliationFails) {
+          if (failure !== "network")
+            return new Response("history denied", { status: Number(failure.slice(5)) });
+          throw new Error("history unavailable");
+        }
+        if (hidden) return Response.json([]);
+      }
+      return f.transport(url, options);
+    };
+    expect((await publishReview(f.config, f.request, draft.session, transport)).status).toBe(
+      "BLOCKED",
+    );
+    expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
+      mutationStarted: true,
+      reason: failure,
+    });
+    reconciliationFails = false;
+    hidden = true;
+    expect(await publishReview(f.config, f.request, draft.session, transport)).toMatchObject({
+      status: "BLOCKED",
+      reason: "publication-uncertain",
+    });
+    expect(f.posts()).toBe(1);
+    expect(f.history).toHaveLength(1);
+    hidden = false;
+    expect((await publishReview(f.config, f.request, draft.session, transport)).status).toBe(
+      "APPROVED",
+    );
+    expect(f.posts()).toBe(1);
+  },
+);
+
+test("lost readback retains known review ID and never repeats POST against empty history", async () => {
+  const f = await lifecycleFixture();
+  let failReadback = true,
+    hideHistory = false;
+  const transport: typeof fetch = async (url, options) => {
+    const path = new URL(String(url)).pathname;
+    if (failReadback && path.endsWith("/reviews/1")) throw new Error("readback lost");
+    if (hideHistory && path.endsWith("/reviews") && options?.method !== "POST")
+      return Response.json([]);
+    return f.transport(url, options);
+  };
+  expect(await publishReview(f.config, f.request, draft.session, transport)).toMatchObject({
+    status: "BLOCKED",
+    reviewId: 1,
+    mutationStarted: true,
+  });
+  failReadback = false;
+  hideHistory = true;
+  expect(await publishReview(f.config, f.request, draft.session, transport)).toMatchObject({
+    status: "BLOCKED",
+    reviewId: 1,
+  });
+  expect(f.posts()).toBe(1);
+});
+
+test("final receipt save failure retains mutation and known ID for reconciliation-only retry", async () => {
+  const f = await lifecycleFixture();
+  faults.approvedWrite = true;
+  expect(await publishReview(f.config, f.request, draft.session, f.transport)).toMatchObject({
+    status: "BLOCKED",
+    reason: "receipt-write",
+    mutationStarted: true,
+    reviewId: 1,
+  });
+  faults.approvedWrite = false;
+  const transport: typeof fetch = async (url, options) => {
+    if (new URL(String(url)).pathname.endsWith("/reviews") && options?.method !== "POST")
+      return Response.json([]);
+    return f.transport(url, options);
+  };
+  expect((await publishReview(f.config, f.request, draft.session, transport)).status).toBe(
+    "BLOCKED",
+  );
+  expect(f.posts()).toBe(1);
+  expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(1);
+});
+
+test("definitive rejected POST supports unchanged retry without permitting ambiguous retry", async () => {
+  const f = await lifecycleFixture();
+  f.deny();
+  expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+    "BLOCKED",
+  );
+  expect(JSON.parse(await readFile(f.request.receipt, "utf8"))).toMatchObject({
+    mutationStarted: false,
+  });
+  f.allow();
+  expect((await publishReview(f.config, f.request, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(2);
+  expect(f.history).toHaveLength(1);
+});
+
+test.each([
+  "H",
+  "B",
+  "session",
+  "contractDigest",
+  "mutationStarted",
+  "reviewId",
+  "attempt",
+  "reviewBlocked",
+  "inputDigest",
+  "supersededAttempts",
+  "evidence",
+  "coverage",
+  "localVerdict",
+  "reason",
+  "appId",
+])("prepare preserves malformed authority missing %s", async (field) => {
+  const f = await lifecycleFixture();
+  const stored = JSON.parse(await readFile(f.request.receipt, "utf8")) as Record<string, unknown>;
+  const { [field]: removed, ...remaining } = stored;
+  expect(removed).not.toBeUndefined();
+  const bytes = JSON.stringify(remaining);
+  await writeFile(f.request.receipt, bytes);
+  await expect(
+    prepareReview(f.config, { ...f.request, attempt: "new-attempt" }, draft.session),
+  ).rejects.toThrow("receipt-state-invalid");
+  expect(await readFile(f.request.receipt, "utf8")).toBe(bytes);
+  expect(f.posts()).toBe(0);
 });
