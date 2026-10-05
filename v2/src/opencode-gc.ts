@@ -1383,6 +1383,9 @@ export function createOpenCodeGcDeps(
         // count for no additional safety inside one run.
         processArgs: () => (processArgsOnce ??= readProcessArgs()),
       }),
+    // opencode's `event` table has no FK to `session` (it cascades off
+    // `event_sequence`), so only `opencode session delete` removes event
+    // rows. Never hand-written SQL.
     deleteSession: async (id, deleteCwd) => {
       await execFileAsync(opencodeCommand(), ["session", "delete", id], {
         cwd: deleteCwd,
