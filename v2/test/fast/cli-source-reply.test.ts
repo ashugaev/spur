@@ -1,4 +1,7 @@
 import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const postJsonMock = vi.fn();
 const writeStdoutMock = vi.fn();
@@ -85,6 +88,31 @@ describe("source reply CLI", () => {
       { message: "all green" },
       "/tmp/spur.yaml",
     );
+  });
+
+  it("sends a semantic proposal without manufacturing approval", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-interface-cli-"));
+    const path = join(directory, "manifest.json");
+    const manifest = { version: 1, repository: "owner/repo", baseBranch: "main", surfaces: [] };
+    try {
+      await writeFile(path, JSON.stringify(manifest));
+      await parseSourceReply([
+        "source",
+        "reply",
+        "Review interface",
+        "--request-interface-approval",
+        path,
+        "--json",
+      ]);
+      expect(postJsonMock).toHaveBeenCalledWith(
+        "/tmp/dist/cli.js",
+        "/sessions/api-1/source-reply",
+        { message: "Review interface", requestInterfaceApproval: manifest },
+        "/tmp/spur.yaml",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("maps repeated --button flags to labels and values", async () => {

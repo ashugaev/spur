@@ -3,6 +3,8 @@ import { mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
+import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
+import { publishLaneState } from "./review-state.js";
 import {
   GitHubApp,
   ReviewAppError,
@@ -36,6 +38,7 @@ interface Attempt {
   receipt: string;
 }
 interface Request extends Attempt {
+  assessment: InterfaceAssessment;
   body: string;
   verdict: "APPROVED" | "CHANGES_REQUESTED";
   coverage: { challenger: string; output: string; omissionsClosed: boolean };
@@ -115,6 +118,7 @@ export function parseRequest(value: unknown): Request {
     throw new ReviewAppError("failed-scenarios");
   return {
     ...attempt,
+    assessment: parseAssessment(data.assessment),
     body: string(data.body),
     verdict: data.verdict,
     coverage: { challenger, output: string(coverage.output), omissionsClosed: true },
@@ -156,11 +160,21 @@ export function publishReview(
 ) {
   return transitionReview(config, request, session, "publish", transport);
 }
-export function prepareReview(config: Config, request: Attempt, session: string | undefined) {
-  return transitionReview(config, request, session, "prepare");
+export function prepareReview(
+  config: Config,
+  request: Attempt,
+  session: string | undefined,
+  transport?: typeof fetch,
+) {
+  return transitionReview(config, request, session, "prepare", transport);
 }
-export function blockReview(config: Config, request: Attempt, session: string | undefined) {
-  return transitionReview(config, request, session, "block");
+export function blockReview(
+  config: Config,
+  request: Attempt,
+  session: string | undefined,
+  transport?: typeof fetch,
+) {
+  return transitionReview(config, request, session, "block", transport);
 }
 async function transitionReview(
   config: Config,
@@ -245,6 +259,22 @@ async function transitionReview(
     } catch {
       throw new ReviewAppError("receipt-write");
     }
+  };
+  const announce = async () => {
+    await publishLaneState(app, {
+      version: 1,
+      repo: request.repo,
+      pr: request.pr,
+      lane: request.lane,
+      session: request.session,
+      attempt: request.attempt,
+      H: request.H,
+      B: request.B,
+      status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+      evidenceDigest: digest({ rows: receipt.evidence, coverage: receipt.coverage }),
+      reviewId: receipt.reviewId,
+      assessment: "assessment" in request ? request.assessment : null,
+    });
   };
   const fresh = async (actor: string) => {
     const pr = object(await app.request(path));
@@ -374,6 +404,7 @@ async function transitionReview(
       receipt.reviewBlocked = true;
     }
     await save();
+    await announce();
     if (action !== "publish") return receipt;
     if (!("body" in request)) throw new ReviewAppError("invalid-request");
     const access = await app.authenticate();
@@ -466,13 +497,20 @@ async function transitionReview(
       throw new ReviewAppError("native-verdict-superseded");
     await fresh(access.actor);
     receipt.status = request.verdict;
+    await announce();
     await save();
     return receipt;
   } catch (error) {
     if (!ownsAttempt) throw error;
     receipt.status = "BLOCKED";
     receipt.reason = error instanceof ReviewAppError ? error.category : "internal";
+    if (action !== "publish") receipt.reviewBlocked = true;
     await save();
+    try {
+      await announce();
+    } catch {
+      /* Unconfirmed external state blocks continuation; cannot revoke an unseen old vote. */
+    }
     return receipt;
   } finally {
     await release();
@@ -494,6 +532,7 @@ export function registerReviewApp(program: Command): void {
         const request = parseAttempt(await readJson(options.request));
         const result = await transitionReview(config, request, process.env["SPUR_SESSION"], action);
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (result.status === "BLOCKED") process.exitCode = 1;
       });
   }
   command

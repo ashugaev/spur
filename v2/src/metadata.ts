@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
   AUTOMATIC_REMINDER_MAX_ATTEMPTS,
@@ -445,6 +446,7 @@ function isTelegramMessageOwner(value: unknown): value is TelegramMessageOwner {
 function isTelegramChoice(value: unknown): value is TelegramChoice {
   if (!value || typeof value !== "object") return false;
   const choice = value as Partial<TelegramChoice>;
+  const purpose = (value as Record<string, unknown>).interfaceConsent;
   return (
     typeof choice.token === "string" &&
     choice.token.length > 0 &&
@@ -458,6 +460,10 @@ function isTelegramChoice(value: unknown): value is TelegramChoice {
       (typeof choice.messageThreadId === "number" && Number.isInteger(choice.messageThreadId))) &&
     typeof choice.text === "string" &&
     typeof choice.value === "string" &&
+    (purpose === undefined ||
+      (isRecord(purpose) &&
+        typeof purpose.challenge === "string" &&
+        ["approved", "rejected", "revoked"].includes(String(purpose.decision)))) &&
     typeof choice.expiresAt === "string" &&
     !Number.isNaN(Date.parse(choice.expiresAt))
   );
@@ -2298,6 +2304,22 @@ export function takeTelegramChoice(
     choices.filter((choice) => choice.offerId !== taken.offerId),
   );
   return taken;
+}
+
+export function readInterfaceConsent(dataDir: string, sessionId: string): InterfaceConsent | null {
+  const path = join(dataDir, "sessions", sessionId, "interface-consent.json");
+  if (!existsSync(path)) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new Error("Unreadable interface consent record");
+  }
+  return parseConsent(value);
+}
+
+export function writeInterfaceConsent(dataDir: string, record: InterfaceConsent): void {
+  writePrivateJsonFile(join(dataDir, "sessions", record.session, "interface-consent.json"), record);
 }
 
 export function readTelegramReplyTarget(

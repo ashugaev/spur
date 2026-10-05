@@ -14,6 +14,7 @@ import {
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({ approvedWrite: false }));
+vi.mock("../../src/review-state.js", () => ({ publishLaneState: vi.fn(async () => undefined) }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FileSystem>();
   return {
@@ -46,6 +47,11 @@ const draft = {
   verdict: "APPROVED",
   coverage: { challenger: "critic-1", output: "matrix.txt", omissionsClosed: true },
   rows: [{ status: "passed", evidence: "proof.png" }],
+  assessment: {
+    status: "N/A",
+    manifest: { version: 1, repository: "owner/repo", baseBranch: "main", surfaces: [] },
+    dispositions: [],
+  },
 };
 test("blocks absent independent challenge and failed approval rows", () => {
   expect(() =>

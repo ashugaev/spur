@@ -4,6 +4,7 @@
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
 `review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
+`review-gate evaluate --repo <owner/name> --pr <number> --policy <file> --json`: Actions-token approval aggregation; `v2/src/review-gate.ts`.
 
 ## Session tools and environment
 
@@ -92,7 +93,7 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Source sup
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Text starts with the session label line (`<id> — <title>`). Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Reply routing, binding and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply`: bound-chat message/buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent; `v2/src/cli.ts`, `v2/src/session-service.ts`.
 
 ## spur-slots
 

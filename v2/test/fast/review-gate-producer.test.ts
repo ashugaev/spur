@@ -1,0 +1,78 @@
+import { readFile } from "node:fs/promises";
+import { parse } from "yaml";
+import { expect, test } from "vitest";
+import { GateGitHub } from "../../src/review-gate.js";
+import { verifyWake } from "../../src/review-gate-producer.js";
+
+test.each(["pull_request_review", "pull_request"])(
+  "validates readonly %s relay from authenticated run/workflow rather than name or PR association",
+  async (event) => {
+    const file = event === "pull_request_review" ? "review-wake.yml" : "ci.yml";
+    const api = new GateGitHub("fixture", async (url) =>
+      Response.json(
+        String(url).includes("/runs/")
+          ? {
+              id: 1,
+              repository: { full_name: "owner/repo" },
+              event,
+              workflow_id: 2,
+              path: `.github/workflows/${file}`,
+              run_attempt: 1,
+              pull_requests: [],
+            }
+          : { id: 2, path: `.github/workflows/${file}` },
+      ),
+    );
+    await expect(
+      verifyWake(api, "owner/repo", "workflow_run", {
+        workflow_run: {
+          id: 1,
+          run_attempt: 1,
+          conclusion: "success",
+          pull_requests: [{ number: 999 }],
+        },
+      }),
+    ).resolves.toBeUndefined();
+  },
+);
+test.each(["repository", "workflow", "path", "attempt", "self"])(
+  "rejects wrong authenticated upstream %s",
+  async (fault) => {
+    const api = new GateGitHub("fixture", async (url) =>
+      Response.json(
+        String(url).includes("/runs/")
+          ? {
+              id: 1,
+              repository: { full_name: fault === "repository" ? "other/repo" : "owner/repo" },
+              event: fault === "self" ? "workflow_run" : "pull_request_review",
+              workflow_id: fault === "workflow" ? 3 : 2,
+              path: fault === "path" ? "wrong" : ".github/workflows/review-wake.yml",
+              run_attempt: fault === "attempt" ? 2 : 1,
+            }
+          : { id: 2, path: ".github/workflows/review-wake.yml" },
+      ),
+    );
+    await expect(
+      verifyWake(api, "owner/repo", "workflow_run", { workflow_run: { id: 1, run_attempt: 1 } }),
+    ).rejects.toThrow();
+  },
+);
+test("wake has no checkout/secrets; writer filters self and privileged PR execution", async () => {
+  const wake = await readFile(
+    new URL("../../../.github/workflows/review-wake.yml", import.meta.url),
+    "utf8",
+  );
+  expect(wake).not.toMatch(/checkout|secrets\.|upload-artifact|download-artifact/);
+  const writer = parse(
+    await readFile(
+      new URL("../../../.github/workflows/review-approval.yml", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    on: { workflow_run: { workflows: string[] } };
+    jobs: { approvals: { steps: { with?: { ref?: string; "persist-credentials"?: boolean } }[] } };
+  };
+  expect(writer.on.workflow_run.workflows).toEqual(["CI", "Spur Review Wake"]);
+  expect(writer.jobs.approvals.steps[1]?.with?.["persist-credentials"]).toBe(false);
+  expect(writer.jobs.approvals.steps[1]?.with?.ref).not.toContain("pull_request.head");
+});

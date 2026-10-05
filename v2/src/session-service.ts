@@ -7,6 +7,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  consentPolicy,
+  proposeConsent,
+  presentConsent,
+  repositoryOf,
+  reconcileInterfaceConsent,
+  type InterfaceConsent,
+} from "./review-interface-consent.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   annotateLifecycleError,
@@ -243,6 +251,8 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  readInterfaceConsent,
+  writeInterfaceConsent,
   recordTelegramMessages,
   writeTelegramOffer,
   readTelegramReplyTarget,
@@ -13665,7 +13675,15 @@ export class SessionService {
     if (!message) {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
-    const buttons = parseSourceReplyButtons(request.buttons);
+    let buttons = parseSourceReplyButtons(request.buttons);
+    await reconcileInterfaceConsent(this.config.dataDir, sessionId).catch(() => {
+      this.logEvent("source.interface-consent.blocked", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: "Interface consent publication blocked; decision retained locally",
+      });
+    });
 
     const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
     const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
@@ -13679,8 +13697,47 @@ export class SessionService {
       );
     }
 
+    let consent: InterfaceConsent | undefined;
+    if (request.requestInterfaceApproval !== undefined) {
+      if (buttons.length > 0)
+        throw new InvalidSourceReplyInputError("Interface approval owns its buttons");
+      const policy = await consentPolicy(source.allowedUsers);
+      const project = this.config.projects[session.project];
+      if (!project || target.projectId !== session.project)
+        throw new InvalidSourceReplyInputError("Interface approval source/project mismatch");
+      const repository = await repositoryOf(session.worktreePath);
+      const branch = await readCurrentBranch(session.worktreePath);
+      if (!policy.repositories.includes(repository) || branch !== session.branch)
+        throw new InvalidSourceReplyInputError("Interface approval repository/branch mismatch");
+      consent = proposeConsent(
+        {
+          session: sessionId,
+          repository,
+          branch,
+          baseBranch: project.defaultBranch,
+          projectId: target.projectId,
+          sourceId: target.sourceId,
+          chatId: target.chatId,
+          approverUserId: policy.approverUserId,
+          manifest: request.requestInterfaceApproval as InterfaceConsent["manifest"],
+        },
+        readInterfaceConsent(this.config.dataDir, sessionId),
+      );
+      buttons = [
+        { text: "Approve interface", value: "approved" },
+        { text: "Reject interface", value: "rejected" },
+        { text: "Revoke interface approval", value: "revoked" },
+      ];
+      writeInterfaceConsent(this.config.dataDir, consent);
+    }
     const view = await this.enrich(session);
     const choices = buildTelegramChoices(sessionId, target, buttons);
+    if (consent)
+      for (const choice of choices)
+        choice.interfaceConsent = {
+          challenge: consent.challenge,
+          decision: choice.value as "approved" | "rejected" | "revoked",
+        };
     // Persisted before the send: a click can only arrive once Telegram has the
     // keyboard, and the row must already be there when it does.
     if (choices.length > 0) {
@@ -13694,7 +13751,7 @@ export class SessionService {
     const result = await sendTelegramReply(
       source,
       target,
-      `${telegramSessionLabel(view)}\n${message}`,
+      `${telegramSessionLabel(view)}\n${message}${consent ? `\n\n${presentConsent(consent)}` : ""}`,
       {
         topicName: telegramTopicName(view),
         ...(choices.length > 0
@@ -13706,7 +13763,19 @@ export class SessionService {
             }
           : {}),
       },
-    );
+    ).catch((error: unknown) => {
+      if (consent) {
+        const current = readInterfaceConsent(this.config.dataDir, sessionId);
+        if (current?.challenge === consent.challenge)
+          writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "failed" });
+      }
+      throw error;
+    });
+    if (consent) {
+      const current = readInterfaceConsent(this.config.dataDir, sessionId);
+      if (current?.challenge === consent.challenge)
+        writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
+    }
     // A buttonless reply supersedes the question it answers, so it retires the
     // pending offer — after the send, since a throw leaves the keyboard up.
     if (choices.length === 0) {
@@ -15381,6 +15450,17 @@ export class SessionService {
       ...(nextPr ? { pr: nextPr } : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
+    if (nextPr)
+      for (const member of this.listDeskSessions(session)) {
+        await reconcileInterfaceConsent(this.config.dataDir, member.id).catch(() => {
+          this.logEvent("source.interface-consent.blocked", {
+            level: "warn",
+            sessionId: member.id,
+            projectId: member.project,
+            message: "Interface consent publication blocked; decision retained locally",
+          });
+        });
+      }
     const displaySlots = deriveSessionSlots(nextState);
     this.logEvent("session.slots.updated", {
       level: "info",
