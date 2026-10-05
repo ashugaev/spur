@@ -10,6 +10,16 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
+  it("names isolated Telegram fixture inputs, stdin seed, and readiness failures", async () => {
+    const commands = await readRepoFile("docs/commands.md");
+    const configuration = await readRepoFile("docs/configuration.md");
+    expect(commands).toContain("isolated-ui");
+    expect(commands).toContain("--telegram-env-stdin");
+    expect(commands).toContain("Telegram NOT_CONNECTED/missing-fixture");
+    expect(commands).toContain("Telegram NOT_CONNECTED/owner-busy");
+    for (const field of ["BOT_TOKEN", "CHAT_ID", "ALLOWED_USERS", "ALLOWED_CHATS"])
+      expect(configuration).toContain(`TELEGRAM_TEST_${field}`);
+  });
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 

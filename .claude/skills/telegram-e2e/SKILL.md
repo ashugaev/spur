@@ -19,7 +19,7 @@ NEVER
 
 INPUTS
 
-  Operator env, names only. Missing one: stop, ask the operator, never fall back to the production bot.
+  Private repository fixture or operator env, names only. Missing input: stop; never fall back to production bot. Seed contract: docs/commands.md Sidecars.
 
   TELEGRAM_TEST_BOT_TOKEN      dedicated test bot, admin in the test forum
   TELEGRAM_TEST_CHAT_ID        forum supergroup, topics on
@@ -31,10 +31,10 @@ INPUTS
 
 SETUP
 
-  1. Compile: `(cd v2 && ./node_modules/.bin/tsc)`.
-  2. Export TELEGRAM_TEST_*, unset the production Telegram vars, start: `env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID bash scripts/spur-isolated-daemon.sh`. The daemon resolves `${VAR}` at config load; a var missing at start makes the registry skip the config (`daemon.registry.warning` in events.jsonl).
-  3. The isolated project config strips sources and triggers. Write a separate test project config: telegram source from TELEGRAM_TEST_* (`token`, `chatId`, `allowedUsers`, `allowedChats`), `autoSpawn`, and a `telegram:message` send trigger with `interrupt: false`. Keys: docs/configuration.md. Connect it: `"$SPUR_SESSION_TOOL_DIR/spur-isolated" connect <file>`.
-  4. Check `source.started` for the test project in the isolated events.jsonl, and no 409 in the production daemon log.
+  1. Compile: `env -u SPUR_BUILD_RESTART pnpm --dir v2 build`.
+  2. Seed dedicated TEST JSON through stdin once per repository; docs/commands.md Sidecars. Never pass secrets in argv. Existing differing fixture refuses overwrite.
+  3. Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name isolated-ui`; dependency starts daemon, retained fixture attaches current checkout/project. No clone or manual connect. Backend-only `isolated-daemon` lacks voice UI; voice needs configured provider.
+  4. Check own isolated `source.started`, no registry/source error or 409. Missing fixture or busy bot: `Telegram NOT_CONNECTED`, source-free daemon; stop test. Retire only owned poller before another start. Restart complete stand: stop UI, stop daemon, start UI.
   5. Fresh isolated data dir: claude shows a folder-trust dialog for its shepherd dir, and the launch Enter picks "No, exit". Open claude there once by hand and accept.
 
   Bare `spur` inside a test agent can resolve to the production install. Test prompts tell agents to do the work themselves and spawn nothing. After the run, check production events.jsonl for no spawn or session of the test project.

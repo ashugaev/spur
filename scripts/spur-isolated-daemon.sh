@@ -161,6 +161,7 @@ REQUIRED_BUILD_OUTPUTS=(
   "$CLI_PATH"
   "$V2_DIR/dist/isolated-instance-config.js"
   "$V2_DIR/dist/isolated-project-config.js"
+  "$V2_DIR/dist/isolated-telegram.js"
 )
 BUILD_INPUT_DIRS=(
   "$V2_DIR/src"
@@ -170,6 +171,7 @@ WRITE_CONFIG_ARGS=(
   --input "$PROJECT_CONFIG_PATH"
   --output "$PROJECT_CONFIG_RUNTIME_PATH"
   --worktree "$CURRENT_WORKTREE"
+  --project "${SPUR_PROJECT:?SPUR_PROJECT not set}"
 )
 if [[ -n "$CURRENT_BRANCH" ]]; then
   WRITE_CONFIG_ARGS+=(--branch "$CURRENT_BRANCH")
@@ -264,7 +266,18 @@ mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
   --base "$CONFIG_DIR/config.yaml" \
   --output "$CONFIG_DIR/config.yaml"
 
-"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
+# Hold the bot lock across both execs for the daemon's lifetime.
+"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" \
+  --telegram-lock-output "$CONFIG_DIR/telegram-lock"
+TELEGRAM_LOCK_PATH="$(<"$CONFIG_DIR/telegram-lock")"
+if [[ -n "$TELEGRAM_LOCK_PATH" ]]; then
+  exec 9>"$TELEGRAM_LOCK_PATH"
+  if ! flock -n 9; then
+    echo "Telegram NOT_CONNECTED/owner-busy" >&2
+    exec 9>&-
+    "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" --without-telegram
+  fi
+fi
 
 echo "Isolated daemon starting on port $AGENT_PORT"
 exec "$ISOLATED_WRAPPER" daemon start

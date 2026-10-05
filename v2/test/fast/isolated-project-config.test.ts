@@ -29,6 +29,35 @@ afterEach(() => {
 });
 
 describe("isolated project config", () => {
+  it("repins explicit tilde project, preserves defaults, disables nested automatic sidecars", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+    const output = buildIsolatedProjectConfig(
+      `projects:\n  api:\n    path: ~/project\n    defaultAgent: claude\n    defaultModels: {claude: sonnet}\n    sidecars:\n      isolated-daemon: {command: daemon, autoStart: true}\n      isolated-ui: {command: ui, autoStart: true}\n  other:\n    path: /tmp/other\n    sources: {prod: {type: github}}\n`,
+      repoDir,
+      "feature/current",
+      {
+        project: "api",
+        telegram: { token: "fake", chatId: -123, allowedUsers: [456], allowedChats: [-123] },
+      },
+    );
+    const parsed = parseYaml(output);
+    expect(parsed.projects.api.path).toBe(repoDir);
+    expect(parsed.projects.api.defaultBranch).toBe("feature/current");
+    expect(parsed.projects.api.defaultModels).toEqual({ claude: "sonnet" });
+    expect(parsed.projects.api.sources["tg-dev"].autoSpawn).toEqual({
+      enabled: true,
+      project: "api",
+      agent: "claude",
+      selfDestruct: { enabled: false },
+    });
+    expect(parsed.projects.api.sidecars["isolated-daemon"].autoStart).toBe(false);
+    expect(parsed.projects.api.sidecars["isolated-ui"].autoStart).toBe(false);
+    expect(parsed.projects.other.sources).toBeUndefined();
+    expect(() =>
+      buildIsolatedProjectConfig("projects: {}", repoDir, undefined, { project: "missing" }),
+    ).toThrow("Unknown isolated project");
+  });
   it("matches projects that use the current repository", () => {
     const repoDir = createRepo("spur-isolated-project-config-");
     cleanupPaths.push(repoDir);
