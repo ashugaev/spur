@@ -46,6 +46,7 @@ CANONICAL GATE ORDER
 PROCESS
 
   1  Intake: parse the user message into concrete todos, record each as a Spur ToDo item before any delegation or recon — `--text` the imperative step, `--reason` why it exists. No agent spawns before the plan is in the ledger. State acceptance criteria first. Treat pasted logs, errors, diffs, PR links as source of truth. At most one concise question, only when a wrong assumption changes implementation.
+     Apply .agents/skills/github/references/agent-protocol.md product/interface gates; route independent classification/approval check before dependent coding.
   2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo in Spur ToDo.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
        - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
