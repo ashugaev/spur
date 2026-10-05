@@ -1038,7 +1038,7 @@ function baseConfig() {
   };
 }
 
-async function loadSessionServiceModule() {
+async function loadSessionServiceModule(options?: { realPaneGeneration?: boolean }) {
   vi.resetModules();
   const module = await import("../../src/session-service.js");
   const BaseSessionService = module.SessionService;
@@ -1053,7 +1053,11 @@ async function loadSessionServiceModule() {
         }>;
         paneGenerationMatches?: () => Promise<boolean>;
       };
-      if (internals.capturePaneGeneration && internals.paneGenerationMatches) {
+      if (
+        !options?.realPaneGeneration &&
+        internals.capturePaneGeneration &&
+        internals.paneGenerationMatches
+      ) {
         vi.spyOn(internals, "capturePaneGeneration").mockImplementation(async (session) => ({
           tmuxSession: session.tmuxSession,
           panePid: 4242,
@@ -1460,8 +1464,8 @@ function sessionServiceInternals(service: unknown): SessionServiceInternals {
 const SUBMITTED: AgentSendOutcome = "submitted";
 const SUBMIT_UNCONFIRMED: AgentSendOutcome = "submit_unconfirmed";
 
-async function createDisposedSessionService() {
-  const { SessionService } = await loadSessionServiceModule();
+async function createDisposedSessionService(options?: { realPaneGeneration?: boolean }) {
+  const { SessionService } = await loadSessionServiceModule(options);
   const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
     deferBackgroundLoops: true,
   });
@@ -9951,6 +9955,106 @@ describe("SessionService", () => {
   });
 
   describe("issue #907 pane-first delivery transaction", () => {
+    it.each(["unavailable pane", "absent pane", "unreadable starttime"] as const)(
+      "fails closed before input with %s at prepare (AC7)",
+      async (failure) => {
+        const sessions = createSessionStore();
+        const original = runningSession({ agentSessionId: "pinned" });
+        sessions.set("api-1", original);
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const internals = sessionServiceInternals(service);
+        lookupTmuxPanePidMock.mockResolvedValue(
+          failure === "unavailable pane"
+            ? { status: "unavailable" }
+            : { status: "ok", panePid: failure === "absent pane" ? null : -1 },
+        );
+        writeSessionMock.mockClear();
+
+        await expect(
+          service.send("api-1", { message: "never type", queue: false }),
+        ).rejects.toThrow(
+          failure === "unreadable starttime"
+            ? "pane process generation is unreadable"
+            : "pane generation is unavailable",
+        );
+
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")).toEqual(original);
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      },
+    );
+
+    it.each([
+      "unavailable pane",
+      "changed generation",
+      "unreadable starttime",
+      "deleted target",
+    ] as const)(
+      "does not write stale state after %s during acknowledgement (AC8)",
+      async (failure) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ agentSessionId: "pinned" }));
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const internals = sessionServiceInternals(service);
+        let releaseAck!: () => void;
+        const ackGate = new Promise<void>((resolve) => {
+          releaseAck = resolve;
+        });
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+          await ackGate;
+          return { found: true, lastScannedFile: null };
+        });
+        const send = service.send("api-1", { message: "generation A input", queue: false });
+        const outcome = send.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+        const replacement = runningSession({
+          agentSessionId: "pinned",
+          prompt: "replacement sentinel",
+          updatedAt: "2026-03-18T10:09:00.000Z",
+          queuedMessages: { messages: ["retain me"], awaitingPrompt: true },
+        });
+        if (failure === "deleted target") {
+          sessions.delete("api-1");
+        } else {
+          sessions.set("api-1", replacement);
+          if (failure === "unreadable starttime") {
+            const reap = await import("../../src/sidecars/reap.js");
+            vi.spyOn(reap, "readProcessStarttime").mockResolvedValue(null);
+          } else {
+            lookupTmuxPanePidMock.mockResolvedValue(
+              failure === "unavailable pane"
+                ? { status: "unavailable" }
+                : { status: "ok", panePid: process.ppid },
+            );
+          }
+        }
+        writeSessionMock.mockClear();
+        releaseAck();
+        const settled = await outcome;
+
+        if (failure === "deleted target") {
+          expect(settled).toMatchObject({ error: expect.any(Error) });
+          expect(sessions.has("api-1")).toBe(false);
+        } else {
+          expect(settled).toMatchObject({ value: { id: "api-1" } });
+          expect(sessions.get("api-1")).toEqual(replacement);
+        }
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      },
+    );
+
     it("keeps same-session ToDo reads and mutations responsive during submit acknowledgement", async () => {
       const sessions = createSessionStore();
       sessions.set(
@@ -10163,16 +10267,42 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
-    it("rejects a queued waiter invalidated by pause before pane input (issue #907 R2/R3)", async () => {
+    it("rejects the stale queued waiter then drains its retained item once to restored B (issue #907 R2/R3)", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
-      const running = runningSession();
+      const running = runningSession({ agentSessionId: "pinned" });
       sessions.set("api-1", running);
       await useRealTodoLedger();
       createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
-      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
-      const service = await createDisposedSessionService();
+      let panePid = process.pid;
+      let paneAlive = true;
+      lookupTmuxPanePidMock.mockImplementation(async () => ({
+        status: "ok",
+        panePid: paneAlive ? panePid : null,
+      }));
+      tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+      isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+      killTmuxSessionMock.mockImplementation(async () => {
+        paneAlive = false;
+      });
+      createTmuxSessionMock.mockImplementation(async () => {
+        panePid = process.ppid;
+        paneAlive = true;
+      });
+      const inputs: { panePid: number; text: string }[] = [];
+      sendMessageToTmuxMock.mockImplementation(async (_pane, text: string) => {
+        inputs.push({ panePid, text });
+      });
+      const service = await createDisposedSessionService({ realPaneGeneration: true });
+      service.dispose();
       const internals = sessionServiceInternals(service);
+      // Hold readiness at a settled prompt; exercise the real pane FIFO and
+      // generation checks rather than the independent transcript settle clock.
+      const classify = internals.classifySessionRecord.bind(internals);
+      vi.spyOn(internals, "classifySessionRecord").mockImplementation(async (session) => {
+        const classified = await classify(session);
+        return session.status === "running" ? { ...classified, state: "waiting" } : classified;
+      });
       sessions.set("api-1", {
         ...running,
         queuedMessages: { messages: ["queued behind A"], awaitingPrompt: false },
@@ -10181,8 +10311,8 @@ describe("SessionService", () => {
       const ackGate = new Promise<void>((resolve) => {
         releaseAck = resolve;
       });
-      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
-        await ackGate;
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (_binding, text) => {
+        if (text === "generation A owner") await ackGate;
         return { found: true, lastScannedFile: null };
       });
 
@@ -10197,7 +10327,14 @@ describe("SessionService", () => {
         "generation A owner",
       );
       await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+      const ownerLock = internals.paneWriteLocks.get(running.tmuxSession);
+      expect(ownerLock).toBeDefined();
+      vi.setSystemTime(Date.now() + 60_000);
       const queuedWaiter = internals.tryDeliverQueuedMessage("api-1");
+      await vi.waitFor(() => {
+        expect(internals.paneWriteLocks.get(running.tmuxSession)).not.toBe(ownerLock);
+        expect(internals.queueDeliveryInFlight.has("api-1")).toBe(true);
+      });
       await expect(service.pause("api-1")).resolves.toMatchObject({ status: "stopped" });
       await expect(
         service.mutateTodo(
@@ -10216,6 +10353,17 @@ describe("SessionService", () => {
         expect.anything(),
       );
       expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued behind A"]);
+      await expect(service.restore("api-1")).resolves.toMatchObject({ status: "running" });
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(panePid).toBe(process.ppid);
+      vi.setSystemTime(Date.now() + 60_000);
+      await expect(internals.tryDeliverQueuedMessage("api-1")).resolves.toBe(true);
+      await expect(internals.tryDeliverQueuedMessage("api-1")).resolves.toBe(false);
+      expect(inputs.filter(({ text }) => text === "queued behind A")).toEqual([
+        { panePid: process.ppid, text: "queued behind A" },
+      ]);
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      expect(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
       expect(internals.queueDeliveryInFlight.size).toBe(0);
       expect(internals.sessionLifecycleLocks.size).toBe(0);
       expect(internals.paneWriteLocks.size).toBe(0);
@@ -10285,42 +10433,65 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
-    it("preserves a workspace sibling while target acknowledgement waits (issue #907 R9)", async () => {
-      const sessions = createSessionStore();
-      sessions.set("api-1", runningSession({ id: "api-1", prompt: "owner sentinel" }));
-      sessions.set(
-        "api-2",
-        runningSession({ id: "api-2", workspaceId: "api-1", prompt: "target" }),
-      );
-      sessions.set(
-        "api-3",
-        runningSession({ id: "api-3", workspaceId: "api-1", prompt: "sibling sentinel" }),
-      );
-      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
-      const service = await createDisposedSessionService();
-      const internals = sessionServiceInternals(service);
-      let releaseAck: () => void = () => {};
-      const ackGate = new Promise<void>((resolve) => {
-        releaseAck = resolve;
-      });
-      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
-        await ackGate;
-        return { found: true, lastScannedFile: null };
-      });
+    it.each(["pause", "complete", "handoff"] as const)(
+      "preserves sibling %s while target acknowledgement waits (issue #907 R9)",
+      async (operation) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ id: "api-1", prompt: "owner sentinel" }));
+        sessions.set(
+          "api-2",
+          runningSession({ id: "api-2", workspaceId: "api-1", prompt: "target" }),
+        );
+        sessions.set(
+          "api-3",
+          runningSession({ id: "api-3", workspaceId: "api-1", prompt: "sibling sentinel" }),
+        );
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        reserveNextSessionIdMock.mockResolvedValue("api-4");
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const internals = sessionServiceInternals(service);
+        let releaseAck: () => void = () => {};
+        const ackGate = new Promise<void>((resolve) => {
+          releaseAck = resolve;
+        });
+        let targetAckHeld = false;
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (_binding, text) => {
+          if (text === "target delivery") {
+            targetAckHeld = true;
+            await ackGate;
+            targetAckHeld = false;
+          }
+          return { found: true, lastScannedFile: null };
+        });
 
-      const send = service.send("api-2", { message: "target delivery", queue: false });
-      await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalled());
-      await expect(service.pause("api-3")).resolves.toMatchObject({ status: "stopped" });
-      const siblingAfterPause = sessions.get("api-3");
-      const ownerBeforeCommit = sessions.get("api-1");
+        const send = service.send("api-2", { message: "target delivery", queue: false });
+        await vi.waitFor(() => expect(targetAckHeld).toBe(true));
+        const transition =
+          operation === "pause"
+            ? service.pause("api-3")
+            : operation === "complete"
+              ? service.complete("api-3", { skipPrCheck: true, prAction: "leave_open" })
+              : service.handoff("api-3", { agent: "claude" });
+        await expect(transition).resolves.toMatchObject({
+          id: operation === "handoff" ? "api-4" : "api-3",
+        });
+        expect(targetAckHeld).toBe(true);
+        expect(sessions.get("api-3")?.status).toBe(operation === "pause" ? "stopped" : "completed");
+        const siblingAfterTransition = sessions.get("api-3");
+        const successorAfterTransition = sessions.get("api-4");
+        const ownerBeforeCommit = sessions.get("api-1");
 
-      releaseAck();
-      await expect(send).resolves.toMatchObject({ id: "api-2" });
-      expect(sessions.get("api-3")).toEqual(siblingAfterPause);
-      expect(sessions.get("api-1")).toEqual(ownerBeforeCommit);
-      expect(internals.sessionLifecycleLocks.size).toBe(0);
-      expect(internals.paneWriteLocks.size).toBe(0);
-    });
+        releaseAck();
+        await expect(send).resolves.toMatchObject({ id: "api-2" });
+        expect(sessions.get("api-3")).toEqual(siblingAfterTransition);
+        expect(sessions.get("api-4")).toEqual(successorAfterTransition);
+        expect(sessions.get("api-1")).toEqual(ownerBeforeCommit);
+        expect(internals.handoffsInFlight.size).toBe(0);
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      },
+    );
 
     it("keeps ToDo responsive while restore context awaits acknowledgement", async () => {
       const sessions = createSessionStore();
