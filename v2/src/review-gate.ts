@@ -122,9 +122,25 @@ function ciIdentity(policy: GatePolicy, run: Record<string, unknown>) {
 }
 function ciCandidate(number: number, snapshot: GateSnapshot, run: Record<string, unknown>) {
   const head = object(snapshot.pr.head);
-  if (run.head_sha === head.sha || ciRef(run)?.number === number) return true;
+  if (run.head_sha === head.sha) return true;
   const anchor = snapshot.ciAnchors.find((value) => value.runId === run.id);
-  if (anchor?.parents.length === 2) return anchor.parents[1] === head.sha;
+  if (
+    anchor?.parents.length === 2 &&
+    anchor.parents.every((sha) => /^[a-f0-9]{40}$/.test(sha)) &&
+    (run.head_sha === anchor.merge || run.head_sha === anchor.parents[1]) &&
+    run.head_branch === head.ref &&
+    Array.isArray(run.pull_requests) &&
+    run.pull_requests.every((value) => {
+      const associated = object(value);
+      return (
+        associated.number === number &&
+        object(associated.head).sha === anchor.parents[1] &&
+        object(associated.base).sha === anchor.parents[0]
+      );
+    })
+  )
+    return anchor.parents[1] === head.sha;
+  if (ciRef(run)?.number === number) return true;
   return (
     run.head_branch === head.ref &&
     (string(run.path).endsWith(`@refs/pull/${number}/merge`) ||

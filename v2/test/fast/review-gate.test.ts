@@ -107,6 +107,7 @@ async function readCiFixture(
     runMismatch?: boolean;
     jobFault?: string;
     unavailableCommitStatus?: 403 | 404;
+    historicalCommit?: Record<string, unknown>;
   } = {},
 ) {
   const paths: string[] = [];
@@ -133,7 +134,9 @@ async function readCiFixture(
       return Response.json(options.commit ?? { sha: M, parents: [{ sha: B }, { sha: H }] });
     }
     if (path.includes("/commits/"))
-      return new Response("unavailable", { status: options.unavailableCommitStatus ?? 404 });
+      return options.historicalCommit
+        ? Response.json(options.historicalCommit)
+        : new Response("unavailable", { status: options.unavailableCommitStatus ?? 404 });
     const match = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?(\/jobs)?$/.exec(path);
     if (match) {
       const run = snapshot.runs.find((value) => value.id === Number(match[1]));
@@ -304,6 +307,65 @@ test.each([
 test("two actual App approvals and complete N/A coverage permit fork without consent", () => {
   expect(evaluateSnapshot(policy, 5, fixture()).status).toBe("APPROVED");
 });
+test.each([
+  "queued",
+  "in_progress",
+  "success",
+  "failure",
+  "native-merge",
+  "denied",
+  "missing",
+  "malformed-parent",
+  "extra-parent",
+  "wrong-commit",
+  "native-current-contradiction",
+  "native-old-contradiction",
+  "association-contradiction",
+])(
+  "obsolete historical head %s excludes only proven history and retains uncertain/contradictory blockers",
+  async (scenario) => {
+    const snapshot = fixture(),
+      oldH = "f".repeat(40),
+      oldM = "e".repeat(40);
+    const oldRun = {
+      ...snapshot.runs[0],
+      id: 2,
+      head_sha: scenario === "native-merge" ? oldM : oldH,
+      display_title: `Spur CI v1 REF=refs/pull/5/merge M=${oldM}`,
+      run_started_at: "2026-10-05T13:00:00Z",
+      pull_requests: [],
+      status: ["queued", "in_progress"].includes(scenario) ? scenario : "completed",
+      conclusion: scenario === "success" ? "success" : "failure",
+    };
+    snapshot.runs.push(oldRun);
+    const options: Parameters<typeof readCiFixture>[1] = {
+      historicalCommit: { sha: oldM, parents: [{ sha: B }, { sha: oldH }] },
+    };
+    if (["denied", "missing"].includes(scenario)) {
+      delete options.historicalCommit;
+      options.unavailableCommitStatus = scenario === "denied" ? 403 : 404;
+    }
+    if (scenario === "malformed-parent")
+      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: "invalid" }] };
+    if (scenario === "extra-parent")
+      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: oldH }, { sha: B }] };
+    if (scenario === "wrong-commit")
+      options.historicalCommit = { sha: M, parents: [{ sha: B }, { sha: oldH }] };
+    if (scenario === "native-current-contradiction") oldRun.head_sha = H;
+    if (scenario === "native-old-contradiction")
+      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: "c".repeat(40) }] };
+    if (scenario === "association-contradiction")
+      Object.assign(oldRun, { pull_requests: [{ number: 5, head: { sha: H }, base: { sha: B } }] });
+    const { result, paths } = await readCiFixture(snapshot, options);
+    expect(result.status).toBe(
+      ["queued", "in_progress", "success", "failure", "native-merge"].includes(scenario)
+        ? "APPROVED"
+        : "BLOCKED",
+    );
+    if (result.status === "APPROVED")
+      expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1/jobs");
+  },
+);
 test.each(["newer-blocker", "missing-time", "tied-time"])(
   "aggregate native chronology %s fails closed despite older review ID",
   (scenario) => {
