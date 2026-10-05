@@ -31,6 +31,11 @@ export function parseGatePolicy(value: unknown): GatePolicy {
     throw new ReviewAppError("invalid-gate-policy");
   return result;
 }
+export function workflowPath(value: unknown): string {
+  const path = string(value),
+    separator = path.indexOf("@");
+  return separator < 0 ? path : path.slice(0, separator);
+}
 export class GateGitHub {
   constructor(
     private readonly token: string,
@@ -222,7 +227,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       .filter(
         (run) =>
           run.workflow_id === policy.ciWorkflowId &&
-          run.path === ".github/workflows/ci.yml" &&
+          workflowPath(run.path) === ".github/workflows/ci.yml" &&
           ((run.head_sha === H &&
             Array.isArray(run.pull_requests) &&
             run.pull_requests.some((value) => {

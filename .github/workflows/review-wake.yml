@@ -10,4 +10,4 @@ jobs:
   wake:
     runs-on: ubuntu-latest
     steps:
-      - run: true
+      - run: "true"

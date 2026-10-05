@@ -16,7 +16,7 @@ test.each(["pull_request_review", "pull_request"])(
               repository: { full_name: "owner/repo" },
               event,
               workflow_id: 2,
-              path: `.github/workflows/${file}`,
+              path: `.github/workflows/${file}@refs/pull/5/merge`,
               run_attempt: 1,
               pull_requests: [],
             }
@@ -63,6 +63,9 @@ test("wake has no checkout/secrets; writer filters self and privileged PR execut
     "utf8",
   );
   expect(wake).not.toMatch(/checkout|secrets\.|upload-artifact|download-artifact/);
+  expect(
+    (parse(wake) as { jobs: { wake: { steps: { run: string }[] } } }).jobs.wake.steps[0]?.run,
+  ).toBe("true");
   const writer = parse(
     await readFile(
       new URL("../../../.github/workflows/review-approval.yml", import.meta.url),

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { parseConfig, parseRequest, prepareReview, publishReview } from "../../src/review-app.js";
+import { stateBody } from "../../src/review-state.js";
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -149,4 +150,27 @@ test("failure to publish final state retains confirmed blocking public state", a
   );
   expect(f.nativePosts()).toBe(1);
   expect(f.comments.at(-1)?.body).toContain('"status":"BLOCKED"');
+});
+test("denied-before-commit prepare cannot remotely revoke an existing same-head approval", async () => {
+  const f = await fixture("denied");
+  const body = stateBody({
+    version: 1,
+    repo: f.request.repo,
+    pr: f.request.pr,
+    lane: f.request.lane,
+    session: f.request.session,
+    attempt: "previous",
+    H: f.request.H,
+    B: f.request.B,
+    status: "APPROVED",
+    evidenceDigest: "d".repeat(64),
+    reviewId: 20,
+    assessment: f.request.assessment,
+  });
+  f.comments.push({ id: 50, body, user: { login: "code[bot]" } });
+  expect((await prepareReview(f.config, f.request, f.request.session, f.transport)).status).toBe(
+    "BLOCKED",
+  );
+  expect(f.comments).toEqual([{ id: 50, body, user: { login: "code[bot]" } }]);
+  expect(f.nativePosts()).toBe(0);
 });

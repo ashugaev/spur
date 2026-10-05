@@ -68,7 +68,7 @@ function fixture(): GateSnapshot {
       {
         id: 1,
         workflow_id: 100,
-        path: ".github/workflows/ci.yml",
+        path: ".github/workflows/ci.yml@refs/pull/5/merge",
         repository: { full_name: "owner/repo" },
         event: "pull_request",
         pull_requests: [{ number: 5, head: { sha: H }, base: { sha: B } }],

@@ -3,7 +3,13 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 import { integer, object, string, ReviewAppError } from "./github-app.js";
-import { GateGitHub, readGateSnapshot, evaluateSnapshot, type GatePolicy } from "./review-gate.js";
+import {
+  GateGitHub,
+  readGateSnapshot,
+  evaluateSnapshot,
+  workflowPath,
+  type GatePolicy,
+} from "./review-gate.js";
 
 export async function verifyWake(
   api: GateGitHub,
@@ -27,8 +33,8 @@ export async function verifyWake(
   const workflow = object(await api.request(`/repos/${repo}/actions/workflows/${file}`));
   if (
     run.workflow_id !== workflow.id ||
-    run.path !== `.github/workflows/${file}` ||
-    workflow.path !== run.path
+    workflowPath(run.path) !== `.github/workflows/${file}` ||
+    workflow.path !== workflowPath(run.path)
   )
     throw new ReviewAppError("unauthorized-upstream-workflow");
   // An upstream run wakes reconciliation only. Its conclusion, PR list and artifacts grant no verdict.
