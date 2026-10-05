@@ -3,7 +3,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, realpathSync } from "node
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadInstanceConfigReadOnly } from "./config.js";
 import {
   deploySwitchStatePath,
@@ -24,10 +24,12 @@ import {
 import {
   makeTargets,
   probe,
+  probeDaemonIdentity,
   readWebPort,
   readWebUnitOptions,
   resolveDaemonPort,
   SERVICE_UNITS,
+  unitMainPidWith,
   unitStateWith,
   type PollSample,
   type ProbeResult,
@@ -45,7 +47,7 @@ import {
   type RollbackState,
   type UpdateInProgress,
 } from "./update-state.js";
-import { getVersion } from "./version.js";
+import { getVersion, resolvePackageVersion } from "./version.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
@@ -149,7 +151,7 @@ function readInstalledVersion(cliEntrypoint: string): string {
   if (typeof parsed.version !== "string") {
     throw new Error(`installed package.json is missing a version string at ${pkgPath}`);
   }
-  return parsed.version;
+  return resolvePackageVersion(parsed.version, new URL("../", pathToFileURL(pkgPath)));
 }
 
 function realLaunch(cliEntrypoint: string): MonitorRef {
@@ -255,7 +257,13 @@ export function createRealUpdateDeps(
   return {
     now: () => Date.now(),
     sleep: (ms) => delay(ms),
-    probe: (target) => probe(target),
+    probe: async (target) =>
+      target.id === "daemon"
+        ? probeDaemonIdentity(target, {
+            version: readInstalledVersion(cliEntrypoint),
+            pid: await unitMainPidWith(scope, SERVICE_UNITS.daemon),
+          })
+        : probe(target),
     unitState: (unit) => unitStateWith(scope, unit),
     installVersion: (target) => {
       const args = ["install", "-g"];

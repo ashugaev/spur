@@ -19,6 +19,7 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 import { agentExecutableCommand } from "./executable.js";
+import type { ProviderTokenUsageSample } from "../token-usage.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -54,8 +55,11 @@ interface CodexSessionLine {
     id?: string;
     phase?: string;
     role?: string;
+    source?: unknown;
+    thread_source?: string;
     type?: string;
   };
+  source?: unknown;
   threadId?: string;
   type?: string;
 }
@@ -91,6 +95,16 @@ function sessionMetaCwd(line: CodexSessionLine): string | null {
     return line.payload.cwd;
   }
   return null;
+}
+
+function isExplicitSubagentSessionMeta(line: CodexSessionLine): boolean {
+  if (line.type !== "session_meta") {
+    return false;
+  }
+  const source = line.payload?.source ?? line.source;
+  return (
+    line.payload?.thread_source === "subagent" || (isRecord(source) && isRecord(source["subagent"]))
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -247,7 +261,7 @@ export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[
 
 async function readSessionMeta(
   filePath: string,
-): Promise<{ cwd: string; threadId: string | null } | null> {
+): Promise<{ cwd: string; threadId: string | null; isSubagent: boolean } | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
     const reader = createInterface({ input, crlfDelay: Infinity });
@@ -262,13 +276,24 @@ async function readSessionMeta(
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        if (isExplicitSubagentSessionMeta(parsed)) {
+          continue;
+        }
         const cwd = sessionMetaCwd(parsed);
         const resumeId = sessionResumeId(parsed);
         if (resumeId && !threadId) {
           threadId = resumeId;
         }
         if (cwd) {
-          return { cwd, threadId };
+          const source = parsed.payload?.source;
+          const subagent = isRecord(source) ? source["subagent"] : undefined;
+          const threadSpawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
+          return {
+            cwd,
+            threadId,
+            isSubagent:
+              isRecord(threadSpawn) && typeof threadSpawn["parent_thread_id"] === "string",
+          };
         }
       } catch {
         // Ignore malformed lines and keep scanning the file header.
@@ -297,7 +322,7 @@ async function loadSessionIndexForRoot(
 
   for (const filePath of files) {
     const meta = await readSessionMeta(filePath);
-    if (!meta) {
+    if (!meta || meta.isSubagent) {
       continue;
     }
     try {
@@ -475,7 +500,7 @@ export function buildCodexPlan(
   );
   if (options?.startupImagePaths?.length) {
     return {
-      launchCommand: prompt.trim() ? `${command} ${shellEscape(prompt)}` : command,
+      launchCommand: prompt.trim() ? `${command} -- ${shellEscape(prompt)}` : command,
       initialMessage: "",
       readyMarkers: ["OpenAI Codex", "›"],
     };
@@ -648,6 +673,12 @@ export async function linkCodexAuth(codexHome: string): Promise<void> {
   }
 }
 
+export async function copyCodexAgentDefinitions(codexHome: string): Promise<void> {
+  const userAgentsDir = join(homedir(), ".codex", "agents");
+  if (!existsSync(userAgentsDir)) return;
+  await cp(userAgentsDir, join(codexHome, "agents"), { recursive: true, force: true });
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
@@ -687,10 +718,7 @@ export async function ensureCodexHooksConfig(
       throw error;
     });
   }
-  const userAgentsDir = join(homedir(), ".codex", "agents");
-  if (existsSync(userAgentsDir)) {
-    await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
-  }
+  await copyCodexAgentDefinitions(codexDir);
   await writeFile(hooksPath, JSON.stringify(next, null, 2) + "\n", "utf8");
   return codexDir;
 }
@@ -850,16 +878,22 @@ export interface CodexRolloutStateRecord {
     | "custom_tool_call"
     | "task_complete"
     | "turn_aborted"
+    | "thread_settings_applied"
     | "input_required"
     | "request_user_input";
   turnId?: string;
   callId?: string;
+  precedingState?: { state: "working" | "waiting" | "needs_input"; timestampMs: number };
 }
 
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  threadId?: string;
+  isSubagent?: boolean;
   model?: string;
+  tokenUsage?: ProviderTokenUsageSample;
+  tokenUsages?: ProviderTokenUsageSample[];
 }
 
 interface CodexRolloutCandidate {
@@ -941,6 +975,11 @@ function extractCodexRolloutStateLine(
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
       return codexRolloutStateRecord("waiting", timestamp, timestampMs, "turn_aborted", turnId);
     }
+    // This event also occurs inside active turns. The caller may treat it as
+    // resume-ready only when it crosses the recorded restore generation.
+    if (payloadType === "thread_settings_applied") {
+      return codexRolloutStateRecord("working", timestamp, timestampMs, "thread_settings_applied");
+    }
     if (payloadType === "input_required") {
       const turnId = readRolloutString(payload["turn_id"]) ?? readRolloutString(payload["turnId"]);
       return codexRolloutStateRecord(
@@ -979,6 +1018,26 @@ function extractCodexRolloutStateLine(
   }
 
   return null;
+}
+
+function updateCodexRolloutState(
+  current: CodexRolloutStateRecord | null,
+  state: Omit<CodexRolloutStateRecord, "filePath"> | null,
+  filePath: string,
+): CodexRolloutStateRecord | null {
+  if (!state) return current;
+  if (!current) return { ...state, filePath };
+  if (
+    current.reason !== "thread_settings_applied" ||
+    current.precedingState ||
+    state.reason === "thread_settings_applied"
+  )
+    return current;
+  return {
+    ...current,
+    state: state.state,
+    precedingState: { state: state.state, timestampMs: state.timestampMs },
+  };
 }
 
 function readMatchedToolCallIds(lines: string[]): Set<string> {
@@ -1020,11 +1079,238 @@ function extractCodexRateLimitsLine(parsed: Record<string, unknown>): unknown {
   return payload["rate_limits"];
 }
 
+interface CodexTokenUsageSnapshot {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
+interface CodexTokenUsageEvent {
+  total: CodexTokenUsageSnapshot;
+  last?: CodexTokenUsageSnapshot;
+  observedAtMs: number;
+}
+
+function extractCodexTokenUsageLine(
+  parsed: Record<string, unknown>,
+): CodexTokenUsageEvent | undefined {
+  if (parsed["type"] !== "event_msg") return undefined;
+  const payload = parsed["payload"];
+  if (!isRecord(payload) || payload["type"] !== "token_count") return undefined;
+  const info = payload["info"];
+  if (!isRecord(info)) return undefined;
+  const timestamp = parsed["timestamp"];
+  const observedAtMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+  const total = readCodexTokenUsageSnapshot(info["total_token_usage"]);
+  if (!total || !Number.isFinite(observedAtMs)) return undefined;
+  const last = readCodexTokenUsageSnapshot(info["last_token_usage"]);
+  return { total, ...(last ? { last } : {}), observedAtMs };
+}
+
+function readCodexTokenUsageSnapshot(value: unknown): CodexTokenUsageSnapshot | null {
+  if (!isRecord(value)) return null;
+  const inputTokens = readTokenUsageNumber(value, ["input_tokens", "prompt_tokens"]);
+  const outputTokens = readTokenUsageNumber(value, ["output_tokens", "completion_tokens"]);
+  const totalTokens = readTokenUsageNumber(value, ["total_tokens"]);
+  const cacheReadInputTokens = readTokenUsageNumber(value, [
+    "cached_input_tokens",
+    "cache_read_input_tokens",
+    "cached_tokens",
+  ]);
+  const cacheWriteInputTokens = readTokenUsageNumber(value, [
+    "cache_write_input_tokens",
+    "cache_creation_input_tokens",
+  ]);
+  const reasoningOutputTokens = readTokenUsageNumber(value, [
+    "reasoning_output_tokens",
+    "reasoning_tokens",
+  ]);
+  if (
+    inputTokens === null ||
+    inputTokens === undefined ||
+    outputTokens === null ||
+    outputTokens === undefined ||
+    totalTokens === null ||
+    totalTokens === undefined ||
+    cacheReadInputTokens === null ||
+    cacheWriteInputTokens === null ||
+    reasoningOutputTokens === null ||
+    totalTokens !== inputTokens + outputTokens ||
+    (cacheReadInputTokens ?? 0) + (cacheWriteInputTokens ?? 0) > inputTokens ||
+    (reasoningOutputTokens !== undefined && reasoningOutputTokens > outputTokens)
+  ) {
+    return null;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+    ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
+  };
+}
+
+function readTokenUsageNumber(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+): number | null | undefined {
+  let result: number | undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      return null;
+    }
+    if (result !== undefined && result !== value) {
+      return null;
+    }
+    result = value;
+  }
+  return result;
+}
+
+const CODEX_OPTIONAL_USAGE_COMPONENTS = [
+  "cacheReadInputTokens",
+  "cacheWriteInputTokens",
+  "reasoningOutputTokens",
+] as const;
+
+function codexUsageReset(
+  current: CodexTokenUsageSnapshot,
+  previous: CodexTokenUsageSnapshot,
+): boolean {
+  if (
+    current.inputTokens < previous.inputTokens ||
+    current.outputTokens < previous.outputTokens ||
+    current.totalTokens < previous.totalTokens
+  ) {
+    return true;
+  }
+  return CODEX_OPTIONAL_USAGE_COMPONENTS.some(
+    (component) =>
+      current[component] !== undefined &&
+      previous[component] !== undefined &&
+      current[component] < previous[component],
+  );
+}
+
+function subtractCodexUsage(
+  current: CodexTokenUsageSnapshot,
+  previous?: CodexTokenUsageSnapshot,
+): CodexTokenUsageSnapshot {
+  return {
+    inputTokens: current.inputTokens - (previous?.inputTokens ?? 0),
+    outputTokens: current.outputTokens - (previous?.outputTokens ?? 0),
+    totalTokens: current.totalTokens - (previous?.totalTokens ?? 0),
+    ...Object.fromEntries(
+      CODEX_OPTIONAL_USAGE_COMPONENTS.flatMap((component) => {
+        const value = current[component];
+        const prior = previous?.[component];
+        return value !== undefined && (previous === undefined || prior !== undefined)
+          ? [[component, value - (prior ?? 0)]]
+          : [];
+      }),
+    ),
+  };
+}
+
+function addCodexUsage(
+  accumulated: CodexTokenUsageSnapshot | undefined,
+  delta: CodexTokenUsageSnapshot,
+): CodexTokenUsageSnapshot | undefined {
+  const inputTokens = (accumulated?.inputTokens ?? 0) + delta.inputTokens;
+  const outputTokens = (accumulated?.outputTokens ?? 0) + delta.outputTokens;
+  const totalTokens = (accumulated?.totalTokens ?? 0) + delta.totalTokens;
+  if (![inputTokens, outputTokens, totalTokens].every(Number.isSafeInteger)) return undefined;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    ...Object.fromEntries(
+      CODEX_OPTIONAL_USAGE_COMPONENTS.flatMap((component) => {
+        if (
+          delta[component] === undefined ||
+          (accumulated && accumulated[component] === undefined)
+        ) {
+          return [];
+        }
+        const value = (accumulated?.[component] ?? 0) + delta[component];
+        return Number.isSafeInteger(value) ? [[component, value]] : [];
+      }),
+    ),
+  };
+}
+
+function extractCodexLifetimeTokenUsage(
+  lines: string[],
+  generationId: string | undefined,
+  replayBeforeMs: number | undefined,
+): ProviderTokenUsageSample | undefined {
+  if (!generationId) return undefined;
+  let previous: CodexTokenUsageSnapshot | undefined;
+  let accumulated: CodexTokenUsageSnapshot | undefined;
+  let observedAtMs: number | undefined;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    const event = extractCodexTokenUsageLine(parsed);
+    if (!event) continue;
+    const reset = previous !== undefined && codexUsageReset(event.total, previous);
+    const delta = reset ? event.last : subtractCodexUsage(event.total, previous);
+    previous = event.total;
+    if (event.observedAtMs < (replayBeforeMs ?? -Infinity) || !delta) continue;
+    accumulated = addCodexUsage(accumulated, delta);
+    if (!accumulated) return undefined;
+    observedAtMs = event.observedAtMs;
+  }
+  return accumulated && observedAtMs !== undefined
+    ? { provider: "codex", generationId, ...accumulated, observedAtMs }
+    : undefined;
+}
+
 function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+  let generationId: string | undefined;
+  let threadId: string | undefined;
+  let isSubagent = false;
+  let replayBeforeMs: number | undefined;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "session_meta") continue;
+    const payload = parsed["payload"];
+    if (!isRecord(payload) || typeof payload["id"] !== "string" || !payload["id"]) continue;
+    generationId = `codex:${payload["id"]}`;
+    threadId = payload["id"];
+    const source = payload["source"];
+    const subagent = isRecord(source) ? source["subagent"] : undefined;
+    const threadSpawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
+    if (isRecord(threadSpawn) && typeof threadSpawn["parent_thread_id"] === "string") {
+      isSubagent = true;
+      const timestamp =
+        typeof payload["timestamp"] === "string" ? payload["timestamp"] : parsed["timestamp"];
+      const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+      if (Number.isFinite(timestampMs)) replayBeforeMs = timestampMs;
+    }
+    break;
+  }
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
+  const tokenUsage = extractCodexLifetimeTokenUsage(lines, generationId, replayBeforeMs);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     // Parse each changed rollout line once and share it across the extractors.
     let parsed: unknown;
@@ -1042,28 +1328,37 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
         rateLimit = detection;
       }
     }
-    if (rollout === null) {
-      const state = extractCodexRolloutStateLine(parsed);
-      if (state && !(state.callId && matchedCallIds.has(state.callId))) {
-        rollout = {
-          ...state,
-          filePath,
-        };
-      }
+    const state = extractCodexRolloutStateLine(parsed);
+    if (state && !(state.callId && matchedCallIds.has(state.callId))) {
+      rollout = updateCodexRolloutState(rollout, state, filePath);
     }
     if (model === undefined) {
       model = extractCodexTurnContextModel(parsed);
     }
-    if (rollout && rateLimit && model !== undefined) {
+    if (
+      rollout &&
+      rateLimit &&
+      model !== undefined &&
+      tokenUsage &&
+      (rollout.reason !== "thread_settings_applied" || rollout.precedingState)
+    ) {
       break;
     }
   }
-  return { rollout, rateLimit, ...(model ? { model } : {}) };
+  return {
+    rollout,
+    rateLimit,
+    ...(threadId ? { threadId } : {}),
+    ...(isSubagent ? { isSubagent: true } : {}),
+    ...(model ? { model } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
+  };
 }
 
 export async function readCodexRolloutState(
   sessionsDir: string,
   reader?: CodexRolloutReaderState,
+  rootThreadId?: string,
 ): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {
@@ -1106,7 +1401,7 @@ export async function readCodexRolloutState(
       }
       const lines = content.trim().split("\n").filter(Boolean);
       const result = readCodexRolloutFromLines(filePath, lines);
-      if (!result.rollout && !result.rateLimit && !result.model) {
+      if (!result.rollout && !result.rateLimit && !result.model && !result.tokenUsage) {
         if (fingerprint) {
           nextFiles.set(filePath, { ...fingerprint, candidate: null });
         }
@@ -1129,13 +1424,31 @@ export async function readCodexRolloutState(
   // A just-started rollout file can carry a `turn_context` model before it has
   // any state or rate-limit line, so it loses both selections below. Rank the
   // model on its own to keep the live model available from the first turn.
-  const model = existing
+  const rootCandidates = existing.filter((candidate) =>
+    rootThreadId
+      ? candidate.result.threadId === rootThreadId
+      : candidate.result.isSubagent !== true,
+  );
+  const model = rootCandidates
     .filter((candidate) => candidate.result.model)
     .reduce<CodexRolloutCandidate | null>(
       (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
       null,
     )?.result.model;
-  const stateful = existing.filter(
+  const newestTokenUsage = existing
+    .filter((candidate) => candidate.result.tokenUsage)
+    .reduce<CodexRolloutCandidate | null>((left, right) => {
+      if (left === null) return right;
+      const leftTs = left.result.tokenUsage?.observedAtMs ?? 0;
+      const rightTs = right.result.tokenUsage?.observedAtMs ?? 0;
+      return rightTs > leftTs || (rightTs === leftTs && right.mtimeMs > left.mtimeMs)
+        ? right
+        : left;
+    }, null)?.result.tokenUsage;
+  const tokenUsages = existing.flatMap((candidate) =>
+    candidate.result.tokenUsage ? [candidate.result.tokenUsage] : [],
+  );
+  const stateful = rootCandidates.filter(
     (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
   );
   const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
@@ -1148,7 +1461,13 @@ export async function readCodexRolloutState(
       }
       return right.mtimeMs > left.mtimeMs ? right : left;
     });
-    return { ...best.result, ...(model ? { model } : {}) };
+    const tokenUsage = best.result.tokenUsage ?? newestTokenUsage;
+    return {
+      ...best.result,
+      ...(model ? { model } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
+      ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
+    };
   }
   const newestByMtime = stateful.reduce<CodexRolloutCandidate | null>(
     (left, right) => (left === null || right.mtimeMs > left.mtimeMs ? right : left),
@@ -1158,6 +1477,8 @@ export async function readCodexRolloutState(
     rollout: null,
     rateLimit: newestByMtime?.result.rateLimit ?? null,
     ...(model ? { model } : {}),
+    ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
+    ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
   };
 }
 

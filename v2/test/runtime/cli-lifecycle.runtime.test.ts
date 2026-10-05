@@ -497,6 +497,48 @@ async function listenOnAllInterfaces(
   });
 }
 
+function isAddrInUse(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EADDRINUSE"
+  );
+}
+
+async function bindConsecutiveFreePortRange(): Promise<{
+  occupiedServer: ReturnType<typeof createServer>;
+  freePortGuard: ReturnType<typeof createServer>;
+  range: { start: number; end: number };
+}> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const occupiedServer = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const freePortGuard = createServer();
+    try {
+      await listenOnAllInterfaces(occupiedServer, 0);
+      const address = occupiedServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected a bound TCP address for runtime test");
+      }
+      if (address.port === 65_535) {
+        await closeServer(occupiedServer);
+        continue;
+      }
+      const range = { start: address.port, end: address.port + 1 };
+      await listenOnAllInterfaces(freePortGuard, range.end);
+      return { occupiedServer, freePortGuard, range };
+    } catch (error) {
+      await closeServer(occupiedServer);
+      await closeServer(freePortGuard);
+      if (attempt >= 2 || !isAddrInUse(error)) throw error;
+    }
+  }
+  throw new Error("Failed to bind consecutive TCP ports for runtime test");
+}
+
 async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
   if (!server.listening) return;
   await new Promise<void>((resolve, reject) => {
@@ -1972,6 +2014,7 @@ projects:
     ) as SessionView;
     expect(spawned.branch).toBe(occupiedBranch);
 
+    await waitForCleanTodoLedger(context, spawned.id);
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
 
     const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
@@ -2514,7 +2557,7 @@ projects:
     await expect(
       context.execCli(["--config", configPath, "send", spawned.id, "after complete"]),
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining(`Session is not running: ${spawned.id}`),
+      stderr: expect.stringContaining(`Session has ended (completed): ${spawned.id}`),
     });
   });
 
@@ -3001,6 +3044,7 @@ projects:
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
+      titleSource: "agent",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
@@ -3164,6 +3208,7 @@ projects:
     expect(response.headers.get("content-disposition")).toContain("inline");
     await expect(response.text()).resolves.toBe("artifact-bytes");
 
+    await waitForCleanTodoLedger(context, spawned.id);
     await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
     expect(existsSync(artifactDir)).toBe(false);
 
@@ -5429,7 +5474,7 @@ projects:
     expect(thirdPort.trim()).toBe("4600");
   });
 
-  it("real sidecar HTTP probe publishes a link and complete or kill removes it", async () => {
+  it("real sidecar listener exposes a runtime URL and complete or kill removes it", async () => {
     const port = await findFreePort();
     const reservedRange = await findConsecutiveFreePorts();
     const context = await createRuntimeTestContext(port);
@@ -5482,23 +5527,29 @@ projects:
         }),
       });
 
-      const withLink = await pollUntil(
+      const withUrl = await pollUntil(
         () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
         {
           timeoutMs: 15_000,
           accept: (session) =>
-            session.slots?.links.some(
-              (link) => link.label === "dev" && link.url.startsWith("http://127.0.0.1:"),
-            ) === true,
+            session.sidecars.some((sidecar) => sidecar.name === "dev" && Boolean(sidecar.url)),
         },
       );
-      expect(withLink.slots?.links.some((link) => link.label === "dev")).toBe(true);
+      const readySidecar = withUrl.sidecars.find((sidecar) => sidecar.name === "dev");
+      if (!readySidecar?.url) throw new Error("Missing ready sidecar URL");
+      expect(readySidecar.url).toBe(
+        `http://127.0.0.1:${readySidecar.ports.find((reserved) => reserved.id === "http")?.port}`,
+      );
+      const response = await fetch(readySidecar.url, { signal: AbortSignal.timeout(2_000) });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("ready");
+      expect(withUrl.slots?.links.some((link) => link.label === "dev") ?? false).toBe(false);
 
       // Wait for the fixture to actually resolve the session's seeded Spur
-      // ToDo item before completing — the sidecar link landing is unrelated
+      // ToDo item before completing — sidecar readiness is unrelated
       // to the fixture's backgrounded add-then-complete todo round trip
       // (record_fixture_todo in helpers/runtime.ts), so completing right
-      // after the link appears can still 409 on an open item that hasn't
+      // after the URL appears can still 409 on an open item that hasn't
       // landed yet.
       await waitForCleanTodoLedger(context, spawned.id);
 
@@ -5512,7 +5563,13 @@ projects:
               body: JSON.stringify({ force: true }),
             });
 
+      expect(closed.status).toBe(action === "complete" ? "completed" : "killed");
+      expect(closed.sidecars.find((sidecar) => sidecar.name === "dev")?.url).toBeUndefined();
       expect(closed.slots?.links.some((link) => link.label === "dev") ?? false).toBe(false);
+      expect(await tmuxSessionExists(readySidecar.tmuxSession)).toBe(false);
+      await expect(
+        fetch(readySidecar.url, { signal: AbortSignal.timeout(2_000) }),
+      ).rejects.toThrow();
     }
   });
 
@@ -5735,19 +5792,11 @@ projects:
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
     const port = await findFreePort();
-    const reservedRange = await findConsecutiveFreePorts();
-    const occupiedServer = createServer((_request, response) => {
-      response.writeHead(204);
-      response.end();
-    });
-    const freePortGuard = createServer();
-    await listenOnAllInterfaces(occupiedServer, reservedRange.start);
-    try {
-      await listenOnAllInterfaces(freePortGuard, reservedRange.end);
-    } catch (error) {
-      await closeServer(occupiedServer);
-      throw error;
-    }
+    const {
+      occupiedServer,
+      freePortGuard,
+      range: reservedRange,
+    } = await bindConsecutiveFreePortRange();
 
     try {
       const context = await createRuntimeTestContext(port);

@@ -10,15 +10,22 @@ import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { writeSession } from "../../src/metadata.js";
 import { sessionArtifactsDir } from "../../src/session-artifacts.js";
 import { startServer, type StartedServer } from "../../src/server.js";
+import { AgentReasoningEffortError } from "../../src/agents/models.js";
 import { TodoEmptyLedgerError, TodoOpenWorkError } from "../../src/todo.js";
 import {
+  buildForeignAgentProcessMessage,
+  ForeignAgentProcessError,
+  LaunchPromptPendingError,
   OpenPrActionRequiredError,
   QueueDeliveryInFlightError,
+  SessionEndedError,
   SessionNotReopenableError,
   SessionNotRestorableError,
   SessionRateLimitedError,
   SessionResourceNotFoundError,
+  SessionStartingError,
   SidecarPortConflictError,
+  SidecarProbeUnresponsiveError,
   SessionService,
 } from "../../src/session-service.js";
 import type { SessionRecord, SessionView, SidecarStopView } from "../../src/types.js";
@@ -30,6 +37,65 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it.each(["spawn", "respawn", "handoff"] as const)(
+    "returns a client error for rejected %s reasoning effort",
+    async (operation) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-effort-"));
+      const repoDir = join(root, "repo");
+      await mkdir(repoDir);
+      const port = await findFreePort();
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${join(root, "data")}`,
+          `worktreeDir: ${join(root, "worktrees")}`,
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+      );
+      const serviceSpy = vi
+        .spyOn(SessionService.prototype, operation)
+        .mockRejectedValue(
+          new AgentReasoningEffortError("reasoningEffort unsupported for selected model"),
+        );
+      const server = await startServer(configPath, {
+        info: () => undefined,
+        warn: () => undefined,
+      });
+      try {
+        const path = operation === "spawn" ? "/sessions" : `/sessions/demo-1/${operation}`;
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: "demo",
+            prompt: "hi",
+            agent: "codex",
+            reasoningEffort: "ultra",
+          }),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: "reasoningEffort unsupported for selected model",
+        });
+        expect(serviceSpy).toHaveBeenCalledWith(
+          ...(operation === "spawn" ? [] : ["demo-1"]),
+          expect.objectContaining({ reasoningEffort: "ultra" }),
+          ...(operation === "handoff" ? [undefined] : []),
+        );
+      } finally {
+        serviceSpy.mockRestore();
+        await server.stop();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("rejects a missing non-default config path without bootstrapping it on disk", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const configPath = join(root, "does-not-exist", "spur.yaml");
@@ -64,16 +130,14 @@ describe("startServer", () => {
         "  demo:",
         `    path: ${repoDir}`,
         "    sources:",
-        "      clock:",
-        "        type: cron",
-        "        schedule: '* * * * *'",
+        "      pr-watch:",
+        "        type: github",
+        '        query: "is:pr is:open"',
         "    triggers:",
-        "      reminder:",
-        "        source: clock",
-        "        event: cron:tick",
-        "        spawn:",
-        "          blocks:",
-        "            - prompt: reminder",
+        "      notify:",
+        "        source: pr-watch",
+        "        event: github:comment",
+        "        send: {}",
       ].join("\n"),
       "utf8",
     );
@@ -95,18 +159,29 @@ describe("startServer", () => {
     const routeFingerprint = autoPingRouteFingerprint({
       version: 1,
       projectId: "demo",
-      triggerId: "reminder",
-      sourceId: "clock",
-      sourceType: "cron",
-      eventName: "cron:tick",
-      actionKind: "spawn",
-      destination: { kind: "trigger" },
+      triggerId: "notify",
+      sourceId: "pr-watch",
+      sourceType: "github",
+      eventName: "github:comment",
+      actionKind: "send",
+      destination: { kind: "session", sessionId: "demo-1" },
+      spawnDeskGroup: false,
+    });
+    policy.registerRoute(routeFingerprint, {
+      version: 1,
+      projectId: "demo",
+      triggerId: "notify",
+      sourceId: "pr-watch",
+      sourceType: "github",
+      eventName: "github:comment",
+      actionKind: "send",
+      destination: { kind: "session", sessionId: "demo-1" },
       spawnDeskGroup: false,
     });
     const grant = policy.createGrant({
       scope: "event",
       routeFingerprint,
-      destination: { kind: "trigger" },
+      destination: { kind: "session", sessionId: "demo-1" },
       target: { kind: "occurrence", occurrenceId: "occurrence-1" },
       actorSessionId: "demo-1",
     });
@@ -833,6 +908,7 @@ describe("startServer", () => {
       calls.push(options);
       return [
         {
+          lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
           id: "demo-done",
           project: "demo",
           agent: "claude",
@@ -1017,6 +1093,7 @@ describe("startServer", () => {
     ) {
       clearPort = request?.clearPort;
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1127,6 +1204,53 @@ describe("startServer", () => {
     }
   });
 
+  // 503, not the 500 catch-all: the refusal is "could not determine, retry".
+  it("answers 503 when the sidecar start refuses on an unresponsive tmux probe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalStartSidecar = SessionService.prototype.startSidecar;
+    SessionService.prototype.startSidecar = async function mockStartSidecar() {
+      throw new SidecarProbeUnresponsiveError("Sidecar dev tmux state is unreadable");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/sidecars/dev/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(503);
+    } finally {
+      SessionService.prototype.startSidecar = originalStartSidecar;
+      await server.stop();
+    }
+  });
+
   it("passes the sidecarStop outcome through the stop route's 200 body alongside id and sidecars", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1153,6 +1277,7 @@ describe("startServer", () => {
     const originalStopSidecar = SessionService.prototype.stopSidecar;
     SessionService.prototype.stopSidecar = async function mockStopSidecar() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1495,6 +1620,160 @@ describe("startServer", () => {
     }
   });
 
+  it("routes a failed prompt's retry and dismiss to the service, and a missing one to 409", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const original = SessionService.prototype.resolveSubmitFailure;
+    const calls: Array<[string, string]> = [];
+    SessionService.prototype.resolveSubmitFailure = async function mockResolve(sessionId, action) {
+      calls.push([sessionId, action]);
+      if (sessionId === "demo-2") {
+        throw new LaunchPromptPendingError(`No failed prompt for ${sessionId}`);
+      }
+      return { id: sessionId } as never;
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+    const post = (path: string) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+    try {
+      expect((await post("/sessions/demo-1/submit-failed/retry")).status).toBe(200);
+      expect((await post("/sessions/demo-1/submit-failed/dismiss")).status).toBe(200);
+      const missing = await post("/sessions/demo-2/submit-failed/retry");
+      expect(missing.status).toBe(409);
+      await expect(missing.json()).resolves.toEqual({ error: "No failed prompt for demo-2" });
+      expect(calls).toEqual([
+        ["demo-1", "retry"],
+        ["demo-1", "dismiss"],
+        ["demo-2", "retry"],
+      ]);
+    } finally {
+      SessionService.prototype.resolveSubmitFailure = original;
+      await server.stop();
+    }
+  });
+
+  it("maps a send, flush, or answer refused by session status to 409 with the message", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    await mkdir(repoDir, { recursive: true });
+
+    const originalSend = SessionService.prototype.send;
+    const originalFlush = SessionService.prototype.flushQueuedMessage;
+    const originalAnswer = SessionService.prototype.answerQuestion;
+    SessionService.prototype.send = async function mockSend(sessionId, request) {
+      if (request.message === "foreign") {
+        throw new ForeignAgentProcessError(buildForeignAgentProcessMessage(sessionId, 4242));
+      }
+      throw new SessionStartingError(`Session is still starting: ${sessionId}`);
+    };
+    SessionService.prototype.flushQueuedMessage = async function mockFlush(sessionId) {
+      throw new SessionEndedError(`Session has ended (killed): ${sessionId}`);
+    };
+    SessionService.prototype.answerQuestion = async function mockAnswer(sessionId) {
+      throw new SessionEndedError(`Session has ended (completed): ${sessionId}`);
+    };
+
+    const { server, port } = await startOnFreePort(
+      (_port, configPath) =>
+        startServer(configPath, { info: () => undefined, warn: () => undefined }),
+      async (port) => {
+        const configPath = join(root, "spur.yaml");
+        await writeFile(
+          configPath,
+          [
+            "server:",
+            "  host: 127.0.0.1",
+            `  port: ${port}`,
+            `dataDir: ${dataDir}`,
+            `worktreeDir: ${worktreeDir}`,
+            "projects:",
+            "  demo:",
+            `    path: ${repoDir}`,
+          ].join("\n"),
+          "utf8",
+        );
+        return configPath;
+      },
+    );
+
+    const post = (path: string, body: unknown) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const starting = await post("/sessions/demo-1/send", {
+        message: "hi",
+        queue: false,
+        interrupt: true,
+      });
+      expect(starting.status).toBe(409);
+      await expect(starting.json()).resolves.toEqual({
+        error: "Session is still starting: demo-1",
+      });
+
+      // The agent already runs outside its pane (a killed wrapper, status
+      // still running): refused, nothing typed.
+      const foreign = await post("/sessions/demo-1/send", {
+        message: "foreign",
+        queue: false,
+        interrupt: true,
+      });
+      expect(foreign.status).toBe(409);
+      await expect(foreign.json()).resolves.toEqual({
+        error: buildForeignAgentProcessMessage("demo-1", 4242),
+      });
+
+      const ended = await post("/sessions/demo-1/queue/flush", { message: "hi" });
+      expect(ended.status).toBe(409);
+      await expect(ended.json()).resolves.toEqual({ error: "Session has ended (killed): demo-1" });
+
+      const answered = await post("/sessions/demo-1/answer", { optionIndex: 0 });
+      expect(answered.status).toBe(409);
+      await expect(answered.json()).resolves.toEqual({
+        error: "Session has ended (completed): demo-1",
+      });
+    } finally {
+      SessionService.prototype.send = originalSend;
+      SessionService.prototype.flushQueuedMessage = originalFlush;
+      SessionService.prototype.answerQuestion = originalAnswer;
+      await server.stop();
+    }
+  });
+
   it("maps queue remove/flush 404 (not queued) and 409 (delivery in flight), and 400 on an empty message", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1645,6 +1924,56 @@ describe("startServer", () => {
     }
   });
 
+  it("never forwards a telegramOrigin from the POST /sessions body to spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalSpawn = SessionService.prototype.spawn;
+    const spawnArgs: unknown[][] = [];
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      SessionService.prototype.spawn = async function mockSpawn(...args: unknown[]) {
+        spawnArgs.push(args);
+        throw new Error("stop after capture");
+      };
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+
+      await fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "demo",
+          telegramOrigin: { projectId: "demo", sourceId: "tg", chatId: 999 },
+        }),
+      });
+
+      expect(spawnArgs).toHaveLength(1);
+      // Options (2nd argument) carry the internal origin; the HTTP route passes none.
+      expect(spawnArgs[0]?.[1]).toBeUndefined();
+    } finally {
+      SessionService.prototype.spawn = originalSpawn;
+      await server?.stop();
+    }
+  });
+
   it("routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1671,6 +2000,7 @@ describe("startServer", () => {
     const spawnInBackground = SessionService.prototype.spawnInBackground;
     SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1799,6 +2129,7 @@ describe("startServer", () => {
     SessionService.prototype.scheduleWake = async function mockScheduleWake(_sessionId, request) {
       scheduleRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1834,6 +2165,7 @@ describe("startServer", () => {
     };
     SessionService.prototype.cancelWake = async function mockCancelWake() {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -1922,6 +2254,70 @@ describe("startServer", () => {
     }
   });
 
+  it("routes source poll-enable and returns 404 for an unknown session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const enableSourcePoll = SessionService.prototype.enableSourcePoll;
+    SessionService.prototype.enableSourcePoll = async function mockEnableSourcePoll(sessionId) {
+      if (sessionId === "unknown-session") {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      return {
+        ok: true,
+        sessionId,
+        projectId: "demo",
+        cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/source-poll-enable`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        sessionId: "demo-1",
+        projectId: "demo",
+        cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+      });
+
+      const missingResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/unknown-session/source-poll-enable`,
+        { method: "POST" },
+      );
+      expect(missingResponse.status).toBe(404);
+    } finally {
+      SessionService.prototype.enableSourcePoll = enableSourcePoll;
+      await server.stop();
+    }
+  });
+
   it("routes targeted wake message updates and rejects invalid update bodies", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
@@ -1953,6 +2349,7 @@ describe("startServer", () => {
     ) {
       updateRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2051,6 +2448,7 @@ describe("startServer", () => {
     SessionService.prototype.dispatchWake = async function mockDispatchWake(_sessionId, request) {
       dispatchRequests.push(request);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: "demo-1",
         project: "demo",
         agent: "claude",
@@ -2132,6 +2530,7 @@ describe("startServer", () => {
     );
 
     const view: SessionView = {
+      lifecycle: { instanceId: "test-instance", revision: 0, operation: null },
       id: "demo-1",
       project: "demo",
       agent: "claude",
@@ -2162,6 +2561,7 @@ describe("startServer", () => {
     SessionService.prototype.completeDesk = async function mockCompleteDesk(sessionId: string) {
       calls.push(`desk:${sessionId}`);
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         completedIds: [sessionId],
       };
     };
@@ -2820,6 +3220,7 @@ describe("startServer", () => {
     const originalSelfDestruct = SessionService.prototype.selfDestruct;
     SessionService.prototype.selfDestruct = async function mockSelfDestruct(sessionId: string) {
       return {
+        lifecycle: { instanceId: this.info().lifecycleInstanceId, revision: 0, operation: null },
         id: sessionId,
         project: "demo",
         agent: "claude",
@@ -4059,13 +4460,21 @@ describe("startServer", () => {
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=claude`,
       );
       expect(claudeResponse.status).toBe(200);
-      await expect(claudeResponse.json()).resolves.toEqual({ model: "sonnet", worktree: false });
+      await expect(claudeResponse.json()).resolves.toEqual({
+        model: "sonnet",
+        worktree: false,
+        reasoningEffort: null,
+      });
 
       const codexResponse = await fetch(
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=codex`,
       );
       expect(codexResponse.status).toBe(200);
-      await expect(codexResponse.json()).resolves.toEqual({ model: null, worktree: false });
+      await expect(codexResponse.json()).resolves.toEqual({
+        model: null,
+        worktree: false,
+        reasoningEffort: null,
+      });
 
       const badAgentResponse = await fetch(
         `http://127.0.0.1:${port}/projects/demo/spawn-defaults?agent=nope`,

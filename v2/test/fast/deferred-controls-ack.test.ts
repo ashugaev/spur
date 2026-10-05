@@ -174,14 +174,18 @@ const isProcessRunningInTmuxMock = vi.fn();
 // that needs to express a genuine matcher/pane_child disagreement (alive
 // true, matchedByName false) overrides this mock directly instead — a plain
 // boolean delegate cannot produce that shape.
-const probeTmuxProcessMatchMock =
-  vi.fn<
-    (
-      sessionName: string,
-      matchers: string[],
-      options?: { fresh?: boolean; paneChildFallback?: boolean },
-    ) => Promise<{ alive: boolean; matchedByName: boolean }>
-  >();
+const probeTmuxProcessMatchMock = vi.fn<
+  (
+    sessionName: string,
+    matchers: string[],
+    options?: { fresh?: boolean; paneChildFallback?: boolean },
+  ) => Promise<{
+    alive: boolean;
+    matchedByName: boolean;
+    unresponsive: boolean;
+    diagnostic?: string;
+  }>
+>();
 const killTmuxSessionMock = vi.fn();
 const capturePaneAgentProcessesMock = vi.fn(() =>
   Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
@@ -202,6 +206,7 @@ const findForeignAgentProcessesForSessionMock = vi.fn(() =>
 );
 const killTmuxSessionTreeMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const sendInterruptKeysToTmuxMock = vi.fn();
 const sendSensitiveMessageToTmuxMock = vi.fn();
 const sendSubmitKeyToTmuxMock = vi.fn();
 const sendMenuSelectionKeysMock = vi.fn();
@@ -222,6 +227,12 @@ const getTmuxSessionPresenceMock = vi.fn(async (name: string, options?: { fresh?
 }));
 const getTmuxPanePresenceMock = vi.fn(async (name: string, options?: { fresh?: boolean }) => ({
   dead: await (options ? tmuxPaneDeadMock(name, options) : tmuxPaneDeadMock(name)),
+  unresponsive: false,
+}));
+// Same delegation for the sidecar-name composition: existing sidecar flows
+// keep driving this call site through sidecarTmuxAliveMock.
+const getSidecarTmuxPresenceMock = vi.fn(async (sessionId: string, sidecarName: string) => ({
+  present: await sidecarTmuxAliveMock(sessionId, sidecarName),
   unresponsive: false,
 }));
 const waitForTmuxReadyMock = vi.fn();
@@ -411,6 +422,8 @@ vi.mock("../../src/claude-accounts.js", () => ({
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   readCursorJsonlState: readCursorJsonlStateMock,
+  configureCursorTurnEndedStore: vi.fn(),
+  resolveCursorBuild: () => "test-build",
 }));
 
 vi.mock("../../src/agents/claude.js", async (importOriginal) => {
@@ -473,6 +486,7 @@ vi.mock("../../src/config.js", () => ({
       : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
+  validateWebhookSourceBindings: () => undefined,
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
@@ -667,11 +681,13 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   const actual = await importOriginal<typeof runtimeTmuxModule>();
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
+    TmuxProbeUnknownError: actual.TmuxProbeUnknownError,
     captureTmuxPane: captureTmuxPaneMock,
     createTmuxSession: createTmuxSessionMock,
     createTmuxCommandSession: createTmuxCommandSessionMock,
     createTmuxSidecarSession: createTmuxSidecarSessionMock,
     sidecarTmuxAlive: sidecarTmuxAliveMock,
+    getSidecarTmuxPresence: getSidecarTmuxPresenceMock,
     refreshTmuxFleetSnapshot: refreshTmuxFleetSnapshotMock,
     sidecarTmuxSession: sidecarTmuxSessionMock,
     listTmuxSessionNames: listTmuxSessionNamesMock,
@@ -687,6 +703,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     killTmuxSessionTree: killTmuxSessionTreeMock,
     setTmuxSocketName: setTmuxSocketNameMock,
     sendMessageToTmux: sendMessageToTmuxMock,
+    sendInterruptKeysToTmux: sendInterruptKeysToTmuxMock,
     sendSensitiveMessageToTmux: sendSensitiveMessageToTmuxMock,
     sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
     sendMenuSelectionKeys: sendMenuSelectionKeysMock,
@@ -1125,12 +1142,7 @@ describe("SessionService", () => {
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
-        (
-          agent: string,
-          initialMessage: string,
-          options?: { planMode?: boolean },
-          deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-        ) => ({
+        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
           agent,
           launchCommand:
             agent === "codex"
@@ -1140,7 +1152,6 @@ describe("SessionService", () => {
                 : "claude --dangerously-skip-permissions",
           initialMessage,
           readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-          ...(deferredSensitiveInitialMessage ? { deferredSensitiveInitialMessage } : {}),
         }),
       );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
@@ -1312,6 +1323,10 @@ describe("SessionService", () => {
       .mockReset()
       .mockResolvedValue({ ok: true, byPid: new Map(), byPgid: new Map() });
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
+    getSidecarTmuxPresenceMock.mockReset().mockImplementation(async (sessionId, sidecarName) => ({
+      present: await sidecarTmuxAliveMock(sessionId, sidecarName),
+      unresponsive: false,
+    }));
     refreshTmuxFleetSnapshotMock.mockReset().mockResolvedValue(undefined);
     sidecarTmuxSessionMock
       .mockReset()
@@ -1331,7 +1346,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (sessionName, matchers, options) => {
         const alive = await isProcessRunningInTmuxMock(sessionName, matchers, options);
-        return { alive, matchedByName: alive };
+        return { alive, matchedByName: alive, unresponsive: false };
       });
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     capturePaneAgentProcessesMock.mockReset().mockResolvedValue({ status: "ok", processes: [] });
@@ -1341,6 +1356,7 @@ describe("SessionService", () => {
       .mockResolvedValue({ status: "unavailable" });
     killTmuxSessionTreeMock.mockReset().mockResolvedValue(true);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendInterruptKeysToTmuxMock.mockReset().mockResolvedValue(true);
     sendSensitiveMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     sendMenuSelectionKeysMock.mockReset().mockResolvedValue(undefined);
@@ -1596,39 +1612,6 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("AC3b: spawn survives a live controls ack timeout; a dead agent still fails spawn", async () => {
-      mockClaudeJsonlState("waiting");
-      primeLiveNonAckingBinding();
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
-      mockTimerPromisesSleepWithFakeTimers();
-      const { SessionService } = await loadSessionServiceModule();
-      const liveService = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      const view = await liveService.spawn(
-        { project: "api", prompt: "hello" },
-        { sensitivePromptSuffix: controlsMessage() },
-      );
-      expect(view.id).toBe("api-1");
-      const sentEvents = logSpurEventMock.mock.calls
-        .map(([, entry]) => entry)
-        .filter((entry) => entry.event === "session.spawn.sensitive_controls_sent");
-      expect(sentEvents).toHaveLength(1);
-      expect(sentEvents[0]?.details?.outcome).toBe("submit_unconfirmed");
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      liveService.dispose();
-
-      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(false);
-      const { SessionService: DeadSessionService } = await loadSessionServiceModule();
-      const deadService = new DeadSessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await expect(
-        deadService.spawn(
-          { project: "api", prompt: "hello" },
-          { sensitivePromptSuffix: controlsMessage() },
-        ),
-      ).rejects.toThrow();
-      deadService.dispose();
-    });
-
     // Safety criteria, NOT a proof of the fix (they already hold against
     // unmodified source; the details key-set assertion is the one part that
     // constrains the new code).
@@ -1740,6 +1723,90 @@ describe("SessionService", () => {
       expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
       service.dispose();
     });
+
+    it("unresponsive liveness probe: stops after one scan, latches the read, and throws probeUnresponsive", async () => {
+      primeLiveNonAckingBinding();
+      probeTmuxProcessMatchMock
+        .mockReset()
+        .mockResolvedValue({ alive: false, matchedByName: false, unresponsive: true });
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+      await expect(
+        deferredInternals(service).sendDeferredSensitiveInitialMessage(
+          runningSession(),
+          controlsMessage(),
+        ),
+      ).rejects.toMatchObject({
+        name: "SubmitAckTimeoutError",
+        processAlive: false,
+        probeUnresponsive: true,
+      });
+
+      expect(waitSpy).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      // Latched: the post-loop read reuses the mid-loop result.
+      expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it.each(
+      (["mid-loop", "final"] as const).flatMap((boundary) =>
+        [false, true].flatMap((unresponsive) =>
+          [undefined, "process probe failed"].map((diagnostic) => ({
+            boundary,
+            unresponsive,
+            diagnostic,
+          })),
+        ),
+      ),
+    )(
+      "deferred ack false-probe contract at $boundary with $unresponsive/$diagnostic",
+      async ({ boundary, unresponsive, diagnostic }) => {
+        primeLiveNonAckingBinding();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const waitSpy = vi
+          .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValue({ found: false, lastScannedFile: null });
+        probeTmuxProcessMatchMock.mockReset().mockResolvedValue({
+          alive: false,
+          matchedByName: false,
+          unresponsive,
+          ...(diagnostic ? { diagnostic } : {}),
+        });
+        if (boundary === "final") {
+          probeTmuxProcessMatchMock
+            .mockResolvedValueOnce({ alive: true, matchedByName: true, unresponsive: false })
+            .mockResolvedValueOnce({ alive: true, matchedByName: true, unresponsive: false });
+        }
+        await expect(
+          deferredInternals(service).sendDeferredSensitiveInitialMessage(
+            runningSession(),
+            controlsMessage(),
+          ),
+        ).rejects.toMatchObject(
+          diagnostic
+            ? { name: "TmuxProbeUnknownError", message: diagnostic }
+            : {
+                name: "SubmitAckTimeoutError",
+                processAlive: false,
+                probeUnresponsive: unresponsive,
+              },
+        );
+        expect(waitSpy).toHaveBeenCalledTimes(boundary === "mid-loop" ? 1 : 3);
+        expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(boundary === "mid-loop" ? 1 : 3);
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(boundary === "mid-loop" ? 0 : 2);
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "session.controls.delivery_recovered",
+          ),
+        ).toHaveLength(0);
+        service.dispose();
+      },
+    );
 
     it("AC7: the deferred scan window is the short constant, not pacing.windowMs", async () => {
       primeLiveNonAckingBinding();

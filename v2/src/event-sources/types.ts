@@ -6,6 +6,7 @@ import {
   type SessionRecord,
   type SourceConfig,
   type SourceType,
+  type TelegramSpawnOrigin,
 } from "../types.js";
 
 export interface SpurEvent<T = unknown> {
@@ -27,6 +28,8 @@ export interface SourceSessionListItem {
   agent: string;
   state: string;
   title?: string;
+  /** Present when a message sent to this session would be dropped (stopped, error, killed). */
+  inactive?: true;
 }
 
 export interface SourceSpawnSessionRequest {
@@ -35,6 +38,8 @@ export interface SourceSpawnSessionRequest {
   agent?: AgentName;
   model?: string;
   selfDestruct?: SelfDestructConfig;
+  /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
+  telegramOrigin?: TelegramSpawnOrigin;
 }
 
 export interface SourceProjectListItem {
@@ -78,6 +83,16 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
 export interface SourceHandle {
   stop(): void | Promise<void>;
   runOnStart?(): void;
+  /**
+   * github-source-specific: drops sessionId's entry from the handle's
+   * in-process pending-poll-disabled override (see github.ts
+   * pendingPollDisabledOverrides), so a session whose disk-registry write
+   * failed still resumes polling from `poll-enable` without waiting for a
+   * rebind, the end-of-cycle sweep, or handle recreation. Returns the PR
+   * number that was pending, or null when nothing was pending for that
+   * session. No other source type implements this.
+   */
+  clearPollDisabledOverride?(sessionId: string): number | null;
 }
 
 export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
@@ -87,6 +102,13 @@ export interface SourceModule<TConfig extends SourceConfig = SourceConfig> {
 
 export interface SourceGroupController {
   stop(): void | Promise<void>;
+  /**
+   * Reaches a single running source handle by projectId/sourceId and, if it
+   * implements SourceHandle.clearPollDisabledOverride (github sources only),
+   * calls it. Returns null when the source is not running, is a different
+   * type, or had nothing pending for that session.
+   */
+  clearPollDisabledOverride(projectId: string, sourceId: string, sessionId: string): number | null;
 }
 
 /**

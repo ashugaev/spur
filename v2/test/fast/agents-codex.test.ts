@@ -1,3 +1,4 @@
+import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -43,7 +44,6 @@ import {
 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
-import { buildAgentLaunchPlan } from "../../src/agents/index.js";
 import {
   codexCommand,
   buildCodexPlan,
@@ -56,6 +56,7 @@ import {
   linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
+  readCodexRolloutState,
 } from "../../src/agents/codex.js";
 
 const mockCreateReadStream = createReadStream as unknown as Mock;
@@ -82,23 +83,6 @@ const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as unkno
   typeof resolveWorktreePathCandidates
 >;
 
-describe("Codex deferred controls", () => {
-  it("keeps controls out of image launch argv and ordinary initial text", () => {
-    const handle = `ap1_${"b".repeat(43)}`;
-    const plan = buildAgentLaunchPlan(
-      "codex",
-      "ordinary prompt",
-      { startupImagePaths: ["/tmp/image.png"] },
-      { text: handle, sensitive: true },
-    );
-    expect(plan.launchCommand).toContain("ordinary prompt");
-    expect(plan.launchCommand).toContain("/tmp/image.png");
-    expect(plan.launchCommand).not.toContain(handle);
-    expect(plan.initialMessage).not.toContain(handle);
-    expect(plan.deferredSensitiveInitialMessage).toEqual({ text: handle, sensitive: true });
-  });
-});
-
 beforeEach(() => {
   vi.clearAllMocks();
   delete process.env["SPUR_CODEX_BIN"];
@@ -109,6 +93,31 @@ afterEach(() => {
 });
 
 describe("codexCommand", () => {
+  it("extracts cumulative structured components from a sanitized rollout fixture", async () => {
+    const actualFs = await vi.importActual<typeof FsPromises>("node:fs/promises");
+    const fixture = await actualFs.readFile(
+      new URL("../fixtures/agent-history/codex/token-components.jsonl", import.meta.url),
+      "utf8",
+    );
+    mockReaddir.mockResolvedValue(["token-components.jsonl"]);
+    mockReadFile.mockResolvedValue(fixture);
+    mockStat.mockResolvedValue({ ino: 1, mtimeMs: 1, size: fixture.length });
+
+    const result = await readCodexRolloutState("/sessions");
+
+    expect(result.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:thread-sanitized",
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 20,
+      observedAtMs: Date.parse("2026-09-24T10:00:01.000Z"),
+    });
+  });
+
   it("returns 'codex' by default", () => {
     expect(codexCommand()).toBe("codex");
   });
@@ -167,6 +176,19 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toContain(`-c 'model_reasoning_effort="medium"'`);
   });
 
+  it.each(["none", "minimal", "xhigh", "max", "ultra"] as const)(
+    "transports %s on launch and resume",
+    (reasoningEffort) => {
+      for (const command of [
+        buildCodexPlan("prompt", { reasoningEffort }).launchCommand,
+        buildCodexResumePlan("session", "codex", { reasoningEffort }).launchCommand,
+      ]) {
+        expect(command).toContain(`-c 'model_reasoning_effort="${reasoningEffort}"'`);
+        expect(command.match(/model_reasoning_effort=/g)).toHaveLength(1);
+      }
+    },
+  );
+
   it("appends typed reasoning effort after legacy raw args", () => {
     const plan = buildCodexPlan("prompt", {
       codexArgs: ["-c", 'model_reasoning_effort="high"'],
@@ -181,10 +203,45 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("describe this", {
       startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
     });
-    expect(plan.launchCommand).toContain("--image '/tmp/one.png'");
-    expect(plan.launchCommand).toContain("--image '/tmp/two.webp'");
-    expect(plan.launchCommand).toContain("'describe this'");
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' --image '/tmp/two.webp' -- 'describe this'",
+    );
     expect(plan.initialMessage).toBe("");
+  });
+
+  it("keeps a leading-dash prompt with commas, newline and quotes as one positional argument", () => {
+    const prompt = "--describe, this\nimage's content";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '--describe, this\nimage'\\''s content'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it("separates mode metadata even when the user's prompt is blank", () => {
+    const prompt = "\n\nMode: manager. Load the manager skill.";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png' -- '\n\nMode: manager. Load the manager skill.'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it.each(["", " \n\t "])("leaves genuinely empty planner input %j image-only", (prompt) => {
+    const plan = buildCodexPlan(prompt, { startupImagePaths: ["/tmp/one.png"] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --image '/tmp/one.png'",
+    );
+    expect(plan.initialMessage).toBe("");
+  });
+
+  it("preserves tmux prompt delivery when startup image paths are empty", () => {
+    const prompt = "--describe, this\nimage's content";
+    const plan = buildCodexPlan(prompt, { startupImagePaths: [] });
+    expect(plan.launchCommand).toBe(
+      "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
+    );
+    expect(plan.initialMessage).toBe(prompt);
   });
 
   it("appends --model when provided", () => {
@@ -483,9 +540,9 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     await ensureCodexHooksConfig("/session/tool");
 
     expect(mockCp).toHaveBeenCalledWith(
-      expect.stringContaining("agents"),
-      expect.stringContaining("agents"),
-      expect.objectContaining({ recursive: true }),
+      "/home/testuser/.codex/agents",
+      "/session/tool/codex-home/agents",
+      { recursive: true, force: true },
     );
   });
 
@@ -982,6 +1039,55 @@ describe("findCodexSessionId", () => {
     expect(result).toBe("session-thread");
     expect(mockCreateInterface).toHaveBeenCalledTimes(1);
   });
+
+  it("ignores newer subagent rollout metadata when choosing a resume id", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockFlatJsonlDir("/custom/sessions", ["parent.jsonl", "child.jsonl"]);
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/custom/sessions/parent.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/custom/sessions/child.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/custom/sessions/parent.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          source: "cli",
+          payload: {
+            id: "parent-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+      "/custom/sessions/child.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "child-thread",
+            cwd: "/worktree/path",
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: "parent-thread",
+                },
+              },
+            },
+            thread_source: "subagent",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDir: "/custom/sessions",
+    });
+
+    expect(result).toBe("parent-thread");
+  });
 });
 
 // Helper: create an async iterable of lines, compatible with the mocked createInterface.
@@ -1173,6 +1279,55 @@ describe("scanCodexRolloutForMessage", () => {
 
     const result = await scanCodexRolloutForMessage("/sessions", "valid", new Map());
     expect(result.found).toBe(true);
+  });
+
+  it("matches a launch prompt in the rollout shape codex 0.157 writes for a first turn", async () => {
+    // Line order and item shapes of a real first-turn rollout: the turn opens
+    // with instructions and an environment_context user item before the
+    // pasted prompt, which carries Spur's appended session metadata.
+    const prompt = "Reply with the single word ready.\n\nSession metadata:\n- Suggest a title.";
+    const userItem = (text: string) =>
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+      });
+    const lines = [
+      JSON.stringify({ type: "session_meta", payload: { id: "thread-1", cwd: "/repo" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "t1" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "<skills_instructions>" }],
+        },
+      }),
+      userItem("<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"),
+      JSON.stringify({ type: "world_state", payload: {} }),
+      JSON.stringify({ type: "turn_context", payload: { cwd: "/repo" } }),
+      userItem(prompt),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "ready" }],
+        },
+      }),
+    ];
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", lines);
+    await expect(
+      scanCodexRolloutForMessage("/sessions", `${prompt}\n`, new Map()),
+    ).resolves.toEqual({ found: true, lastScannedFile: "/sessions/rollout.jsonl" });
+
+    // A prompt still sitting unsubmitted in the composer leaves only the
+    // turn preamble behind: the scan must not report it delivered.
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", lines.slice(0, 6));
+    await expect(scanCodexRolloutForMessage("/sessions", prompt, new Map())).resolves.toMatchObject(
+      { found: false },
+    );
   });
 
   it("scans multiple rollout files", async () => {

@@ -72,6 +72,376 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it("normalizes webhook sources and resolves their secret", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events/provider
+        secret: \${WEBHOOK_SECRET}
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        spawn:
+          prompt: "Handle {{body}} received at {{receivedAt}}"
+`);
+    await writeProjectEnv(configPath, "WEBHOOK_SECRET=test-webhook-key\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects.backend?.sources.incoming).toEqual({
+      type: "webhook",
+      host: "127.0.0.1",
+      port: 8456,
+      path: "/events/provider",
+      secret: "test-webhook-key",
+    });
+    expect(config.projects.backend?.triggers.receive).toMatchObject({
+      source: "incoming",
+      event: "webhook:received",
+    });
+  });
+
+  it.each([
+    ["127.0.0.1", "127.0.0.1"],
+    ["::1", "::1"],
+    ["0:0:0:0:0:0:0:1", "::1"],
+    ["2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+  ])("stores webhook host %s as %s", async (host, expected) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "${host}"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects.backend?.sources.incoming).toMatchObject({ host: expected });
+  });
+
+  it.each([
+    [
+      "host",
+      "host: localhost\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "zone-scoped host",
+      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "port",
+      "port: 0\n        path: /events\n        secret: test-webhook-key",
+      "port must be an integer between 1 and 65535",
+    ],
+    [
+      "path",
+      "port: 8456\n        path: //events\n        secret: test-webhook-key",
+      "path must be 1 through 2048 visible ASCII bytes",
+    ],
+    [
+      "secret",
+      "port: 8456\n        path: /events\n        secret: short",
+      "secret must be 16 through 512 visible ASCII bytes",
+    ],
+    [
+      "unknown key",
+      "port: 8456\n        path: /events\n        secret: test-webhook-key\n        extra: true",
+      "extra is not supported for webhook sources",
+    ],
+  ])("rejects invalid webhook %s", async (_name, fields, message) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        ${fields}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it("rejects duplicate webhook binds inside one config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      first:
+        type: webhook
+        host: "::1"
+        port: 8456
+        path: /first
+        secret: test-webhook-key
+      second:
+        type: webhook
+        host: "0:0:0:0:0:0:0:1"
+        port: 8456
+        path: /second
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.second duplicates webhook bind [::1]:8456 owned by projects.backend.sources.first",
+    );
+  });
+
+  it.each([
+    ["0.0.0.0", "127.0.0.1"],
+    ["::", "::1"],
+    ["::", "127.0.0.1"],
+    ["::ffff:127.0.0.1", "127.0.0.1"],
+  ])("rejects overlapping webhook binds %s and %s", async (firstHost, secondHost) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      first:
+        type: webhook
+        host: "${firstHost}"
+        port: 8456
+        path: /first
+        secret: test-webhook-key
+      second:
+        type: webhook
+        host: "${secondHost}"
+        port: 8456
+        path: /second
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.second duplicates webhook bind",
+    );
+  });
+
+  it("rejects overlapping webhook binds across projects", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::ffff:127.0.0.1"
+        port: 8456
+        path: /api
+        secret: test-webhook-key
+  web:
+    path: $REPO_PATH
+    sessionPrefix: web
+    sources:
+      incoming:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /web
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.web.sources.incoming duplicates webhook bind 127.0.0.1:8456 owned by projects.api.sources.incoming",
+    );
+  });
+
+  it("allows distinct specific IPv4 and IPv6 webhook binds", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ipv6:
+        type: webhook
+        host: "::1"
+        port: 8456
+        path: /ipv6
+        secret: test-webhook-key
+      ipv4:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /ipv4
+        secret: second-webhook-key
+`);
+
+    expect(loadConfig(configPath).projects.backend?.sources).toMatchObject({
+      ipv6: { host: "::1", port: 8456 },
+      ipv4: { host: "127.0.0.1", port: 8456 },
+    });
+  });
+
+  it("rejects a webhook bind on the daemon host and port", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it.each([
+    ["localhost", "127.0.0.1"],
+    ["localhost", "::1"],
+    ["daemon.internal", "192.0.2.1"],
+  ])("rejects daemon hostname %s overlap with webhook host %s", async (serverHost, webhookHost) => {
+    const configPath = await writeConfig(`
+server:
+  host: ${serverHost}
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "${webhookHost}"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      `projects.backend.sources.incoming webhook bind ${
+        webhookHost.includes(":") ? `[${webhookHost}]` : webhookHost
+      }:8456 overlaps server bind ${serverHost}:8456`,
+    );
+  });
+
+  it("rejects webhook wildcard overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  host: 0.0.0.0
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 0.0.0.0:8456",
+    );
+  });
+
+  it("rejects dual-stack webhook overlap with an IPv4 daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  host: 127.0.0.1
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind [::]:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects IPv4-mapped webhook overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::ffff:127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind [::ffff:7f00:1]:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects webhook overlap with the configured UI port", async () => {
+    const configPath = await writeConfig(`
+ui:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps ui bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects webhook send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.receive.send is not supported for webhook sources; use spawn",
+    );
+  });
+
   it("applies Spur defaults once at the config boundary", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1188,6 +1558,185 @@ projects:
     });
   });
 
+  it("resolves telegram allowedUsers and allowedChats from the environment", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+        allowedChats: "\${TG_CHATS}"
+        chatId: "\${TG_CHAT}"
+`);
+    await writeProjectEnv(configPath, "TG_USERS=123, 456\nTG_CHATS=-1001,123\nTG_CHAT=-1001\n");
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      allowedUsers: [123, 456],
+      allowedChats: [-1001, 123],
+      chatId: -1001,
+    });
+
+    const empty = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(empty, 'TG_USERS=","\n');
+    expect(() => loadConfig(empty)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must include at least one integer",
+    );
+
+    const bogus = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS}"
+`);
+    await writeProjectEnv(bogus, "TG_USERS=123,abc\n");
+    expect(() => loadConfig(bogus)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers must be an integer",
+    );
+
+    const missing = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: "\${TG_USERS_ABSENT}"
+`);
+    expect(() => loadConfig(missing)).toThrow(
+      "projects.backend.sources.telegram.allowedUsers could not be resolved from the environment",
+    );
+  });
+
+  it("parses a telegram outbound chatId and requires it to be allowed", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: -1001
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1001,
+    });
+
+    const mismatched = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        allowedChats: [-1002]
+        chatId: -1001
+`);
+    expect(() => loadConfig(mismatched)).toThrow(
+      "projects.backend.sources.telegram.chatId must be listed in " +
+        "projects.backend.sources.telegram.allowedChats",
+    );
+
+    const fromEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(fromEnv, "TELEGRAM_CHAT_ID=-1002\n");
+    expect(loadConfig(fromEnv).projects["backend"]?.sources["telegram"]).toMatchObject({
+      chatId: -1002,
+    });
+
+    const missingEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID_ABSENT}"
+`);
+    expect(() => loadConfig(missingEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const emptyEnv = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "\${TELEGRAM_CHAT_ID}"
+`);
+    await writeProjectEnv(emptyEnv, 'TELEGRAM_CHAT_ID=""\n');
+    // An empty value never resolves to chat 0.
+    expect(() => loadConfig(emptyEnv)).toThrow(
+      "projects.backend.sources.telegram.chatId could not be resolved from the environment",
+    );
+
+    const hex = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: "0x10"
+`);
+    expect(() => loadConfig(hex)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+
+    const fractional = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      telegram:
+        type: telegram
+        token: token-123
+        allowedUsers: [123]
+        chatId: 1.5
+`);
+    expect(() => loadConfig(fractional)).toThrow(
+      "projects.backend.sources.telegram.chatId must be an integer",
+    );
+  });
+
   it("materializes telegram autoSpawn defaults with no model", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1571,12 +2120,88 @@ projects:
     reasoningEffort:
       claude: low
       codex: high
+      cursor: xhigh
+      opencode: minimal
 `);
 
     expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({
       claude: "low",
       codex: "high",
+      cursor: "xhigh",
+      opencode: "minimal",
     });
+  });
+
+  it.each(["none", "minimal", "ultra", "invalid", "42"])(
+    "rejects Claude effort %s",
+    async (effort) => {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+      expect(() => loadConfig(configPath)).toThrow("reasoningEffort.claude");
+    },
+  );
+
+  it.each(["xhigh", "max"])("accepts Claude effort %s", async (effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    reasoningEffort:
+      claude: ${effort}
+`);
+    expect(loadConfig(configPath).projects["backend"]?.reasoningEffort).toEqual({ claude: effort });
+  });
+
+  it("parses trigger effort without an explicit agent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          reasoningEffort: ultra
+`);
+    expect(loadConfig(configPath).projects["backend"]?.triggers?.["kickoff"]).toMatchObject({
+      spawn: { blocks: [{ prompt: "ship it", reasoningEffort: "ultra" }] },
+    });
+  });
+
+  it.each([
+    ["codex", "invalid"],
+    ["claude", "ultra"],
+    ["claude", "none"],
+  ])("rejects trigger effort %s/%s", async (agent, effort) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      timer:
+        type: cron
+        schedule: '0 9 * * *'
+    triggers:
+      kickoff:
+        source: timer
+        event: cron:tick
+        spawn:
+          prompt: ship it
+          agent: ${agent}
+          reasoningEffort: ${effort}
+`);
+    expect(() => loadConfig(configPath)).toThrow("spawn.reasoningEffort");
   });
 
   it("rejects non-string project codex args", async () => {
@@ -2134,6 +2759,57 @@ projects:
       type: "github",
       maxReviewBatchTargets: 16,
     });
+  });
+
+  // A12
+  it("parses pollDisabledRecheckMs on a github source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        pollDisabledRecheckMs: 3600000
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      pollDisabledRecheckMs: 3_600_000,
+    });
+  });
+
+  it("omits pollDisabledRecheckMs when unset", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+`);
+
+    const config = loadConfig(configPath);
+    const parsed = config.projects["backend"]?.sources["pr-watch"];
+    expect(parsed).toBeDefined();
+    expect("pollDisabledRecheckMs" in (parsed ?? {})).toBe(false);
+  });
+
+  it.each([0, 2.5, "8"])("rejects a non-positive pollDisabledRecheckMs %s", async (value) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        pollDisabledRecheckMs: ${JSON.stringify(value)}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      /pollDisabledRecheckMs must be a positive integer/,
+    );
   });
 
   it("parses a sentry source with a resolved token and defaults", async () => {
@@ -3107,6 +3783,9 @@ projects:
 
   it("keeps the root sp project free of a review fleet", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.sources["gh"]?.type).toBe("github");
@@ -3116,6 +3795,9 @@ projects:
 
   it("parses the root PR-merged send trigger", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
     const trigger = config.projects["sp"]?.triggers["gh-merged"];
     if (!trigger || !("send" in trigger)) {
@@ -3131,6 +3813,9 @@ projects:
 
   it("sets medium provider reasoning for the sp project", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.reasoningEffort).toEqual({ claude: "medium", codex: "medium" });
@@ -3140,6 +3825,9 @@ projects:
 
   it("sets manager as the default mode for the sp project and drops spawn.steps", async () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "test-token");
+    vi.stubEnv("TELEGRAM_CHAT_ID", "-1001");
+    vi.stubEnv("TELEGRAM_ALLOWED_USERS", "123");
+    vi.stubEnv("TELEGRAM_ALLOWED_CHATS", "-1001,123");
     const config = loadConfig(join(initialCwd, "..", "spur.yaml"));
 
     expect(config.projects["sp"]?.modes?.["manager"]?.default).toBe(true);
@@ -4736,6 +5424,61 @@ projects:
 
     expect(loadConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
     expect(loadProjectConfig(configPath).projects["backend"]?.maxLiveSessions).toBe(3);
+  });
+
+  it("parses a positive projects.<id>.tokenBudget in both config modes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+`);
+
+    expect(loadConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+    expect(loadProjectConfig(configPath).projects["backend"]?.tokenBudget).toBe(12000);
+  });
+
+  it.each([0, -1, 1.5])("rejects projects.<id>.tokenBudget=%s", async (tokenBudget) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: ${tokenBudget}
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudget must be a positive integer",
+    );
+  });
+
+  it("parses projects.<id>.tokenBudgetWarnOnly in both config modes and defaults false", async () => {
+    const enabledPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudget: 12000
+    tokenBudgetWarnOnly: true
+`);
+    expect(loadConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+    expect(loadProjectConfig(enabledPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(true);
+
+    const defaultPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+    expect(loadConfig(defaultPath).projects["backend"]?.tokenBudgetWarnOnly).toBe(false);
+  });
+
+  it("rejects a non-boolean projects.<id>.tokenBudgetWarnOnly", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    tokenBudgetWarnOnly: yes
+`);
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.tokenBudgetWarnOnly must be a boolean",
+    );
   });
 
   it("defaults staleAfterMinutes to 12 hours when the config does not set it", async () => {

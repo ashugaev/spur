@@ -1,0 +1,256 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ReasoningSelect } from "@/components/ReasoningSelect";
+import { ModelReasoningField } from "@/components/ModelReasoningField";
+import { serializeReasoningIntent, type ReasoningIntent } from "@/lib/reasoning-effort";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
+import type { AgentModelsResponse } from "@/lib/types";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+const props = {
+  label: "Respawn reasoning",
+  intent: { kind: "carried" as const, level: "high" as const },
+  levels: ["low", "high"] as ("low" | "high")[],
+  loading: false,
+  error: null,
+  needsModel: false,
+  lifecycle: true,
+  projectEffort: "low" as const,
+  onChange: vi.fn(),
+};
+
+describe("ReasoningSelect", () => {
+  it("freezes the selected value while submitting and restores control afterward", () => {
+    const { rerender } = render(<ReasoningSelect {...props} />);
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("high");
+    expect(select.disabled).toBe(false);
+    rerender(<ReasoningSelect {...props} submitting />);
+    expect(select.disabled).toBe(true);
+    expect(select.value).toBe("high");
+    expect(screen.queryByText("This model has no reasoning levels")).toBeNull();
+    rerender(<ReasoningSelect {...props} submitting={false} />);
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("high");
+  });
+  it("shows carried value and sends clear rather than project level on Default", () => {
+    const onChange = vi.fn();
+    render(<ReasoningSelect {...props} onChange={onChange} />);
+    expect(screen.getByRole("option", { name: "Reasoning · High · current" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "default" } });
+    expect(onChange).toHaveBeenCalledWith({ kind: "clear" });
+  });
+  it("renders only advertised levels and explicit intent", () => {
+    const onChange = vi.fn();
+    render(<ReasoningSelect {...props} onChange={onChange} />);
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "low" } });
+    expect(onChange).toHaveBeenCalledWith({ kind: "explicit", level: "low" });
+  });
+  it.each([
+    { levels: [], needsModel: false, error: null, text: "Not supported" },
+    { levels: [], needsModel: true, error: null, text: "Pick a model" },
+    { levels: undefined, needsModel: false, error: "catalog failed", text: "Unavailable" },
+  ])("disables unavailable metadata: $text", ({ text, ...state }) => {
+    render(<ReasoningSelect {...props} {...state} />);
+    expect((screen.getByRole("combobox") as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByRole("option").textContent).toContain(text);
+  });
+  it("uses a motion skeleton while loading", () => {
+    render(<ReasoningSelect {...props} loading />);
+    expect(screen.getByLabelText("Resolving reasoning")).toBeTruthy();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+});
+
+describe("model capability revalidation", () => {
+  it.each([
+    { order: "catalog-first", supported: false },
+    { order: "defaults-first", supported: false },
+    { order: "catalog-first", supported: true },
+    { order: "defaults-first", supported: true },
+  ])(
+    "initial carry waits for preselection: $order, supported=$supported",
+    async ({ order, supported }) => {
+      let releaseCatalog!: (response: Response) => void;
+      let releaseDefaults!: (response: Response) => void;
+      const catalogResponse = new Promise<Response>((resolve) => {
+        releaseCatalog = resolve;
+      });
+      const defaultsResponse = new Promise<Response>((resolve) => {
+        releaseDefaults = resolve;
+      });
+      const fetch = vi.fn((url: string) =>
+        url.startsWith("/api/models?") ? catalogResponse : defaultsResponse,
+      );
+      vi.stubGlobal("fetch", fetch);
+      const catalog: AgentModelsResponse = {
+        models: [
+          {
+            id: "reasoning",
+            label: "Reasoning model",
+            reasoningEfforts: supported ? ["max"] : ["low", "medium", "high"],
+          },
+        ],
+        defaultReasoningEfforts: ["low", "medium", "high"],
+      };
+      const changed = vi.fn();
+      function InitialCarryComposer() {
+        const [model, setModel] = useState<string | null>(null);
+        const [intent, setIntent] = useState<ReasoningIntent>({ kind: "carried", level: "max" });
+        const defaults = useResolvedSpawnDefaults("project", "claude");
+        return (
+          <>
+            <ModelReasoningField
+              agent="claude"
+              value={model}
+              onChange={setModel}
+              carry={{ agent: "claude", model: "reasoning" }}
+              spawnDefaults={defaults}
+              onValidityChange={() => {}}
+              lifecycle
+              reasoningLabel="Respawn reasoning"
+              reasoningIntent={intent}
+              onReasoningChange={(next) => {
+                changed(model, next);
+                setIntent(next);
+              }}
+            />
+            <output data-testid="selected-model">{model ?? "unresolved"}</output>
+            <output data-testid="serialized-request">
+              {JSON.stringify({ reasoningEffort: serializeReasoningIntent(intent) })}
+            </output>
+          </>
+        );
+      }
+      render(<InitialCarryComposer />);
+      const completeCatalog = () => releaseCatalog(new Response(JSON.stringify(catalog)));
+      const completeDefaults = () =>
+        releaseDefaults(new Response(JSON.stringify({ model: "reasoning", worktree: false })));
+      expect(screen.getByLabelText("Resolving reasoning")).toBeTruthy();
+      await act(async () => {
+        (order === "catalog-first" ? completeCatalog : completeDefaults)();
+      });
+      expect(screen.getByTestId("selected-model").textContent).toBe("unresolved");
+      expect(changed).not.toHaveBeenCalled();
+      expect(screen.queryByText(/not offered/)).toBeNull();
+      expect(screen.getByLabelText("Resolving reasoning")).toBeTruthy();
+      await act(async () => {
+        (order === "catalog-first" ? completeDefaults : completeCatalog)();
+      });
+      expect(screen.getByTestId("selected-model").textContent).toBe("reasoning");
+      expect(changed.mock.calls.filter(([model]) => model === null)).toEqual([]);
+      if (supported) {
+        expect(changed).not.toHaveBeenCalled();
+        expect(screen.queryByText(/not offered/)).toBeNull();
+        expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("max");
+        expect(screen.getByTestId("serialized-request").textContent).toBe("{}");
+      } else {
+        expect(changed).toHaveBeenCalledExactlyOnceWith("reasoning", { kind: "clear" });
+        expect(screen.getByText("Max not offered by Reasoning model, using Default")).toBeTruthy();
+        expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("default");
+        expect(screen.getByTestId("serialized-request").textContent).toBe(
+          '{"reasoningEffort":null}',
+        );
+      }
+      expect(fetch.mock.calls.filter(([url]) => url.startsWith("/api/models?"))).toHaveLength(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
+  it("preserves untouched carried intent after initial preselection on capability error, but blocks changed model", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          models: [
+            { id: "sonnet", label: "Sonnet" },
+            { id: "other", label: "Other" },
+          ],
+          reasoningError: "Native capabilities unavailable",
+        }),
+      }),
+    );
+    function CarriedComposer() {
+      const [model, setModel] = useState<string | null>(null);
+      const [valid, setValid] = useState(false);
+      return (
+        <>
+          <ModelReasoningField
+            agent="claude"
+            value={model}
+            onChange={setModel}
+            carry={{ agent: "claude", model: "sonnet" }}
+            spawnDefaults={{ model: "sonnet", worktree: false, loading: false, error: null }}
+            onValidityChange={setValid}
+            lifecycle
+            reasoningLabel="Respawn reasoning"
+            reasoningIntent={{ kind: "carried", level: "high" }}
+            onReasoningChange={() => {}}
+          />
+          <button disabled={!valid}>Submit current</button>
+          <button onClick={() => setModel("other")}>Change model</button>
+        </>
+      );
+    }
+    render(<CarriedComposer />);
+    await screen.findByText("Reasoning · Unavailable");
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Submit current" }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Change model" }));
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Submit current" }) as HTMLButtonElement).disabled,
+      ).toBe(true),
+    );
+  });
+  function Composer() {
+    const [model, setModel] = useState<string | null>("supported");
+    const [intent, setIntent] = useState<ReasoningIntent>({ kind: "carried", level: "high" });
+    return (
+      <>
+        <ModelReasoningField
+          agent="claude"
+          value={model}
+          onChange={setModel}
+          carry={null}
+          spawnDefaults={{ model: null, worktree: false, loading: false, error: null }}
+          onValidityChange={() => {}}
+          lifecycle
+          reasoningLabel="Respawn reasoning"
+          reasoningIntent={intent}
+          onReasoningChange={setIntent}
+        />
+        <output>{intent.kind}</output>
+        <button onClick={() => setModel("unsupported")}>Switch model</button>
+      </>
+    );
+  }
+  it("clears carried unsupported effort using the one existing catalog request", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: [
+          { id: "supported", label: "Supported", reasoningEfforts: ["high"] },
+          { id: "unsupported", label: "Unsupported", reasoningEfforts: [] },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Composer />);
+    await waitFor(() =>
+      expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("high"),
+    );
+    fireEvent.click(screen.getByText("Switch model"));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("clear"));
+    expect(screen.getByText("High not offered by Unsupported, using Default")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

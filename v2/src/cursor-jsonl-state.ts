@@ -1,7 +1,8 @@
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type { SessionState, TranscriptEntry } from "./types.js";
+import { basename, dirname, join } from "node:path";
+import type { CursorRestoreBoundary, SessionState, TranscriptEntry } from "./types.js";
 import { resolveWorktreePathCandidates } from "./agents/worktree-path.js";
 import { detectCursorRateLimit, type RateLimitDetection } from "./rate-limit-detect.js";
 
@@ -17,9 +18,185 @@ export interface CursorParsedRecord {
 
 export interface CursorJsonlReaderState {
   filePath: string;
+  /** End of the stable prefix: complete lines, trailing turn_ended excluded. */
   lastOffset: number;
   lastMtimeMs: number;
   tailRecords: CursorParsedRecord[];
+  /** Records parsed from the trailing turn_ended lines past lastOffset. */
+  trailingRecords: CursorParsedRecord[];
+  /** The installed cursor closes turns with turn_ended (this file or the host). */
+  usesTurnEnded: boolean;
+  /** The file currently ends in a turn_ended line. */
+  turnEnded: boolean;
+}
+
+// A cursor build that closes turns with turn_ended writes no tool records while
+// a shell command runs: the tail is a plain assistant text line for the whole
+// run. Once the build is known to use the marker, its absence after the last
+// record is the running-turn signal, bounded by the tool-use grace so a turn
+// cursor never closed cannot pin the session working.
+//
+// The file alone cannot prove it: every submit rewrites away the previous
+// turn_ended, so a transcript mid-command holds none. The marker is a property
+// of the installed cursor build, so any transcript on the host that ends in it
+// answers for all of them; a daemon restart mid-command reads it back from the
+// on-disk store (configureCursorTurnEndedStore).
+let hostCursorWritesTurnEnded = false;
+let hostProbeAtMs = 0;
+const HOST_PROBE_INTERVAL_MS = 10 * 60_000;
+const HOST_PROBE_FILE_LIMIT = 20;
+const HOST_PROBE_TAIL_BYTES = 512;
+
+let hostProbeProjectsRoot: string | null = null;
+
+// The learned fact survives a daemon restart on disk, keyed by cursor build:
+// right after a restart mid-command the host probe can find no transcript
+// ending in turn_ended (every submit rewrites the marker away), the open turn
+// then read waiting, and a queued message typed into it. The probe only
+// covers the first learn for a build.
+let turnEndedStore: { filePath: string; build: string } | null = null;
+
+function readTurnEndedBuilds(filePath: string): Record<string, true> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, "utf8"));
+    const builds =
+      parsed !== null && typeof parsed === "object"
+        ? (parsed as { builds?: unknown }).builds
+        : undefined;
+    if (builds === null || typeof builds !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(builds).filter((entry): entry is [string, true] => entry[1] === true),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function learnHostCursorWritesTurnEnded(): void {
+  if (hostCursorWritesTurnEnded) return;
+  hostCursorWritesTurnEnded = true;
+  if (!turnEndedStore) return;
+  const builds = readTurnEndedBuilds(turnEndedStore.filePath);
+  builds[turnEndedStore.build] = true;
+  try {
+    mkdirSync(dirname(turnEndedStore.filePath), { recursive: true });
+    writeFileSync(turnEndedStore.filePath, `${JSON.stringify({ builds })}\n`, "utf8");
+  } catch {
+    // The in-memory fact still holds for this process.
+  }
+}
+
+/**
+ * Points the learned turn_ended fact at its on-disk store and loads it for
+ * `build` (the installed cursor build; "unknown" when it cannot be named).
+ */
+export function configureCursorTurnEndedStore(filePath: string, build: string): void {
+  turnEndedStore = { filePath, build };
+  if (readTurnEndedBuilds(filePath)[build]) hostCursorWritesTurnEnded = true;
+}
+
+/**
+ * The installed cursor build, from the versioned install path the launcher
+ * resolves to (`.../cursor-agent/versions/<build>/cursor-agent`).
+ */
+export function resolveCursorBuild(executablePath: string | null): string {
+  if (!executablePath) return "unknown";
+  try {
+    const resolved = realpathSync(executablePath);
+    const parent = dirname(resolved);
+    return basename(dirname(parent)) === "versions" ? basename(parent) : resolved;
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Test seam: clears the learned flag and points the host probe at `projectsRoot`. */
+export function resetCursorTurnEndedProbe(projectsRoot: string | null = null): void {
+  hostCursorWritesTurnEnded = false;
+  hostProbeAtMs = 0;
+  hostProbeProjectsRoot = projectsRoot;
+  turnEndedStore = null;
+}
+
+async function endsWithTurnEnded(filePath: string): Promise<boolean> {
+  const fd = await open(filePath, "r");
+  try {
+    const { size } = await fd.stat();
+    const start = Math.max(0, size - HOST_PROBE_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    if (buffer.length > 0) await fd.read(buffer, 0, buffer.length, start);
+    return cursorStablePrefixBytes(buffer) < buffer.lastIndexOf(NEWLINE) + 1;
+  } finally {
+    await fd.close();
+  }
+}
+
+async function cursorBuildWritesTurnEnded(projectsDir: string, nowMs: number): Promise<boolean> {
+  if (hostCursorWritesTurnEnded || nowMs - hostProbeAtMs < HOST_PROBE_INTERVAL_MS) {
+    return hostCursorWritesTurnEnded;
+  }
+  hostProbeAtMs = nowMs;
+  const files: Array<{ path: string; mtimeMs: number }> = [];
+  try {
+    for (const project of await readdir(projectsDir)) {
+      const transcriptsDir = join(projectsDir, project, "agent-transcripts");
+      let chats: string[];
+      try {
+        chats = await readdir(transcriptsDir);
+      } catch {
+        continue;
+      }
+      for (const chat of chats) {
+        const path = join(transcriptsDir, chat, `${chat}.jsonl`);
+        try {
+          files.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+        } catch {
+          // Not a transcript dir.
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+  files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const file of files.slice(0, HOST_PROBE_FILE_LIMIT)) {
+    try {
+      if (await endsWithTurnEnded(file.path)) {
+        learnHostCursorWritesTurnEnded();
+        break;
+      }
+    } catch {
+      // Rotated away between listing and read.
+    }
+  }
+  return hostCursorWritesTurnEnded;
+}
+
+function cursorReaderState(
+  records: CursorParsedRecord[],
+  reader: Pick<CursorJsonlReaderState, "usesTurnEnded" | "turnEnded">,
+  nowMs: number,
+  fileMtimeMs: number,
+): SessionState {
+  const state = classifyCursorJsonlState(records, nowMs, fileMtimeMs);
+  const turnOpen =
+    (reader.usesTurnEnded || hostCursorWritesTurnEnded) &&
+    !reader.turnEnded &&
+    nowMs - fileMtimeMs <= CURSOR_JSONL_TOOL_USE_GRACE_MS;
+  return state === "waiting" && turnOpen ? "working" : state;
+}
+
+export async function captureCursorRestoreBoundary(
+  worktreePath: string,
+  agentSessionId?: string,
+): Promise<CursorRestoreBoundary | null> {
+  const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+  if (!filePath) return null;
+  try {
+    return { filePath, offset: (await stat(filePath)).size };
+  } catch {
+    return null;
+  }
 }
 
 const TAIL_RECORD_LIMIT = 50;
@@ -31,6 +208,44 @@ function tryParseJson(line: string): Record<string, unknown> | null {
     return JSON.parse(line) as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+const NEWLINE = 0x0a;
+
+// Cursor rewrites its transcript on every submit and drops the trailing
+// `turn_ended` lines (none sit mid-file across 244 host transcripts), so an
+// offset past them lands inside the next record and that record never parses.
+// Returns the byte length of the prefix a later read can resume from: complete
+// lines only, trailing turn_ended (and blank) lines excluded.
+export function cursorStablePrefixBytes(buffer: Buffer): number {
+  let end = buffer.lastIndexOf(NEWLINE) + 1;
+  while (end > 0) {
+    const start = end >= 2 ? buffer.lastIndexOf(NEWLINE, end - 2) + 1 : 0;
+    const line = buffer.subarray(start, end).toString("utf8").trim();
+    if (line && tryParseJson(line)?.["type"] !== "turn_ended") {
+      break;
+    }
+    end = start;
+  }
+  return end;
+}
+
+const STABLE_OFFSET_TAIL_BYTES = 65_536;
+
+/** File offset where a read survives cursor's next rewrite; see cursorStablePrefixBytes. */
+export async function readCursorStableOffset(filePath: string): Promise<number> {
+  const fd = await open(filePath, "r");
+  try {
+    const { size } = await fd.stat();
+    const start = Math.max(0, size - STABLE_OFFSET_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    if (buffer.length > 0) {
+      await fd.read(buffer, 0, buffer.length, start);
+    }
+    return start + cursorStablePrefixBytes(buffer);
+  } finally {
+    await fd.close();
   }
 }
 
@@ -298,7 +513,7 @@ export async function readCursorJsonlState(
   worktreePath: string,
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
-  options?: { minMtimeMs?: number | undefined },
+  options?: { minMtimeMs?: number | undefined; after?: CursorRestoreBoundary | undefined },
 ): Promise<{
   state: SessionState;
   reader: CursorJsonlReaderState;
@@ -329,27 +544,58 @@ export async function readCursorJsonlState(
     return null;
   }
 
+  const boundaryOffset =
+    options?.after?.filePath === filePath && fileStat.size >= options.after.offset
+      ? options.after.offset
+      : 0;
   const currentReader: CursorJsonlReaderState =
-    reader && reader.filePath === filePath
+    reader &&
+    reader.filePath === filePath &&
+    (boundaryOffset === 0 || reader.lastOffset > boundaryOffset || reader.tailRecords.length === 0)
       ? reader
       : {
           filePath,
-          lastOffset: 0,
+          lastOffset: boundaryOffset,
           lastMtimeMs: 0,
           tailRecords: [],
+          trailingRecords: [],
+          usesTurnEnded: false,
+          turnEnded: false,
         };
 
-  if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
+  if (
+    fileStat.mtimeMs === currentReader.lastMtimeMs &&
+    fileStat.size === currentReader.lastOffset &&
+    currentReader.tailRecords.length + currentReader.trailingRecords.length > 0
+  ) {
+    const cached = [...currentReader.tailRecords, ...currentReader.trailingRecords];
     return {
-      state: classifyCursorJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
+      state: cursorReaderState(cached, currentReader, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
-      rateLimit: detectCursorRateLimit(latestCursorTerminalError(currentReader.tailRecords)),
+      rateLimit: detectCursorRateLimit(latestCursorTerminalError(cached)),
     };
   }
 
   const readOffset = Math.min(currentReader.lastOffset, fileStat.size);
   const nowMs = Date.now();
-  const newRecords: CursorParsedRecord[] = [];
+  const parseRecords = (chunk: Buffer): CursorParsedRecord[] => {
+    const records: CursorParsedRecord[] = [];
+    for (const line of chunk.toString("utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
+      if (record) {
+        records.push(record);
+      }
+    }
+    return records;
+  };
+  let stableRecords: CursorParsedRecord[];
+  let trailingRecords: CursorParsedRecord[];
+  let stableBytes: number;
+  let turnEnded: boolean;
 
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -358,36 +604,46 @@ export async function readCursorJsonlState(
     if (buffer.length > 0) {
       await fd.read(buffer, 0, buffer.length, readOffset);
     }
-    for (const line of buffer.toString("utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const record = parseCursorJsonlRecord(trimmed, fileStat.mtimeMs);
-      if (record) {
-        newRecords.push(record);
-      }
-    }
+    stableBytes = cursorStablePrefixBytes(buffer);
+    const completeBytes = buffer.lastIndexOf(NEWLINE) + 1;
+    stableRecords = parseRecords(buffer.subarray(0, stableBytes));
+    const trailing = buffer.subarray(stableBytes, completeBytes);
+    trailingRecords = parseRecords(trailing);
+    turnEnded = trailing.toString("utf8").trim().length > 0;
   } catch {
     return null;
   } finally {
     await fd?.close();
   }
 
-  const combined = [...currentReader.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+  const tailRecords = [...currentReader.tailRecords, ...stableRecords].slice(-TAIL_RECORD_LIMIT);
+  const combined = [...tailRecords, ...trailingRecords].slice(-TAIL_RECORD_LIMIT);
+  if (turnEnded) learnHostCursorWritesTurnEnded();
   const nextReader: CursorJsonlReaderState = {
     filePath,
-    lastOffset: fileStat.size,
+    lastOffset: readOffset + stableBytes,
     lastMtimeMs: fileStat.mtimeMs,
-    tailRecords: combined,
+    tailRecords,
+    trailingRecords,
+    usesTurnEnded:
+      currentReader.usesTurnEnded ||
+      turnEnded ||
+      (await cursorBuildWritesTurnEnded(
+        hostProbeProjectsRoot ?? join(homedir(), ".cursor", "projects"),
+        nowMs,
+      )),
+    turnEnded,
   };
 
   if (combined.length === 0) {
+    if (options?.after) {
+      return { state: "waiting", reader: nextReader, rateLimit: null };
+    }
     return null;
   }
 
   return {
-    state: classifyCursorJsonlState(combined, nowMs, fileStat.mtimeMs),
+    state: cursorReaderState(combined, nextReader, nowMs, fileStat.mtimeMs),
     reader: nextReader,
     rateLimit: detectCursorRateLimit(latestCursorTerminalError(combined)),
   };

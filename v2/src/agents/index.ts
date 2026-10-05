@@ -32,7 +32,13 @@ import {
   ensureCursorWorkspaceTrust,
   findCursorSessionId,
 } from "./cursor.js";
-import { captureCursorSubmitBaseline, scanCursorJsonlForMessage } from "./cursor-submit-ack.js";
+import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
+import {
+  captureCursorSubmitBaseline,
+  persistCursorSubmitBaseline,
+  restoreCursorSubmitBaseline,
+  scanCursorJsonlForMessage,
+} from "./cursor-submit-ack.js";
 import {
   buildOpenCodePlan,
   buildOpenCodeConfig,
@@ -41,18 +47,21 @@ import {
   assertOpenCodeCompatibility,
   captureOpenCodeSubmitBaseline,
   findOpenCodeSessionId,
+  invalidateOpenCodeState,
   opencodeCommand,
   readOpenCodeConversation,
-  scanOpenCodeForNewUserMessage,
+  scanOpenCodeForTypedMessage,
 } from "./opencode.js";
 import { agentExecutableCommand, agentProcessNames } from "./executable.js";
 import { readClaudeTranscriptEntries } from "../claude-jsonl-state.js";
+import { readClaudeSessionStatus } from "../claude-session-status.js";
 import { readCursorTranscriptEntries } from "../cursor-jsonl-state.js";
 import type {
   AgentName,
   ProviderReasoningEffort,
   TranscriptEntry,
   SidecarMcpBinding,
+  SubmitAckBaseline,
 } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
@@ -65,6 +74,7 @@ interface AgentPlanOptions {
   codexHomePath?: string;
   codexArgs?: string[];
   reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -106,6 +116,16 @@ export const DEFERRED_CONTROLS_ACK_WINDOW_MS = 5_000;
 // agent's DEFAULT_SUBMIT_MAX_RESENDS and restores just enough recovery for a
 // genuinely dropped Enter without reintroducing that hold.
 export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
+// Pacing for a send typed into an agent known to be idle or just interrupted:
+// the user's send/flush, the queued-message drain, the ToDo reminder. An idle
+// agent records the submit within seconds, so a miss means a swallowed Enter,
+// not a slow agent; short windows resend it fast and bound the lock hold to
+// 4 x 5s. The long default windows stay for deliver() into a busy agent,
+// which records the message only when its turn ends.
+export const INTERACTIVE_SUBMIT_ACK_PACING: SubmitAckPacing = {
+  windowMs: 5_000,
+  maxResends: 3,
+};
 // Launch-send pacing for claude. A claude TUI still rendering the pasted launch
 // message swallows the submit Enter, and nothing is submitted until another one
 // arrives, so the launch send scans in short windows instead of the mid-session
@@ -114,6 +134,17 @@ export const DEFERRED_CONTROLS_MAX_RESENDS = 2;
 // overwrite the composer.
 const CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS = 5_000;
 const CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS = 2;
+// First ack window of a mid-session claude send. The TUI can swallow the submit
+// Enter while it renders a multi-line paste, and the 300s default window then
+// stalls the message for minutes. One Enter after 5s bounds that stall; the
+// remaining resends keep the long window.
+const CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS = 5_000;
+// Launch-send pacing for codex, same shape as claude's: a launch send that
+// never acked stayed in "spawning" behind the 300s default window. A healthy
+// codex launch records the prompt in its rollout ~2.5-4s after the submit,
+// so 10s windows leave margin before an Enter resend.
+const CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS = 10_000;
+const CODEX_LAUNCH_SUBMIT_MAX_RESENDS = 2;
 
 export interface AgentSubmitAckContext {
   worktreePath: string;
@@ -122,6 +153,8 @@ export interface AgentSubmitAckContext {
   agentSessionId?: string;
   /** Send goes to an agent that just launched and has no transcript yet. */
   freshLaunch?: boolean;
+  /** Session-private cursor config dir, used to re-resolve a rotated chat id. */
+  cursorConfigDir?: string;
 }
 
 export interface SubmitAckScanResult {
@@ -132,9 +165,18 @@ export interface SubmitAckScanResult {
 export interface SubmitAckPacing {
   windowMs: number;
   maxResends: number;
+  /** Window for the first scan only, when it should be shorter than `windowMs`. */
+  firstWindowMs?: number;
+}
+
+export interface AgentEarlyResendContext {
+  worktreePath: string;
+  agentSessionId?: string;
+  panePid?: number;
 }
 
 export interface SubmitAckBinding {
+  baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
 }
 
@@ -168,6 +210,9 @@ interface AgentAdapter {
     cursorConfigDir?: string;
     claudeConfigDir?: string;
     modelsCacheHome?: string;
+    model?: string;
+    reasoningEffort?: ProviderReasoningEffort;
+    reasoningVariantNames?: string[];
   }): Promise<{
     claudeSettingsPath?: string;
     claudeMcpConfigPath?: string;
@@ -182,21 +227,38 @@ interface AgentAdapter {
   processMatchers(launchCommand: string): string[];
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
-  sendsInterruptKey: boolean;
+  /**
+   * tmux key names that interrupt a running turn, sent in order. Empty when
+   * the agent has no interrupt key safe to send (cursor).
+   */
+  interruptKeys: readonly string[];
   waitsForSubmitAck: boolean;
   submitAckWindowMs: number;
   submitAckMaxResends: number;
   /** Pacing for the launch send only, for an agent that needs its own. */
   launchSubmitAck?: SubmitAckPacing;
+  /** First-window override for a mid-session send; needs `earlySubmitResendAllowed`. */
+  submitAckFirstWindowMs?: number;
+  /**
+   * Whether the Enter that ends the first (short) window is safe. False when
+   * the agent may be showing a menu that would take the keystroke.
+   */
+  earlySubmitResendAllowed?(ctx: AgentEarlyResendContext): Promise<boolean>;
   busyQueuedSendAwaitsPrompt: boolean;
   queuedSendPromptGraceMs: number;
   /**
    * Capture a baseline before the message is sent, returning a binding whose
    * `scan` walks only new bytes appended after the send. Returns `null` when
    * no acknowledgment is required (for example, Claude on a fresh session
-   * before any JSONL exists).
+   * before any JSONL exists). `persisted`, this agent's own earlier
+   * baseline, replaces the capture.
    */
-  submitAck?(ctx: AgentSubmitAckContext): Promise<SubmitAckBinding | null>;
+  submitAck?(
+    ctx: AgentSubmitAckContext,
+    persisted?: SubmitAckBaseline,
+  ): Promise<SubmitAckBinding | null>;
+  /** Drops the agent's own cached state for a session after a pane write. */
+  invalidateState?(agentSessionId: string): void;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -243,11 +305,13 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
 } {
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
     ...(options?.planMode ? { planMode: true } : {}),
     ...(options?.model ? { model: options.model } : {}),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
   };
 }
 
@@ -302,11 +366,10 @@ function defaultProcessMatchers(agent: AgentName, launchCommand: string): string
 // (b) launchCommand's first token is always agentExecutableCommand(agent)
 // (executable.ts:33-36), never a user-authored `exec ...` prefix — the
 // `exec $BIN "$@"` shape in issue #871 is wrapper-script CONTENT a plan never
-// records as the launch command itself. That token is not always what
-// extractCommandBinary derives, though: a quoted env prefix whose value
-// contains whitespace (OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT)
-// mis-tokenizes to an arbitrary fragment, neither the canonical name nor an
-// SPUR_*_BIN path.
+// records as the launch command itself. extractCommandBinary now skips quoted
+// assignment prefixes such as OpenCode's restrictWrites OPENCODE_CONFIG_CONTENT
+// and returns the real executable there. The residual no longer includes that
+// launch shape.
 // (c) The remaining real case is a non-exec wrapper (e.g. matchers
 // ["codex-wrap.sh","codex"]) whose pass 1 matches for the agent's whole life: the
 // gate still arms there, and on such a host RESIDUAL 2's `set +m` shape can read a
@@ -436,7 +499,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("claude", launchCommand),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
@@ -444,16 +507,32 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       windowMs: CLAUDE_LAUNCH_SUBMIT_ACK_WINDOW_MS,
       maxResends: CLAUDE_LAUNCH_SUBMIT_MAX_RESENDS,
     },
+    submitAckFirstWindowMs: CLAUDE_SUBMIT_FIRST_ACK_WINDOW_MS,
+    // Only a status file that proves a running or idle turn allows the early
+    // Enter; a permission prompt or a missing file could turn it into a menu pick.
+    earlySubmitResendAllowed: async (ctx) => {
+      const status = await readClaudeSessionStatus(
+        ctx.worktreePath,
+        ctx.agentSessionId,
+        undefined,
+        ctx.panePid !== undefined ? { panePid: ctx.panePid } : {},
+      );
+      return status?.state === "working" || status?.state === "waiting";
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
-        freshLaunch: ctx.freshLaunch === true,
-      });
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "claude"
+          ? { file: persisted.file, size: persisted.size }
+          : await captureClaudeSubmitBaseline(ctx.worktreePath, ctx.agentSessionId, {
+              freshLaunch: ctx.freshLaunch === true,
+            });
       if (!baseline) {
         return null;
       }
       return {
+        baseline: { agent: "claude", ...baseline },
         async scan(text) {
           const found = await scanClaudeJsonlForMessage(
             baseline,
@@ -499,15 +578,23 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("codex", launchCommand),
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    interruptKeys: ["C-c"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
+    launchSubmitAck: {
+      windowMs: CODEX_LAUNCH_SUBMIT_ACK_WINDOW_MS,
+      maxResends: CODEX_LAUNCH_SUBMIT_MAX_RESENDS,
+    },
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureCodexRolloutBaseline(ctx.codexSessionsDir);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "codex"
+          ? new Map(Object.entries(persisted.offsets))
+          : await captureCodexRolloutBaseline(ctx.codexSessionsDir);
       return {
+        baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
         async scan(text) {
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
@@ -529,6 +616,9 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
+      if (cursorConfigDir) {
+        ensureCursorTokenUsageHook();
+      }
       if (restrictWrites && cursorConfigDir) {
         await ensureCursorRestrictWritesConfig(worktreePath, cursorConfigDir);
       }
@@ -549,24 +639,33 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     processMatchers: (launchCommand) => defaultProcessMatchers("cursor", launchCommand),
     stateStrategy: "cursor_jsonl",
     sendMode: "default",
-    sendsInterruptKey: false,
+    interruptKeys: [],
     waitsForSubmitAck: true,
     submitAckWindowMs: CURSOR_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: CURSOR_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: true,
     queuedSendPromptGraceMs: 5_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureCursorSubmitBaseline(ctx.worktreePath, ctx.agentSessionId);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "cursor"
+          ? restoreCursorSubmitBaseline(persisted)
+          : await captureCursorSubmitBaseline(
+              ctx.worktreePath,
+              ctx.agentSessionId,
+              ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            );
       if (!baseline) {
         return null;
       }
       return {
+        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
+            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
@@ -575,6 +674,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
   },
   opencode: {
     command: opencodeCommand,
+    invalidateState: invalidateOpenCodeState,
     buildLaunchPlan: (prompt, options) => buildOpenCodePlan(prompt, openCodePlanOptions(options)),
     buildRestorePlan: (worktreePath, prompt, options) =>
       buildOpenCodeRestorePlan(worktreePath, prompt, openCodePlanOptions(options)),
@@ -582,29 +682,52 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
     readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
-    setup: async ({ mcpBindings, restrictWrites }) => {
+    setup: async ({
+      mcpBindings,
+      restrictWrites,
+      model,
+      reasoningEffort,
+      reasoningVariantNames,
+    }) => {
       await assertOpenCodeCompatibility();
-      const configContent = buildOpenCodeConfig(mcpBindings, restrictWrites);
+      const configContent = buildOpenCodeConfig(
+        mcpBindings,
+        restrictWrites,
+        model && reasoningEffort && reasoningVariantNames
+          ? { model, reasoningEffort, variantNames: reasoningVariantNames }
+          : undefined,
+      );
       return configContent ? { opencodeConfigContent: configContent } : {};
     },
     processMatchers: (launchCommand) => defaultProcessMatchers("opencode", launchCommand),
     stateStrategy: "opencode",
     sendMode: "bracketed_paste",
-    sendsInterruptKey: true,
+    // opencode 1.18 binds ctrl+c to app_exit and session_interrupt to escape,
+    // pressed twice ("esc again to interrupt"; the second press must follow
+    // within ~1s).
+    interruptKeys: ["Escape", "Escape"],
     waitsForSubmitAck: true,
     submitAckWindowMs: DEFAULT_SUBMIT_ACK_WINDOW_MS,
     submitAckMaxResends: DEFAULT_SUBMIT_MAX_RESENDS,
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
-    submitAck: async (ctx) => {
-      const baseline = await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+    submitAck: async (ctx, persisted) => {
+      const baseline =
+        persisted?.agent === "opencode"
+          ? { sessionId: persisted.sessionId, after: persisted.after }
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
       return {
-        async scan() {
+        baseline: {
+          agent: "opencode",
+          sessionId: baseline.sessionId,
+          after: baseline.after,
+        },
+        async scan(text) {
           return {
-            found: await scanOpenCodeForNewUserMessage(baseline),
+            found: await scanOpenCodeForTypedMessage(baseline, text),
             lastScannedFile: null,
           };
         },
@@ -625,14 +748,8 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(
-  agent: AgentName,
-  prompt: string,
-  options?: AgentPlanOptions,
-  deferredSensitiveInitialMessage?: { text: string; sensitive: true },
-) {
-  const plan = agentAdapter(agent).buildLaunchPlan(prompt, options);
-  return deferredSensitiveInitialMessage ? { ...plan, deferredSensitiveInitialMessage } : plan;
+export function buildAgentLaunchPlan(agent: AgentName, prompt: string, options?: AgentPlanOptions) {
+  return agentAdapter(agent).buildLaunchPlan(prompt, options);
 }
 
 export async function buildAgentRestorePlan(
@@ -645,29 +762,111 @@ export async function buildAgentRestorePlan(
 }
 
 export function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
-  const trimmed = launchCommand.trim();
-  if (!trimmed) {
-    return fallbackBinary;
-  }
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-      continue;
-    }
-    if (token.startsWith("'")) {
-      const closing = token.indexOf("'", 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+  let index = 0;
+  while (index < launchCommand.length) {
+    while (index < launchCommand.length) {
+      if (/\s/.test(launchCommand[index] ?? "")) {
+        index += 1;
+        continue;
       }
-    }
-    if (token.startsWith('"')) {
-      const closing = token.indexOf('"', 1);
-      if (closing > 1) {
-        return token.slice(1, closing);
+      if (launchCommand[index] === "\\" && launchCommand[index + 1] === "\n") {
+        index += 2;
+        continue;
       }
+      break;
     }
-    return token;
+    if (index >= launchCommand.length) break;
+
+    let value = "";
+    let quote: "single" | "double" | null = null;
+    let wordStarted = false;
+    let assignmentPrefixValid = true;
+    let assignmentNameLength = 0;
+    let assignment = false;
+
+    while (index < launchCommand.length) {
+      const char = launchCommand[index] ?? "";
+      if (quote === null && /\s/.test(char)) break;
+      wordStarted = true;
+
+      if (quote === "single") {
+        if (char === "'") quote = null;
+        else value += char;
+        index += 1;
+        continue;
+      }
+
+      if (quote === "double") {
+        if (char === '"') {
+          quote = null;
+          index += 1;
+          continue;
+        }
+        if (char === "\\") {
+          const next = launchCommand[index + 1];
+          if (next === undefined) return fallbackBinary;
+          if (next === "\n") {
+            index += 2;
+            continue;
+          }
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
+            value += next;
+            index += 2;
+            continue;
+          }
+          value += `\\${next}`;
+          index += 2;
+          continue;
+        }
+        value += char;
+        index += 1;
+        continue;
+      }
+
+      if (char === "'") {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "single";
+        index += 1;
+        continue;
+      }
+      if (char === '"') {
+        if (!assignment) assignmentPrefixValid = false;
+        quote = "double";
+        index += 1;
+        continue;
+      }
+      if (char === "\\") {
+        const next = launchCommand[index + 1];
+        if (next === undefined) return fallbackBinary;
+        if (next === "\n") {
+          index += 2;
+          continue;
+        }
+        if (!assignment) assignmentPrefixValid = false;
+        value += next;
+        index += 2;
+        continue;
+      }
+      if (char === "=" && !assignment) {
+        assignment = assignmentPrefixValid && assignmentNameLength > 0;
+        value += char;
+        index += 1;
+        continue;
+      }
+      if (!assignment) {
+        const validNameChar =
+          assignmentNameLength === 0 ? /[A-Za-z_]/.test(char) : /[A-Za-z0-9_]/.test(char);
+        if (!validNameChar) assignmentPrefixValid = false;
+        assignmentNameLength += 1;
+      }
+      value += char;
+      index += 1;
+    }
+
+    if (!wordStarted || quote !== null) return fallbackBinary;
+    if (!assignment) return value || fallbackBinary;
   }
+
   return fallbackBinary;
 }
 
@@ -706,6 +905,9 @@ export async function setupAgentHooks(args: {
   cursorConfigDir?: string;
   claudeConfigDir?: string;
   modelsCacheHome?: string;
+  model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
+  reasoningVariantNames?: string[];
 }): Promise<{
   claudeSettingsPath?: string;
   claudeMcpConfigPath?: string;
@@ -730,8 +932,8 @@ export function agentSendMode(agent: AgentName): AgentSendMode {
   return agentAdapter(agent).sendMode;
 }
 
-export function agentSendsInterruptKey(agent: AgentName): boolean {
-  return agentAdapter(agent).sendsInterruptKey;
+export function agentInterruptKeys(agent: AgentName): readonly string[] {
+  return agentAdapter(agent).interruptKeys;
 }
 
 export function agentProcessMatchers(agent: AgentName, launchCommand: string): string[] {
@@ -744,13 +946,30 @@ export function agentWaitsForSubmitAck(agent: AgentName): boolean {
 
 export function agentSubmitAckPacing(
   agent: AgentName,
-  options?: { freshLaunch?: boolean },
+  options?: { freshLaunch?: boolean; interactive?: boolean; slashCommand?: boolean },
 ): SubmitAckPacing {
   const adapter = agentAdapter(agent);
   if (options?.freshLaunch === true && adapter.launchSubmitAck) {
     return adapter.launchSubmitAck;
   }
-  return { windowMs: adapter.submitAckWindowMs, maxResends: adapter.submitAckMaxResends };
+  if (options?.interactive === true) {
+    return INTERACTIVE_SUBMIT_ACK_PACING;
+  }
+  // A slash command can open a menu, so the early Enter is never safe for it.
+  const firstWindowMs = options?.slashCommand === true ? undefined : adapter.submitAckFirstWindowMs;
+  return {
+    windowMs: adapter.submitAckWindowMs,
+    maxResends: adapter.submitAckMaxResends,
+    ...(firstWindowMs !== undefined ? { firstWindowMs } : {}),
+  };
+}
+
+export async function agentEarlySubmitResendAllowed(
+  agent: AgentName,
+  ctx: AgentEarlyResendContext,
+): Promise<boolean> {
+  const gate = agentAdapter(agent).earlySubmitResendAllowed;
+  return gate ? gate(ctx) : true;
 }
 
 /**
@@ -771,6 +990,26 @@ export async function createAgentSubmitAckBinding(
     return null;
   }
   return adapter.submitAck(ctx);
+}
+
+// Only opencode caches its own state (the others read their transcript on
+// every classification); the session's cache there must not outlive a write.
+export function invalidateAgentState(agent: AgentName, agentSessionId?: string): void {
+  if (agentSessionId) agentAdapter(agent).invalidateState?.(agentSessionId);
+}
+
+// Rebinds a scan to a baseline persisted from an earlier binding of the same
+// agent: the same matcher, bounded to turns recorded after that send.
+export async function resumeAgentSubmitAckBinding(
+  agent: AgentName,
+  ctx: AgentSubmitAckContext,
+  baseline: SubmitAckBaseline,
+): Promise<SubmitAckBinding | null> {
+  const adapter = agentAdapter(agent);
+  if (!adapter.submitAck || baseline.agent !== agent) {
+    return null;
+  }
+  return adapter.submitAck(ctx, baseline);
 }
 
 export function agentBusyQueuedSendAwaitsPrompt(agent: AgentName): boolean {

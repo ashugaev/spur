@@ -47,6 +47,17 @@ function planOne(
 }
 
 describe("planSidecarReap: decision table", () => {
+  it.each([
+    { ownerExists: false },
+    { worktreeExists: false },
+    { workspaceRunning: false },
+    { lastActivityAtMs: NOW_MS - 200 * 60_000 },
+  ])("retained workspace error vetoes cleanup for %j", (overrides) => {
+    const plan = planOne({ ...overrides, workspaceRetainedError: true });
+    expect(plan.keep[0]?.reason).toBe("retained_error");
+    expect(plan.reap).toEqual([]);
+  });
+
   it("row 1: config.enabled === false -> keep disabled, regardless of everything else", () => {
     const plan = planOne(
       { ownerExists: false, connections: "none", lastActivityAtMs: null },
@@ -209,6 +220,7 @@ describe("planSidecarReap: exhaustiveness and shape", () => {
       "no_pane_no_identity",
       "connections_established",
       "probe_unknown",
+      "retained_error",
       "activity_unknown",
       "within_idle_ttl",
     ];
@@ -218,6 +230,7 @@ describe("planSidecarReap: exhaustiveness and shape", () => {
       no_pane_no_identity: { paneAlive: false, hasRecordedIdentity: false },
       connections_established: { connections: "established" },
       probe_unknown: { connections: "unknown" },
+      retained_error: { workspaceRetainedError: true },
       activity_unknown: { lastActivityAtMs: null },
       within_idle_ttl: {},
     };

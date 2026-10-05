@@ -24,7 +24,7 @@ const isProcessRunningInTmuxMock = vi.fn();
 const probeTmuxProcessMatchMock = vi.fn(
   async (name: string, matchers: string[], options?: { fresh?: boolean }) => {
     const alive: boolean = await isProcessRunningInTmuxMock(name, matchers, options);
-    return { alive, matchedByName: alive };
+    return { alive, matchedByName: alive, unresponsive: false };
   },
 );
 const getTmuxSessionActivityMock = vi.fn();
@@ -130,6 +130,9 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxCommandSession: vi.fn(),
   createTmuxSidecarSession: vi.fn(),
   sidecarTmuxAlive: vi.fn(),
+  // Behavior-identical to the inline sidecarTmuxAlive above (which resolves
+  // undefined, i.e. falsy `present`); `unresponsive` is never exercised here.
+  getSidecarTmuxPresence: vi.fn(async () => ({ present: false, unresponsive: false })),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   captureTmuxPane: captureTmuxPaneMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,

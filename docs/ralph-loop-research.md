@@ -1,5 +1,7 @@
 # Ralph loop: what it is, and how to run one in Spur
 
+> Scope: Ralph loop pattern and Spur recipe. Caveman, no overhead.
+
 ## TL;DR
 
 "Ralph" (aka the Ralph Wiggum technique) is not a product — it's a pattern: keep

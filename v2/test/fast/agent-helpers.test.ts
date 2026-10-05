@@ -41,6 +41,49 @@ describe("extractCommandBinary", () => {
   it("returns fallback when all tokens are env vars", () => {
     expect(extractCommandBinary("A=1 B=2", "fallback")).toBe("fallback");
   });
+
+  it("skips quoted assignment values from restricted-write OpenCode launches", () => {
+    expect(
+      extractCommandBinary(
+        `OPENCODE_CONFIG_CONTENT='{"permission":{"edit":"deny", "bash":"ask"}}' opencode --auto`,
+        "fallback",
+      ),
+    ).toBe("opencode");
+    expect(extractCommandBinary("FOO='bar baz' A=1 node app.js", "fallback")).toBe("node");
+  });
+
+  it("recognizes assignments only from an unquoted and unescaped lexical prefix", () => {
+    expect(extractCommandBinary("'FOO=bar' --flag", "fallback")).toBe("FOO=bar");
+    expect(extractCommandBinary("FOO\\=bar --flag", "fallback")).toBe("FOO=bar");
+    expect(extractCommandBinary("'/opt/tools/a=b' --flag", "fallback")).toBe("/opt/tools/a=b");
+  });
+
+  it("dequotes quoted, adjacent, and escaped command fragments", () => {
+    expect(extractCommandBinary("'/opt/Open Code/bin/opencode' --auto", "fallback")).toBe(
+      "/opt/Open Code/bin/opencode",
+    );
+    expect(extractCommandBinary(String.raw`'a'\''b' --flag`, "fallback")).toBe("a'b");
+    expect(extractCommandBinary(String.raw`/opt/Open\ Code/opencode --auto`, "fallback")).toBe(
+      "/opt/Open Code/opencode",
+    );
+  });
+
+  it("applies quote-local POSIX backslash rules", () => {
+    expect(extractCommandBinary(String.raw`'a\q' --flag`, "fallback")).toBe(String.raw`a\q`);
+    expect(extractCommandBinary(String.raw`"a\q" --flag`, "fallback")).toBe(String.raw`a\q`);
+    expect(extractCommandBinary(String.raw`"a\$\`\"\\b" --flag`, "fallback")).toBe('a$`"\\b');
+    expect(extractCommandBinary("a\\\nb --flag", "fallback")).toBe("ab");
+    expect(extractCommandBinary('"a\\\nb" --flag', "fallback")).toBe("ab");
+    expect(extractCommandBinary("FOO\\\n=bar opencode --auto", "fallback")).toBe("opencode");
+    expect(extractCommandBinary("FOO=bar \\\n  opencode --auto", "fallback")).toBe("opencode");
+  });
+
+  it.each(["'unterminated", '"unterminated', "trailing\\", "'' --flag", "A=1 B=2"])(
+    "returns fallback for malformed or missing command input: %s",
+    (command) => {
+      expect(extractCommandBinary(command, "fallback")).toBe("fallback");
+    },
+  );
 });
 
 describe("parseAgentName", () => {

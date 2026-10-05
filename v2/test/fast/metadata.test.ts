@@ -8,14 +8,23 @@ import {
   deletePendingSendBatchConditional,
   deleteTelegramSourceStateForSession,
   deleteWorkItemLifecycle,
+  hasPendingTelegramSend,
   listSessions,
+  clearGitHubPollDisabledSession,
+  listGitHubPollDisabledEntries,
+  listGitHubPollDisabledSourceIds,
+  markGitHubPollDisabledChecked,
   readCommentSeenRegistry,
+  readGitHubPollDisabled,
+  recordGitHubPollDisabledSession,
+  writeGitHubPollDisabled,
   readPendingSendBatches,
   readPendingSendBatch,
   readReviewSourceSnapshot,
   writeReviewSourceSnapshot,
   readTelegramBindings,
   readTelegramLastUpdateId,
+  readTelegramChoices,
   readTelegramReplyTarget,
   readWorkItemLifecycles,
   readSession,
@@ -24,13 +33,23 @@ import {
   recordPendingSendBatch,
   recordWorkItem,
   recordWorkItemLifecycle,
+  findTelegramChoice,
+  findTelegramMessageSession,
+  recordTelegramMessages,
+  takeTelegramChoice,
+  writeTelegramOffer,
   writeTelegramBindings,
   writeTelegramReplyTarget,
   writeSession,
   updatePendingSendBatchConditional,
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
-import type { PersistedPendingBatch, SessionRecord } from "../../src/types.js";
+import type {
+  PersistedPendingBatch,
+  SessionRecord,
+  SubmitAckBaseline,
+  TelegramChoice,
+} from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -124,6 +143,150 @@ describe("comment-seen registry", () => {
     expect(ids.size).toBe(2);
     expect(ids.has("101")).toBe(true);
     expect(ids.has("102")).toBe(true);
+  });
+});
+
+describe("github poll-disabled registry", () => {
+  it("returns an empty map when the registry file is missing", async () => {
+    const dataDir = await newDataDir();
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(0);
+  });
+
+  it("returns an empty map when the registry file is corrupt", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "pr-watch.json"), "{ not json", "utf8");
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(0);
+  });
+
+  it("drops non-numeric and non-integer values", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "pr-watch.json"),
+      JSON.stringify({ "api-a1b2": 42, "api-c3d4": "42", "api-e5f6": 42.5, "api-g7h8": -1 }),
+      "utf8",
+    );
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.size).toBe(1);
+    expect(entries.get("api-a1b2")).toEqual({ prNumber: 42, disabledAtMs: 0, lastCheckedAtMs: 0 });
+  });
+
+  // A9: a legacy bare-number entry (the shape this branch wrote before the
+  // recheck window landed) is honored and probes immediately.
+  it("reads a legacy numeric poll-disabled entry as a zero-timestamp entry", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-poll-disabled", "api");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "pr-watch.json"), JSON.stringify({ "api-a1b2": 42 }), "utf8");
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({ prNumber: 42, disabledAtMs: 0, lastCheckedAtMs: 0 });
+  });
+
+  it("round-trips a recorded session", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 1000,
+    });
+  });
+
+  it("preserves disabledAtMs and lastCheckedAtMs when re-recording the same prNumber", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 9999);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 1000,
+    });
+  });
+
+  it("an empty map removes the registry file", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    writeGitHubPollDisabled(dataDir, "api", "pr-watch", new Map());
+    const path = join(dataDir, "source-state", "github-poll-disabled", "api", "pr-watch.json");
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("clear returns the prNumber then null on repeat", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBe(42);
+    expect(clearGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2")).toBeNull();
+  });
+
+  // A7 half: markGitHubPollDisabledChecked returns false and writes nothing for an
+  // unknown session, so the caller's override keeps gating instead of dropping the
+  // disable entirely.
+  it("markGitHubPollDisabledChecked returns false and writes nothing for an unknown session", async () => {
+    const dataDir = await newDataDir();
+    const path = join(dataDir, "source-state", "github-poll-disabled", "api", "pr-watch.json");
+    expect(markGitHubPollDisabledChecked(dataDir, "api", "pr-watch", "api-a1b2", 5000)).toBe(false);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("markGitHubPollDisabledChecked stamps lastCheckedAtMs and preserves disabledAtMs", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    expect(markGitHubPollDisabledChecked(dataDir, "api", "pr-watch", "api-a1b2", 5000)).toBe(true);
+    const entries = readGitHubPollDisabled(dataDir, "api", "pr-watch");
+    expect(entries.get("api-a1b2")).toEqual({
+      prNumber: 42,
+      disabledAtMs: 1000,
+      lastCheckedAtMs: 5000,
+    });
+  });
+
+  it("listGitHubPollDisabledSourceIds lists every registry file under a project", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a1b2", 42, 1000);
+    recordGitHubPollDisabledSession(dataDir, "api", "gone-source", "api-a1b2", 43, 1000);
+    recordGitHubPollDisabledSession(dataDir, "web", "other", "web-1", 44, 1000);
+    expect(listGitHubPollDisabledSourceIds(dataDir, "api").sort()).toEqual([
+      "gone-source",
+      "pr-watch",
+    ]);
+    expect(listGitHubPollDisabledSourceIds(dataDir, "missing")).toEqual([]);
+  });
+
+  it("listGitHubPollDisabledEntries walks every project/source and sorts by disabledAtMs", async () => {
+    const dataDir = await newDataDir();
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-b", 7, 2000);
+    recordGitHubPollDisabledSession(dataDir, "api", "pr-watch", "api-a", 8, 1000);
+    recordGitHubPollDisabledSession(dataDir, "web", "issues", "web-c", 9, 3000);
+    const entries = listGitHubPollDisabledEntries(dataDir);
+    expect(entries).toEqual([
+      {
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-a",
+        prNumber: 8,
+        disabledAtMs: 1000,
+      },
+      {
+        projectId: "api",
+        sourceId: "pr-watch",
+        sessionId: "api-b",
+        prNumber: 7,
+        disabledAtMs: 2000,
+      },
+      { projectId: "web", sourceId: "issues", sessionId: "web-c", prNumber: 9, disabledAtMs: 3000 },
+    ]);
+  });
+
+  it("listGitHubPollDisabledEntries returns an empty array when the root is missing", async () => {
+    const dataDir = await newDataDir();
+    expect(listGitHubPollDisabledEntries(dataDir)).toEqual([]);
   });
 });
 
@@ -235,7 +398,9 @@ describe("telegram source state", () => {
       chatId: 1,
     });
 
-    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: true,
+    });
 
     expect([...readTelegramBindings(dataDir, "api", "telegram-a").values()]).toEqual([
       { chatId: 2, sessionId: "api-2" },
@@ -243,8 +408,206 @@ describe("telegram source state", () => {
     expect(readTelegramBindings(dataDir, "api", "telegram-b").size).toBe(0);
     expect(readTelegramLastUpdateId(dataDir, "api", "telegram-a")).toBe(55);
     expect(readTelegramReplyTarget(dataDir, "api-1")).toBeNull();
+    expect(deleteTelegramSourceStateForSession(dataDir, "api", "api-1")).toEqual({
+      heldBinding: false,
+    });
+  });
+
+  it("records telegram message owners per source, upserts, and evicts the oldest past 1000", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [1, 2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, [2]);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-2", chatId: 5 }, []);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBe("api-1");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 2)).toBe("api-2");
+    expect(findTelegramMessageSession(dataDir, "api", "other", 5, 1)).toBeNull();
+
+    const ids = Array.from({ length: 1000 }, (_, index) => 100 + index);
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-3", chatId: 5 }, ids);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 100)).toBe("api-3");
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 1099)).toBe("api-3");
+  });
+
+  it("finds a message owner only in its own chat", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 6, 7)).toBeNull();
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBe("api-1");
+  });
+
+  it("treats a corrupt telegram message file as empty", async () => {
+    const dataDir = await newDataDir();
+    recordTelegramMessages(dataDir, "api", "tg", { sessionId: "api-1", chatId: 5 }, [7]);
+    writeFileSync(join(dataDir, "source-state", "telegram", "api", "messages", "tg.json"), "{");
+
+    expect(findTelegramMessageSession(dataDir, "api", "tg", 5, 7)).toBeNull();
+  });
+
+  it("finds a pending choice without consuming it", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
+
+    expect(findTelegramChoice(dataDir, "api", "tg", "t1", 999)).toBeNull();
+    expect(findTelegramChoice(dataDir, "api", "tg", "t1", -1001)).toMatchObject({ token: "t1" });
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(1);
+  });
+
+  it("consumes the whole offer on the first taken choice", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "t1", offerId: "offer-1", value: "yes" }),
+        choice({ token: "t2", offerId: "offer-1", value: "no" }),
+        choice({ token: "t3", offerId: "offer-2", value: "later" }),
+      ]),
+    );
+
+    // A click from a chat the offer was not sent to consumes nothing.
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", 999)).toBeNull();
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(3);
+
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t1", -1001)).toMatchObject({ value: "yes" });
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual(["t3"]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "t2", -1001)).toBeNull();
+  });
+
+  it("retires the session's previous offer in the same chat", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "old-a", offerId: "offer-1" }),
+        choice({ token: "old-b", offerId: "offer-1" }),
+      ]),
+    );
+    // Another session's offer in the same chat is untouched.
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "other", offerId: "offer-other", sessionId: "api-2" })]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "new-a", offerId: "offer-2" })]),
+    );
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "other",
+      "new-a",
+    ]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "old-a", -1001)).toBeNull();
+  });
+
+  it("retires the pending offer when a reply carries no buttons", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([choice({ token: "t1" })]));
+
+    writeTelegramOffer(dataDir, "api", "tg", offerOf([]));
+
+    expect(readTelegramChoices(dataDir, "api", "tg")).toHaveLength(0);
+  });
+
+  it("drops expired choices and caps the store", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([
+        choice({ token: "stale", expiresAt: new Date(Date.now() - 1_000).toISOString() }),
+        choice({ token: "fresh" }),
+      ]),
+    );
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "fresh",
+    ]);
+    expect(takeTelegramChoice(dataDir, "api", "tg", "stale", -1001)).toBeNull();
+
+    // One offer per session, so the cap is only reachable across sessions.
+    for (let index = 0; index < 199; index += 1) {
+      writeTelegramOffer(
+        dataDir,
+        "api",
+        "tg",
+        offerOf([
+          choice({ token: `t${index}`, offerId: `offer-${index}`, sessionId: `bulk-${index}` }),
+        ]),
+      );
+    }
+    // 199 singles + a 3-button offer crosses the 200 cap; the young offer must
+    // survive intact, so whole old offers go instead of a partial slice.
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf(
+        ["a", "b", "c"].map((suffix) =>
+          choice({ token: `last-${suffix}`, offerId: "offer-last", sessionId: "api-last" }),
+        ),
+      ),
+    );
+    const stored = readTelegramChoices(dataDir, "api", "tg");
+    expect(stored.length).toBeLessThanOrEqual(200);
+    expect(stored.filter((entry) => entry.offerId === "offer-last")).toHaveLength(3);
+    expect(stored.some((entry) => entry.token === "fresh")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t0")).toBe(false);
+    expect(stored.some((entry) => entry.token === "t198")).toBe(true);
+  });
+
+  it("removes a session's pending choices with the rest of its telegram state", async () => {
+    const dataDir = await newDataDir();
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "mine", sessionId: "api-1" })]),
+    );
+    writeTelegramOffer(
+      dataDir,
+      "api",
+      "tg",
+      offerOf([choice({ token: "theirs", sessionId: "api-2" })], "api-2"),
+    );
+
+    deleteTelegramSourceStateForSession(dataDir, "api", "api-1");
+
+    expect(readTelegramChoices(dataDir, "api", "tg").map((entry) => entry.token)).toEqual([
+      "theirs",
+    ]);
   });
 });
+
+function offerOf(choices: TelegramChoice[], sessionId = "api-1", chatId = -1001) {
+  return { sessionId, chatId, choices };
+}
+
+function choice(
+  overrides: Partial<TelegramChoice> & Pick<TelegramChoice, "token">,
+): TelegramChoice {
+  return {
+    offerId: "offer-1",
+    sessionId: "api-1",
+    chatId: -1001,
+    text: "Yes",
+    value: "yes",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    ...overrides,
+  };
+}
 
 function reviewPendingBatch(overrides: Partial<PersistedPendingBatch> = {}): PersistedPendingBatch {
   return {
@@ -311,6 +674,99 @@ function telegramPendingBatch(
 }
 
 describe("pending send batches", () => {
+  describe("admission cap metadata", () => {
+    it("loads legacy records and round-trips a positive finite deadline", async () => {
+      const dataDir = await newDataDir();
+      const legacy = reviewPendingBatch();
+      recordPendingSendBatch(dataDir, legacy);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(legacy);
+      const held = { ...legacy, admissionCapRetryAt: 1_800_000_000_000 };
+      recordPendingSendBatch(dataDir, held);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual({
+        ...held,
+        admissionCapDenials: 1,
+      });
+      for (const admissionCapDenials of [1, 7]) {
+        const counted = { ...held, admissionCapDenials };
+        recordPendingSendBatch(dataDir, counted);
+        expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(counted);
+        const countOnly = { ...legacy, admissionCapDenials };
+        recordPendingSendBatch(dataDir, countOnly);
+        expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual(countOnly);
+      }
+      const expiredLegacy = { ...legacy, admissionCapRetryAt: 1 };
+      recordPendingSendBatch(dataDir, expiredLegacy);
+      expect(readPendingSendBatches(dataDir).get(legacy.queueKey)).toEqual({
+        ...expiredLegacy,
+        admissionCapDenials: 1,
+      });
+    });
+
+    it.each(["later", null, 0, -1, 1.5, 8, NaN, Infinity, -Infinity])(
+      "rejects an invalid serialized denial count %s",
+      async (admissionCapDenials) => {
+        const dataDir = await newDataDir();
+        writeFileSync(
+          join(dataDir, "pending-send-batches.json"),
+          JSON.stringify({ records: [{ ...reviewPendingBatch(), admissionCapDenials }] }),
+        );
+        expect(readPendingSendBatches(dataDir).size).toBe(0);
+      },
+    );
+
+    it.each(["later", null, 0, -1, NaN, Infinity, -Infinity])(
+      "rejects an invalid serialized deadline %s",
+      async (admissionCapRetryAt) => {
+        const dataDir = await newDataDir();
+        writeFileSync(
+          join(dataDir, "pending-send-batches.json"),
+          JSON.stringify({ records: [{ ...reviewPendingBatch(), admissionCapRetryAt }] }),
+        );
+        expect(readPendingSendBatches(dataDir).size).toBe(0);
+      },
+    );
+
+    it("clears the deadline only for the owned work revision and claim", async () => {
+      const dataDir = await newDataDir();
+      const record = reviewPendingBatch({
+        workId: "held-work",
+        revision: 4,
+        admissionCapRetryAt: 1_800_000_000_000,
+        admissionCapDenials: 3,
+        claim: {
+          controllerId: "controller",
+          routeLeaseId: "lease",
+          claimId: "owned-claim",
+          claimedAt: "2026-10-01T00:00:00.000Z",
+        },
+      });
+      recordPendingSendBatch(dataDir, record);
+      const cleared = {
+        ...record,
+        revision: 5,
+        admissionCapRetryAt: undefined,
+        admissionCapDenials: undefined,
+      };
+      for (const expected of [
+        { workId: "other-work", revision: 4, claimId: "owned-claim" },
+        { workId: "held-work", revision: 3, claimId: "owned-claim" },
+        { workId: "held-work", revision: 4, claimId: "other-claim" },
+      ]) {
+        expect(updatePendingSendBatchConditional(dataDir, expected, cleared)).toBe(false);
+        expect(readPendingSendBatch(dataDir, "held-work")).toEqual(record);
+      }
+      expect(
+        updatePendingSendBatchConditional(
+          dataDir,
+          { workId: "held-work", revision: 4, claimId: "owned-claim" },
+          cleared,
+        ),
+      ).toBe(true);
+      expect(readPendingSendBatch(dataDir, "held-work")).not.toHaveProperty("admissionCapRetryAt");
+      expect(readPendingSendBatch(dataDir, "held-work")).not.toHaveProperty("admissionCapDenials");
+    });
+  });
+
   it("round-trips retry tombstones and rejects malformed present accounting", async () => {
     const dataDir = await newDataDir();
     const entry = {
@@ -622,6 +1078,287 @@ describe("staleSidecars", () => {
     writeSession(dataDir, { ...base, id: "api-1", tmuxSession: "api-1" });
 
     expect(readSession(dataDir, "api-1")).not.toHaveProperty("staleSidecars");
+  });
+});
+
+describe("tokenUsage", () => {
+  it("persists budget approval through disk reload", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      status: "budget_limited",
+      stopReason: "token_budget",
+      tokenBudgetOverride: true,
+    });
+    expect(readSession(dataDir, "api-1")).toMatchObject({
+      status: "budget_limited",
+      tokenBudgetOverride: true,
+    });
+  });
+
+  it("normalizes legacy token budget stops to budget_limited", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      stopReason: "token_budget",
+    });
+    expect(readSession(dataDir, "api-1")?.status).toBe("budget_limited");
+  });
+
+  const base = {
+    project: "api",
+    agent: "claude" as const,
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    launchCommand: "claude",
+    status: "stopped" as const,
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  };
+
+  it("survives the session metadata whitelist", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      tokenUsage: {
+        provider: "codex",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        generations: {
+          "codex:thread": { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+        },
+      },
+    });
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.totalTokens).toBe(100);
+  });
+
+  it("migrates valid legacy baselines and rejects aggregate overflow", async () => {
+    const dataDir = await newDataDir();
+    const record = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      tokenUsage: {
+        provider: "claude",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sources: {
+          first: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+        },
+      },
+    } as unknown as SessionRecord;
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.generations).toEqual({
+      first: { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+      "legacy:claude": { inputTokens: 40, outputTokens: 10, totalTokens: 50 },
+    });
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        provider: "claude",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        sources: {
+          first: { inputTokens: 60, outputTokens: 20, totalTokens: 80 },
+          second: { inputTokens: 60, outputTokens: 20, totalTokens: 80 },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+
+  it("preserves complete optional components and rejects subset violations", async () => {
+    const dataDir = await newDataDir();
+    const record = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      tokenUsage: {
+        provider: "opencode",
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        cacheReadInputTokens: 30,
+        cacheWriteInputTokens: 10,
+        reasoningOutputTokens: 5,
+        generations: {
+          generation: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 30,
+            cacheWriteInputTokens: 10,
+            reasoningOutputTokens: 5,
+          },
+        },
+      },
+    } as unknown as SessionRecord;
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, "api-1")?.tokenUsage?.reasoningOutputTokens).toBe(5);
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        ...record.tokenUsage,
+        cacheReadInputTokens: 81,
+        generations: {
+          generation: {
+            ...record.tokenUsage?.generations.generation,
+            cacheReadInputTokens: 81,
+          },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+
+    writeSession(dataDir, {
+      ...record,
+      tokenUsage: {
+        ...record.tokenUsage,
+        cacheReadInputTokens: 50,
+        cacheWriteInputTokens: 40,
+        generations: {
+          generation: {
+            ...record.tokenUsage?.generations.generation,
+            cacheReadInputTokens: 50,
+            cacheWriteInputTokens: 40,
+          },
+        },
+      },
+    } as unknown as SessionRecord);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+
+  it.each([
+    { provider: "codex", inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+    {
+      provider: "unknown",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: "80",
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: {},
+    },
+    {
+      provider: "codex",
+      inputTokens: 80,
+      outputTokens: 20,
+      totalTokens: 100,
+      sources: { source: { inputTokens: 80, outputTokens: -1, totalTokens: 100 } },
+    },
+    {
+      provider: "codex",
+      inputTokens: 8,
+      outputTokens: 2,
+      totalTokens: 10,
+      sources: { source: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
+    },
+  ])("discards incomplete or invalid persisted token usage %#", async (tokenUsage) => {
+    const dataDir = await newDataDir();
+    const session = {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      tokenUsage,
+    } as unknown as SessionRecord;
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("tokenUsage");
+  });
+
+  it("round-trips valid pre-flight usage and drops an invalid cache partition", async () => {
+    const dataDir = await newDataDir();
+    const session = {
+      ...base,
+      id: "api-1",
+      tmuxSession: "api-1",
+      preflightTokenUsage: {
+        status: "measured",
+        attemptCount: 2,
+        unknownAttemptCount: 0,
+        providerIterationCount: 3,
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        cacheReadInputTokens: 30,
+        cacheWriteInputTokens: 10,
+        byProvider: {
+          claude: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 30,
+            cacheWriteInputTokens: 10,
+          },
+        },
+      },
+    } as SessionRecord;
+    writeSession(dataDir, session);
+    expect(readSession(dataDir, "api-1")?.preflightTokenUsage).toEqual(session.preflightTokenUsage);
+    const preflightTokenUsage = session.preflightTokenUsage;
+    if (!preflightTokenUsage) throw new Error("missing test pre-flight usage");
+
+    writeSession(dataDir, {
+      ...session,
+      preflightTokenUsage: {
+        ...preflightTokenUsage,
+        cacheReadInputTokens: 75,
+        cacheWriteInputTokens: 25,
+        byProvider: {
+          claude: {
+            inputTokens: 80,
+            outputTokens: 20,
+            totalTokens: 100,
+            cacheReadInputTokens: 75,
+            cacheWriteInputTokens: 25,
+          },
+        },
+      },
+    });
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("preflightTokenUsage");
   });
 });
 
@@ -1145,7 +1882,7 @@ describe("session metadata PR migration", () => {
     ]);
   });
 
-  it("preserves model and originalTaskPrompt when writing and reading a session record", async () => {
+  it("preserves model, explicit reasoning and originalTaskPrompt across later writes", async () => {
     // normalizeSessionRecord rebuilds the record field by field, so an
     // optional SessionRecord field missing from its whitelist is silently
     // dropped on the very next write — spawn persists both of these and every
@@ -1156,6 +1893,7 @@ describe("session metadata PR migration", () => {
       project: "api",
       agent: "claude",
       model: "opus",
+      reasoningEffort: "high",
       prompt: "ship it (with orchestrator preamble)",
       originalTaskPrompt: "ship it",
       branch: "api-1",
@@ -1171,11 +1909,186 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, session);
 
     expect(readSession(dataDir, "api-1")).toEqual(
-      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+      expect.objectContaining({
+        model: "opus",
+        reasoningEffort: "high",
+        originalTaskPrompt: "ship it",
+      }),
     );
     expect(listSessions(dataDir)).toEqual([
-      expect.objectContaining({ model: "opus", originalTaskPrompt: "ship it" }),
+      expect.objectContaining({
+        model: "opus",
+        reasoningEffort: "high",
+        originalTaskPrompt: "ship it",
+      }),
     ]);
+    const stored = readSession(dataDir, "api-1");
+    expect(stored).toBeDefined();
+    if (!stored) throw new Error("Missing persisted session");
+    writeSession(dataDir, { ...stored, status: "stopped" });
+    expect(readSession(dataDir, "api-1")?.reasoningEffort).toBe("high");
+    const { reasoningEffort: _effort, ...legacy } = session;
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, "api-1")).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("keeps submitUnconfirmedAt across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      submitUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+      submitRequeuedMessage: "typed once",
+      submitFailedMessage: { message: "typed twice", at: "2026-03-18T10:01:30.000Z" },
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    // The re-queue budget survives a write, and so a restart.
+    expect(readSession(dataDir, "api-1")?.submitRequeuedMessage).toBe("typed once");
+    expect(readSession(dataDir, "api-1")?.submitFailedMessage).toEqual({
+      message: "typed twice",
+      at: "2026-03-18T10:01:30.000Z",
+    });
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+
+    const { submitUnconfirmedAt: _cleared, ...confirmed } = first;
+    writeSession(dataDir, confirmed);
+    expect(readSession(dataDir, "api-1")?.submitUnconfirmedAt).toBeUndefined();
+  });
+
+  it("migrates a hold persisted under the old launchUnconfirmedAt name, writing only the new one", async () => {
+    const dataDir = await newDataDir();
+    const legacy = {
+      id: "api-1",
+      project: "api",
+      agent: "codex" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      launchUnconfirmedAt: "2026-03-18T10:00:30.000Z",
+    };
+    writeSession(dataDir, legacy as unknown as SessionRecord);
+
+    const migrated = readSession(dataDir, "api-1");
+    expect(migrated?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+    expect(migrated).not.toHaveProperty("launchUnconfirmedAt");
+    expect(listSessions(dataDir)[0]?.submitUnconfirmedAt).toBe("2026-03-18T10:00:30.000Z");
+  });
+
+  it("keeps queuedMessageTyped across an unrelated later write and drops it once cleared", async () => {
+    const dataDir = await newDataDir();
+    const typed = {
+      message: "typed text",
+      typedAt: "2026-03-18T10:00:30.000Z",
+      ackBaseline: { agent: "codex" as const, offsets: { "/s/rollout.jsonl": 120 } },
+    };
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessageTyped: typed,
+    });
+    const first = readSession(dataDir, "api-1");
+    if (!first) throw new Error("record missing");
+    writeSession(dataDir, { ...first, updatedAt: "2026-03-18T10:02:00.000Z" });
+
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual(typed);
+    expect(listSessions(dataDir)[0]?.queuedMessageTyped).toEqual(typed);
+
+    const { queuedMessageTyped: _cleared, ...acked } = first;
+    writeSession(dataDir, acked);
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toBeUndefined();
+  });
+
+  it("keeps every agent's ack baseline shape on the typed marker and drops a malformed one alone", async () => {
+    const dataDir = await newDataDir();
+    const base = {
+      id: "api-1",
+      project: "api",
+      agent: "claude" as const,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const typedAt = "2026-03-18T10:00:30.000Z";
+    const baselines: SubmitAckBaseline[] = [
+      { agent: "claude", file: "/c.jsonl", size: 7 },
+      { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
+      { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
+      { agent: "opencode", sessionId: "ses_1", after: null },
+    ];
+    for (const ackBaseline of baselines) {
+      writeSession(dataDir, {
+        ...base,
+        queuedMessageTyped: { message: "m", typedAt, ackBaseline },
+      });
+      expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({
+        message: "m",
+        typedAt,
+        ackBaseline,
+      });
+    }
+    const malformed = { agent: "claude", size: "x" } as unknown as {
+      agent: "claude";
+      file: string;
+      size: number;
+    };
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // A malformed rotation entry drops alone; the pinned offset survives.
+    const badRotation = {
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+      rotated: { file: 3 },
+    } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: badRotation },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
+      agent: "cursor",
+      file: "/k.jsonl",
+      size: 9,
+    });
   });
 });
 
@@ -1426,5 +2339,62 @@ describe("listSessions record cache", () => {
 
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
     expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+  });
+});
+
+describe("hasPendingTelegramSend", () => {
+  const telegramRecord = (
+    queueKey: string,
+    sessionId: string,
+    claimed = false,
+  ): PersistedPendingBatch => ({
+    queueKey,
+    projectId: "api",
+    triggerId: "chat",
+    sourceId: "tg",
+    batch: {
+      kind: "telegram",
+      sessionId,
+      messages: [{ sessionId, chatId: 1, userId: 2, messageId: 3, text: "hi" }],
+    },
+    ...(claimed
+      ? {
+          claim: {
+            controllerId: "c",
+            routeLeaseId: "l",
+            claimId: "id",
+            claimedAt: "2026-01-01T00:00:00.000Z",
+          },
+        }
+      : {}),
+  });
+
+  it("matches only telegram batches for that session", async () => {
+    const dataDir = await newDataDir();
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+    recordPendingSendBatch(dataDir, {
+      queueKey: "api:review:api-1",
+      projectId: "api",
+      triggerId: "review",
+      sourceId: "pr",
+      batch: {
+        kind: "review",
+        providerId: "github",
+        projectId: "api",
+        sourceId: "pr",
+        sessionId: "api-1",
+        prNumber: 1,
+        prTitle: "t",
+        signals: [],
+      },
+    });
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-2", "api-2"));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(false);
+
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1", true));
+    expect(hasPendingTelegramSend(dataDir, "api-1")).toBe(true);
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(false);
+    recordPendingSendBatch(dataDir, telegramRecord("api:chat:api-1", "api-1"));
+    expect(hasPendingTelegramSend(dataDir, "api-1", { unclaimedOnly: true })).toBe(true);
   });
 });

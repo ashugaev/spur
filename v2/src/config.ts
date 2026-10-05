@@ -1,13 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, totalmem } from "node:os";
+import { isIP } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
+  GITHUB_PR_OCCURRENCE_KINDS,
   JIRA_WORK_ITEM_NEW_EVENT,
   SENTRY_ISSUE_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
+  WEBHOOK_RECEIVED_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
@@ -27,6 +30,7 @@ import {
   type ProjectMcpConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ProviderReasoningEffort,
   type ReviewProviderId,
   type SelfDestructConfig,
   type SentrySourceConfig,
@@ -41,6 +45,7 @@ import {
   type TagDefinition,
   type TelegramAutoSpawnConfig,
   type TelegramSourceConfig,
+  type WebhookSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -218,6 +223,14 @@ function asOptionalPositiveInteger(value: unknown, label: string): number | unde
   return value;
 }
 
+function asOptionalInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return value;
+}
+
 function asOptionalIntegerArray(value: unknown, label: string): number[] | undefined {
   const values = asOptionalArray(value, label, "integers", (entry, entryLabel) => {
     if (typeof entry !== "number" || !Number.isInteger(entry)) {
@@ -287,17 +300,39 @@ function parseProjectReasoningEffort(
   const raw = asObject(value, `projects.${projectId}.reasoningEffort`);
   const effort: AgentReasoningEffortConfig = {};
   for (const [agent, entry] of Object.entries(raw)) {
-    if (agent !== "claude" && agent !== "codex") {
+    if (agent !== "claude" && agent !== "codex" && agent !== "cursor" && agent !== "opencode") {
       throw new Error(`projects.${projectId}.reasoningEffort has unknown agent "${agent}"`);
     }
-    if (entry !== "low" && entry !== "medium" && entry !== "high") {
-      throw new Error(
-        `projects.${projectId}.reasoningEffort.${agent} must be "low", "medium", or "high"`,
-      );
-    }
-    effort[agent] = entry;
+    effort[agent] = parseReasoningEffort(
+      entry,
+      `projects.${projectId}.reasoningEffort.${agent}`,
+      agent,
+    );
   }
   return effort;
+}
+
+function parseReasoningEffort(
+  value: unknown,
+  label: string,
+  agent?: AgentName,
+): ProviderReasoningEffort {
+  if (
+    value !== "none" &&
+    value !== "minimal" &&
+    value !== "low" &&
+    value !== "medium" &&
+    value !== "high" &&
+    value !== "xhigh" &&
+    value !== "max" &&
+    value !== "ultra"
+  ) {
+    throw new Error(`${label} must be a recognized reasoning effort`);
+  }
+  if (agent === "claude" && (value === "none" || value === "minimal" || value === "ultra")) {
+    throw new Error(`${label} must be "low", "medium", "high", "xhigh", or "max" for Claude`);
+  }
+  return value;
 }
 
 function parseTriggerSpawnBlock(
@@ -311,6 +346,10 @@ function parseTriggerSpawnBlock(
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   const agent = asOptionalAgent(raw["agent"], `${label}.agent`);
   const model = asOptionalString(raw["model"], `${label}.model`);
+  const reasoningEffort =
+    raw["reasoningEffort"] === undefined
+      ? undefined
+      : parseReasoningEffort(raw["reasoningEffort"], `${label}.reasoningEffort`, agent);
   if (model !== undefined && agent === undefined) {
     throw new Error(`${label}.model requires ${label}.agent`);
   }
@@ -331,6 +370,7 @@ function parseTriggerSpawnBlock(
     ...(steps !== undefined ? { steps } : {}),
     ...(agent !== undefined ? { agent } : {}),
     ...(model !== undefined ? { model } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(mode !== undefined ? { mode } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(overrides !== undefined ? { overrides } : {}),
@@ -369,6 +409,7 @@ function parseTriggerSpawn(value: unknown, label: string): TriggerSpawnConfig {
       "steps",
       "agent",
       "model",
+      "reasoningEffort",
       "mode",
       "branch",
       "overrides",
@@ -631,12 +672,16 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "telegram") {
     return [TELEGRAM_MESSAGE_EVENT];
   }
+  if (source.type === "webhook") {
+    return [WEBHOOK_RECEIVED_EVENT];
+  }
   if (source.type === "jira") {
     return source.query !== undefined ? [JIRA_WORK_ITEM_NEW_EVENT] : [];
   }
   const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
   if (source.type === "github") {
     for (const kind of GITHUB_PR_LIFECYCLE_KINDS) events.push(`github:${kind}`);
+    for (const kind of GITHUB_PR_OCCURRENCE_KINDS) events.push(`github:${kind}`);
     if (source.query !== undefined) {
       events.push("github:work_item.new");
     }
@@ -701,6 +746,10 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? asOptionalPositiveInteger(raw["maxReviewBatchTargets"], `${label}.maxReviewBatchTargets`)
       : undefined;
+  const pollDisabledRecheckMs =
+    provider === "github"
+      ? asOptionalPositiveInteger(raw["pollDisabledRecheckMs"], `${label}.pollDisabledRecheckMs`)
+      : undefined;
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -710,6 +759,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(draft !== undefined ? { draft } : {}),
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
     ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
+    ...(pollDisabledRecheckMs !== undefined ? { pollDisabledRecheckMs } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -804,7 +854,7 @@ function parseBacklog(
 
   // `spawn` (used by some live configs to document Take-spawn prompts) is
   // parsed and ignored here — no code path consumes it. See
-  // docs/configuration.md's backlog section.
+  // docs/configuration.md#field-reference, `backlog.<backlogId>.spawn`.
   return {
     source,
     provider: conn.type,
@@ -916,6 +966,70 @@ function parseTelegramAutoSpawn(raw: unknown, label: string): TelegramAutoSpawnC
   };
 }
 
+/** Integer, or a `${VAR}` string resolving to one, so a chat id can stay out of a shared config. */
+/**
+ * Strict digits: `Number("")` is 0 and `Number("0x10")` is 16 — both would pass
+ * validation and fail later inside Telegram.
+ */
+function telegramIdToken(value: string, label: string): number {
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be an integer`);
+  }
+  return parsed;
+}
+
+function resolveTelegramEnvValue(
+  raw: string,
+  label: string,
+  projectEnv: Record<string, string>,
+): string {
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    throw new Error(`${label} could not be resolved from the environment`);
+  }
+  return resolved;
+}
+
+/** Integer, or a `${VAR}` string resolving to one, so an id stays out of a shared config. */
+function parseTelegramChatId(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalInteger(raw, label);
+  }
+  return telegramIdToken(resolveTelegramEnvValue(raw, label, projectEnv), label);
+}
+
+/**
+ * Integer array, or a `${VAR}` string resolving to a comma-separated list, so
+ * user and chat ids stay out of a shared config.
+ */
+function parseTelegramIdList(
+  raw: unknown,
+  label: string,
+  projectEnv: Record<string, string>,
+): number[] | undefined {
+  if (typeof raw !== "string") {
+    return asOptionalIntegerArray(raw, label);
+  }
+  const ids = resolveTelegramEnvValue(raw, label, projectEnv)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => telegramIdToken(entry, label));
+  if (ids.length === 0) {
+    throw new Error(`${label} must include at least one integer`);
+  }
+  return ids;
+}
+
 function parseTelegramSource(
   projectId: string,
   sourceId: string,
@@ -928,8 +1042,20 @@ function parseTelegramSource(
   if (token === undefined) {
     throw new Error(`${label}.token could not be resolved from the environment`);
   }
-  const allowedUsers = asOptionalIntegerArray(raw["allowedUsers"], `${label}.allowedUsers`);
-  const allowedChats = asOptionalIntegerArray(raw["allowedChats"], `${label}.allowedChats`);
+  const allowedUsers = parseTelegramIdList(
+    raw["allowedUsers"],
+    `${label}.allowedUsers`,
+    projectEnv,
+  );
+  const allowedChats = parseTelegramIdList(
+    raw["allowedChats"],
+    `${label}.allowedChats`,
+    projectEnv,
+  );
+  const chatId = parseTelegramChatId(raw["chatId"], `${label}.chatId`, projectEnv);
+  if (chatId !== undefined && allowedChats !== undefined && !allowedChats.includes(chatId)) {
+    throw new Error(`${label}.chatId must be listed in ${label}.allowedChats`);
+  }
   if ((allowedUsers?.length ?? 0) === 0) {
     throw new Error(`${label} must define allowedUsers`);
   }
@@ -940,7 +1066,58 @@ function parseTelegramSource(
     token,
     ...(allowedUsers !== undefined ? { allowedUsers } : {}),
     ...(allowedChats !== undefined ? { allowedChats } : {}),
+    ...(chatId !== undefined ? { chatId } : {}),
     autoSpawn,
+  };
+}
+
+function parseWebhookSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): WebhookSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const allowedKeys = new Set(["type", "host", "port", "path", "secret"]);
+  const unknownKey = Object.keys(raw).find((key) => !allowedKeys.has(key));
+  if (unknownKey) {
+    throw new Error(`${label}.${unknownKey} is not supported for webhook sources`);
+  }
+
+  const host = asOptionalString(raw["host"], `${label}.host`) ?? "127.0.0.1";
+  const ipVersion = isIP(host);
+  if (ipVersion === 0 || host.includes("%")) {
+    throw new Error(`${label}.host must be an IPv4 or IPv6 literal without a zone id`);
+  }
+  const normalizedHost =
+    ipVersion === 6 ? new URL(`http://[${host}]/`).hostname.slice(1, -1) : host;
+
+  const path = asString(raw["path"], `${label}.path`);
+  const pathBytes = Buffer.byteLength(path);
+  if (
+    pathBytes < 1 ||
+    pathBytes > 2_048 ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    /[^\x21-\x7e]|[?#]/.test(path)
+  ) {
+    throw new Error(
+      `${label}.path must be 1 through 2048 visible ASCII bytes, start with one "/", and contain no "?" or "#"`,
+    );
+  }
+
+  const secret = resolveRequiredEnvString(raw["secret"], `${label}.secret`, projectEnv);
+  const secretBytes = Buffer.byteLength(secret);
+  if (secretBytes < 16 || secretBytes > 512 || /[^\x21-\x7e]/.test(secret)) {
+    throw new Error(`${label}.secret must be 16 through 512 visible ASCII bytes`);
+  }
+
+  return {
+    type: "webhook",
+    host: normalizedHost,
+    port: asPortNumber(raw["port"], `${label}.port`),
+    path,
+    secret,
   };
 }
 
@@ -977,6 +1154,9 @@ function parseSource(
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
   }
+  if (type === "webhook") {
+    return parseWebhookSource(projectId, sourceId, raw, projectEnv);
+  }
   if (type === "github-ci") {
     return parseGitHubCiSource(projectId, sourceId, raw);
   }
@@ -997,6 +1177,93 @@ function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): voi
         );
       }
       owners.set(source.token, owner);
+    }
+  }
+}
+
+function webhookBindLabel(host: string, port: number): string {
+  return `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+}
+
+function normalizeBindHost(host: string): string {
+  if (isIP(host) !== 6 || host.includes("%")) return host;
+  return new URL(`http://[${host}]/`).hostname.slice(1, -1);
+}
+
+function ipv4MappedHost(host: string): string | undefined {
+  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (!match) return undefined;
+  const high = Number.parseInt(match[1] ?? "", 16);
+  const low = Number.parseInt(match[2] ?? "", 16);
+  if (high > 0xffff || low > 0xffff) return undefined;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+}
+
+function overlapBindHost(host: string): { host: string; version: number } {
+  const normalized = normalizeBindHost(host);
+  const mapped = ipv4MappedHost(normalized);
+  if (mapped !== undefined) return { host: mapped, version: 4 };
+  return { host: normalized, version: isIP(normalized) };
+}
+
+function bindHostsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = overlapBindHost(left);
+  const normalizedRight = overlapBindHost(right);
+  if (normalizedLeft.version === 0 || normalizedRight.version === 0) {
+    return true;
+  }
+  if (
+    (normalizedLeft.host === "::" && normalizedRight.version === 4) ||
+    (normalizedRight.host === "::" && normalizedLeft.version === 4)
+  ) {
+    return true;
+  }
+  if (normalizedLeft.version !== normalizedRight.version) return false;
+  return (
+    normalizedLeft.host === normalizedRight.host ||
+    normalizedLeft.host === "0.0.0.0" ||
+    normalizedRight.host === "0.0.0.0" ||
+    normalizedLeft.host === "::" ||
+    normalizedRight.host === "::"
+  );
+}
+
+export function validateWebhookSourceBindings(
+  projects: Record<string, ProjectConfig>,
+  daemonBind?: { host: string; port: number },
+  uiBind?: { host: string; port: number },
+): void {
+  const existingBinds: Array<{ host: string; port: number; owner: string }> = [];
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "webhook") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const endpoint = webhookBindLabel(source.host, source.port);
+      if (
+        daemonBind !== undefined &&
+        source.port === daemonBind.port &&
+        bindHostsOverlap(source.host, daemonBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps server bind ${webhookBindLabel(normalizeBindHost(daemonBind.host), daemonBind.port)}`,
+        );
+      }
+      if (
+        uiBind !== undefined &&
+        source.port === uiBind.port &&
+        bindHostsOverlap(source.host, uiBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps ui bind ${webhookBindLabel(normalizeBindHost(uiBind.host), uiBind.port)}`,
+        );
+      }
+      const existing = existingBinds.find(
+        (bind) => bind.port === source.port && bindHostsOverlap(bind.host, source.host),
+      );
+      if (existing) {
+        throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existing.owner}`);
+      }
+      existingBinds.push({ host: source.host, port: source.port, owner });
     }
   }
 }
@@ -1378,6 +1645,9 @@ function parseTrigger(
     if (spawnDeskGroup !== undefined) {
       throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
     }
+    if (sourceConfig.type === "webhook") {
+      throw new Error(`${label}.send is not supported for webhook sources; use spawn`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
@@ -1485,6 +1755,9 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     raw["maxLiveSessions"],
     `${label}.maxLiveSessions`,
   );
+  const tokenBudget = asOptionalPositiveInteger(raw["tokenBudget"], `${label}.tokenBudget`);
+  const tokenBudgetWarnOnly =
+    asOptionalBoolean(raw["tokenBudgetWarnOnly"], `${label}.tokenBudgetWarnOnly`) ?? false;
   const staleAfterMinutes = asNonNegativeNumber(
     raw["staleAfterMinutes"],
     `${label}.staleAfterMinutes`,
@@ -1587,6 +1860,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     backlog,
     triggers,
     ...(maxLiveSessions !== undefined ? { maxLiveSessions } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    tokenBudgetWarnOnly,
     ...(staleAfterMinutes !== undefined ? { staleAfterMinutes } : {}),
   };
 }
@@ -2041,16 +2316,28 @@ function parseConfigFile(
     normalizedProjects[projectId] = parsedProject;
   }
   validateTelegramBotTokens(normalizedProjects);
+  const serverHost =
+    mode === "instance"
+      ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
+      : resolvedDefaults.serverHost;
+  const serverPort =
+    mode === "instance"
+      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
+      : resolvedDefaults.serverPort;
+  const uiPort =
+    mode === "instance"
+      ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
+      : resolvedDefaults.uiPort;
+  validateWebhookSourceBindings(
+    normalizedProjects,
+    { host: serverHost, port: serverPort },
+    { host: "127.0.0.1", port: uiPort },
+  );
 
   const tags = parseTags(root["tags"]);
 
   const projectsRootRaw =
     mode === "instance" ? asOptionalString(root["projectsRoot"], "projectsRoot") : undefined;
-
-  const serverPort =
-    mode === "instance"
-      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
-      : resolvedDefaults.serverPort;
 
   const dataDir =
     mode === "instance"
@@ -2068,10 +2355,7 @@ function parseConfigFile(
   return {
     configPath,
     server: {
-      host:
-        mode === "instance"
-          ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
-          : resolvedDefaults.serverHost,
+      host: serverHost,
       port: serverPort,
     },
     dataDir,
@@ -2095,10 +2379,7 @@ function parseConfigFile(
           : resolvedDefaults.tmuxSocketName,
     },
     ui: {
-      port:
-        mode === "instance"
-          ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
-          : resolvedDefaults.uiPort,
+      port: uiPort,
     },
     models: {
       codexHome:

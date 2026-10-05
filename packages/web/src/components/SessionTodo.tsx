@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { usePoll } from "@/hooks/usePoll";
 import { isSpurTodoProjection, type SpurTodoActor, type SpurTodoProjection } from "@/lib/types";
 import { HARD_WRAP_TEXT_CLASS } from "@/design/classes";
 
@@ -24,14 +25,17 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    let active = true;
     setProjection(null);
     setError(null);
     setExpanded(new Set());
-    const load = async () => {
+  }, [sessionId]);
+
+  const load = useCallback(
+    async (signal: AbortSignal) => {
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/todo`, {
           cache: "no-store",
+          signal,
         });
         const payload = (await response.json()) as unknown;
         if (!response.ok) {
@@ -42,22 +46,18 @@ export function SessionTodo({ sessionId }: { sessionId: string }) {
           throw new Error(message);
         }
         if (!isSpurTodoProjection(payload)) throw new Error("Invalid ToDo response from Spur");
-        if (active) {
+        if (!signal.aborted) {
           setProjection(payload);
           setError(null);
         }
       } catch (loadError) {
-        if (active)
+        if (!signal.aborted)
           setError(loadError instanceof Error ? loadError.message : "Failed to read Spur ToDo");
       }
-    };
-    void load();
-    const timer = window.setInterval(() => void load(), 5_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [sessionId]);
+    },
+    [sessionId],
+  );
+  usePoll(load, 5_000);
 
   const resolved = projection ? projection.counts.completed + projection.counts.cancelled : 0;
   return (

@@ -1,6 +1,6 @@
 # Install from npm
 
-> Agent-first doc: terse and command-dense so an AI agent can run it top to bottom. Human-runnable too — it stays readable where that costs the agent nothing.
+> Scope: npm install guide. Caveman, no overhead.
 
 Run Spur on a fresh Linux server. This is the required path for coding-agent installs. Use source only for contributors/maintainers, and only when the user explicitly asks for source: [install-from-source.md](install-from-source.md).
 
@@ -74,6 +74,8 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 `spur init` sets up private web access over your tailnet — your devices only, never public. Opt out with `--no-tailscale`.
 
+No auth key is no reason to opt out: plain `spur init` never waits on a login — it installs Tailscale, stays loopback-only, and leaves `sudo tailscale up` to the operator TODO. `--no-tailscale` skips the install, so that TODO step has no `tailscale` binary to run.
+
 Auth is yours — two ways to bring the tailnet up:
 
 - Human: `sudo tailscale up`, sign in at the printed URL.
@@ -112,9 +114,16 @@ After a start/restart the units can take up to ~2 min to answer on a ~1 GB host 
 
 ```bash
 cd <repo>
-spur connect --config spur.yaml
-spur spawn <project-id> --branch <branch> "smoke test" --json
+spur doctor --scaffold
+spur connect spur.yaml
+spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
+
+`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
+
+`<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
+
+`<new-branch>`: a branch not checked out in any worktree. The default branch fails.
 
 ## Upgrade
 

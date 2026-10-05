@@ -9,6 +9,7 @@ interface SpawnBody {
   prompt?: string;
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: string | null;
   mode?: string;
   attachments?: Array<{ name: string; data: string }>;
   branch?: string;
@@ -19,6 +20,7 @@ interface SpawnBody {
   reuseWorkspaceSessionId?: string;
   bootstrap?: boolean;
   slots?: { links?: Array<{ label: string; url: string }> };
+  preflightBatchId?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -29,6 +31,12 @@ export async function POST(request: NextRequest) {
 
     if (!project) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
+    }
+    if (body.reasoningEffort === null) {
+      return NextResponse.json(
+        { error: "Fresh spawn cannot clear reasoning effort" },
+        { status: 400 },
+      );
     }
 
     const filteredSteps = Array.isArray(body.steps)
@@ -46,6 +54,8 @@ export async function POST(request: NextRequest) {
     }
     if (body.agent) payload.agent = body.agent;
     if (body.model?.trim()) payload.model = body.model.trim();
+    if (body.reasoningEffort !== undefined) payload.reasoningEffort = body.reasoningEffort;
+    if (body.preflightBatchId?.trim()) payload.preflightBatchId = body.preflightBatchId.trim();
     if (body.mode?.trim()) payload.mode = body.mode.trim();
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;

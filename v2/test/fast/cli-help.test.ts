@@ -7,6 +7,10 @@ function buildProgram() {
 }
 
 describe("spur help", () => {
+  it.each(["spawn", "respawn", "handoff"])("documents %s reasoning selection", (name) => {
+    const command = buildProgram().commands.find((entry) => entry.name() === name);
+    expect(command?.helpInformation()).toContain("--reasoning-effort <level>");
+  });
   it("renders branded root help without implicit or internal commands", () => {
     const help = buildProgram().helpInformation();
 
@@ -262,6 +266,22 @@ describe("spur help", () => {
     expect(source.helpInformation()).toContain("Work with source-bound session messages.");
     const help = reply.helpInformation();
     expect(help).toContain("reply [options] <message...>");
+    expect(help).toContain("--session <id>");
+    expect(help).toContain("defaults to SPUR_SESSION");
+  });
+
+  it("documents source poll-enable", () => {
+    const program = buildProgram();
+    const source = program.commands.find((command) => command.name() === "source");
+    const pollEnable = source?.commands.find((command) => command.name() === "poll-enable");
+
+    expect(source).toBeDefined();
+    expect(pollEnable).toBeDefined();
+    if (!pollEnable) {
+      throw new Error("Expected source poll-enable command to be registered");
+    }
+
+    const help = pollEnable.helpInformation();
     expect(help).toContain("--session <id>");
     expect(help).toContain("defaults to SPUR_SESSION");
   });

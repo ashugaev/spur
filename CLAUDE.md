@@ -11,6 +11,7 @@ MIRROR
   `.codex/agents/*.toml` are the Codex-side agent prompts, parallel to `.claude/agents/*.md`. Update them when behavior or rules change.
   `.cursor/BUGBOT.md` configures Cursor BugBot review focus. Keep aligned with ALWAYS-ON RULES below.
   Hook scripts mirror per runtime: `.claude/hooks/`, `.codex/hooks/`, `.cursor/hooks/`. Sync runtime-specific scripts across all three. Cross-runtime scripts, for example `auto-push.sh`, live only in `.claude/hooks/`, referenced from each runtime's `hooks.json`.
+  The Telegram spawn-prompt suffix has four copies: `wrapTelegramSpawnPrompt` (v2/src/event-sources/telegram.ts), `TelegramSendBatch.format` (v2/src/send-batches.ts), `TELEGRAM_REPLY_SUFFIX` (packages/web/src/lib/session-prompt.ts), and the pinning literal in `packages/web/src/__tests__/session-prompt.test.ts`. Change all four together, or the web UI indexes and shows the raw suffix. Any other consumer imports `TELEGRAM_REPLY_SUFFIX` — never pastes it. Its first and last line are the strip anchors: edit the middle freely, but rewording either end orphans the wrapper in every prompt already stored on disk.
 
 
 AGENTS
@@ -45,6 +46,7 @@ Capabilities loaded by description match. Source: .claude/skills/
   shallow-scoring     .claude/skills/shallow-scoring/SKILL.md     Route a task to a deliberation tier by ambiguity × blast radius
   self-verify         .claude/skills/self-verify/SKILL.md         Final close-out gate validation
   telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
+  telegram-e2e        .claude/skills/telegram-e2e/SKILL.md        Live test the Telegram source on a test bot before close-out of any Telegram change
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
   clean-install-test  .claude/skills/clean-install-test/SKILL.md  Clean-room test the npm server install before release, or verify a source-install deploy change end to end on the itest VM
@@ -81,6 +83,8 @@ TASK MEMORY
 
 ALWAYS-ON RULES
 
+  Follow `.claude/skills/github/references/agent-protocol.md` for product/interface approval, every agent GitHub comment/review footer, and conditional merge authority.
+
   Keep instructions lean. Only include constraints that materially change implementation.
   Think twice, write once. Prefer the shortest form that preserves correctness.
   Never modify code with scripts (`sed`, `awk`, codemods, `find -exec`, mass replace). Edit files one at a time, by hand, after reading the file's context.
@@ -97,11 +101,14 @@ ALWAYS-ON RULES
   Detect session state and rate limits from structured agent sources first (transcript/rollout JSONL, status files). Scan the tmux pane buffer only as a fallback when the structured sources cannot resolve it. Never start detection from tmux.
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
+  Never publish operator environment detail to GitHub — issue and PR titles, bodies, comments, commit messages, CI logs. Banned: IP addresses, hostnames, VM and machine names, OS usernames, internal URLs and ports, tokens, absolute home paths, names of the operator's personal skills, agents, or unrelated projects and repos. Say `the host`, `a dev box`, `a local daemon` instead. Real names stay in session artifacts and local notes. Redact before posting, never after.
+  Run full test suites in GitHub CI; consume automatic result notifications. Locally run only targeted quick checks when needed.
   Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
-  Default close-out: push to the existing PR branch, or create a new PR and leave it open for a human to merge. Never run `gh pr merge --auto`; auto-merge is disabled repo-wide and only an admin can enable it. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
+  Default close-out: push existing PR branch or create open PR for human merge. Auto-merge stays OFF unless separate user authorization, admin configuration and activation proof satisfy agent-protocol.md. Never merge with failing CI; pre-existing failures remain your responsibility.
+  Query CI status or review comments only on explicit user request or bounded verification in a user-authorized review workflow; approval/completion wakes resume that authority, never grant it. Other Spur notifications do not authorize queries.
   Use `Spur` in code, config, docs, and CLI surfaces.
   Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
@@ -112,6 +119,7 @@ ALWAYS-ON RULES
   Worth capturing: a protocol that worked, a tool quirk, a wrong assumption that cost a cycle, a load-bearing invariant. Not: task status, one-off trivia, anything re-derivable by reading the code.
   Skill found stale, wrong, or missing a rule while using it: fix it in the same change. Never leave a known-wrong instruction for the next agent.
   Never fix a problem outside the current request. Covers an unrelated bug found along the way, and review feedback that arrives after its PR merged. Two carve-outs, both stated above: a stale or wrong skill rule hit while using it, and a CI failure on your own PR — fix those in the same change. Otherwise file a GitHub issue for it before close-out; procedure in `.claude/skills/github/SKILL.md`. An agent without shell access reports it to manager instead.
+  Triage GitHub issues on creation, reopening, and worker selection per ISSUE PRIORITY, ISSUE DISPOSITION, and ISSUE WORKERS in `.claude/skills/github/SKILL.md`.
   Log Spur-operation friction with `spur agent-issue log`: friction blocking your operation of Spur, never a code defect in this repo. Boundary and usage: `docs/commands.md`.
   Keep Spur skill byte-minimal: general user-facing actions and capabilities plus canonical references; runtime and interface details live in owning docs or source.
   No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text or colon labels.

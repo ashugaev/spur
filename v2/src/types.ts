@@ -8,6 +8,7 @@ export type SessionStatus =
   | "spawning"
   | "running"
   | "stopped"
+  | "budget_limited"
   | "paused"
   | "errored"
   | "completed"
@@ -48,6 +49,7 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionSlotTitleSource = "manual" | "agent";
 export interface SessionPrBinding {
   number: number;
   repo: string;
@@ -127,6 +129,7 @@ export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
+  titleSource?: SessionSlotTitleSource;
   links: SessionLink[];
   tags?: string[];
 }
@@ -144,6 +147,7 @@ export type SourceType =
   | "sentry"
   | "service"
   | "telegram"
+  | "webhook"
   | "jira"
   | "github-ci";
 
@@ -156,6 +160,14 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+// GitHub-only signal kinds that report an occurrence, not a lifecycle state.
+// They are exempt from the lifecycle filter a session's first poll applies, so
+// an occurrence already pending when the session is first baselined still
+// emits. A poll with no prior snapshot at all emits nothing unless the source
+// asks for it (`runOnStart`), same as every other kind.
+export const GITHUB_PR_OCCURRENCE_KINDS = ["review_requested"] as const;
+export type GitHubPrOccurrenceKind = (typeof GITHUB_PR_OCCURRENCE_KINDS)[number];
+
 export const GITHUB_PR_LIFECYCLE_KINDS = [
   "ready_for_review",
   "approved",
@@ -167,6 +179,9 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
+/** Callback-data prefix for an agent-offered inline button. */
+export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
 export const JIRA_WORK_ITEM_NEW_EVENT = "jira:work_item.new" as const;
 
@@ -259,6 +274,10 @@ export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
   // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
   maxReviewBatchTargets?: number;
+  // How often a durably poll-disabled session (bound PR permanently not found) gets
+  // one bounded recheck request. Default 86400000 (24h, see
+  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+  pollDisabledRecheckMs?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -321,7 +340,17 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   token: string;
   allowedUsers?: number[];
   allowedChats?: number[];
+  /** Destination for agent-initiated sends from a session with no inbound Telegram message. */
+  chatId?: number;
   autoSpawn?: TelegramAutoSpawnConfig;
+}
+
+export interface WebhookSourceConfig {
+  type: "webhook";
+  host: string;
+  port: number;
+  path: string;
+  secret: string;
 }
 
 export interface TelegramAutoSpawnConfig {
@@ -338,10 +367,32 @@ export interface TelegramBinding {
   sessionId: string;
 }
 
+/** One pending inline-button choice offered by an agent, awaiting a click. */
+export interface TelegramChoice {
+  token: string;
+  /** All choices from one agent send share this; a click consumes the whole offer. */
+  offerId: string;
+  sessionId: string;
+  chatId: number;
+  messageThreadId?: number;
+  text: string;
+  value: string;
+  expiresAt: string;
+}
+
+/** A bot message and the session that sent it, so a user reply routes back there. */
+export interface TelegramMessageOwner {
+  chatId: number;
+  messageId: number;
+  sessionId: string;
+}
+
 export interface TelegramReplyTarget extends TelegramBinding {
   projectId: string;
   sourceId: string;
   statusMessageId?: number;
+  /** Last forum-topic name applied for this session; a rename happens only when the computed name differs. */
+  topicName?: string;
   lastInboundAt?: string;
   lastReplyAt?: string;
   updatedAt: string;
@@ -353,6 +404,7 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
+  | WebhookSourceConfig
   | JiraSourceConfig
   | GitHubCiSourceConfig;
 
@@ -364,6 +416,11 @@ export interface TelegramMessageEventData {
   username?: string;
   messageId: number;
   text: string;
+}
+
+export interface WebhookReceivedEventData {
+  body: string;
+  receivedAt: string;
 }
 
 export interface SpawnOverrides {
@@ -439,6 +496,7 @@ export interface TriggerSpawnBlockConfig {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   branch?: string;
   overrides?: SpawnOverrides;
@@ -476,14 +534,14 @@ export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
 export interface ReviewSignal {
   key: string;
-  kind: ReviewSignalKind | GitHubLifecycleKind;
+  kind: ReviewSignalKind | GitHubLifecycleKind | GitHubPrOccurrenceKind;
   text: string;
   providerThreadTarget?: AutoPingThreadTarget;
 }
 
 export type AutoPingScope = "event" | "thread" | "subscription";
 
-export type AutoPingDestination = { kind: "session"; sessionId: string } | { kind: "trigger" };
+export type AutoPingDestination = { kind: "session"; sessionId: string };
 
 export type AutoPingThreadTarget =
   | { kind: "github-review-thread"; threadId: string }
@@ -502,7 +560,7 @@ export interface AutoPingRouteDescriptor {
   sourceId: string;
   sourceType: SourceType;
   eventName: string;
-  actionKind: "send" | "spawn";
+  actionKind: "send";
   destination: AutoPingDestination;
   spawnDeskGroup: boolean;
 }
@@ -555,6 +613,8 @@ export function reviewSnapshotBaseline(
 
 export interface ReviewEventData {
   sessionId: string;
+  repo?: string;
+  prUrl?: string;
   prNumber: number;
   prTitle: string;
   signals: ReviewSignal[];
@@ -612,6 +672,8 @@ export type PersistedSendBatch = (
       sourceId: string;
       prompt?: string;
       sessionId: string;
+      repo?: string;
+      prUrl?: string;
       prNumber: number;
       prTitle: string;
       signals: ReviewSignal[];
@@ -647,6 +709,10 @@ export interface PersistedPendingBatch {
   sourceId: string;
   batch: PersistedSendBatch;
   retryAccounting?: SendBatchRetryEntry[];
+  admissionCapRetryAt?: number | undefined;
+  admissionCapDenials?: number | undefined;
+  /** Session hold (`submitUnconfirmedAt`) this batch already logged a suppression for. */
+  suppressedHoldAt?: string;
 }
 
 export interface SendBatchRetryEntry {
@@ -698,13 +764,88 @@ export interface ProjectConfig {
   backlog: Record<string, BacklogConfig>;
   triggers: Record<string, TriggerConfig>;
   maxLiveSessions?: number;
+  tokenBudget?: number;
+  tokenBudgetWarnOnly?: boolean;
   staleAfterMinutes?: number;
 }
 
-export type ProviderReasoningEffort = "low" | "medium" | "high";
-export type AgentReasoningEffortConfig = Partial<
-  Record<"claude" | "codex", ProviderReasoningEffort>
->;
+export type ProviderReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+  | "ultra";
+export type AgentReasoningEffortConfig = Partial<Record<AgentName, ProviderReasoningEffort>>;
+
+export interface TokenUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+  cacheWrite5mInputTokens?: number;
+  cacheWrite1hInputTokens?: number;
+}
+
+export interface SessionTokenUsageRecord extends TokenUsageTotals {
+  provider: "claude" | "codex" | "cursor" | "opencode";
+  generations: Record<string, TokenUsageTotals>;
+}
+
+export type PreflightUsageProvider = "claude" | "codex" | "cursor" | "opencode";
+
+export interface PreflightTokenUsageRecord extends TokenUsageTotals {
+  status: "measured" | "partial" | "unknown";
+  attemptCount: number;
+  unknownAttemptCount: number;
+  providerIterationCount: number;
+  byProvider: Partial<Record<PreflightUsageProvider, TokenUsageTotals>>;
+}
+
+export type PreflightTokenUsageView =
+  | (PreflightTokenUsageRecord & { status: "measured" | "partial" })
+  | {
+      status: "unknown" | "legacy_unknown";
+      attemptCount: number;
+      unknownAttemptCount: number;
+      providerIterationCount: number;
+    };
+
+export interface TokenBudgetView {
+  budget?: number;
+  overridden?: boolean;
+  warnOnly: boolean;
+  knownTotalTokens: number;
+  exhausted: boolean;
+  enforced: boolean;
+  reason?: "legacy_unknown" | "preflight_unknown" | "main_usage_unavailable";
+}
+
+export type SessionTokenUsageView =
+  | ({
+      status: "available";
+      provider: "claude" | "codex" | "cursor" | "opencode";
+      budget?: number;
+      exhausted: boolean;
+    } & TokenUsageTotals)
+  | {
+      status: "waiting";
+      provider: "claude" | "codex" | "cursor" | "opencode";
+      budget?: number;
+      exhausted: false;
+    }
+  | {
+      status: "unavailable";
+      provider: "cursor";
+      budget?: number;
+      exhausted: false;
+      unenforced: boolean;
+      reason: "structured_usage_unavailable";
+    };
 
 export type AdmissionCapSource = "default" | "config" | "derived";
 
@@ -961,6 +1102,11 @@ export interface SidecarProcessIdentity {
   starttime: number;
 }
 
+export interface CursorRestoreBoundary {
+  filePath: string;
+  offset: number;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -981,6 +1127,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -988,6 +1135,10 @@ export interface SessionRecord {
   claudeAccountId?: string;
   allowedTriggers?: string[];
   agentSessionId?: string;
+  /** Cursor transcript position before the latest restore; excludes earlier activity from state. */
+  cursorRestoreBoundary?: CursorRestoreBoundary;
+  /** Start of the latest Codex restore generation for rollout state classification. */
+  codexRestoreStartedAt?: string;
   prompt: string;
   originalTaskPrompt?: string;
   startupAttachmentIds?: string[];
@@ -1001,7 +1152,11 @@ export interface SessionRecord {
   /** Opaque identity shared only by one agent launch and its process tree. */
   agentLaunchId?: string;
   status: SessionStatus;
-  stopReason?: "manual_pause" | "stale_timeout";
+  /** "memory_shed" is written only by the critical memory shed's session stop. */
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
+  tokenBudgetOverride?: boolean;
+  tokenUsage?: SessionTokenUsageRecord;
+  preflightTokenUsage?: PreflightTokenUsageRecord;
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
@@ -1021,6 +1176,33 @@ export interface SessionRecord {
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
+  /**
+   * ISO time of a launch or send whose submit never confirmed. Every typed
+   * send holds while set. A launch hold clears on the first transcript
+   * activity after it; a send's hold (with `queuedMessageTyped`) clears only
+   * on the agent's ack of that text. Read from the legacy
+   * `launchUnconfirmedAt` on older records.
+   */
+  submitUnconfirmedAt?: string;
+  /**
+   * A message already typed into the pane (and so off the queue) whose
+   * submit ack is still pending, or never came (with `submitUnconfirmedAt`).
+   * `ackBaseline` is the ack scan's pre-send transcript position, absent when
+   * the send had no ack scan. A daemon restart with this set, no hold, and no
+   * ack past that position (or no position at all) puts the message back at
+   * the head.
+   */
+  queuedMessageTyped?: { message: string; typedAt: string; ackBaseline?: SubmitAckBaseline };
+  /**
+   * Text an unconfirmed send already put back at the queue head once. Its
+   * next unconfirmed submit releases the hold instead of re-queuing it again.
+   */
+  submitRequeuedMessage?: string;
+  /**
+   * A send the agent never acked, after its one re-queue: the hold is
+   * released, the text shown with Retry and Dismiss until the user acts.
+   */
+  submitFailedMessage?: { message: string; at: string };
   scheduledWake?: SessionScheduledWakeState;
   intervalWake?: SessionIntervalWakeState;
   dailyWake?: SessionDailyWakeState;
@@ -1040,6 +1222,16 @@ export function isTerminalSessionStatus(
   status: SessionRecord["status"],
 ): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
+}
+
+export function hasRetainedSessionError(
+  session: Pick<SessionRecord, "status" | "error">,
+  state?: SessionState,
+): boolean {
+  return (
+    !isTerminalSessionStatus(session.status) &&
+    (session.status === "errored" || Boolean(session.error?.trim()) || state === "error")
+  );
 }
 
 // respawn()'s own gate. One definition consumed by the hint builders in
@@ -1075,6 +1267,24 @@ export interface SessionDeskMember {
 
 export interface CompleteDeskResponse {
   completedIds: string[];
+  lifecycle: SessionLifecycleSnapshot;
+}
+
+export type LifecycleAction = "complete" | "restore" | "reopen";
+export type LifecyclePhase = "pending" | "succeeded" | "failed";
+
+export interface LifecycleOperation {
+  operationId: string;
+  action: LifecycleAction;
+  phase: LifecyclePhase;
+  targetIds: string[];
+  outcomes: { sessionId: string; phase: "succeeded" | "failed" }[];
+}
+
+export interface SessionLifecycleSnapshot {
+  instanceId: string;
+  revision: number;
+  operation: LifecycleOperation | null;
 }
 
 export interface SidecarPortView {
@@ -1090,6 +1300,8 @@ export interface SidecarPortView {
 export interface SessionSidecarView {
   name: string;
   alive: boolean;
+  /** Configured URL with a live recorded launcher and reserved TCP listener. */
+  url?: string;
   ports: SidecarPortView[];
   tmuxSession: string;
   /** Elapsed seconds since the recorded identity's process start; omitted when unresolvable. */
@@ -1101,7 +1313,16 @@ export interface SessionSidecarView {
   deadPane?: boolean;
 }
 
-export interface SessionView extends Omit<SessionRecord, "queuedMessages" | "agentLaunchId"> {
+export interface SessionView extends Omit<
+  SessionRecord,
+  | "queuedMessages"
+  | "agentLaunchId"
+  | "tokenUsage"
+  | "preflightTokenUsage"
+  | "cursorRestoreBoundary"
+  | "codexRestoreStartedAt"
+> {
+  lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1118,6 +1339,15 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages" | "age
   claudeAccounts?: { id: string; label?: string; authenticated: boolean }[];
   activeClaudeAccountId?: string;
   queuedMessages?: SessionQueuedMessagesView;
+  tokenUsageView?: SessionTokenUsageView;
+  preflightTokenUsageView?: PreflightTokenUsageView;
+  tokenBudgetView?: TokenBudgetView;
+  /**
+   * Send now / flush response only: the message was queued at the head
+   * instead of typed. `no_interrupt`: the agent has no interrupt key and was
+   * not waiting.
+   */
+  queuedAheadReason?: "no_interrupt";
 }
 
 /**
@@ -1128,6 +1358,8 @@ export interface SessionView extends Omit<SessionRecord, "queuedMessages" | "age
  */
 export type DashboardOmittedField =
   | "queuedMessages"
+  | "cursorRestoreBoundary"
+  | "codexRestoreStartedAt"
   | "pipeline"
   | "sidecarNames"
   | "sidecarPorts"
@@ -1136,9 +1368,12 @@ export type DashboardOmittedField =
   | "allowedTriggers"
   | "agentSessionId"
   | "agentLaunchId"
-  | "branchSource";
+  | "branchSource"
+  | "tokenUsage"
+  | "preflightTokenUsage";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
+  lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
@@ -1147,7 +1382,11 @@ export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmitt
   slots?: SessionSlots;
   hasServiceIssues?: boolean;
   runningSidecarNames?: string[];
+  sidecars?: SessionSidecarView[];
   deskGroupMembers?: SessionDeskMember[];
+  tokenUsageView?: SessionTokenUsageView;
+  preflightTokenUsageView?: PreflightTokenUsageView;
+  tokenBudgetView?: TokenBudgetView;
 }
 
 export type SidecarStopReport =
@@ -1198,10 +1437,13 @@ export interface PreflightRequest {
   prompt: string;
   agent?: AgentName;
   overrides?: SpawnOverrides;
+  preflightBatchId?: string;
 }
 
 export interface PreflightResponse {
   branch: string | null;
+  preflightBatchId: string;
+  preflightTokenUsageView: PreflightTokenUsageView;
 }
 
 export interface BranchExistsResponse {
@@ -1217,6 +1459,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort;
   mode?: string;
   planMode?: boolean;
   restrictWrites?: boolean;
@@ -1227,6 +1470,7 @@ export interface SpawnSessionRequest {
   originalTaskPrompt?: string;
   bareSpawnMessage?: boolean;
   configPath?: string;
+  preflightBatchId?: string;
   slots?: { links?: SessionLink[] };
   selfDestruct?: SelfDestructConfig;
   bootstrap?: boolean;
@@ -1236,6 +1480,15 @@ export interface SpawnSessionRequest {
   claudeAccountId?: string;
   subscriptions?: SubscribeSessionStatesRequest[];
 }
+
+/**
+ * Telegram chat a source-initiated spawn came from. Internal to the daemon:
+ * only the source adapter passes it (spawn options), never the HTTP body.
+ */
+export type TelegramSpawnOrigin = Pick<
+  TelegramReplyTarget,
+  "projectId" | "sourceId" | "chatId" | "messageThreadId"
+>;
 
 export interface SendMessageAttachment {
   name: string;
@@ -1249,8 +1502,14 @@ export interface SendMessageRequest {
   interrupt?: boolean;
 }
 
+export interface SourceReplyButton {
+  text: string;
+  value: string;
+}
+
 export interface SourceReplyRequest {
   message: string;
+  buttons?: SourceReplyButton[];
 }
 
 export interface SourceReplyResponse {
@@ -1261,6 +1520,14 @@ export interface SourceReplyResponse {
   sourceId: string;
   chatId: number;
   messageThreadId?: number;
+  buttons?: number;
+}
+
+export interface SourcePollEnableResponse {
+  ok: true;
+  sessionId: string;
+  projectId: string;
+  cleared: { sourceId: string; prNumber: number }[];
 }
 
 export type WakeTarget = "scheduled" | "interval" | "daily";
@@ -1318,6 +1585,7 @@ export interface SidecarPortConflictPayload {
 export type OpenPrAction = "leave_open" | "close";
 
 export interface CompleteSessionRequest {
+  operationId?: string;
   scope?: "session" | "desk";
   prAction?: OpenPrAction;
   skipPrCheck?: boolean;
@@ -1419,7 +1687,9 @@ export interface KillSessionRequest {
 // assertNoForeignAgentForSession in session-service.ts. Never bypasses the P1
 // (pane-rooted) survivor check; a pid that survives SIGKILL always refuses.
 export interface RestoreSessionRequest {
+  operationId?: string;
   force?: boolean;
+  overrideTokenBudget?: boolean;
 }
 
 export interface OpenPrActionRequiredPayload {
@@ -1454,11 +1724,13 @@ export interface RespawnSessionRequest {
   forceKillSource?: boolean;
   agent?: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort | null;
 }
 
 export interface HandoffSessionRequest {
   agent: AgentName;
   model?: string;
+  reasoningEffort?: ProviderReasoningEffort | null;
   notes?: string;
 }
 
@@ -1466,10 +1738,22 @@ export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
   setTitleIfAbsent?: boolean;
+  source?: SessionSlotTitleSource;
   links?: SessionLink[];
   unlinkLabels?: string[];
   tags?: string[];
   untags?: string[];
+}
+
+export type SessionSlotTitleResult = "updated" | "cleared" | "unchanged" | "blocked";
+
+export interface SessionSlotsUpdateResult {
+  titleResult: SessionSlotTitleResult;
+  message?: string;
+}
+
+export interface UpdateSessionSlotsResponse extends SessionView {
+  slotUpdate: SessionSlotsUpdateResult;
 }
 
 export interface ProjectListEntry {
@@ -1488,6 +1772,7 @@ export interface ProjectListEntry {
 // or built-in default.
 export interface SpawnDefaultsResponse {
   model: string | null;
+  reasoningEffort: ProviderReasoningEffort | null;
   worktree: boolean;
 }
 
@@ -1555,6 +1840,7 @@ export interface ProjectConfigMutationResponse {
 }
 
 export interface RuntimeInfo {
+  lifecycleInstanceId: string;
   ok: true;
   apiVersion: number;
   version: string;
@@ -1590,6 +1876,28 @@ export interface ConversationMessage {
   text: string;
   timestampMs: number;
 }
+
+/**
+ * JSON form of a submit-ack binding's pre-send transcript position. Persisted
+ * with a typed queued message so a restarted daemon can rebind the same scan
+ * (resumeAgentSubmitAckBinding) and see only turns recorded after the send.
+ */
+export type SubmitAckBaseline =
+  | { agent: "claude"; file: string; size: number }
+  | { agent: "codex"; offsets: Record<string, number> }
+  | {
+      agent: "cursor";
+      file: string;
+      size: number;
+      /** Rotated chat transcript and its offset at send time. */
+      rotated?: { file: string; size: number };
+    }
+  | {
+      agent: "opencode";
+      sessionId: string;
+      /** Newest user message at send time; null when the session had none. */
+      after: { createdMs: number; id: string } | null;
+    };
 
 export type TranscriptEntry =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestampMs?: number }

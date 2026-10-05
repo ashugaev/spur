@@ -108,6 +108,32 @@ describe("captureClaudeSubmitBaseline", () => {
 });
 
 describe("scanClaudeJsonlForMessage", () => {
+  // Shapes copied from live claude transcripts (content redacted): a skill
+  // writes message/name/args, a built-in command name/message/args indented.
+  it.each([
+    {
+      typed: "/pr-comments-fix 986 check every thread",
+      content:
+        "<command-message>pr-comments-fix</command-message>\n<command-name>/pr-comments-fix</command-name>\n<command-args>986 check every thread</command-args>",
+    },
+    {
+      typed: "/compact",
+      content:
+        "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>",
+    },
+  ])("matches a slash command recorded as command tags: $typed", async ({ typed, content }) => {
+    const filePath = await makeJsonl("slash.jsonl", []);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    await appendJsonl(filePath, [{ type: "user", message: { role: "user", content } }]);
+    expect(await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, typed, "/tmp/w")).toBe(
+      true,
+    );
+    // Another command, or other args, is not this send's ack.
+    expect(
+      await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, `${typed} extra`, "/tmp/w"),
+    ).toBe(false);
+  });
+
   it("matches user message with content as string", async () => {
     const filePath = await makeJsonl("string-content.jsonl", []);
     findLatestSessionFileMock.mockResolvedValue(filePath);
@@ -294,5 +320,169 @@ describe("scanClaudeJsonlForMessage", () => {
       "/tmp/worktree",
     );
     expect(found).toBe(true);
+  });
+
+  // Trimmed real claude queue records: a send typed into a busy pane writes
+  // `enqueue` when Enter lands, then a content-less `dequeue` or a `remove` and a
+  // `queued_command` attachment carrying the same text once the turn absorbs it.
+  const QUEUE_SESSION = "5f59054b-5b77-4966-8287-943a327f9c5d";
+  const enqueueRecord = (content: string) => ({
+    type: "queue-operation",
+    operation: "enqueue",
+    timestamp: "2026-09-03T14:53:43.360Z",
+    sessionId: QUEUE_SESSION,
+    content,
+  });
+  const absorbedRecords = (content: string) => [
+    {
+      type: "queue-operation",
+      operation: "remove",
+      timestamp: "2026-09-03T14:53:48.616Z",
+      sessionId: QUEUE_SESSION,
+      content,
+      reason: "absorbed_mid_turn",
+    },
+    {
+      type: "attachment",
+      attachment: { type: "queued_command", prompt: content, commandMode: "prompt" },
+    },
+  ];
+
+  it("matches a send queued into a busy pane by its enqueue record", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      { type: "user", message: { role: "user", content: "launch prompt" } },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    const fs = await import("node:fs/promises");
+    const baseline = { file: filePath, size: (await fs.stat(filePath)).size };
+
+    await appendJsonl(filePath, [enqueueRecord("Automatic ping controls")]);
+
+    expect(
+      await scanClaudeJsonlForMessage(baseline, "Automatic ping controls", "/tmp/worktree"),
+    ).toBe(true);
+  });
+
+  it("does not ack a send whose only enqueue precedes the baseline", async () => {
+    const filePath = await makeJsonl("a.jsonl", [enqueueRecord("Automatic ping controls")]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    const fs = await import("node:fs/promises");
+    const baseline = { file: filePath, size: (await fs.stat(filePath)).size };
+
+    await appendJsonl(filePath, [
+      {
+        type: "queue-operation",
+        operation: "dequeue",
+        timestamp: "2026-09-03T14:53:48.600Z",
+        sessionId: QUEUE_SESSION,
+      },
+      ...absorbedRecords("Automatic ping controls"),
+    ]);
+
+    expect(
+      await scanClaudeJsonlForMessage(baseline, "Automatic ping controls", "/tmp/worktree"),
+    ).toBe(false);
+  });
+
+  it("matches an enqueue whose content uses the \\r separators claude records", async () => {
+    const filePath = await makeJsonl("a.jsonl", [
+      enqueueRecord("Automatic ping controls:\r- event: unsubscribe\r- subscription: unsubscribe"),
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls:\n- event: unsubscribe\n- subscription: unsubscribe",
+        "/tmp/worktree",
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false for an enqueue whose text does not match the target", async () => {
+    const filePath = await makeJsonl("a.jsonl", [enqueueRecord("some other message")]);
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    expect(
+      await scanClaudeJsonlForMessage(
+        { file: filePath, size: 0 },
+        "Automatic ping controls",
+        "/tmp/worktree",
+      ),
+    ).toBe(false);
+  });
+
+  // Claude >=2.1.277 wraps typed pastes over ~800 chars in both record types.
+  const wrapPaste = (text: string, openId = "a1b2", closeId = openId) =>
+    `\n\n<pasted_content id="${openId}">\n${text}\n</pasted_content id="${closeId}">\n`;
+  const longText = `${"long paste line\n".repeat(60)}end`;
+  const pasteRecords: Array<{
+    name: string;
+    record: (content: string) => Record<string, unknown>;
+  }> = [
+    {
+      name: "user record",
+      record: (content) => ({ type: "user", message: { role: "user", content } }),
+    },
+    { name: "enqueue record", record: enqueueRecord },
+  ];
+
+  describe.each(pasteRecords)("pasted_content wrapper in $name", ({ record }) => {
+    it("acks wrapped and unwrapped text", async () => {
+      for (const content of [wrapPaste(longText), longText]) {
+        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+        findLatestSessionFileMock.mockResolvedValue(filePath);
+        expect(
+          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+        ).toBe(true);
+      }
+    });
+
+    it("does not ack a wrapped block holding different text", async () => {
+      const filePath = await makeJsonl("paste.jsonl", [record(wrapPaste("other text"))]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+      ).toBe(false);
+    });
+
+    it("does not unwrap mismatched ids or text around the block", async () => {
+      for (const content of [
+        wrapPaste(longText, "a1b2", "c3d4"),
+        `prefix ${wrapPaste(longText)}`,
+        `${wrapPaste(longText)}suffix`,
+      ]) {
+        const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+        findLatestSessionFileMock.mockResolvedValue(filePath);
+        expect(
+          await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+        ).toBe(false);
+      }
+    });
+
+    it("acks a send that is itself a pasted_content block, recorded raw", async () => {
+      const sent = wrapPaste("short text").trim();
+      const filePath = await makeJsonl("paste.jsonl", [record(sent)]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, sent, "/tmp/worktree"),
+      ).toBe(true);
+    });
+
+    it("acks a closed block with a large inner whitespace run", async () => {
+      const text = `head${" ".repeat(2_000)}tail`;
+      const filePath = await makeJsonl("paste.jsonl", [record(wrapPaste(text))]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, text, "/tmp/worktree"),
+      ).toBe(true);
+    });
+
+    it("rejects an unclosed block with a large whitespace run quickly", async () => {
+      const content = `<pasted_content id="a">${" ".repeat(2_000)}x`;
+      const filePath = await makeJsonl("paste.jsonl", [record(content)]);
+      findLatestSessionFileMock.mockResolvedValue(filePath);
+      expect(
+        await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
+      ).toBe(false);
+    }, 2000);
   });
 });

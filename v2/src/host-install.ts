@@ -34,7 +34,7 @@ import {
   renderHostSkillWarnings,
 } from "./host-skills.js";
 import { writeStderr } from "./io.js";
-import { listSessions } from "./metadata.js";
+import { listGitHubPollDisabledEntries, listSessions, sessionRecordExists } from "./metadata.js";
 import { findListenerPids, isHostPortFree } from "./port-probe.js";
 import { withTimeout } from "./promise-timeout.js";
 import { isExistingFile, isInsideWorktreeDir, readConfigRegistryFile } from "./registry.js";
@@ -67,6 +67,7 @@ import {
 } from "./update-health.js";
 import { getVersion } from "./version.js";
 import { resolveAgentExecutable } from "./agents/executable.js";
+import { ensureCursorTokenUsageHook } from "./cursor-token-usage.js";
 
 // C2: below this available-KB/free-inode floor, `data-dir-disk-space` reports
 // an error — deliberately low so a normal dev/CI host's disk is never flagged.
@@ -112,6 +113,44 @@ export function checkOpenCodeExecutable(): HostInstallCheck {
       : {
           fix: "npm install -g --prefix ~/.local opencode-ai, or set SPUR_OPENCODE_BIN to an executable path",
         }),
+  };
+}
+
+// Read-only directory walk, zero writes (doctor's read-only contract, #600).
+// severity is static "warn" in both outcomes per the convention at cli.ts:
+// severity is the check's importance if it fails, not a flag that flips with the
+// outcome; the renderer only surfaces it once `ok` is false.
+//
+// Reports only entries that still gate polling: the session record exists and
+// (projectId, sourceId) is a currently configured github source. Registry files orphaned
+// by a removed session or renamed/removed source are ignored (never mutated here).
+export function checkGitHubPollDisabled(
+  config: Pick<AppConfig, "dataDir" | "projects">,
+): HostInstallCheck {
+  const entries = listGitHubPollDisabledEntries(config.dataDir).filter(
+    (entry) =>
+      config.projects[entry.projectId]?.sources[entry.sourceId]?.type === "github" &&
+      // Doctor is read-only: existence check, never readSession.
+      sessionRecordExists(config.dataDir, entry.projectId, entry.sessionId),
+  );
+  if (entries.length === 0) {
+    return {
+      id: "github-poll-disabled",
+      ok: true,
+      severity: "warn",
+      detail: "no GitHub sources have a session gated by a not-found PR",
+    };
+  }
+  const lines = entries.map((entry) => {
+    const since = entry.disabledAtMs > 0 ? new Date(entry.disabledAtMs).toISOString() : "unknown";
+    return `${entry.projectId}/${entry.sourceId} ${entry.sessionId} PR #${entry.prNumber} since ${since}`;
+  });
+  return {
+    id: "github-poll-disabled",
+    ok: false,
+    severity: "warn",
+    detail: `${entries.length} session(s) gated by a not-found PR:\n${lines.join("\n")}`,
+    fix: "spur source poll-enable --session <id>",
   };
 }
 
@@ -261,7 +300,11 @@ export function isActive(ctl: string[], unit: string): boolean {
 }
 
 export function resolveSystemdScope(home: string): SystemdScope {
-  const userUnitDir = join(home, ".config", "systemd", "user");
+  const userUnitDir = join(
+    process.env["XDG_CONFIG_HOME"] || join(home, ".config"),
+    "systemd",
+    "user",
+  );
   if (existsSync(join(userUnitDir, "spur-daemon.service"))) {
     return {
       kind: "user",
@@ -1690,6 +1733,9 @@ export function runNpmInit(
     args.push("--web-port", options.webPort);
   }
   args.push(options.tailscale === false ? "--no-tailscale" : "--tailscale");
+  if (!ensureCursorTokenUsageHook()) {
+    writeStderr("spur: Cursor token hook setup skipped; existing hooks were preserved");
+  }
   execFileSync("bash", [script, ...args], { stdio: "inherit" });
   // Refreshes ~/.claude/skills and ~/.codex/skills for every `spur init` /
   // `update` / `reinit` / `POST /deploy/switch` / auto-update tick — the
