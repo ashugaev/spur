@@ -42,7 +42,7 @@ DOCS
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
-  Config: docs/configuration.md; events: docs/configuration.md#events
+  Config, reviewer App and consent policy: docs/configuration.md; events: docs/configuration.md#events
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
 

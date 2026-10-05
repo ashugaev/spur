@@ -15,6 +15,8 @@ INTERFACE
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve visible UI design gate; changed surface revision invalidates affected approval.
   Require reviewer to compare final diff with approved scope; missing/stale approval blocks, never claim retroactive consent.
+  Request authenticated semantic consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
+  Require designated Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
 
 GITHUB PUBLICATION
 
@@ -33,4 +35,5 @@ MERGE AUTHORITY
   Block strict success for pending/failing/missing/canceled/skipped/neutral required execution; no bypass.
   Reject footer, PR-owned receipt, prompt affirmation or replayed consent as protected approval proof.
   Require producer provenance, revision/lifecycle invalidation and privileged runner isolation before activation.
-  Approval Gate and authenticated Telegram consent issuer: NOT IMPLEMENTED; prompt rules remain advisory.
+  Require active default-branch Approval Gate, designated consent policy and live activation proof; source implementation alone grants no merge authority.
+  Hold owner continuation when public state transport fails; unobserved local failure cannot invalidate historical remote approval.
