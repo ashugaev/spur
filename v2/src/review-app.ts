@@ -3,12 +3,15 @@ import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
+import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
+import { publishLaneState } from "./review-state.js";
 import {
   GitHubApp,
   ReviewAppError,
   integer,
   object,
   readJson,
+  effectiveNativeReview,
   string,
   type AppCredentials,
 } from "./github-app.js";
@@ -36,6 +39,7 @@ interface Attempt {
   receipt: string;
 }
 interface Request extends Attempt {
+  assessment: InterfaceAssessment;
   body: string;
   verdict: "APPROVED" | "CHANGES_REQUESTED";
   coverage: { challenger: string; output: string; omissionsClosed: boolean };
@@ -115,6 +119,7 @@ export function parseRequest(value: unknown): Request {
     throw new ReviewAppError("failed-scenarios");
   return {
     ...attempt,
+    assessment: parseAssessment(data.assessment),
     body: string(data.body),
     verdict: data.verdict,
     coverage: { challenger, output: string(coverage.output), omissionsClosed: true },
@@ -156,11 +161,21 @@ export function publishReview(
 ) {
   return transitionReview(config, request, session, "publish", transport);
 }
-export function prepareReview(config: Config, request: Attempt, session: string | undefined) {
-  return transitionReview(config, request, session, "prepare");
+export function prepareReview(
+  config: Config,
+  request: Attempt,
+  session: string | undefined,
+  transport?: typeof fetch,
+) {
+  return transitionReview(config, request, session, "prepare", transport);
 }
-export function blockReview(config: Config, request: Attempt, session: string | undefined) {
-  return transitionReview(config, request, session, "block");
+export function blockReview(
+  config: Config,
+  request: Attempt,
+  session: string | undefined,
+  transport?: typeof fetch,
+) {
+  return transitionReview(config, request, session, "block", transport);
 }
 async function transitionReview(
   config: Config,
@@ -256,6 +271,22 @@ async function transitionReview(
           throw new ReviewAppError("receipt-temp-cleanup");
         });
     }
+  };
+  const announce = async () => {
+    await publishLaneState(app, {
+      version: 1,
+      repo: request.repo,
+      pr: request.pr,
+      lane: request.lane,
+      session: request.session,
+      attempt: request.attempt,
+      H: request.H,
+      B: request.B,
+      status: receipt.status as "PENDING" | "BLOCKED" | "APPROVED" | "CHANGES_REQUESTED",
+      evidenceDigest: digest({ rows: receipt.evidence, coverage: receipt.coverage }),
+      reviewId: receipt.reviewId,
+      assessment: "assessment" in request ? request.assessment : null,
+    });
   };
   const fresh = async (actor: string) => {
     const pr = object(await app.request(path));
@@ -387,6 +418,7 @@ async function transitionReview(
       receipt.reviewBlocked = true;
     }
     await save();
+    await announce();
     if (action !== "publish") return receipt;
     if (!("body" in request)) throw new ReviewAppError("invalid-request");
     const access = await app.authenticate();
@@ -407,35 +439,7 @@ async function transitionReview(
     await save();
     // Reconcile before mutation too: rerunning a completed attempt must not duplicate its review.
     const history = await app.history(`${path}/reviews`);
-    const effective = (rows: unknown[]) => {
-      const submitted = rows
-        .map(object)
-        .filter((review) => {
-          const user = object(review.user);
-          if (user.login !== access.actor) return false;
-          integer(review.id);
-          if (["COMMENTED", "PENDING"].includes(String(review.state))) return false;
-          if (
-            !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(String(review.state)) ||
-            typeof review.body !== "string" ||
-            typeof review.commit_id !== "string" ||
-            !/^[a-f0-9]{40}$/.test(review.commit_id) ||
-            typeof review.submitted_at !== "string" ||
-            !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(review.submitted_at) ||
-            !Number.isFinite(Date.parse(review.submitted_at))
-          )
-            throw new ReviewAppError("invalid-history");
-          return true;
-        })
-        .sort((a, b) => Date.parse(String(b.submitted_at)) - Date.parse(String(a.submitted_at)));
-      if (
-        submitted.length > 1 &&
-        Date.parse(String(submitted[0]?.submitted_at)) ===
-          Date.parse(String(submitted[1]?.submitted_at))
-      )
-        throw new ReviewAppError("ambiguous-history");
-      return submitted[0];
-    };
+    const effective = (rows: unknown[]) => effectiveNativeReview(rows, { login: access.actor });
     effective(history);
     const attemptReviews = history.filter((value) => {
       const review = object(value);
@@ -500,13 +504,20 @@ async function transitionReview(
       throw new ReviewAppError("native-verdict-superseded");
     await fresh(access.actor);
     receipt.status = request.verdict;
+    await announce();
     await save();
     return receipt;
   } catch (error) {
     if (!ownsAttempt) throw error;
     receipt.status = "BLOCKED";
     receipt.reason = error instanceof ReviewAppError ? error.category : "internal";
+    if (action !== "publish") receipt.reviewBlocked = true;
     await save();
+    try {
+      await announce();
+    } catch {
+      /* Unconfirmed external state blocks continuation; cannot revoke an unseen old vote. */
+    }
     return receipt;
   } finally {
     await release();

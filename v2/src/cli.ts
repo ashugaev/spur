@@ -21,12 +21,14 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
+import { readJson } from "./github-app.js";
 import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
 import { registerReviewApp } from "./review-app.js";
+import { registerReviewGate } from "./review-gate.js";
 import {
   connectProjectConfig,
   deleteJson,
@@ -2693,6 +2695,7 @@ async function ensureCliSpawnSubscriptionTargetsExist(
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
   registerReviewApp(program);
+  registerReviewGate(program);
 
   program
     .name("spur")
@@ -4662,6 +4665,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<message...>", "Message to send")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
     .option(
+      "--request-interface-approval <manifest-file>",
+      "Request designated human approval of a semantic interface manifest",
+    )
+    .option(
       "--button <label[=value]>",
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
@@ -4670,7 +4677,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(
       async (
         messageParts: string[],
-        options: { session?: string; json?: boolean; button?: SourceReplyButton[] },
+        options: {
+          session?: string;
+          json?: boolean;
+          button?: SourceReplyButton[];
+          requestInterfaceApproval?: string;
+        },
         command: Command,
       ) => {
         const configPath = prepareInstanceConfig(
@@ -4684,6 +4696,9 @@ export function createProgram(cliEntrypoint: string): Command {
         const payload: SourceReplyRequest = {
           message: messageParts.join(" "),
           ...(buttons.length > 0 ? { buttons } : {}),
+          ...(options.requestInterfaceApproval
+            ? { requestInterfaceApproval: await readJson(options.requestInterfaceApproval) }
+            : {}),
         };
         await outputResult({
           json: Boolean(options.json),

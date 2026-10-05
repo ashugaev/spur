@@ -3,6 +3,9 @@ import { Bot, type Context } from "grammy";
 import { logSpurEvent } from "../event-log.js";
 import {
   deleteTelegramReplyTarget,
+  readInterfaceConsent,
+  writeInterfaceConsent,
+  readSession,
   readTelegramBindings,
   readTelegramLastUpdateId,
   findTelegramChoice,
@@ -33,6 +36,12 @@ import type {
 } from "./types.js";
 import { formatTelegramSessionLabel } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
+import {
+  consentPolicy,
+  decideConsent,
+  reconcileInterfaceConsent,
+} from "../review-interface-consent.js";
+import { readCurrentBranch } from "../workspace.js";
 
 const WATCH_CALLBACK_PREFIX = "spur_watch:";
 const SPAWN_CALLBACK_PREFIX = "spur_spawn:";
@@ -1061,7 +1070,74 @@ async function handleAgentChoiceCallback(
     );
     return;
   }
-  const choice = takeTelegramChoice(
+  let choice: ReturnType<typeof takeTelegramChoice> = null;
+  if (pending.interfaceConsent) {
+    try {
+      const policy = await consentPolicy(deps.config.allowedUsers);
+      const record = readInterfaceConsent(deps.dataDir, pending.sessionId);
+      if (
+        !record ||
+        policy.approverUserId !== record.approverUserId ||
+        !policy.repositories.includes(record.repository)
+      )
+        throw new Error("Interface approval policy changed");
+      const actualSession = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !actualSession ||
+        actualSession.project !== record.projectId ||
+        actualSession.branch !== record.branch ||
+        (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
+      )
+        throw new Error("Interface approval task changed");
+      const active = findTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      const current = readInterfaceConsent(deps.dataDir, pending.sessionId);
+      const currentSession = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !active?.interfaceConsent ||
+        !current ||
+        current.generation !== record.generation ||
+        current.challenge !== record.challenge ||
+        !currentSession ||
+        currentSession.project !== record.projectId ||
+        currentSession.branch !== record.branch
+      )
+        throw new Error("Interface approval superseded");
+      const decision = decideConsent(current, {
+        session: pending.sessionId,
+        sourceId: deps.sourceId,
+        projectId: deps.projectId,
+        chatId: message.chat.id,
+        actor: from.id,
+        challenge: active.interfaceConsent.challenge,
+        decision: active.interfaceConsent.decision,
+      });
+      choice = takeTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      if (!choice) throw new Error("Interface approval choice retired");
+      writeInterfaceConsent(deps.dataDir, decision);
+      // Failed external publication keeps the durable outbox for the next lifecycle call.
+      await reconcileInterfaceConsent(deps.dataDir, pending.sessionId).catch(() => {
+        deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
+      });
+    } catch {
+      await ctx.answerCallbackQuery(
+        "Interface approval is inactive or requires the designated approver.",
+      );
+      return;
+    }
+  }
+  choice ??= takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
     deps.sourceId,

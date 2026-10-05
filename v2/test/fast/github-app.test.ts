@@ -3,9 +3,36 @@ import { mkdtemp, writeFile, rm, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { GitHubApp } from "../../src/github-app.js";
+import { GitHubApp, effectiveNativeReview } from "../../src/github-app.js";
 
 const dirs: string[] = [];
+test("shared native authority orders submission time for login and numeric actor", () => {
+  const old = {
+    id: 99,
+    user: { id: 11, login: "code[bot]" },
+    state: "APPROVED",
+    commit_id: "a".repeat(40),
+    body: "old",
+    submitted_at: "2026-10-05T12:00:00Z",
+  };
+  const blocker = {
+    ...old,
+    id: 1,
+    state: "CHANGES_REQUESTED",
+    submitted_at: "2026-10-05T12:01:00Z",
+  };
+  expect(effectiveNativeReview([old, blocker], { id: 11 })?.id).toBe(1);
+  expect(effectiveNativeReview([old, blocker], { login: "code[bot]" })?.id).toBe(1);
+  expect(() =>
+    effectiveNativeReview([old, { ...blocker, submitted_at: undefined }], { id: 11 }),
+  ).toThrow("invalid-history");
+  expect(() =>
+    effectiveNativeReview([old, { ...blocker, submitted_at: old.submitted_at }], { id: 11 }),
+  ).toThrow("ambiguous-history");
+  expect(
+    effectiveNativeReview([old, { id: 2, user: old.user, state: "PENDING" }], { id: 11 })?.id,
+  ).toBe(99);
+});
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
