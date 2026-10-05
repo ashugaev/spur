@@ -11,12 +11,12 @@ INTERFACE
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
   Present reviewable scope through authorized Telegram source reply when configured; otherwise use available user channel or block dependent work.
-  Treat typed/button reply as human prompt approval, never authenticated CI consent.
+  Treat ordinary text/buttons as prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve visible UI design gate; changed surface revision invalidates affected approval.
   Require reviewer to compare final diff with approved scope; missing/stale approval blocks, never claim retroactive consent.
-  Request authenticated semantic consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
-  Require designated Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
+  Request required interface consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
+  Require designated purpose-bound Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
 
 GITHUB PUBLICATION
 
@@ -28,12 +28,10 @@ GITHUB PUBLICATION
 
 MERGE AUTHORITY
 
-  Keep human merge default; leave auto-merge OFF while trusted enforcement remains unimplemented.
+  Keep human merge default; leave auto-merge OFF without live activation proof.
   Require two distinct designated eligible non-author native APPROVED identities for target automated flow: code and browser/manual.
   Reject generic vote count, same-login lanes and local verdicts as target gate substitutes.
-  Permit native auto-merge only after separate user authorization, admin configuration and sandbox activation proof of trusted exact-identity/consent/strict-CI enforcement.
+  Permit native auto-merge only after separate user authorization, admin configuration and sandbox activation proof of default-branch Approval Gate with designated consent/exact-identity/strict-CI enforcement.
   Block strict success for pending/failing/missing/canceled/skipped/neutral required execution; no bypass.
   Reject footer, PR-owned receipt, prompt affirmation or replayed consent as protected approval proof.
   Require producer provenance, revision/lifecycle invalidation and privileged runner isolation before activation.
-  Require active default-branch Approval Gate, designated consent policy and live activation proof; source implementation alone grants no merge authority.
-  Hold owner continuation when public state transport fails; unobserved local failure cannot invalidate historical remote approval.
