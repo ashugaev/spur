@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   evaluateSnapshot,
+  readGateSnapshot,
   GateGitHub,
   type GateSnapshot,
   type GatePolicy,
@@ -9,7 +10,8 @@ import { produceGates } from "../../src/review-gate-producer.js";
 import { stateBody, readStateBody, consentMarker, type LaneState } from "../../src/review-state.js";
 import { manifestDigest, baselineDigest } from "../../src/review-interface.js";
 const H = "a".repeat(40),
-  B = "b".repeat(40);
+  B = "b".repeat(40),
+  M = "d".repeat(40);
 const policy: GatePolicy = {
   repository: "owner/repo",
   baseBranch: "main",
@@ -75,6 +77,9 @@ function fixture(): GateSnapshot {
         event: "pull_request",
         pull_requests: [{ number: 5, head: { sha: H }, base: { sha: B } }],
         head_sha: H,
+        head_branch: "feature/example",
+        display_title: `Spur CI v1 REF=refs/pull/5/merge M=${M}`,
+        run_started_at: "2026-10-05T12:00:00Z",
         status: "completed",
         conclusion: "success",
         run_attempt: 1,
@@ -87,9 +92,215 @@ function fixture(): GateSnapshot {
       status: "completed",
       conclusion: "success",
     })),
-    mergeParents: [],
+    ciAnchors: [{ runId: 1, merge: M, parents: [B, H] }],
   };
 }
+const strictPolicy = {
+  ...policy,
+  ciJobs: ["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"],
+};
+async function readCiFixture(
+  snapshot: GateSnapshot,
+  options: {
+    commit?: Record<string, unknown> | null;
+    attemptMismatch?: boolean;
+    runMismatch?: boolean;
+    jobFault?: string;
+    unavailableCommitStatus?: 403 | 404;
+  } = {},
+) {
+  const paths: string[] = [];
+  const api = new GateGitHub("fixture", async (url) => {
+    const path = new URL(String(url)).pathname;
+    paths.push(path);
+    if (path === "/graphql")
+      return Response.json({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+            },
+          },
+        },
+      });
+    if (path.endsWith("/pulls/5")) return Response.json(snapshot.pr);
+    if (path.endsWith("/reviews")) return Response.json(snapshot.reviews);
+    if (path.endsWith("/comments")) return Response.json(snapshot.comments);
+    if (path.endsWith("/files")) return Response.json(snapshot.files);
+    if (path.endsWith("/runs")) return Response.json({ workflow_runs: snapshot.runs });
+    if (path.endsWith(`/commits/${M}`)) {
+      if (options.commit === null) return new Response("missing", { status: 404 });
+      return Response.json(options.commit ?? { sha: M, parents: [{ sha: B }, { sha: H }] });
+    }
+    if (path.includes("/commits/"))
+      return new Response("unavailable", { status: options.unavailableCommitStatus ?? 404 });
+    const match = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?(\/jobs)?$/.exec(path);
+    if (match) {
+      const run = snapshot.runs.find((value) => value.id === Number(match[1]));
+      if (!run) throw new Error("unknown run");
+      if (match[3]) {
+        const jobs = strictPolicy.ciJobs.map((name) => ({
+          name,
+          run_id: run.id,
+          run_attempt: Number(match[2]),
+          status: options.jobFault === "pending" ? "in_progress" : "completed",
+          conclusion: options.jobFault ?? "success",
+        }));
+        if (options.jobFault === "missing") jobs.pop();
+        return Response.json({ jobs });
+      }
+      return Response.json(
+        match[2] && options.attemptMismatch
+          ? { ...run, run_attempt: Number(match[2]) + 1 }
+          : options.runMismatch
+            ? { ...run, head_sha: "f".repeat(40) }
+            : run,
+      );
+    }
+    throw new Error("unexpected CI fixture API");
+  });
+  const fresh = await readGateSnapshot(api, strictPolicy, 5);
+  return { result: evaluateSnapshot(strictPolicy, 5, fresh), paths };
+}
+test.each([
+  "fork",
+  "dependabot",
+  "merge-head",
+  "old-B",
+  "no-marker",
+  "wrong-pr",
+  "wrong-head",
+  "wrong-branch",
+  "wrong-event",
+  "wrong-workflow",
+  "wrong-repository",
+  "old-association",
+  "reversed-parents",
+  "third-parent",
+  "wrong-commit",
+  "deleted-commit",
+  "missing-time",
+  "invalid-time",
+  "wrong-attempt",
+  "list-run-mismatch",
+  "pending",
+  "failure",
+  "cancelled",
+  "skipped",
+  "neutral",
+  "missing",
+])(
+  "historical API provenance %s never substitutes current merge/base or old success",
+  async (fault) => {
+    const snapshot = fixture();
+    snapshot.pr.merge_commit_sha = "e".repeat(40); // A fresh current merge cannot stand in for tested M.
+    const run = snapshot.runs[0];
+    if (!run) throw new Error("missing fixture run");
+    run.pull_requests = [];
+    const options: Parameters<typeof readCiFixture>[1] = {};
+    if (fault === "dependabot") snapshot.pr.user = { id: 9, login: "dependabot[bot]" };
+    if (fault === "merge-head") run.head_sha = M;
+    if (fault === "old-B")
+      options.commit = { sha: M, parents: [{ sha: "f".repeat(40) }, { sha: H }] };
+    if (fault === "no-marker") delete run.display_title;
+    if (fault === "wrong-pr") run.display_title = `Spur CI v1 REF=refs/pull/6/merge M=${M}`;
+    if (fault === "wrong-head") run.head_sha = "f".repeat(40);
+    if (fault === "wrong-branch") run.head_branch = "feature/other";
+    if (fault === "wrong-event") run.event = "push";
+    if (fault === "wrong-workflow") run.workflow_id = 101;
+    if (fault === "wrong-repository") run.repository = { full_name: "other/repo" };
+    if (fault === "old-association")
+      run.pull_requests = [{ number: 5, head: { sha: H }, base: { sha: "f".repeat(40) } }];
+    if (fault === "reversed-parents")
+      options.commit = { sha: M, parents: [{ sha: H }, { sha: B }] };
+    if (fault === "third-parent")
+      options.commit = { sha: M, parents: [{ sha: B }, { sha: H }, { sha: B }] };
+    if (fault === "wrong-commit")
+      options.commit = { sha: "f".repeat(40), parents: [{ sha: B }, { sha: H }] };
+    if (fault === "deleted-commit") options.commit = null;
+    if (fault === "missing-time") delete run.run_started_at;
+    if (fault === "invalid-time") run.run_started_at = "yesterday";
+    if (fault === "wrong-attempt") options.attemptMismatch = true;
+    if (fault === "list-run-mismatch") options.runMismatch = true;
+    if (["pending", "failure", "cancelled", "skipped", "neutral", "missing"].includes(fault))
+      options.jobFault = fault;
+    if (["missing-time", "invalid-time", "wrong-attempt", "list-run-mismatch"].includes(fault)) {
+      await expect(readCiFixture(snapshot, options)).rejects.toThrow();
+      return;
+    }
+    const { result, paths } = await readCiFixture(snapshot, options);
+    expect(result.status).toBe(
+      ["fork", "dependabot", "merge-head"].includes(fault) ? "APPROVED" : "BLOCKED",
+    );
+    expect(paths).not.toContain(`/repos/owner/repo/commits/${snapshot.pr.merge_commit_sha}`);
+    if (["fork", "dependabot", "merge-head"].includes(fault)) {
+      expect(paths).toContain("/repos/owner/repo/actions/runs/1");
+      expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1");
+      expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1/jobs");
+    }
+  },
+);
+test.each([
+  "queued-rerun",
+  "running-rerun",
+  "old-late-completion",
+  "completed-rerun",
+  "failed-rerun",
+  "skipped-rerun",
+  "missing-marker-rerun",
+  "markerless-merge-rerun",
+  "markerless-missing-merge-rerun",
+  "markerless-denied-merge-rerun",
+  "tied-start",
+])(
+  "current-attempt API ordering %s blocks active/ambiguous/newer failed CI without ID or completion fallback",
+  async (scenario) => {
+    const snapshot = fixture();
+    const earlier: Record<string, unknown> = {
+      ...snapshot.runs[0],
+      pull_requests: [],
+      updated_at: "2026-10-05T16:00:00Z",
+    };
+    const later: Record<string, unknown> = {
+      ...earlier,
+      id: 2,
+      run_started_at: "2026-10-05T13:00:00Z",
+      updated_at: "2026-10-05T13:30:00Z",
+    };
+    snapshot.runs = [earlier, later];
+    if (scenario === "old-late-completion") later.status = "in_progress";
+    else {
+      earlier.run_attempt = 2;
+      earlier.run_started_at =
+        scenario === "tied-start" ? later.run_started_at : "2026-10-05T14:00:00Z";
+      if (scenario === "queued-rerun") earlier.status = "queued";
+      if (scenario === "running-rerun") earlier.status = "in_progress";
+      if (scenario === "failed-rerun") earlier.conclusion = "failure";
+      if (scenario === "skipped-rerun") earlier.conclusion = "skipped";
+      if (scenario === "missing-marker-rerun") delete earlier.display_title;
+      if (scenario.startsWith("markerless-")) {
+        delete earlier.display_title;
+        earlier.head_sha = scenario === "markerless-merge-rerun" ? M : "e".repeat(40);
+      }
+    }
+    if (scenario === "tied-start") {
+      await expect(readCiFixture(snapshot)).rejects.toThrow("ci-attempt-time-ambiguous");
+      return;
+    }
+    const { result, paths } = await readCiFixture(snapshot, {
+      ...(scenario === "markerless-denied-merge-rerun" ? { unavailableCommitStatus: 403 } : {}),
+    });
+    if (scenario.startsWith("markerless-"))
+      expect((await readCiFixture({ ...snapshot, runs: [later] })).result.status).toBe("APPROVED");
+    expect(result.status).toBe(scenario === "completed-rerun" ? "APPROVED" : "BLOCKED");
+    expect(paths).toContain("/repos/owner/repo/actions/runs/2/attempts/1");
+    expect(paths).toContain(
+      `/repos/owner/repo/actions/runs/1/attempts/${scenario === "old-late-completion" ? 1 : 2}`,
+    );
+    if (scenario === "completed-rerun")
+      expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/2/jobs");
+  },
+);
 test("two actual App approvals and complete N/A coverage permit fork without consent", () => {
   expect(evaluateSnapshot(policy, 5, fixture()).status).toBe("APPROVED");
 });
@@ -172,6 +383,10 @@ test.each(["clean", "moved", "read-denied"])(
       if (path.endsWith("/comments")) return Response.json(snapshot.comments);
       if (path.endsWith("/files")) return Response.json(snapshot.files);
       if (path.endsWith("/runs")) return Response.json({ workflow_runs: snapshot.runs });
+      if (path.endsWith("/runs/1") || path.endsWith("/runs/1/attempts/1"))
+        return Response.json(snapshot.runs[0]);
+      if (path.endsWith(`/commits/${M}`))
+        return Response.json({ sha: M, parents: [{ sha: B }, { sha: H }] });
       if (path.endsWith("/jobs")) return Response.json({ jobs: snapshot.jobs });
       throw new Error("unexpected API path");
     });

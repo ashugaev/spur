@@ -8,8 +8,27 @@ test.each(["denied", "malformed", "merge-not-found"])(
   "candidate %s cannot abandon later head invalidation",
   async (fault) => {
     const api = new GateGitHub("fixture");
+    const run = {
+      id: 10,
+      workflow_id: 1,
+      path: ".github/workflows/ci.yml",
+      event: "pull_request",
+      repository: { full_name: "owner/repo" },
+      head_sha: "a".repeat(40),
+      head_branch: "feature/example",
+      display_title: `Spur CI v1 REF=refs/pull/1/merge M=${"c".repeat(40)}`,
+      run_attempt: 1,
+      run_started_at: "2026-10-05T12:00:00Z",
+      status: "completed",
+      conclusion: "success",
+      pull_requests: [],
+    };
     vi.spyOn(api, "pages").mockImplementation(async (path) =>
-      path.endsWith("/pulls?state=open") ? [{ number: 1 }, { number: 2 }] : [],
+      path.endsWith("/pulls?state=open")
+        ? [{ number: 1 }, { number: 2 }]
+        : path.includes("/workflows/")
+          ? [run]
+          : [],
     );
     const writes: { path: string; payload: unknown }[] = [];
     vi.spyOn(api, "request").mockImplementation(async (path, method, payload) => {
@@ -43,18 +62,19 @@ test.each(["denied", "malformed", "merge-not-found"])(
           ...(path.endsWith("/pulls/1") ? { merge_commit_sha: "c".repeat(40) } : {}),
         };
       if (path.includes("/commits/")) throw new Error("404");
+      if (path.includes("/actions/runs/10")) return run;
       throw new Error("unexpected API");
     });
-    await expect(
-      produceGates(api, {
-        repository: "owner/repo",
-        baseBranch: "main",
-        codeActor: 11,
-        browserActor: 12,
-        ciWorkflowId: 1,
-        ciJobs: ["Quality"],
-      }),
-    ).rejects.toThrow("gate-reconciliation-incomplete");
+    const reconciliation = produceGates(api, {
+      repository: "owner/repo",
+      baseBranch: "main",
+      codeActor: 11,
+      browserActor: 12,
+      ciWorkflowId: 1,
+      ciJobs: ["Quality"],
+    });
+    if (fault === "merge-not-found") await reconciliation;
+    else await expect(reconciliation).rejects.toThrow("gate-reconciliation-incomplete");
     expect(
       writes.some(({ payload }) =>
         (payload as { external_id?: string }).external_id?.startsWith("2:"),
@@ -138,4 +158,20 @@ test("wake has no checkout/secrets; writer filters self and privileged PR execut
   expect(writer.on.workflow_run.workflows).toEqual(["CI", "Spur Review Wake"]);
   expect(writer.jobs.approvals.steps[1]?.with?.["persist-credentials"]).toBe(false);
   expect(writer.jobs.approvals.steps[1]?.with?.ref).not.toContain("pull_request.head");
+});
+test("CI provenance uses built-in merge ref/SHA and all four default event checkouts", async () => {
+  const ci = parse(
+    await readFile(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  ) as {
+    "run-name": string;
+    jobs: Record<string, { steps: { uses?: string; with?: { ref?: string } }[] }>;
+  };
+  expect(ci["run-name"]).toMatch(
+    /^Spur CI v1 REF=\$\{\{ github.ref \}\} M=\$\{\{ github.sha \}\}$/,
+  );
+  const checkouts = Object.values(ci.jobs).flatMap((job) =>
+    job.steps.filter((step) => step.uses?.startsWith("actions/checkout@")),
+  );
+  expect(checkouts).toHaveLength(4);
+  expect(checkouts.every((step) => step.with?.ref === undefined)).toBe(true);
 });

@@ -103,7 +103,86 @@ export interface GateSnapshot {
   unresolved: number;
   runs: Record<string, unknown>[];
   jobs: Record<string, unknown>[];
-  mergeParents: string[];
+  ciAnchors: { runId: number; merge: string; parents: string[] }[];
+}
+function ciRef(run: Record<string, unknown>) {
+  if (typeof run.display_title !== "string") return null;
+  const match = /^Spur CI v1 REF=refs\/pull\/([1-9]\d*)\/merge M=([a-f0-9]{40})$/.exec(
+    run.display_title,
+  );
+  return match ? { number: integer(Number(match[1])), merge: string(match[2]) } : null;
+}
+function ciIdentity(policy: GatePolicy, run: Record<string, unknown>) {
+  return (
+    run.workflow_id === policy.ciWorkflowId &&
+    workflowPath(run.path) === ".github/workflows/ci.yml" &&
+    object(run.repository).full_name === policy.repository &&
+    run.event === "pull_request"
+  );
+}
+function ciCandidate(number: number, snapshot: GateSnapshot, run: Record<string, unknown>) {
+  const head = object(snapshot.pr.head);
+  if (run.head_sha === head.sha || ciRef(run)?.number === number) return true;
+  const anchor = snapshot.ciAnchors.find((value) => value.runId === run.id);
+  if (anchor?.parents.length === 2) return anchor.parents[1] === head.sha;
+  return (
+    run.head_branch === head.ref &&
+    (string(run.path).endsWith(`@refs/pull/${number}/merge`) ||
+      (Array.isArray(run.pull_requests) &&
+        run.pull_requests.some((value) => object(value).number === number)))
+  );
+}
+function selectCiRun(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
+  const candidates = snapshot.runs.filter(
+    (run) => ciIdentity(policy, run) && ciCandidate(number, snapshot, run),
+  );
+  const active = candidates.find((run) => run.status !== "completed");
+  if (active) return active;
+  const starts = candidates
+    .map((run) => {
+      if (
+        typeof run.run_started_at !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(run.run_started_at) ||
+        !Number.isFinite(Date.parse(run.run_started_at))
+      )
+        throw new ReviewAppError("ci-attempt-time-unavailable");
+      integer(run.run_attempt);
+      return { run, time: Date.parse(run.run_started_at) };
+    })
+    .sort((a, b) => b.time - a.time);
+  if (new Set(starts.map(({ time }) => time)).size !== starts.length)
+    throw new ReviewAppError("ci-attempt-time-ambiguous");
+  return starts[0]?.run;
+}
+function ciProvenance(
+  policy: GatePolicy,
+  number: number,
+  snapshot: GateSnapshot,
+  run: Record<string, unknown>,
+) {
+  const ref = ciRef(run),
+    H = object(snapshot.pr.head).sha,
+    B = object(snapshot.pr.base).sha;
+  const anchor = snapshot.ciAnchors.find((value) => value.runId === run.id);
+  return (
+    ciIdentity(policy, run) &&
+    ref?.number === number &&
+    anchor?.merge === ref.merge &&
+    anchor.parents.length === 2 &&
+    anchor.parents[0] === B &&
+    anchor.parents[1] === H &&
+    (run.head_sha === H || run.head_sha === ref.merge) &&
+    run.head_branch === object(snapshot.pr.head).ref &&
+    Array.isArray(run.pull_requests) &&
+    run.pull_requests.every((value) => {
+      const associated = object(value);
+      return (
+        associated.number === number &&
+        object(associated.head).sha === H &&
+        object(associated.base).sha === B
+      );
+    })
+  );
 }
 export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
   const blocked = (reason: string) => ({
@@ -254,30 +333,13 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       )
         return blocked("consent-not-approved");
     }
-    const eligible = snapshot.runs
-      .filter(
-        (run) =>
-          run.workflow_id === policy.ciWorkflowId &&
-          workflowPath(run.path) === ".github/workflows/ci.yml" &&
-          ((run.head_sha === H &&
-            Array.isArray(run.pull_requests) &&
-            run.pull_requests.some((value) => {
-              const associated = object(value);
-              return (
-                associated.number === number &&
-                object(associated.head).sha === H &&
-                object(associated.base).sha === B
-              );
-            })) ||
-            (run.head_sha === pr.merge_commit_sha &&
-              snapshot.mergeParents.includes(H) &&
-              snapshot.mergeParents.includes(B))) &&
-          object(run.repository).full_name === policy.repository &&
-          ["pull_request", "push", "workflow_dispatch"].includes(String(run.event)),
-      )
-      .sort((a, b) => integer(b.id) - integer(a.id));
-    const run = eligible[0];
-    if (!run || run.status !== "completed" || run.conclusion !== "success")
+    const run = selectCiRun(policy, number, snapshot);
+    if (
+      !run ||
+      run.status !== "completed" ||
+      run.conclusion !== "success" ||
+      !ciProvenance(policy, number, snapshot, run)
+    )
       return blocked("ci-not-success");
     if (
       snapshot.jobs.length !== policy.ciJobs.length ||
@@ -312,7 +374,7 @@ export async function readGateSnapshot(
 ): Promise<GateSnapshot> {
   const path = `/repos/${policy.repository}`;
   const pr = object(await api.request(`${path}/pulls/${number}`));
-  const [reviews, comments, files, runs] = await Promise.all([
+  const [reviews, comments, files, listedRuns] = await Promise.all([
     api.pages(`${path}/pulls/${number}/reviews`),
     api.pages(`${path}/issues/${number}/comments`),
     api.pages(`${path}/pulls/${number}/files`),
@@ -346,30 +408,77 @@ export async function readGateSnapshot(
       throw new ReviewAppError("gate-response");
     cursor = string(info.endCursor);
   }
-  const mergeParents: string[] = [];
-  if (typeof pr.merge_commit_sha === "string") {
-    const commit = object(await api.request(`${path}/commits/${pr.merge_commit_sha}`));
-    if (!Array.isArray(commit.parents)) throw new ReviewAppError("gate-response");
-    mergeParents.push(...commit.parents.map((value) => string(object(value).sha)));
-  }
-  const H = object(pr.head).sha,
-    B = object(pr.base).sha;
-  const run = runs
-    .filter(
-      (row) =>
-        row.head_sha === H ||
-        (row.head_sha === pr.merge_commit_sha &&
-          mergeParents.includes(String(H)) &&
-          mergeParents.includes(String(B))),
+  const runs: GateSnapshot["runs"] = [],
+    ciAnchors: GateSnapshot["ciAnchors"] = [];
+  for (const listed of listedRuns) {
+    if (!ciIdentity(policy, listed)) continue;
+    const ref = ciRef(listed);
+    if (
+      listed.head_sha !== object(pr.head).sha &&
+      ref?.number !== number &&
+      !(
+        listed.head_branch === object(pr.head).ref &&
+        (ref ||
+          string(listed.path).endsWith(`@refs/pull/${number}/merge`) ||
+          (Array.isArray(listed.pull_requests) &&
+            listed.pull_requests.some((value) => object(value).number === number)))
+      )
     )
-    .sort((a, b) => integer(b.id) - integer(a.id))[0];
+      continue;
+    const run = object(await api.request(`${path}/actions/runs/${integer(listed.id)}`));
+    const attempt = object(
+      await api.request(
+        `${path}/actions/runs/${integer(listed.id)}/attempts/${integer(run.run_attempt)}`,
+      ),
+    );
+    if (
+      !ciIdentity(policy, run) ||
+      !ciIdentity(policy, attempt) ||
+      run.id !== listed.id ||
+      ["path", "head_sha", "head_branch", "display_title"].some(
+        (key) => run[key] !== listed[key],
+      ) ||
+      [
+        "id",
+        "path",
+        "run_attempt",
+        "head_sha",
+        "head_branch",
+        "display_title",
+        "run_started_at",
+        "status",
+        "conclusion",
+      ].some((key) => run[key] !== attempt[key]) ||
+      digest(run.pull_requests) !== digest(attempt.pull_requests)
+    )
+      throw new ReviewAppError("ci-attempt-mismatch");
+    runs.push(attempt);
+    const actualRef = ciRef(attempt);
+    const historicalMerge =
+      actualRef?.merge ??
+      (attempt.head_sha === object(pr.head).sha ? null : string(attempt.head_sha));
+    if (historicalMerge) {
+      if (!/^[a-f0-9]{40}$/.test(historicalMerge)) throw new ReviewAppError("invalid-ci-head");
+      let parents: string[] = [];
+      try {
+        const commit = object(await api.request(`${path}/commits/${historicalMerge}`));
+        if (commit.sha === historicalMerge && Array.isArray(commit.parents))
+          parents = commit.parents.map((value) => string(object(value).sha));
+      } catch {
+        /* Missing historical lineage remains ineligible, never inferred from current merge state. */
+      }
+      ciAnchors.push({ runId: integer(attempt.id), merge: historicalMerge, parents });
+    }
+  }
+  const snapshot = { pr, reviews, comments, files, unresolved, runs, jobs: [], ciAnchors };
+  const run = selectCiRun(policy, number, snapshot);
   const jobs = run
     ? await api.pages(
         `${path}/actions/runs/${integer(run.id)}/attempts/${integer(run.run_attempt)}/jobs`,
         "jobs",
       )
     : [];
-  return { pr, reviews, comments, files, unresolved, runs, jobs, mergeParents };
+  return { ...snapshot, jobs };
 }
 export function registerReviewGate(program: Command): void {
   program
