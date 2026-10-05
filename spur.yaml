@@ -73,6 +73,11 @@ projects:
         schedule: "0 3 */3 * *"
         runOnStart: false
     triggers:
+      gh-approved:
+        source: gh
+        event: github:approved
+        send:
+          prompt: "Run $manager and $github. Resume user-authorized review workflow with initial caller-supplied trusted external contract path/digest and receipt root; missing trust/query authority blocks. Apply owner gate to current receipts, paginated reviews, required checks and blocking threads. Correlated affirmation replies resume existing invocation. Continue authorized work after gate; human merges."
       gh-changes-requested:
         source: gh
         event: github:changes_requested

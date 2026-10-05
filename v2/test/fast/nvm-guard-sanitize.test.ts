@@ -70,8 +70,8 @@ function writeFakeNode(nodeDir: string): void {
 }
 
 // Every sanitize key contaminated at once — the exact env shape a pane
-// inherits once tmux's `-e` args (which spread the daemon's whole
-// `process.env`, per `buildEnvArgs`) merge with `buildSessionEnv`'s own pin.
+// inherits once the pane env file (which spreads the daemon's whole
+// `process.env`, per `buildPaneEnv`) merges with `buildSessionEnv`'s own pin.
 function contaminatedEnv(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   for (const key of NPM_PIN_SANITIZE_ENV_KEYS) {

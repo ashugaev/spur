@@ -39,7 +39,7 @@ description = "Extract reusable patterns from external reference repos. Use when
 config_file = "agents/reference-researcher.toml"
 
 [agents.reviewer]
-description = "Adversarial review gate. Try to falsify that the implementation satisfies each acceptance criterion. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer."
+description = "Adversarial local implementation or live PR review gate. Returns local verdict and publication APPROVED, CHANGES_REQUESTED, BLOCKED, or NOT REQUIRED. Use after developer."
 config_file = "agents/reviewer.toml"
 
 [agents.spec-critic]

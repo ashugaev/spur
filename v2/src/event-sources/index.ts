@@ -12,6 +12,7 @@ import { jiraSourceModule } from "./jira.js";
 import { sentrySourceModule } from "./sentry.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
+import { webhookSourceModule } from "./webhook.js";
 import type {
   SourceGroupController,
   SourceHandle,
@@ -61,6 +62,7 @@ const SOURCE_MODULES = {
   sentry: sentrySourceModule,
   service: serviceSourceModule,
   telegram: telegramSourceModule,
+  webhook: webhookSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
 // A jira source with no `query` is consumed by the backlog subsystem only,

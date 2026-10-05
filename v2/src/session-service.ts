@@ -2242,8 +2242,8 @@ function buildSessionEnv(args: {
     // `prefix=`/`globalconfig=` line in `~/.npmrc`, and a session pane that
     // sources `~/.nvm/nvm.sh` (e.g. a sidecar) would hit that guard on every
     // launch. A `*_GLOBALCONFIG` env var is invisible to both of nvm's
-    // guards. `buildEnvArgs` (runtime-tmux.ts) merges the daemon's full
-    // `process.env` before this pin, and npm lowercases every one of its env
+    // guards. The pane env file (`buildPaneEnv`, runtime-tmux.ts) merges the
+    // daemon's full `process.env` before this pin, and npm lowercases every one of its env
     // keys when resolving a config option — so an inherited lowercase
     // globalconfig key collides with this uppercase one and whichever one
     // iterates last wins (measured). Setting both casings to the identical
