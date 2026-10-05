@@ -83,6 +83,8 @@ TASK MEMORY
 
 ALWAYS-ON RULES
 
+  Follow `.claude/skills/github/references/agent-protocol.md` for product/interface approval, every agent GitHub comment/review footer, and conditional merge authority.
+
   Keep instructions lean. Only include constraints that materially change implementation.
   Think twice, write once. Prefer the shortest form that preserves correctness.
   Never modify code with scripts (`sed`, `awk`, codemods, `find -exec`, mass replace). Edit files one at a time, by hand, after reading the file's context.
@@ -105,8 +107,8 @@ ALWAYS-ON RULES
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
-  Default close-out: push to the existing PR branch, or create a new PR and leave it open for a human to merge. Never run `gh pr merge --auto`; auto-merge is disabled repo-wide and only an admin can enable it. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
-  Query CI status or review comments only on explicit user request; Spur notifications alone do not authorize queries.
+  Default close-out: push existing PR branch or create open PR for human merge. Auto-merge stays OFF unless separate user authorization, admin configuration and activation proof satisfy agent-protocol.md. Never merge with failing CI; pre-existing failures remain your responsibility.
+  Query CI status or review comments only on explicit user request or bounded verification in a user-authorized review workflow; approval/completion wakes resume that authority, never grant it. Other Spur notifications do not authorize queries.
   Use `Spur` in code, config, docs, and CLI surfaces.
   Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.
