@@ -30,25 +30,14 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## opencode-gc
 
-`spur opencode-gc [--execute]` reclaims opencode's own store — root resolved from `opencode db path`, never hardcoded. Dry run unless `--execute`, daemon-free. Three units: store rows of an opencode session, `snapshot/<projectId>/<worktreeHash>` leaves, `log/opencode.log`.
+`spur opencode-gc [--execute --older-than <days> --statuses <completed,killed,stopped> --limit <n> --no-sizes --json]` reclaims opencode's own store (root from `opencode db path`). Dry run unless `--execute`, daemon-free. Flags override `opencodeGc.*` ([configuration.md](configuration.md#field-reference)); `--no-sizes` skips `du`. Exits `1` on any error.
 
-Selects a store session only when a Spur record's `agentSessionId` equals its id and every such record is `completed`/`killed`. Directory co-location protects, never selects, and both sides are realpath-canonicalized. Skip reasons: `protected_live_record`, `directory_gone_protected`, `live_process_holds_session`, `directory_unresolvable`, `no_record_match`, `too_recent`, `over_limit`. Plan-wide refusals: `store_unresolved`, `enumeration_failed`, `enumeration_truncated`. Rows go through `opencode session delete` — `event` has no FK to `session`, so only the vendor path removes the event rows.
-
-A session whose worktree is already gone is still reclaimable — that is the population `gc` leaves behind. `realpath` failing with exactly `ENOENT` puts the directory in the `gone` state and protection falls back to comparing the raw directory against every record's raw `worktreePath`, plus one `readlink` hop so a live record holding the symlink spelling of a deleted target still protects. Any other errno, or an error carrying no errno, is `directory_unresolvable` and never selectable. A symlink chain that does not settle in one hop is also `directory_unresolvable`. The render counts these as `selected via gone-directory`; many at once sharing a path prefix means a vanished parent, not per-session cleanup.
-
-A session whose id appears in any running process's argv is `live_process_holds_session`. The match is on the `ses_` id, never the binary name. When the process tree cannot be read, the gone-directory fallback is disabled for the whole run and every gone session reverts to `directory_unresolvable`.
-
-Each record is re-read from disk immediately before its own delete, and the full directory rule is re-run with it; either disagreeing blocks that entry as `changed_during_run`. Covers a respawn landing mid-run — `completed` is respawnable and an opencode resume is `--session <agentSessionId>`, so a deleted session would come back empty — and a worktree recreated at the same path. The re-check narrows the race to one function call; it does not close it.
-
-Snapshot leaf selected when its git config records a `[core] worktree` that no longer exists; a leaf with an existing worktree or no `worktree` line is never selected. Log above [`opencodeGc.logMaxBytes`](configuration.md#field-reference) is copy-truncated: tail to `opencode.log.1` (overwritten), then `ftruncate` to 0. Truncate, never rename — every live opencode process holds the file `O_APPEND` and resumes at offset 0. Writes landing between the copy and the truncate are lost.
-
-`opencode session list` is scoped by its cwd's project and takes no directory flag, so the plan enumerates once per distinct candidate directory — the canonicalized `worktreePath` of every collected opencode record carrying an `agentSessionId` — and merges. The report names each directory listed and how many failed. Sessions outside those projects are never listed, so every total is a floor, and an empty plan is distinguishable from a blind one. One listing costs 2-4 s.
-
-Two byte numbers, never summed: freed files (`du -s --block-size=1` of snapshot leaves plus the log delta) and DB file bytes returned by `VACUUM` (a stat delta, `--execute` only). A dry run reports file bytes only and never estimates DB bytes — sizing the selected rows up front means opening the store, and even `sqlite3 "file:<db>?mode=ro"` rewrites the `-shm`. A dry run's log term is marked `[projected, not measured]`: with no archive written yet it cannot be a `du`, so it is up to one filesystem block off.
-
-One `VACUUM` at the end of an `--execute` run, CLI only (93 s measured on a 3.1 GB store). Skipped, with the reason printed, on `dry_run`, `no_sessions_deleted`, `db_path_unresolved`, `free_space_unknown`, `insufficient_free_space` (needs 2x the DB size free), or `live_opencode_record`.
-
-Flags: `--older-than <days>`, `--statuses <completed,killed,stopped>`, `--limit <n>` override `opencodeGc.olderThanDays`, `.statuses`, `.maxSessionsPerSweep`; `--no-sizes` skips `du` (no freed-byte reporting); `--json` prints raw JSON. Exits `1` on any error. Defaults: `opencodeGc.*` ([configuration.md](configuration.md#field-reference)).
+- Units: store rows (`opencode session delete`, then one CLI-only `VACUUM`), snapshot leaves whose `[core] worktree` no longer exists, `log/opencode.log` above `opencodeGc.logMaxBytes` (tail kept as `opencode.log.1`, then truncated).
+- Selects a store session when a Spur record's `agentSessionId` equals its id and every such record is `completed`/`killed`.
+- Skip reasons: `protected_live_record`, `directory_gone_protected`, `live_process_holds_session`, `directory_unresolvable`, `no_record_match`, `too_recent`, `over_limit`; entry blocked on recheck: `changed_during_run`.
+- Plan refusals: `store_unresolved`, `enumeration_failed`, `enumeration_truncated`.
+- `VACUUM` skipped with reason: `dry_run`, `no_sessions_deleted`, `db_path_unresolved`, `free_space_unknown`, `insufficient_free_space` (needs 2x DB size free), `live_opencode_record`.
+- Bytes: freed files and `VACUUM` DB delta, never summed; dry run reports files only. Mechanism: `v2/src/opencode-gc.ts`.
 
 ## cache
 
