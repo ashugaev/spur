@@ -4,7 +4,7 @@
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
 `review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
-`review-gate evaluate --repo <owner/name> --pr <number> --policy <file> --json`: Actions-token approval aggregation; `v2/src/review-gate.ts`.
+`review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 
 ## Session tools and environment
 

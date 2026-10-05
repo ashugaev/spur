@@ -6,7 +6,8 @@ Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, 
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
-`SPUR_REVIEW_APP_CONFIG`, private `consent.approverUserId`: designated allowed Telegram user; `v2/src/review-interface-consent.ts`.
+`SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
+Approval Gate policy JSON: `v2/src/review-gate.ts`.
 Approval writer variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/review-approval.yml`.
 
 ## Config registry
