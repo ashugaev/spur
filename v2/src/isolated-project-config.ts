@@ -8,9 +8,10 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { IsolatedTelegramCredentials } from "./isolated-telegram.js";
+import { resolveProjectEnvValue } from "./config.js";
 
 const ISOLATED_WORKTREE_SYMLINKS = [
   ".env",
@@ -86,6 +87,7 @@ export function isolatedTelegramProjectBoundary(
   project: string,
 ): { selected: boolean; configuredTokens: string[] } {
   const parsed = parseProjectConfig(readFileSync(inputPath, "utf8"));
+  if (!Object.hasOwn(parsed.projects, project)) return { selected: false, configuredTokens: [] };
   const configuredTokens = Object.values(parsed.projects).flatMap((candidate) => {
     const sources = candidate["sources"];
     if (typeof sources !== "object" || sources === null) return [];
@@ -99,10 +101,17 @@ export function isolatedTelegramProjectBoundary(
         typeof source.token !== "string"
       )
         return [];
-      return [source.token.trim()];
+      if (typeof candidate.path !== "string" || !candidate.path.trim())
+        throw new Error("Invalid isolated Telegram project path");
+      const resolved = resolveProjectEnvValue(
+        dirname(resolve(inputPath)),
+        candidate.path.trim(),
+        source.token.trim(),
+      );
+      return resolved === undefined ? [] : [resolved];
     });
   });
-  return { selected: Object.hasOwn(parsed.projects, project), configuredTokens };
+  return { selected: true, configuredTokens };
 }
 
 export function projectUsesCurrentRepository(

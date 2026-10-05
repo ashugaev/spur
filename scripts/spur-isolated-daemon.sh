@@ -14,6 +14,9 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 # guards in scripts/spur-sidecar-common.sh.
 ensure_node_ready
 
+TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
+: "${SPUR_PROJECT:?SPUR_PROJECT not set}"
+
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
@@ -23,6 +26,17 @@ CURRENT_WORKTREE="$REPO_ROOT"
 V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
+SHARED_CLEANUP_OWNED=0
+RUNTIME_FILE=""
+RUNTIME_TMP_FILE=""
+ISOLATED_WRAPPER=""
+cleanup() {
+  if [[ "$SHARED_CLEANUP_OWNED" -eq 1 ]]; then
+    rm -f "$RUNTIME_FILE" "$RUNTIME_TMP_FILE" "$ISOLATED_WRAPPER"
+  fi
+  rm -rf "$CONFIG_DIR"
+}
+trap cleanup EXIT
 
 # Reclaims stale spur-isolated-daemon.* dirs this same script leaks on every
 # successful start (the trailing `exec` at the bottom of this file replaces
@@ -147,7 +161,6 @@ prune_stale_config_dirs() {
 }
 prune_stale_config_dirs
 
-TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 RUNTIME_TMP_FILE="$RUNTIME_FILE.tmp.$$"
@@ -208,12 +221,9 @@ ensure_v2_build() {
   fi
 }
 
-cleanup() {
-  rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.* "$ISOLATED_WRAPPER"
-  rm -rf "$CONFIG_DIR"
-}
-trap cleanup EXIT
-rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
+# Shared cleanup owns paths only after validated inputs reach this write boundary.
+SHARED_CLEANUP_OWNED=1
+rm -f "$RUNTIME_FILE" "$RUNTIME_TMP_FILE"
 
 cat > "$CONFIG_DIR/config.yaml" <<YAML
 server:

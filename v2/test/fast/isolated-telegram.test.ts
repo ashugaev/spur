@@ -1,8 +1,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -124,6 +126,7 @@ describe("private isolated Telegram fixture", () => {
     );
     const rejected = spawnSync(process.execPath, [...args, "--telegram-env-stdin"], {
       input: JSON.stringify(fields),
+      env: { PATH: process.env["PATH"], HOME: path },
       encoding: "utf8",
     });
     expect(rejected.status).toBe(1);
@@ -133,11 +136,101 @@ describe("private isolated Telegram fixture", () => {
     loadIsolatedTelegram(path, JSON.stringify(fields));
     const fixture = isolatedTelegramFixturePath(path);
     const original = readFileSync(fixture, "utf8");
-    const retained = spawnSync(process.execPath, args, { encoding: "utf8" });
+    const retained = spawnSync(process.execPath, args, {
+      env: { PATH: process.env["PATH"], HOME: path },
+      encoding: "utf8",
+    });
     expect(retained.status).toBe(1);
     expect(retained.stderr).toBe(rejected.stderr);
     expect(readFileSync(fixture, "utf8")).toBe(original);
   });
+  it.each([
+    ["process", true],
+    ["project", true],
+    ["bare-unquoted", true],
+    ["tilde", true],
+    ["blank-process", true],
+    ["different-process", false],
+    ["missing", false],
+    ["unreadable", false],
+  ] as const)(
+    "resolves supplied Telegram token through canonical %s env before seed/attachment",
+    (mode, collision) => {
+      const path = repo();
+      const declared = join(path, "declared");
+      const checkout = join(path, "checkout");
+      mkdirSync(declared);
+      mkdirSync(checkout);
+      execFileSync("git", ["init", "-q"], { cwd: checkout });
+      const differentToken = "654321:fake-other-token";
+      const input = join(path, "spur.yaml");
+      const output = join(path, "project.yaml");
+      const lock = join(path, "lock-output");
+      writeFileSync(
+        input,
+        `projects:\n  test:\n    path: ${mode === "tilde" ? "~/declared" : "./declared"}\n    sources: {prod: {type: telegram, token: '${mode === "bare-unquoted" ? "TELEGRAM_BOT_TOKEN" : `\${TELEGRAM_BOT_TOKEN}`}'}}\n`,
+      );
+      if (mode === "unreadable") mkdirSync(join(declared, ".env"));
+      else if (mode !== "missing")
+        writeFileSync(
+          join(declared, ".env"),
+          mode === "bare-unquoted"
+            ? `TELEGRAM_BOT_TOKEN=${fields.TELEGRAM_TEST_BOT_TOKEN}\n`
+            : ` # ignored\n TELEGRAM_BOT_TOKEN = '${mode === "process" ? differentToken : fields.TELEGRAM_TEST_BOT_TOKEN}' \n`,
+        );
+      // The supplied declared project owns .env, not the repinned checkout.
+      writeFileSync(join(checkout, ".env"), `TELEGRAM_BOT_TOKEN=${differentToken}\n`);
+      const env = {
+        PATH: process.env["PATH"],
+        HOME: path,
+        TELEGRAM_BOT_TOKEN:
+          mode === "process"
+            ? ` ${fields.TELEGRAM_TEST_BOT_TOKEN} `
+            : mode === "different-process"
+              ? differentToken
+              : " ",
+      };
+      const args = [
+        resolve("bin/write-isolated-project-config.mjs"),
+        "--input",
+        input,
+        "--output",
+        output,
+        "--worktree",
+        checkout,
+        "--project",
+        "test",
+        "--telegram-lock-output",
+        lock,
+      ];
+      const seeded = spawnSync(process.execPath, [...args, "--telegram-env-stdin"], {
+        input: JSON.stringify(fields),
+        env,
+        encoding: "utf8",
+      });
+      expect(seeded.status).toBe(collision ? 1 : 0);
+      expect(seeded.stderr).not.toContain(fields.TELEGRAM_TEST_BOT_TOKEN);
+      expect(seeded.stderr).not.toContain(differentToken);
+      if (collision) {
+        expect(existsSync(join(isolatedTelegramFixturePath(checkout), ".."))).toBe(false);
+        expect(existsSync(output)).toBe(false);
+        expect(existsSync(lock)).toBe(false);
+        loadIsolatedTelegram(checkout, JSON.stringify(fields));
+      }
+      const original = readFileSync(isolatedTelegramFixturePath(checkout), "utf8");
+      const retained = spawnSync(process.execPath, args, { env, encoding: "utf8" });
+      expect(retained.status).toBe(collision ? 1 : 0);
+      expect(readFileSync(isolatedTelegramFixturePath(checkout), "utf8")).toBe(original);
+      if (collision) {
+        expect(retained.stderr).toBe("Telegram TEST token matches a configured Telegram source\n");
+        expect(existsSync(output)).toBe(false);
+        expect(existsSync(lock)).toBe(false);
+      } else
+        expect(Object.keys(loadProjectConfig(output).projects["test"]?.sources ?? {})).toEqual([
+          "tg-dev",
+        ]);
+    },
+  );
   it("keeps unknown selected projects source-free but rejects their seed before persistence", () => {
     const path = repo();
     const input = join(path, "spur.yaml");

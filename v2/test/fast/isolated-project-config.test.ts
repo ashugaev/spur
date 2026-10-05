@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildIsolatedProjectConfig,
+  isolatedTelegramProjectBoundary,
   projectUsesCurrentRepository,
 } from "../../src/isolated-project-config.js";
 
@@ -29,6 +30,22 @@ afterEach(() => {
 });
 
 describe("isolated project config", () => {
+  it("skips env resolution for unknown selection and rejects invalid declared Telegram paths", () => {
+    const repoDir = createRepo("spur-isolated-project-boundary-");
+    cleanupPaths.push(repoDir);
+    const input = join(repoDir, "spur.yaml");
+    writeFileSync(
+      input,
+      `projects:\n  test:\n    sources: {prod: {type: telegram, token: '\${ABSENT_TELEGRAM_TOKEN}'}}\n`,
+    );
+    expect(isolatedTelegramProjectBoundary(input, "unknown")).toEqual({
+      selected: false,
+      configuredTokens: [],
+    });
+    expect(() => isolatedTelegramProjectBoundary(input, "test")).toThrow(
+      "Invalid isolated Telegram project path",
+    );
+  });
   it("repins explicit tilde project, preserves defaults, disables nested automatic sidecars", () => {
     const repoDir = createRepo("spur-isolated-project-config-");
     cleanupPaths.push(repoDir);

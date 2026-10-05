@@ -516,6 +516,14 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   return resolved.includes(MISSING_ENV_SENTINEL) ? undefined : resolved;
 }
 
+export function resolveProjectEnvValue(
+  configDir: string,
+  projectPath: string,
+  raw: string,
+): string | undefined {
+  return resolveEnvVars(raw, readProjectEnv(resolveFrom(configDir, projectPath)));
+}
+
 function resolveOptionalUrl(
   raw: string,
   label: string,
