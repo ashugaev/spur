@@ -76,8 +76,8 @@ PR BODY: plain language, what got fixed and why. Two to four lines, no headings.
   Closes line only when a real issue number exists.
 
   Bad:   Dropped the Default sentinel in resolveAgentLaunchModel, added 3 vitest cases.
-  Good:  Spawn dropdown now shows the model that actually launches. Before it could
-         show one model and start another.
+  Good:  Spawn dropdown now shows the model that launches. Before, it showed
+         one model and started another.
 
 CREATE OPEN PR
 

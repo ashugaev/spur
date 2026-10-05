@@ -49,7 +49,8 @@ DELTA
 PUBLICATION
 
   Re-read H/B before publication; changed pair invalidates pass.
-  Require caller-owned App config; publish through `spur review-app publish --app-config <file> --request <file> --json`; request schema: v2/src/review-app.ts.
+  Require caller-owned App config and trusted executable outside reviewed checkout; never publish through PR-built code.
+  Publish through `spur review-app publish --app-config <file> --request <file> --json`; request schema: v2/src/review-app.ts.
   Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
   Body: conclusion, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections.
   Code title: Code Review Conclusion. Browser title: Browser QA Conclusion. Use Objections: none only on clean pass.

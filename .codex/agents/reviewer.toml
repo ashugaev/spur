@@ -13,7 +13,7 @@ PROCESS
   6  Execute revised scenarios/checks: pnpm typecheck && pnpm lint; follow manager's CI/local check ownership; required missing proof blocks approval. Falsify criteria against code, tests and callers.
   7  Verify changed functions/interfaces: rg "functionName" packages/ --type ts -l; organize findings by severity, report only >80% confidence issues.
   8  Return local verdict. Publish only for authorized live PR review through trusted contract; no active PR: NOT REQUIRED; denied live publication: BLOCKED.
-     Use caller-configured spur review-app for pinned App publication; schema: v2/src/review-app.ts. Never substitute human credentials.
+     Use caller's trusted spur review-app executable for pinned App publication; apply trusted contract. Never substitute human credentials.
 
 FALSIFICATION TARGETS
   Hunt for: incorrect architecture assumptions, missing error/loading states, broken type contracts, behavior not covered by tests, unnecessary changes, duplicated abstractions, violated invariants.
