@@ -14,9 +14,9 @@ ATTEMPT
   Live caller supplies permitted shared receipt root and network/publication capability; probe effective access before work.
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
   Capture repository, PR, lane, designated session, unique attempt, head H and base B.
-  Persist <caller-receipt-root>/<repository>/<PR>/<lane>.json before live work with status PENDING.
+  Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt. Request schema: v2/src/review-app.ts.
   Receipt fields: session, attempt, H, B, contractDigest, status, evidence, reviewId; use repository owner/name namespaces.
-  Serialize attempts per lane; unresolved/concurrent attempts block. Persist BLOCKED before GitHub publication/dismissal writes.
+  Persist review failure through `spur review-app block`; new attempt required after review blocker. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
   Receipt write failure blocks; notify owner. Never recover eligibility from historical approval alone.
   Checkout H; bind test environment and artifacts to H/B. Record configuration/environment fingerprints.
 

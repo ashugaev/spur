@@ -9,7 +9,12 @@ test("registers daemon-free required status and publish inputs", () => {
   const command = program.commands[0];
   if (!command) throw new Error("missing review-app command");
   expect(command.name()).toBe("review-app");
-  expect(command.commands.map((child) => child.name())).toEqual(["status", "publish"]);
+  expect(command.commands.map((child) => child.name())).toEqual([
+    "prepare",
+    "block",
+    "status",
+    "publish",
+  ]);
   for (const child of command.commands)
     expect(child.options.find((option) => option.long === "--app-config")?.mandatory).toBe(true);
 });
