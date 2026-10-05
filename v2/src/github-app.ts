@@ -126,21 +126,31 @@ export class GitHubApp {
     const permissions = object(token.permissions);
     if (permissions.pull_requests !== "write" || permissions.metadata !== "read")
       throw new ReviewAppError("permissions");
-    this.token = string(token.token);
-    this.expires = Date.parse(string(token.expires_at));
-    if (!Number.isFinite(this.expires) || this.expires <= Date.now())
+    const nextToken = string(token.token);
+    const nextExpires = Date.parse(string(token.expires_at));
+    if (!Number.isFinite(nextExpires) || nextExpires <= Date.now())
       throw new ReviewAppError("token-expiry");
-    const repository = object(await this.http(`/repos/${this.repo}`, this.token));
+    const repository = object(await this.http(`/repos/${this.repo}`, nextToken));
     if (string(repository.full_name).toLowerCase() !== this.repo.toLowerCase())
       throw new ReviewAppError("repository-mismatch");
-    this.access = {
+    const access: AppAccess = {
       appId: this.credentials.appId,
       actor: `${string(app.slug)}[bot]`,
       installationId,
       repositoryId: integer(repository.id),
       permissions: { pull_requests: "write", metadata: "read" },
     };
-    return this.access;
+    if (
+      this.access &&
+      (this.access.actor !== access.actor ||
+        this.access.installationId !== access.installationId ||
+        this.access.repositoryId !== access.repositoryId)
+    )
+      throw new ReviewAppError("identity-changed");
+    this.token = nextToken;
+    this.expires = nextExpires;
+    this.access = access;
+    return access;
   }
 
   async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
