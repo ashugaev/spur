@@ -735,6 +735,25 @@ describe("scanTmuxRateLimit", () => {
     expect(scanTmuxRateLimit("\u2717 flags the real codex out of credits pane")).toBeNull();
   });
 
+  it("ignores a stale \u25cf usage-limit banner replayed after a claude --resume", () => {
+    // A resumed claude redraws its old history, so an expired limit's banner sits
+    // in the pane with no print time. Admitting \u25cf would pin the session limited.
+    const pane = [
+      "\u25cf Usage limit reached \u00b7 continuing automatically at 11:50am \u00b7 esc or type to cancel",
+      "",
+      "\u25cf Usage limit reset \u00b7 continuing automatically",
+      "",
+      "\u25cf Automatic continue stopped \u00b7 the usage limit now resets more than 24 hours out, so this task",
+      "  will not resume on its own (/rate-limit-options to wait anyway)",
+      "  \u23bf  You've hit your weekly limit \u00b7 resets Sep 23, 8am (UTC)",
+      "",
+      "\u273b Crunched for 0s \u00b7 done Sunday, Sep 20, 11:51 AM",
+      "",
+      "\u276f",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toBeNull();
+  });
+
   it("keeps the marker-anywhere allowance for codex's \u25a0 banner only", () => {
     expect(scanTmuxRateLimit("\u25a0 Your workspace is out of credits. Ask your owner.")).toEqual({
       limited: true,
