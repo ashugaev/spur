@@ -8143,6 +8143,29 @@ describe("SessionService", () => {
       },
     );
 
+    it.each(["Task title", "x".repeat(123) + "😀tail"])(
+      "bounds titled topics when session identity exceeds 128 units: %s",
+      async (title) => {
+        const id = "x".repeat(120) + "-abcd";
+        const { service, sessions } = await serviceWithTelegramSession(title);
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing session");
+        sessions.delete("api-1");
+        sessions.set(id, { ...session, id, tmuxSession: id });
+        readTelegramReplyTargetMock.mockReturnValue(
+          replyTargetFor({ sessionId: id, topicName: "old" }),
+        );
+        await service.replyToSource(id, { message: "hello" });
+        const name = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+        expect(name.length).toBeLessThanOrEqual(128);
+        expect(name).toMatch(/^\S+ (?:Task title|x)/u);
+        expect(name.endsWith("…")).toBe(true);
+        expect(name).not.toMatch(
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+        );
+      },
+    );
+
     it("does not re-create a target that was removed while the send was in flight", async () => {
       let stored: Record<string, unknown> | null = replyTargetFor();
       readTelegramReplyTargetMock.mockImplementation(() => stored);

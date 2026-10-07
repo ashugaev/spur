@@ -56,7 +56,7 @@ Private/forum placeholders: `Received. <label> is thinking...`, `is busy; your m
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
 Private/forum typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
-Forum topic names: status emoji, title, session id, agent; title truncation preserves identity within 128 UTF-16 units — `v2/src/session-service.ts`.
+Forum topic names: status emoji, title, session id, agent; 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
 Generated Telegram launch instructions require source `chatId` and matching `telegram:message` send trigger; inbound origin/provenance selects Telegram readership and decisions, capability-only launches select user-requested sends — `v2/src/session-service.ts`.
 
 ## Event log retention

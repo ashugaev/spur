@@ -3054,15 +3054,15 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
   if (!title) return `${emoji} ${identity}`;
   const suffix = ` — ${identity}`;
   const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
-  let topicTitle = title;
-  if (topicTitle.length > titleLimit) {
-    topicTitle =
-      topicTitle
-        .slice(0, titleLimit - 1)
-        .replace(/[\uD800-\uDBFF]$/u, "")
-        .trimEnd() + "…";
-  }
-  return `${emoji} ${topicTitle}${suffix}`;
+  const truncate = (value: string, limit: number): string =>
+    value.length > limit
+      ? value
+          .slice(0, limit - 1)
+          .replace(/[\uD800-\uDBFF]$/u, "")
+          .trimEnd() + "…"
+      : value;
+  if (titleLimit < 1) return truncate(`${emoji} ${title}${suffix}`, TELEGRAM_TOPIC_NAME_MAX);
+  return `${emoji} ${truncate(title, titleLimit)}${suffix}`;
 }
 
 export class SessionService {
