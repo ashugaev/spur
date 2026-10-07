@@ -10912,15 +10912,25 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
-    it.each(["wake", "no edit", "pause", "replacement pane"] as const)(
-      "revalidates restore after acknowledgement with %s (issue #907 P2)",
-      async (change) => {
+    it.each([
+      ["wake", "acknowledged"],
+      ["no edit", "acknowledged"],
+      ["pause", "acknowledged"],
+      ["replacement pane", "acknowledged"],
+      ["wake", "timeout"],
+      ["no edit", "timeout"],
+      ["pause", "timeout"],
+      ["replacement pane", "timeout"],
+    ] as const)(
+      "revalidates restore with %s after %s (issue #907 P2)",
+      async (change, ackOutcome) => {
         const sessions = createSessionStore();
         sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
         mockExitedThenRestoredProcess();
         createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
         lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
         const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const { SubmitAckTimeoutError } = await import("../../src/session-service.js");
         const internals = sessionServiceInternals(service);
         mockTimerPromisesSleepWithFakeTimers();
         let releaseAck: () => void = () => {};
@@ -10931,6 +10941,16 @@ describe("SessionService", () => {
         vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
           ackHeld = true;
           await ackGate;
+          if (ackOutcome === "timeout") {
+            throw new SubmitAckTimeoutError({
+              sessionId: "api-1",
+              agent: "claude",
+              lastScannedFile: null,
+              elapsedMs: 20_000,
+              processAlive: true,
+              probeUnresponsive: false,
+            });
+          }
           return { found: true, lastScannedFile: null };
         });
         const restore = service.restore("api-1");
@@ -10956,11 +10976,16 @@ describe("SessionService", () => {
           lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid + 1 });
         }
         const concurrentRecord = sessions.get("api-1");
+        const killsBeforeAck = killTmuxSessionMock.mock.calls.length;
         releaseAck();
         if (change === "pause" || change === "replacement pane") {
           await expect(outcome).resolves.toMatchObject({
             error: expect.objectContaining({
-              message: expect.stringContaining("changed during restore"),
+              message: expect.stringContaining(
+                ackOutcome === "timeout"
+                  ? "Timed out waiting for agent submit acknowledgment"
+                  : "changed during restore",
+              ),
             }),
           });
           expect(sessions.get("api-1")).toEqual(concurrentRecord);
@@ -10974,7 +10999,20 @@ describe("SessionService", () => {
             TEST_DATA_DIR,
             expect.objectContaining({ event: "session.restore.failed" }),
           );
+          if (ackOutcome === "timeout") {
+            expect(logSpurEventMock).toHaveBeenCalledWith(
+              TEST_DATA_DIR,
+              expect.objectContaining({
+                event: "session.restore.recovered",
+                details: expect.objectContaining({
+                  reason: "submit_ack_timeout",
+                  processAlive: true,
+                }),
+              }),
+            );
+          }
         }
+        expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsBeforeAck);
         expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
         expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
         expect(internals.sessionLifecycleLocks.size).toBe(0);

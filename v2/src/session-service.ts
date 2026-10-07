@@ -18739,7 +18739,7 @@ export class SessionService {
             !latest ||
             !restoreGeneration ||
             this.reopensInFlight.get(sessionId)?.invalidated === true ||
-            !this.lifecycleStampMatches(latest, claim) ||
+            !this.lifecycleStateMatches(latest, claim) ||
             !(await this.paneGenerationMatches(latest, restoreGeneration))
           ) {
             throw error;
