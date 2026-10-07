@@ -8178,6 +8178,62 @@ describe("SessionService", () => {
       );
     });
 
+    it.each(["sent", "failed"] as const)(
+      "preserves consent buttons and separate session label when delivery is %s",
+      async (delivery) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor());
+        const { service } = await serviceWithTelegramSession("Review interface");
+        const consentModule = await import("../../src/review-interface-consent.js");
+        const metadata = await import("../../src/metadata.js");
+        vi.spyOn(consentModule, "reconcileInterfaceConsent").mockResolvedValue(undefined);
+        vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+          repositories: ["owner/repo"],
+          approverUserId: 123,
+        });
+        vi.spyOn(consentModule, "repositoryOf").mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+        const readConsent = vi.spyOn(metadata, "readInterfaceConsent").mockReturnValue(null);
+        vi.spyOn(metadata, "writeInterfaceConsent").mockImplementation((_dir, consent) => {
+          readConsent.mockReturnValue(consent);
+        });
+        const failure = new Error("Telegram unavailable");
+        if (delivery === "failed") sendTelegramReplyMock.mockRejectedValueOnce(failure);
+        else sendTelegramReplyMock.mockResolvedValueOnce({ messageIds: [91] });
+
+        const result = service.replyToSource("api-1", {
+          message: "Review this interface",
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              { kind: "CLI", id: "run", before: [], after: ["--dry-run"], constraints: [] },
+            ],
+          },
+        });
+        if (delivery === "failed") await expect(result).rejects.toThrow(failure);
+        else await result;
+
+        expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.stringMatching(/^Review this interface\n\n/),
+          expect.objectContaining({
+            sessionLabel: "api-1 — Review interface",
+            buttons: [
+              expect.objectContaining({ text: "Approve interface" }),
+              expect.objectContaining({ text: "Reject interface" }),
+              expect.objectContaining({ text: "Revoke interface approval" }),
+            ],
+          }),
+        );
+        expect(metadata.writeInterfaceConsent).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery }),
+        );
+      },
+    );
+
     it("keeps a placeholder recorded while the reply was in flight", async () => {
       readTelegramReplyTargetMock
         .mockReturnValueOnce(replyTargetFor({ statusMessageId: 77 }))

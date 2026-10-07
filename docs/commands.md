@@ -59,7 +59,6 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## list
 
 `spur list [--json]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)). TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
-
 `spur pause <sessionId> [--json]` — keeps the worktree.
 `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
@@ -73,7 +72,9 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## auto-ping
 
-`spur auto-ping unsubscribe --event|--thread|--subscription <handle> [--session <id>] [--json]`: exactly one scope; event one occurrence/24h post-work, thread provider thread, subscription route; unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`.
+`spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
 `spur auto-ping list [--session <id>] [--json]`; `spur auto-ping resume <suppressionId> [--session <id>] [--json]`; `SPUR_SESSION` supplies session inside agents; `grant_not_ready` requires retry.
 Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
 
@@ -98,7 +99,6 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 ## spur-slots
 
 `spur-slots --title-if-absent "<title>"`, `spur-slots --link <label>=<url>`/`--unlink <label>`, `spur-slots --clear-title`, `spur-slots --tag <name>`/`--untag <name>`/`--list-tags` — session `PATH` helper for tmux title/links/tags.
-
 `spur actions [--session <id> | --global] [--limit <n>] [--json]` — logged mutating requests, one session or fleet-wide.
 
 ## service, memory, agent-issue, comment-seen, subscribe
