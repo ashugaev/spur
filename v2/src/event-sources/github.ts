@@ -987,7 +987,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   const pollCycle = (emitInitial: boolean): Promise<void> => {
     if (stopped || deps.signal.aborted) return Promise.resolve();
     if (activePoll) return activePoll;
-    activePoll = (async () => {
+    activePoll = Promise.resolve().then(async () => {
       // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
       // await in between) does its own refresh at its try-block entry, and the interval
       // tick path already refreshed in shouldPollThisTick immediately before calling this.
@@ -998,6 +998,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       const skippedByCooldown = shouldSkipGitHubCalls();
       const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
       try {
+        if (stopped || deps.signal.aborted) return;
         await runGhPollCycle(
           { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
           async () => {
@@ -1015,7 +1016,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         }
         activePoll = null;
       }
-    })();
+    });
     return activePoll;
   };
 
