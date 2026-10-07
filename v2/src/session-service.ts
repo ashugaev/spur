@@ -14344,7 +14344,10 @@ export class SessionService {
     return { view: await this.enrich(activeRecord), attempt };
   }
 
-  private async ensureReadyForQueuedSend(sessionId: string): Promise<void> {
+  private async ensureReadyForQueuedSend(
+    sessionId: string,
+    expectedLifecycle?: SessionLifecycleStamp,
+  ): Promise<void> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     this.assertTokenBudgetAllowsActivation(hint);
@@ -14358,11 +14361,15 @@ export class SessionService {
       const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
         const current = readSession(this.config.dataDir, sessionId);
         if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+        if (expectedLifecycle && !this.lifecycleStateMatches(current, expectedLifecycle)) {
+          return null;
+        }
         if (current.tmuxSession !== hint.tmuxSession) {
           throw new Error(`Session ${sessionId} changed before queued send`);
         }
         return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
       });
+      if (!ready) return;
       const generation = await this.capturePaneGeneration(ready.session);
       const stamp = this.lifecycleStamp(
         readSession(this.config.dataDir, sessionId) ?? ready.session,
@@ -19949,7 +19956,7 @@ export class SessionService {
     try {
       let nextMessage: string | undefined;
       try {
-        await this.ensureReadyForQueuedSend(sessionId);
+        await this.ensureReadyForQueuedSend(sessionId, this.lifecycleStamp(session));
         const readySession = readSession(this.config.dataDir, sessionId);
         if (!readySession) return false;
         // A live claude server-error wedge behaves like "waiting" for delivery

@@ -10452,6 +10452,82 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
+    it.each(["pause during probe", "no pause", "explicit send from stopped"] as const)(
+      "guards dead-pane queued recovery: %s (issue #907 P1)",
+      async (scenario) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            agentSessionId: "session-uuid",
+            ...(scenario === "explicit send from stopped"
+              ? { status: "stopped", stopReason: "manual_pause" }
+              : { queuedMessages: { messages: ["queued body"], awaitingPrompt: false } }),
+          }),
+        );
+        mockExitedThenRestoredProcess();
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service);
+        vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+          found: true,
+          lastScannedFile: null,
+        });
+        let releaseProbe: () => void = () => {};
+        const probeGate = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        let probeStarted = false;
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementationOnce(async () => {
+          probeStarted = true;
+          await probeGate;
+          return {
+            runtimeAlive: false,
+            paneUsable: false,
+            processAlive: false,
+            probeUnresponsive: false,
+          };
+        });
+        const delivery =
+          scenario === "explicit send from stopped"
+            ? service.send("api-1", { message: "queued body" })
+            : internals.tryDeliverQueuedMessage("api-1");
+        await vi.waitFor(() => expect(probeStarted).toBe(true));
+        if (scenario === "pause during probe") {
+          await expect(service.pause("api-1")).resolves.toMatchObject({
+            status: "stopped",
+            stopReason: "manual_pause",
+          });
+        }
+        releaseProbe();
+        await delivery;
+        if (scenario === "pause during probe") {
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(logSpurEventMock).not.toHaveBeenCalledWith(
+            TEST_DATA_DIR,
+            expect.objectContaining({ event: "session.recover.completed" }),
+          );
+          expect(sessions.get("api-1")).toMatchObject({
+            status: "stopped",
+            stopReason: "manual_pause",
+            queuedMessages: { messages: ["queued body"] },
+          });
+        } else {
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+            "api-1",
+            "queued body",
+            expect.anything(),
+          );
+          expect(sessions.get("api-1")?.status).toBe("running");
+        }
+        await vi.waitFor(() => expect(internals.paneWriteLocks.size).toBe(0));
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+      },
+    );
+
     it("rejects a same-status replacement while the submit binding is prepared (issue #907 R2)", async () => {
       const sessions = createSessionStore();
       const generationA = runningSession({ agent: "claude" });
