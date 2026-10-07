@@ -132,7 +132,6 @@ describe("startServer", () => {
         "    sources:",
         "      pr-watch:",
         "        type: github",
-        '        query: "is:pr is:open"',
         "    triggers:",
         "      notify:",
         "        source: pr-watch",
