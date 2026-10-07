@@ -607,5 +607,27 @@ test("required semantics need matching consent; internal same-file edits reuse a
     user: { id: 11, type: "Bot" },
     body: `${consentMarker}${JSON.stringify({ ...consent, generation: 3, challenge: "three" })}`,
   });
+  snapshot.comments.push({
+    id: 34,
+    user: { id: 11, type: "Bot" },
+    body: `${consentMarker}${JSON.stringify({ ...consent, generation: 3, challenge: "three", decision: "revoked" })}`,
+  });
+  expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("BLOCKED");
+  snapshot.comments.push({
+    id: 35,
+    user: { id: 11, type: "Bot" },
+    body: `${consentMarker}${JSON.stringify({ ...consent, generation: 4, challenge: "four" })}`,
+  });
+  snapshot.comments.push({
+    id: 36,
+    user: { id: 11, type: "Bot" },
+    body: `${consentMarker}${JSON.stringify({ ...consent, generation: 4, challenge: "different" })}`,
+  });
+  expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("BLOCKED");
+  snapshot.comments.push({
+    id: 37,
+    user: { id: 11, type: "Bot" },
+    body: `${consentMarker}${JSON.stringify({ ...consent, generation: 5, challenge: "five" })}`,
+  });
   expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("APPROVED");
 });

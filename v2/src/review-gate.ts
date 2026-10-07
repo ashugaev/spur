@@ -14,6 +14,7 @@ import {
   readStateBody,
   stateMarker,
   sameConsentScope,
+  resolveConsentGeneration,
 } from "./review-state.js";
 
 export interface GatePolicy {
@@ -299,42 +300,33 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
         manifestDigest: manifestDigest(first.manifest),
         baselineDigest: baselineDigest(first.manifest),
       };
-      const latest = snapshot.comments
+      const history = snapshot.comments
         .filter(
           (row) =>
             integer(object(row.user).id) === policy.codeActor &&
             typeof row.body === "string" &&
             row.body.startsWith(consentMarker),
         )
-        .filter((row) =>
-          sameConsentScope(
-            parseConsentState(
-              JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
-            ),
-            scope,
+        .map((row) => ({
+          row,
+          state: parseConsentState(
+            JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
           ),
-        )
-        .sort((a, b) => integer(b.id) - integer(a.id))[0];
+        }))
+        .filter((entry) => sameConsentScope(entry.state, scope));
+      const latest = history.sort((a, b) => integer(b.row.id) - integer(a.row.id))[0]?.row;
       if (!latest || object(latest.user).type !== "Bot") return blocked("consent-missing");
       let consent;
       try {
-        consent = parseConsentState(
-          JSON.parse(string(latest.body).slice(consentMarker.length).split("\n")[0] ?? ""),
+        const task = history[0]?.state.task;
+        if (!task || history.some((entry) => entry.state.task !== task))
+          return blocked("consent-task-conflict");
+        consent = resolveConsentGeneration(
+          history.map((entry) => entry.state),
+          scope,
+          task,
         );
-        for (const row of snapshot.comments) {
-          if (
-            integer(object(row.user).id) !== policy.codeActor ||
-            typeof row.body !== "string" ||
-            !row.body.startsWith(consentMarker)
-          )
-            continue;
-          const prior = parseConsentState(
-            JSON.parse(row.body.slice(consentMarker.length).split("\n")[0] ?? ""),
-          );
-          if (!sameConsentScope(prior, scope)) continue;
-          if (prior.task !== consent.task) return blocked("consent-task-conflict");
-          if (prior.task === consent.task && prior.generation > consent.generation) consent = prior;
-        }
+        if (!consent) return blocked("consent-missing");
       } catch {
         return blocked("consent-invalid");
       }

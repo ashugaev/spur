@@ -40,7 +40,9 @@ import {
   consentPolicy,
   decideConsent,
   reconcileInterfaceConsent,
+  repositoryOf,
 } from "../review-interface-consent.js";
+import { workspaceIdOf } from "../session-desk.js";
 import { readCurrentBranch } from "../workspace.js";
 import {
   TelegramWorkbench,
@@ -1513,9 +1515,27 @@ async function handleAgentChoiceCallback(
         !actualSession ||
         actualSession.project !== record.projectId ||
         actualSession.branch !== record.branch ||
+        workspaceIdOf(actualSession) !== record.authority ||
         (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
       )
         throw new Error("Interface approval task changed");
+      const relocated = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !relocated ||
+        relocated.project !== record.projectId ||
+        relocated.branch !== record.branch ||
+        workspaceIdOf(relocated) !== record.authority
+      )
+        throw new Error("Interface approval task changed");
+      const validatedPath = relocated.worktreePath;
+      if (validatedPath !== actualSession.worktreePath) {
+        const [branch, repository] = await Promise.all([
+          readCurrentBranch(validatedPath),
+          repositoryOf(validatedPath),
+        ]);
+        if (branch !== record.branch || repository !== record.repository)
+          throw new Error("Interface approval task changed");
+      }
       const active = findTelegramChoice(
         deps.dataDir,
         deps.projectId,
@@ -1530,9 +1550,12 @@ async function handleAgentChoiceCallback(
         !current ||
         current.generation !== record.generation ||
         current.challenge !== record.challenge ||
+        current.authority !== record.authority ||
         !currentSession ||
         currentSession.project !== record.projectId ||
-        currentSession.branch !== record.branch
+        currentSession.branch !== record.branch ||
+        currentSession.worktreePath !== validatedPath ||
+        workspaceIdOf(currentSession) !== record.authority
       )
         throw new Error("Interface approval superseded");
       const decision = decideConsent(current, {

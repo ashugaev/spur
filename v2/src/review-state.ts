@@ -120,6 +120,24 @@ export function sameConsentScope(a: ConsentScope, b: ConsentScope): boolean {
     a.baselineDigest === b.baselineDigest
   );
 }
+export function resolveConsentGeneration(
+  states: readonly ConsentState[],
+  scope: ConsentScope,
+  task: string,
+): ConsentState | null {
+  const eligible = states.filter((state) => state.task === task && sameConsentScope(state, scope));
+  const generation = eligible.reduce((maximum, state) => Math.max(maximum, state.generation), 0);
+  const latest = eligible.filter((state) => state.generation === generation);
+  const selected = latest[0];
+  if (
+    selected &&
+    latest.some(
+      (state) => state.challenge !== selected.challenge || state.decision !== selected.decision,
+    )
+  )
+    throw new ReviewAppError("consent-conflict");
+  return selected ?? null;
+}
 export function parseConsentState(value: unknown): ConsentState {
   const data = object(value);
   if (data.version !== 1 || !["approved", "rejected", "revoked"].includes(String(data.decision)))
@@ -162,41 +180,32 @@ export async function publishConsentState(
         typeof row.body === "string" &&
         row.body.startsWith(consentMarker),
     )
-    .filter((row) => {
+    .map((row) => {
       try {
-        return sameConsentScope(
-          parseConsentState(
+        return {
+          row,
+          state: parseConsentState(
             JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
           ),
-          state,
-        );
+        };
       } catch {
         throw new ReviewAppError("invalid-consent-state");
       }
-    });
-  for (const row of history) {
-    const current = parseConsentState(
-      JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
-    );
+    })
+    .filter((current) => sameConsentScope(current.state, state));
+  for (const { state: current } of history) {
     if (current.task !== state.task && state.decision === "approved")
       throw new ReviewAppError("consent-authority-handoff-required");
-    if (current.task === state.task && current.generation > state.generation)
-      throw new ReviewAppError("consent-superseded");
   }
-  const previous = history.sort((a, b) => integer(b.id) - integer(a.id))[0];
-  if (previous) {
-    let current: ConsentState;
-    try {
-      current = parseConsentState(
-        JSON.parse(string(previous.body).slice(consentMarker.length).split("\n")[0] ?? ""),
-      );
-    } catch {
-      throw new ReviewAppError("invalid-consent-state");
-    }
-    if (exact(previous)) return;
-    if (current.task === state.task && current.generation === state.generation)
-      throw new ReviewAppError("consent-conflict");
-  }
+  const current = resolveConsentGeneration(
+    [...history.map((entry) => entry.state), state],
+    state,
+    state.task,
+  );
+  if (current && current.generation > state.generation)
+    throw new ReviewAppError("consent-superseded");
+  const previous = history.sort((a, b) => integer(b.row.id) - integer(a.row.id))[0]?.row;
+  if (previous && exact(previous)) return;
   const result = object(await app.request(path, "POST", { body }));
   const readback = await app.request(`/repos/${state.repo}/issues/comments/${integer(result.id)}`);
   if (!exact(result) || !exact(readback)) throw new ReviewAppError("state-publication-mismatch");
