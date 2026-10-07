@@ -99,7 +99,8 @@ rm -rf "$HOME/spur-docs"
 log "removing source-install clone and run projects"
 rm -rf "$HOME/spur" "$HOME/spur-mirror" "$HOME/projects" "$HOME/spur-smoke"
 for d in "$HOME"/*/; do
-  if [ -e "${d}.git" ]; then rm -rf "$d"; fi
+  [ -L "${d%/}" ] && continue
+  if [ -e "${d}.git" ]; then rm -rf "${d%/}"; fi
 done
 
 # host-skills only creates these two — never `rm -rf "$HOME/.claude"`, that
