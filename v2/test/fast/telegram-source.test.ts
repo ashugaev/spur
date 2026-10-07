@@ -1883,6 +1883,191 @@ describe("telegramSourceModule", () => {
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
   });
 
+  it.each(["success", "submitted_unknown", "terminal_failure", "binding_failure"])(
+    "consumes a ready text task once after rejected spawn progress: %s",
+    async (outcome) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      const spawn =
+        outcome === "submitted_unknown"
+          ? vi.fn().mockRejectedValue(new Error("spawn failed token-123"))
+          : vi.fn().mockResolvedValue({
+              id: "api-new",
+              project: "api",
+              agent: "codex",
+              state: "working",
+            });
+      const { bot, emit, logger, listSessions } = await startSource(dataDir, vi.fn(), spawn);
+      const spawnCtx = telegramContext({ text: "/spawn codex" });
+      await required(bot).emitText(spawnCtx);
+      await required(bot).emitCallback({
+        callbackQuery: {
+          data: spawnProjectCallbackData(spawnCtx.reply, 0),
+          message: spawnCtx.message,
+          from: spawnCtx.message.from,
+        },
+        answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue({}),
+      });
+      const write =
+        outcome === "binding_failure"
+          ? vi
+              .spyOn(metadataModule, "writeTelegramBindings")
+              .mockRejectedValueOnce(new Error("Write failed"))
+          : undefined;
+      const taskCtx = telegramContext({ text: "deliver task" });
+      taskCtx.reply.mockRejectedValueOnce(new Error("progress failed token-123"));
+      if (outcome === "terminal_failure") {
+        taskCtx.reply.mockRejectedValueOnce(new Error("terminal failed"));
+      }
+      try {
+        await required(bot).emitText(taskCtx);
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(spawn).toHaveBeenCalledWith({
+          project: "api",
+          agent: "codex",
+          prompt: wrapTelegramSpawnPrompt("deliver task"),
+          telegramOrigin: {
+            projectId: "api",
+            sourceId: "telegram",
+            chatId: -1001,
+            messageThreadId: 22,
+          },
+        });
+        expect(logger.warn).toHaveBeenCalledWith(
+          "[source:api/telegram] telegram spawn progress failed: progress failed <telegram-token>",
+        );
+        const bound = outcome === "success" || outcome === "terminal_failure";
+        if (bound) {
+          listSessions.mockResolvedValue([
+            { id: "api-new", project: "api", agent: "codex", state: "working" },
+          ]);
+        }
+        expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+          bound ? "api-new" : undefined,
+        );
+        const terminal =
+          outcome === "submitted_unknown"
+            ? "Spawn failed: spawn failed <telegram-token>"
+            : outcome === "binding_failure"
+              ? "Created api-new. Binding failed. Use /work to inspect."
+              : "Spawned and bound: api-new.";
+        expect(taskCtx.reply).toHaveBeenCalledWith(terminal);
+        if (outcome === "terminal_failure") {
+          expect(taskCtx.reply).toHaveBeenLastCalledWith(
+            "Created api-new. Bound; notification failed. Use /work to inspect.",
+          );
+        }
+        expect(taskCtx.api.editMessageText).not.toHaveBeenCalled();
+        const followup = telegramContext({ text: "next task" });
+        await required(bot).emitText(followup);
+        expect(spawn).toHaveBeenCalledTimes(1);
+        if (bound) {
+          expect(emit).toHaveBeenCalledWith(
+            "telegram:message",
+            expect.objectContaining({ sessionId: "api-new", text: "next task" }),
+          );
+        } else {
+          expect(emit).not.toHaveBeenCalled();
+          expect(followup.reply).toHaveBeenCalledWith(
+            "No Spur session bound here. Use /watch or /spawn.",
+          );
+        }
+      } finally {
+        write?.mockRestore();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"])("aborted progress %s prevents submission", async (result) => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const controller = new AbortController();
+    const { bot, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      signal: controller.signal,
+      listProjects: vi.fn().mockResolvedValue([{ id: "api", name: "api" }]),
+    });
+    let resolveProgress: ((value: { message_id: number }) => void) | undefined;
+    let rejectProgress: ((error: Error) => void) | undefined;
+    const progress = new Promise<{ message_id: number }>((resolve, reject) => {
+      resolveProgress = resolve;
+      rejectProgress = reject;
+    });
+    const ctx = telegramContext({ text: "/spawn codex task" });
+    ctx.reply.mockReturnValueOnce(progress);
+    const task = required(bot).emitText(ctx);
+    await vi.waitFor(() => expect(ctx.reply).toHaveBeenCalledWith("Spawning codex agent..."));
+    controller.abort();
+    if (result === "resolve") resolveProgress?.({ message_id: 55 });
+    else rejectProgress?.(new Error("progress failed"));
+    await task;
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it("retains a replacement ready selection while the previous progress reply rejects", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawn = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "api-old", project: "api", agent: "codex", state: "working" })
+      .mockResolvedValueOnce({ id: "api-new", project: "api", agent: "claude", state: "working" });
+    const { bot, listSessions } = await startSource(dataDir, vi.fn(), spawn);
+    let rejectProgress: ((error: Error) => void) | undefined;
+    const progress = new Promise<never>((_resolve, reject) => {
+      rejectProgress = reject;
+    });
+    const oldCtx = telegramContext({ text: "/spawn codex" });
+    await required(bot).emitText(oldCtx);
+    await required(bot).emitCallback({
+      callbackQuery: {
+        data: spawnProjectCallbackData(oldCtx.reply, 0),
+        message: oldCtx.message,
+        from: oldCtx.message.from,
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      reply: vi.fn().mockResolvedValue({}),
+    });
+    const oldPrompt = telegramContext({ text: "old task" });
+    oldPrompt.reply.mockReturnValueOnce(progress);
+    const oldTask = required(bot).emitText(oldPrompt);
+    await vi.waitFor(() => expect(oldPrompt.reply).toHaveBeenCalledWith("Spawning codex agent..."));
+    const replacement = telegramContext({ text: "/spawn claude" });
+    await required(bot).emitText(replacement);
+    await required(bot).emitCallback({
+      callbackQuery: {
+        data: spawnProjectCallbackData(replacement.reply, 0),
+        message: replacement.message,
+        from: replacement.message.from,
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      reply: vi.fn().mockResolvedValue({}),
+    });
+    rejectProgress?.(new Error("progress failed"));
+    await oldTask;
+    await required(bot).emitText(telegramContext({ text: "replacement task" }));
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(spawn.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ agent: "codex", prompt: wrapTelegramSpawnPrompt("old task") }),
+    );
+    expect(spawn.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        agent: "claude",
+        prompt: wrapTelegramSpawnPrompt("replacement task"),
+      }),
+    );
+    listSessions.mockResolvedValue([
+      { id: "api-new", project: "api", agent: "claude", state: "working" },
+    ]);
+    await required(bot).emitText(telegramContext({ text: "followup" }));
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-new",
+    );
+  });
+
   it("clears a pending spawn when the user binds an existing session", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -4409,6 +4594,67 @@ describe("telegramSourceModule voice notes", () => {
     // No statusMessageId to edit: the echo and the routing ack both fall
     // back to a fresh ctx.reply call.
     expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();
+  });
+
+  it("launches a ready voice task once after rejected echo and spawn progress", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const spawn = vi.fn().mockResolvedValue({
+      id: "api-new",
+      project: "api",
+      agent: "codex",
+      state: "working",
+    });
+    const { bot, emit, logger, listSessions } = await startSource(dataDir, vi.fn(), spawn);
+    const spawnCtx = telegramContext({ text: "/spawn codex" });
+    await required(bot).emitText(spawnCtx);
+    await required(bot).emitCallback({
+      callbackQuery: {
+        data: spawnProjectCallbackData(spawnCtx.reply, 0),
+        message: spawnCtx.message,
+        from: spawnCtx.message.from,
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      reply: vi.fn().mockResolvedValue({}),
+    });
+    vi.stubGlobal("fetch", mockTranscribeFetch("  delivery  "));
+    const voice = telegramVoiceContext({ updateId: 81 });
+    voice.api.editMessageText.mockRejectedValue(new Error("echo edit failed"));
+    voice.reply.mockResolvedValueOnce({ message_id: 55 });
+    voice.reply.mockRejectedValueOnce(new Error("echo failed token-123"));
+    voice.reply.mockRejectedValueOnce(new Error("progress failed token-123"));
+    await required(bot).emitVoice(voice);
+    await vi.waitFor(() => expect(voice.reply).toHaveBeenCalledWith("Spawned and bound: api-new."));
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith({
+      project: "api",
+      agent: "codex",
+      prompt: wrapTelegramSpawnPrompt("delivery"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
+    });
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-new",
+    );
+    expect(logger.warn.mock.calls).toEqual([
+      ["[source:api/telegram] telegram voice echo failed: echo failed <telegram-token>"],
+      ["[source:api/telegram] telegram spawn progress failed: progress failed <telegram-token>"],
+    ]);
+    listSessions.mockResolvedValue([
+      { id: "api-new", project: "api", agent: "codex", state: "working" },
+    ]);
+    await required(bot).emitVoice(voice);
+    await required(bot).emitText(telegramContext({ text: "followup" }));
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-new", text: "followup" }),
+    );
   });
 
   it("routes a trimmed transcript once when its echo edit and fallback reply reject", async () => {

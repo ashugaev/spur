@@ -695,8 +695,14 @@ async function bindSpawnedSession(
       return { phase: "not_submitted" };
     }
     if (!options) {
-      const status = await ctx.reply(`Spawning ${request.agent} agent...`);
-      statusMessageId = extractMessageId(status);
+      try {
+        const status = await ctx.reply(`Spawning ${request.agent} agent...`);
+        statusMessageId = extractMessageId(status);
+      } catch (error) {
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] telegram spawn progress failed: ${redactedErrorText(deps, error)}`,
+        );
+      }
     }
     if (!current()) return { phase: "not_submitted" };
     submitted = true;
