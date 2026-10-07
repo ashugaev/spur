@@ -30,6 +30,7 @@ import type * as eventLogModule from "../../src/event-log.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as telegramSourceStateModule from "../../src/telegram-source-state.js";
 import type * as interfaceConsentModule from "../../src/review-interface-consent.js";
+import type * as metadataModule from "../../src/metadata.js";
 import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
@@ -7953,7 +7954,7 @@ describe("SessionService", () => {
     expect(result.worktreePath).toBe("/repo/api");
   });
 
-  it.each(["ordinary", "consent", "delivery-failure"])(
+  it.each(["ordinary", "consent", "delivery-failure", "real-consent"])(
     "replies to the latest Telegram source target: %s",
     async (kind) => {
       const config = baseConfig();
@@ -8003,6 +8004,16 @@ describe("SessionService", () => {
         consentRepositoryMock.mockResolvedValue("owner/repo");
         readCurrentBranchMock.mockResolvedValue("api-1");
       }
+      if (kind === "real-consent") {
+        const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing fixture session");
+        actual.writeSession(TEST_DATA_DIR, session);
+        readSessionMock.mockImplementation(actual.readSession);
+        listSessionsMock.mockImplementation(actual.listSessions);
+        readInterfaceConsentMock.mockImplementation(actual.readInterfaceConsent);
+        writeInterfaceConsentMock.mockImplementation(actual.writeInterfaceConsent);
+      }
       if (kind === "delivery-failure")
         sendTelegramReplyMock.mockRejectedValueOnce(new Error("Telegram unavailable"));
       const reply = service.replyToSource("api-1", {
@@ -8035,6 +8046,16 @@ describe("SessionService", () => {
         return;
       }
       const result = await reply;
+      if (kind === "real-consent") {
+        expect(listSessionsMock).toHaveBeenCalled();
+        expect(listSessionsMock(TEST_DATA_DIR).map((session: SessionRecord) => session.id)).toEqual(
+          ["api-1"],
+        );
+        expect(readInterfaceConsentMock(TEST_DATA_DIR, "api-1")).toMatchObject({
+          decision: "pending",
+          delivery: "sent",
+        });
+      }
 
       expect(sendTelegramReplyMock).toHaveBeenCalledWith(
         telegramSource,

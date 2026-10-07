@@ -86,6 +86,12 @@ it("desk requesters share one consent generation; old requester cannot recover r
       decidedAt: new Date().toISOString(),
     };
     metadata.writeInterfaceConsent(dataDir, first);
+    expect(
+      metadata
+        .listSessions(dataDir)
+        .map(({ id }) => id)
+        .sort(),
+    ).toEqual(["sibling", "task"]);
     const second = proposeConsent(
       { ...first, session: "sibling" },
       metadata.readInterfaceConsent(dataDir, "sibling"),
@@ -99,6 +105,7 @@ it("desk requesters share one consent generation; old requester cannot recover r
       },
     );
     metadata.writeInterfaceConsent(dataDir, revoked);
+    expect(metadata.listSessions(dataDir)).toHaveLength(2);
     expect(metadata.readInterfaceConsent(dataDir, "task")).toEqual(revoked);
     await reconcileInterfaceConsent(dataDir, "task");
     expect(metadata.readInterfaceConsent(dataDir, "sibling")).toEqual(revoked);
@@ -113,6 +120,7 @@ it("desk requesters share one consent generation; old requester cannot recover r
     expect(approved.generation).toBe(3);
     expect(approved.decision).toBe("approved");
     metadata.writeInterfaceConsent(dataDir, approved);
+    expect(metadata.listSessions(dataDir)).toHaveLength(2);
     expect(metadata.readInterfaceConsent(dataDir, "task")).toEqual(approved);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
