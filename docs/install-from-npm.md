@@ -93,7 +93,7 @@ Skip too when another service holds 443 — never displace it. On failure report
 
 A few steps use your own accounts and each needs one interactive action — they can't be scripted, and a setup agent must not hack around them. Do everything else first, then hand the operator this list:
 
-- Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. At least one agent, fully onboarded, is required before Spur can spawn sessions.
+- Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion, from `~/.spur/worktrees` (exists after `spur init`), answering "Yes, I trust this folder": that one trust covers every Spur worktree. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. Untrusted, the first spawn hangs on Claude's trust prompt. At least one agent, fully onboarded, is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
 - Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
@@ -149,16 +149,17 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 ## Troubleshooting
 
-| Symptom                                  | Fix                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `status=203/EXEC`                        | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
-| `EACCES .../usr/lib/node_modules`        | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
-| units die after SSH logout               | linger off: `loginctl enable-linger $USER`                                                                    |
-| web terminal `/ws` won't connect         | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
-| `/ws` closes immediately                 | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
-| web unreachable over Tailscale           | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
-| mic button dead on the tailnet URL       | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
-| first spawn: `OAuth error: Invalid code` | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| Symptom                                                    | Fix                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC`                                          | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
+| `EACCES .../usr/lib/node_modules`                          | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
+| units die after SSH logout                                 | linger off: `loginctl enable-linger $USER`                                                                    |
+| web terminal `/ws` won't connect                           | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
+| `/ws` closes immediately                                   | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
+| web unreachable over Tailscale                             | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
+| mic button dead on the tailnet URL                         | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
+| first spawn: `OAuth error: Invalid code`                   | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| `spawn: Timed out waiting for agent submit acknowledgment` | pane shows "Yes, I trust this folder": `cd ~/.spur/worktrees && claude`, accept trust, exit, re-spawn         |
 
 ## System-wide units (advanced)
 
