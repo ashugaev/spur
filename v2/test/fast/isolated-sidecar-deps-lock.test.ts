@@ -84,6 +84,13 @@ case "$1" in
     ;;
   "$SPUR_TEST_REPO/v2/bin/write-isolated-project-config.mjs")
     echo "project-helper" >> "$SPUR_TEST_LOG"
+    for ((index = 1; index <= $#; index++)); do
+      if [[ "\${!index}" == "--telegram-lock-output" ]]; then next=$((index + 1)); : > "\${!next}"; fi
+    done
+    ;;
+  "$SPUR_TEST_REPO/v2/bin/isolated-web-endpoint.mjs"|"$SPUR_TEST_REPO/scripts/../v2/bin/isolated-web-endpoint.mjs")
+    shift
+    exec "$SPUR_TEST_REAL_NODE" "$SPUR_TEST_ENDPOINT_FIXTURE" "$@"
     ;;
   *)
     echo "unexpected-node $*" >> "$SPUR_TEST_LOG"
@@ -124,7 +131,7 @@ fi
 if [[ "$1" == "--dir" && "$3" == "build" ]]; then
   echo "build" >> "$SPUR_TEST_LOG"
   mkdir -p "$SPUR_TEST_REPO/v2/dist"
-  for file_name in cli.js isolated-instance-config.js isolated-project-config.js; do
+  for file_name in cli.js isolated-instance-config.js isolated-project-config.js isolated-telegram.js isolated-web-endpoint.js; do
     printf 'built\\n' > "$SPUR_TEST_REPO/v2/dist/$file_name"
   done
   exit 0
@@ -174,6 +181,10 @@ function createFixture(): FakeWorktree {
   writeFileSync(join(webDir, "tsconfig.json"), "{}\n", "utf8");
 
   const logPath = join(repoDir, "calls.log");
+  writeFileSync(
+    join(repoDir, "endpoint-fixture.mjs"),
+    `const a=process.argv.slice(2);\nglobalThis.fetch=async()=>Response.json({ok:true,apiVersion:3,pid:Number(a[6]),host:"127.0.0.1",port:Number(new URL(a[4]).port),configPath:a[1],dataDir:a[3],tmuxSocketName:a[5],lifecycleInstanceId:"fixture-generation"});\nawait import(${JSON.stringify(join(REPO_ROOT, "v2/bin/isolated-web-endpoint.mjs"))});\n`,
+  );
   makeExecutable(join(pathDir, "node"), nodeFakeSource());
   makeExecutable(join(pathDir, "pnpm"), pnpmFakeSource());
   makeExecutable(join(pathDir, "curl"), "#!/usr/bin/env bash\nexit 0\n");
@@ -191,12 +202,14 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
     HOME: join(worktree.repoDir, "home"),
     PATH: `${worktree.pathDir}:${process.env["PATH"] ?? ""}`,
     SPUR_PROJECT_CONFIG_PATH: join(worktree.repoDir, "spur.yaml"),
+    SPUR_PROJECT: "test",
     SPUR_RESERVED_PORT_DAEMON: "4791",
     SPUR_RESERVED_PORT_UI: "5691",
     SPUR_SESSION_TOOL_DIR: worktree.toolDir,
     SPUR_SIDECAR_NAME: "deps-lock-test",
     SPUR_TEST_LOG: worktree.logPath,
     SPUR_TEST_REAL_NODE: process.execPath,
+    SPUR_TEST_ENDPOINT_FIXTURE: join(worktree.repoDir, "endpoint-fixture.mjs"),
     SPUR_TEST_REPO: worktree.repoDir,
     TMPDIR: worktree.tmpDir,
     ...extraEnv,
@@ -326,7 +339,7 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     };
 
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/Missing isolated runtime file/);
+    expect(rejection.stderr).toMatch(/Timed out waiting for current isolated daemon runtime/);
     const log = readLog(worktree);
     expect(log).toContain("install-start");
     expect(log).toContain("install-end");
@@ -417,11 +430,27 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     const worktree = createFixture();
     const markers = materializeReadyTree(worktree.repoDir);
 
-    await runIsolatedDaemon(worktree);
-    // Runtime file is already published by the daemon above, so the UI runs
-    // to completion here (no swallowed rejection to hide a dead-before-probe
-    // UI making "no install-start" trivially true).
-    await runIsolatedUi(worktree);
+    const daemon = execFileAsync(
+      "bash",
+      [join(worktree.repoDir, "scripts/spur-isolated-daemon.sh")],
+      { env: testEnv(worktree, { SPUR_TEST_DAEMON_STDIN: "1" }), timeout: 25_000 },
+    );
+    try {
+      await new Promise<void>((done, reject) => {
+        const timer = setTimeout(() => reject(new Error("Daemon did not exec")), 20_000);
+        daemon.child.stdout?.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes("daemon-ready")) {
+            clearTimeout(timer);
+            done();
+          }
+        });
+        void daemon.catch(reject);
+      });
+      await runIsolatedUi(worktree);
+    } finally {
+      daemon.child.stdin?.end("go\n");
+      await daemon;
+    }
 
     const log = readLog(worktree);
     expect(log).not.toContain("install-start");
@@ -481,7 +510,7 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
       stderr: string;
     };
     expect(rejection).toMatchObject({ code: 1 });
-    expect(rejection.stderr).toMatch(/Missing isolated runtime file/);
+    expect(rejection.stderr).toMatch(/Timed out waiting for current isolated daemon runtime/);
 
     await runIsolatedDaemon(worktree);
 

@@ -582,7 +582,10 @@ export async function reapSidecarPane(
   );
 }
 
-type StarttimeProbe = { kind: "ok"; starttime: number } | { kind: "gone" } | { kind: "unknown" };
+type StarttimeProbe =
+  | { kind: "ok"; starttime: number; state: string | undefined }
+  | { kind: "gone" }
+  | { kind: "unknown" };
 
 // /proc/<pid>/stat field 22 (starttime). The comm field is parenthesized and
 // may itself contain spaces, so parsing anchors on the last ')'.
@@ -609,7 +612,9 @@ async function readProcStarttime(pid: number): Promise<StarttimeProbe> {
     .trim()
     .split(/\s+/);
   const starttime = Number.parseInt(fields[19] ?? "", 10);
-  return Number.isFinite(starttime) ? { kind: "ok", starttime } : { kind: "unknown" };
+  return Number.isFinite(starttime)
+    ? { kind: "ok", starttime, state: fields[0] }
+    : { kind: "unknown" };
 }
 
 /**
@@ -620,6 +625,14 @@ async function readProcStarttime(pid: number): Promise<StarttimeProbe> {
 export async function readProcessStarttime(pid: number): Promise<number | null> {
   const probe = await readProcStarttime(pid);
   return probe.kind === "ok" ? probe.starttime : null;
+}
+
+/** Live identity only; retain readProcessStarttime's identity-only semantics. */
+export async function readLiveProcessStarttime(pid: number): Promise<number | null> {
+  const probe = await readProcStarttime(pid);
+  return probe.kind === "ok" && probe.state !== undefined && /^[RSDTtKWPI]$/.test(probe.state)
+    ? probe.starttime
+    : null;
 }
 
 // An empty or root parent is never a valid containment bound — without this

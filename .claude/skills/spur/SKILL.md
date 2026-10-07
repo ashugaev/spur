@@ -20,7 +20,7 @@ INTERFACES
   Session variables: `env | grep '^SPUR_'`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`. Reply routing: `docs/configuration.md#telegram-binding`; command: `docs/commands.md#source-reply`.
+  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; users launch tasks and inspect attention cards. Routing: `docs/configuration.md#telegram-binding`; commands: `docs/commands.md#source-reply`.
   Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -34,6 +34,7 @@ SAFETY
   Agents run full-access — any untrusted prompt from Telegram, GitHub, Jira, or webhook runs arbitrary commands as the daemon user.
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
+  Isolated TEST seed/attachment constraints: docs/configuration.md; stand/current-generation UI readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
 
 DOCS

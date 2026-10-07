@@ -50,6 +50,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 ## Telegram binding
 
 `/watch [sessionId]` binds chat/topic; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
+Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
 [`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
 Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
 `/spawn` changes plain-message recipient; group-main replies retain sender routing; forum takeover detaches old session — `v2/src/event-sources/telegram.ts`.
@@ -95,6 +96,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.tokenBudgetWarnOnly`: boolean, default `false`; with `tokenBudget`, marks exceeded usage without blocking or stopping the session. Without `tokenBudget`, no effect. See `v2/src/config.ts`.
 - `projects.<id>.restoreAfterReboot` (`false`). See [Restore after reboot](#restore-after-reboot).
 - `projects.<id>.sidecars.<name>` (map, mutually exclusive with `devServer`; built-in `playwright` — [Built-in MCP sidecars](commands.md#built-in-mcp-sidecars)), `.idleTtlMinutes` ([Sidecar reaping](#sidecar-reaping)), `.ports.<id>.{env,start,end,url}` ([Sidecars](commands.md#sidecars)); `v2/src/config.ts`.
+- Isolated Telegram: retained `TELEGRAM_TEST_BOT_TOKEN`, `TELEGRAM_TEST_CHAT_ID`, `TELEGRAM_TEST_ALLOWED_USERS`, `TELEGRAM_TEST_ALLOWED_CHATS` string fields; reject known resolved supplied-project Telegram token collisions before seed/attachment, unresolved/undisclosed tokens unchecked, one local poller per bot, no production fallback; `v2/src/config.ts`, `v2/src/isolated-telegram.ts`, [Sidecars](commands.md#sidecars).
+- Isolated voice: current daemon-owner readiness precedes private UI receipt; fail-closed discovery without parent helper or production fallback; `v2/src/ports.ts`, [Session tools](commands.md#session-tools-and-environment).
 - `projects.<id>.mcp.exclude` (`[]`). See [Suppressing a host MCP server](commands.md#suppressing-a-host-mcp-server).
 - `projects.<id>.symlinks` (`[]`), `.branchNaming.regex`, `.spawn.steps`, `.defaultModels` (agent fallbacks: `v2/src/agents/claude.ts`, `cursor.ts`), `.codexArgs`.
 - `projects.<id>.reasoningEffort.{claude,codex,cursor,opencode}`: live launch defaults; explicit session override wins; omitted uses native default; OpenCode permits only selected variant for that model until effort changes or is removed; provider/model constraints in `v2/src/session-service.ts`, YAML validation in `v2/src/config.ts`.

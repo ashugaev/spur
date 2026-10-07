@@ -5,6 +5,7 @@ import {
   sendTelegramChatAction,
   sendTelegramReply,
 } from "../../src/telegram-source-state.js";
+import { presentConsent, proposeConsent } from "../../src/review-interface-consent.js";
 
 describe("sendTelegramReply", () => {
   beforeEach(() => {
@@ -306,6 +307,106 @@ describe("sendTelegramReply formatting", () => {
       text: "a <b>b</b> &lt;c&gt; &amp; <code>d</code>",
       parse_mode: "HTML",
     });
+  });
+
+  it("bolds the escaped session signature without parsing title markdown", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+    await sendTelegramReply(config, { chatId: 123 }, "\n\nDone **today**", {
+      sessionLabel: "api-1 — <checkout> & **literal** `title`",
+    });
+    expect(bodyOf(fetchMock, 0)).toEqual({
+      chat_id: 123,
+      text: "<b>api-1 — &lt;checkout&gt; &amp; **literal** `title`</b>\n\nDone <b>today</b>",
+      parse_mode: "HTML",
+    });
+  });
+
+  it("keeps one empty line after an id-only signature when editing a placeholder with buttons", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(77));
+    const result = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, "Pick", {
+      sessionLabel: "api-1",
+      buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+    });
+    expect(bodyOf(fetchMock, 0)).toMatchObject({
+      message_id: 77,
+      text: "<b>api-1</b>\n\nPick",
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]] },
+    });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
+  });
+  it("renders semantic consent body once under the main session signature and preserves purpose keyboard/thread", async () => {
+    const record = proposeConsent(
+      {
+        session: "api-1",
+        repository: "owner/repo",
+        branch: "feature/change",
+        baseBranch: "main",
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: 123,
+        approverUserId: 7,
+        manifest: {
+          version: 1,
+          repository: "owner/repo",
+          baseBranch: "main",
+          surfaces: [
+            {
+              kind: "CLI",
+              id: "run",
+              before: ["no flag"],
+              after: ["--dry-run"],
+              constraints: ["no process created"],
+            },
+          ],
+        },
+      },
+      null,
+    );
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+    await sendTelegramReply(
+      config,
+      { chatId: 123, messageThreadId: 22 },
+      `Approve scope\n\n${presentConsent(record)}`,
+      {
+        sessionLabel: "api-1 — Scope <review>",
+        buttons: [{ text: "Approve interface", callbackData: "spur_choice:purpose" }],
+      },
+    );
+    const payload = bodyOf(fetchMock, 0);
+    expect(payload).toMatchObject({
+      chat_id: 123,
+      message_thread_id: 22,
+      reply_markup: {
+        inline_keyboard: [[{ text: "Approve interface", callback_data: "spur_choice:purpose" }]],
+      },
+    });
+    expect(payload.text).toContain("<b>api-1 — Scope &lt;review&gt;</b>\n\nApprove scope");
+    if (typeof payload.text !== "string") throw new Error("missing Telegram text");
+    expect(payload.text.match(/api-1/g)).toHaveLength(1);
+    expect(payload.text).toContain("--dry-run");
+    expect(payload.text).toContain("no process created");
+  });
+
+  it("includes the signature in the first chunk limit without repeating it on continuation", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55)).mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: 123 }, "x".repeat(4096), { sessionLabel: "api-1" });
+    expect(bodyOf(fetchMock, 0)["text"]).toBe(`<b>api-1</b>\n\n${"x".repeat(4089)}`);
+    expect(bodyOf(fetchMock, 1)["text"]).toBe("x".repeat(7));
+  });
+
+  it("keeps the literal signature and separator on plain parse-error fallback", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(parseError()).mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: 123 }, "Done **today**", {
+      sessionLabel: "api-1 — <checkout>",
+    });
+    expect(bodyOf(fetchMock, 1)["text"]).toBe("api-1 — <checkout>\n\nDone **today**");
+    expect(bodyOf(fetchMock, 1)).not.toHaveProperty("parse_mode");
   });
 
   it("resends one chunk as plain text when Telegram cannot parse entities", async () => {
