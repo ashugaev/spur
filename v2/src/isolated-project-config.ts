@@ -1,7 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  ftruncateSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import type { IsolatedTelegramCredentials } from "./isolated-telegram.js";
+import { resolveProjectEnvValue } from "./config.js";
 
 const ISOLATED_WORKTREE_SYMLINKS = [
   ".env",
@@ -62,6 +72,48 @@ function isProjectConfigDocument(value: unknown): value is RawProjectConfigDocum
   return typeof value === "object" && value !== null;
 }
 
+function parseProjectConfig(
+  sourceConfig: string,
+): RawProjectConfigDocument & { projects: Record<string, RawProjectConfig> } {
+  const parsed = parseYaml(sourceConfig) as unknown;
+  if (!isProjectConfigDocument(parsed) || !parsed.projects) {
+    throw new Error("Project config must define projects");
+  }
+  return { ...parsed, projects: parsed.projects };
+}
+
+export function isolatedTelegramProjectBoundary(
+  inputPath: string,
+  project: string,
+): { selected: boolean; configuredTokens: string[] } {
+  const parsed = parseProjectConfig(readFileSync(inputPath, "utf8"));
+  if (!Object.hasOwn(parsed.projects, project)) return { selected: false, configuredTokens: [] };
+  const configuredTokens = Object.values(parsed.projects).flatMap((candidate) => {
+    const sources = candidate["sources"];
+    if (typeof sources !== "object" || sources === null) return [];
+    return Object.values(sources).flatMap((source: unknown) => {
+      if (
+        typeof source !== "object" ||
+        source === null ||
+        !("type" in source) ||
+        source.type !== "telegram" ||
+        !("token" in source) ||
+        typeof source.token !== "string"
+      )
+        return [];
+      if (typeof candidate.path !== "string" || !candidate.path.trim())
+        throw new Error("Invalid isolated Telegram project path");
+      const resolved = resolveProjectEnvValue(
+        dirname(resolve(inputPath)),
+        candidate.path.trim(),
+        source.token.trim(),
+      );
+      return resolved === undefined ? [] : [resolved];
+    });
+  });
+  return { selected: true, configuredTokens };
+}
+
 export function projectUsesCurrentRepository(
   currentWorktreePath: string,
   projectPath: unknown,
@@ -78,20 +130,35 @@ export function buildIsolatedProjectConfig(
   sourceConfig: string,
   currentWorktreePath: string,
   currentBranch?: string,
+  options?: { project: string; telegram?: IsolatedTelegramCredentials },
 ): string {
-  const parsed = parseYaml(sourceConfig) as unknown;
-  if (!isProjectConfigDocument(parsed) || !parsed.projects) {
-    throw new Error("Project config must define projects");
-  }
+  const parsed = parseProjectConfig(sourceConfig);
+  if (options && !parsed.projects[options.project]) throw new Error("Unknown isolated project");
 
   const nextProjects = Object.fromEntries(
     Object.entries(parsed.projects).map(([projectId, project]) => {
       const strippedProject = stripSidecarExcludedFields(project);
-      if (!projectUsesCurrentRepository(currentWorktreePath, project.path)) {
+      const selected = options?.project === projectId;
+      if (!selected && !projectUsesCurrentRepository(currentWorktreePath, project.path)) {
         return [projectId, strippedProject];
       }
 
       const symlinks = [...normalizeSymlinks(project.symlinks), ...ISOLATED_WORKTREE_SYMLINKS];
+      const telegram = selected ? options.telegram : undefined;
+      const sidecars = selected ? strippedProject["sidecars"] : undefined;
+      const isolatedSidecars =
+        typeof sidecars === "object" && sidecars !== null
+          ? Object.fromEntries(
+              Object.entries(sidecars).map(([name, config]) => [
+                name,
+                (name === "isolated-daemon" || name === "isolated-ui") &&
+                typeof config === "object" &&
+                config !== null
+                  ? { ...config, autoStart: false }
+                  : config,
+              ]),
+            )
+          : undefined;
 
       return [
         projectId,
@@ -100,6 +167,32 @@ export function buildIsolatedProjectConfig(
           path: resolve(currentWorktreePath),
           ...(currentBranch ? { defaultBranch: currentBranch } : {}),
           symlinks: [...new Set(symlinks)],
+          ...(isolatedSidecars ? { sidecars: isolatedSidecars } : {}),
+          ...(telegram
+            ? {
+                sources: {
+                  "tg-dev": {
+                    type: "telegram",
+                    ...telegram,
+                    autoSpawn: {
+                      enabled: true,
+                      project: projectId,
+                      ...(typeof project["defaultAgent"] === "string"
+                        ? { agent: project["defaultAgent"] }
+                        : {}),
+                      selfDestruct: { enabled: false },
+                    },
+                  },
+                },
+                triggers: {
+                  "tg-dev-message": {
+                    source: "tg-dev",
+                    event: "telegram:message",
+                    send: { interrupt: false },
+                  },
+                },
+              }
+            : {}),
         },
       ];
     }),
@@ -113,12 +206,32 @@ export function writeIsolatedProjectConfig(args: {
   outputPath: string;
   currentWorktreePath: string;
   currentBranch?: string;
+  options?: { project: string; telegram?: IsolatedTelegramCredentials };
 }): void {
   const sourceConfig = readFileSync(args.inputPath, "utf8");
   const output = buildIsolatedProjectConfig(
     sourceConfig,
     args.currentWorktreePath,
     args.currentBranch,
+    args.options,
   );
-  writeFileSync(args.outputPath, output, "utf8");
+  const fd = openSync(
+    args.outputPath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    const stat = fstatSync(fd);
+    if (
+      stat.uid !== process.getuid?.() ||
+      !stat.isFile() ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.nlink !== 1
+    )
+      throw new Error("Unsafe isolated project output");
+    ftruncateSync(fd);
+    writeFileSync(fd, output, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }

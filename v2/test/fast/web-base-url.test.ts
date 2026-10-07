@@ -1,8 +1,10 @@
-import { writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
+import type * as childProcessModule from "node:child_process";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveWebBaseUrl } from "../../src/ports.js";
 import { createTempDir } from "../helpers/common.js";
+import { publishIsolatedWebEndpoint } from "../../src/isolated-web-endpoint.js";
 
 // portLine is written between literal single quotes in the fixture script,
 // so it must contain none itself.
@@ -17,6 +19,64 @@ async function makeFakeSpurSidecar(jsonBody: string | null): Promise<string> {
 }
 
 describe("resolveWebBaseUrl", () => {
+  it("never invokes unresolved parent helper when receipt contract is selected", async () => {
+    const dir = await makeFakeSpurSidecar("[]");
+    const configPath = join(dir, "config.yaml");
+    const filePath = join(dir, "ui-endpoint.json");
+    await writeFile(configPath, "server: {port: 4321}\n");
+    await publishIsolatedWebEndpoint({ configPath, filePath, port: 5642, pid: process.pid });
+    const unresolved = vi.fn();
+    vi.doMock("node:child_process", async () => ({
+      ...(await vi.importActual<typeof childProcessModule>("node:child_process")),
+      execFile: unresolved,
+    }));
+    vi.resetModules();
+    try {
+      const fresh = await import("../../src/ports.js");
+      const env = {
+        SPUR_SESSION_TOOL_DIR: dir,
+        SPUR_ISOLATED_CONFIG: configPath,
+        SPUR_ISOLATED_UI_ENDPOINT_FILE: filePath,
+      };
+      expect(await fresh.resolveWebBaseUrl(5555, env)).toBe("http://127.0.0.1:5642");
+      expect(
+        await fresh.resolveWebBaseUrl(5555, {
+          ...env,
+          SPUR_ISOLATED_CONFIG: join(dir, "wrong.yaml"),
+        }),
+      ).toBeNull();
+      expect(unresolved).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+  it("uses own receipt immediately and never invokes parent helper or falls through on stopped receipt", async () => {
+    const dir = await createTempDir("spur-ui-endpoint-resolver-");
+    const config = join(dir, "config.yaml");
+    const file = join(dir, "ui-endpoint.json");
+    const marker = join(dir, "helper-called");
+    await writeFile(config, "server: {port: 4321}\n");
+    await writeFile(join(dir, "spur-sidecar"), `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, {
+      mode: 0o755,
+    });
+    const env = {
+      SPUR_SESSION_TOOL_DIR: dir,
+      SPUR_ISOLATED_CONFIG: config,
+      SPUR_ISOLATED_UI_ENDPOINT_FILE: file,
+    };
+    expect(await resolveWebBaseUrl(5555, env)).toBeNull();
+    await publishIsolatedWebEndpoint({
+      configPath: config,
+      filePath: file,
+      port: 5642,
+      pid: process.pid,
+    });
+    expect(await resolveWebBaseUrl(5555, env)).toBe("http://127.0.0.1:5642");
+    await writeFile(file, "{}", { mode: 0o600 });
+    expect(await resolveWebBaseUrl(5555, env)).toBeNull();
+    await expect(access(marker)).rejects.toThrow();
+  });
   it("trusts config.ui.port directly when this process has no SPUR_SESSION_TOOL_DIR (a normally-started daemon)", async () => {
     const url = await resolveWebBaseUrl(5555, {});
     expect(url).toBe("http://127.0.0.1:5555");
