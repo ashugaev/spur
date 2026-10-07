@@ -5,8 +5,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// The ports call crosses the outer instance's CLI and daemon (measured 4-12s);
-// voice runs detached from the update loop, so waiting this long blocks nothing.
+// Legacy parent-helper timeout; receipt-backed isolated launchers skip this call.
 const SIDECAR_PORTS_TIMEOUT_MS = 30_000;
 
 // Default ports, kept in a dependency-free leaf module so both the config
@@ -58,7 +57,8 @@ function isSidecarPortRow(value: unknown): value is { port: number; alive: true 
  * session-service.ts) that reservation is only made strictly *after*
  * `isolated-daemon`'s own startup call has already returned — this daemon
  * cannot observe it at startup by any means, poll or otherwise. So it
- * defers entirely to the moment of use: ask the outer session for its own
+ * defers to the moment of use: read its ready UI's private endpoint receipt.
+ * Legacy launchers without that contract ask the outer session for its own
  * authoritative `isolated-ui` reservation via
  * "$SPUR_SESSION_TOOL_DIR/spur-sidecar ports --name isolated-ui --json"
  * (the exact same reservation session-service hands to the `isolated-ui`
@@ -75,10 +75,16 @@ export async function resolveWebBaseUrl(
   if (!toolDir) {
     return `http://127.0.0.1:${uiPort}`;
   }
+  const endpointFile = env["SPUR_ISOLATED_UI_ENDPOINT_FILE"];
+  if (endpointFile !== undefined) {
+    const configPath = env["SPUR_ISOLATED_CONFIG"];
+    if (!configPath || !endpointFile) return null;
+    const { readIsolatedWebEndpoint } = await import("./isolated-web-endpoint.js");
+    return readIsolatedWebEndpoint(configPath, endpointFile);
+  }
 
-  // Isolated context past this point: uiPort (config.ui.port) is never
-  // returned again, on any path — the outer session's registry is the only
-  // source of truth, and every failure to read it is null, same as below.
+  // Legacy isolated launchers use the canonical parent reservation helper.
+  // Failed receipt reads above never reach this path or config.ui.port.
   const sidecarCli = join(toolDir, "spur-sidecar");
   try {
     accessSync(sidecarCli, constants.X_OK);
