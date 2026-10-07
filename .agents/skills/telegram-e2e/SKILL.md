@@ -49,7 +49,7 @@ SCENARIOS
 
   Each passes within 60s of the user action, with no duplicate prompt in the agent pane.
 
-  1. Agent send: spawn in the test project with "notify me in Telegram, buttons X and Y". Message starts with the session label (id and title), keyboard renders, a forum topic is created.
+  1. Agent send: spawn in test project with "notify me in Telegram, buttons X and Y". Forum answer starts with agent body, keyboard renders, topic title precedes session id. Subsequent answers omit session label; successful forum binding confirmations omit identity.
   2. Click: toast, message edited to "Selected: X", keyboard gone, agent answers.
   3. Topic reply: reply-to the agent message. Placeholder "Received. <label> is thinking..." appears, then is edited into the answer.
   4. DM spawn: plain task to the bot DM. "Spawned and bound", then the labeled answer in the DM.

@@ -3048,13 +3048,21 @@ interface ResolvedTelegramNotice {
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
-  const head = `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+  const emoji = telegramStatusEmoji(session.state);
+  const identity = `${session.id} ${session.agent}`;
   const title = sessionTitle(session);
-  if (!title) return head;
-  const name = `${head} — ${title}`;
-  return name.length > TELEGRAM_TOPIC_NAME_MAX
-    ? `${name.slice(0, TELEGRAM_TOPIC_NAME_MAX - 1).trimEnd()}…`
-    : name;
+  if (!title) return `${emoji} ${identity}`;
+  const suffix = ` — ${identity}`;
+  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
+  let topicTitle = title;
+  if (topicTitle.length > titleLimit) {
+    topicTitle =
+      topicTitle
+        .slice(0, titleLimit - 1)
+        .replace(/[\uD800-\uDBFF]$/u, "")
+        .trimEnd() + "…";
+  }
+  return `${emoji} ${topicTitle}${suffix}`;
 }
 
 export class SessionService {
@@ -7746,8 +7754,8 @@ export class SessionService {
   }
 
   /**
-   * Renames the agent's forum topic when its computed name (status emoji, id,
-   * agent, title) differs from the last name applied. The one place that calls
+   * Renames the agent's forum topic when its computed name (status emoji, title,
+   * id, agent) differs from the last name applied. The one place that calls
    * editTelegramTopic; group topics only.
    */
   private async syncTelegramTopicName(

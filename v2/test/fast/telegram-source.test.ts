@@ -422,7 +422,7 @@ describe("telegramSourceModule", () => {
       },
     });
     expect(callback.editMessageText).toHaveBeenCalledWith(
-      expect.stringContaining("Created api-new. Bound here."),
+      "Created. Bound here.",
       expect.anything(),
     );
     expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
@@ -478,7 +478,7 @@ describe("telegramSourceModule", () => {
       expect(ctx.reply).toHaveBeenCalledWith("Spawning codex agent...");
       const expected =
         outcome === "success"
-          ? "Spawned and bound: created."
+          ? "Spawned and bound."
           : outcome === "binding_failure"
             ? "Created created. Binding failed. Use /work to inspect."
             : "Spawn failed: boom <telegram-token>";
@@ -642,6 +642,10 @@ describe("telegramSourceModule", () => {
         ),
       );
       await required(bot).emitCallback(action);
+      expect(action.editMessageText).toHaveBeenCalledWith(
+        "Bound. Plain messages here go to this task.",
+        expect.anything(),
+      );
       expect(emit).not.toHaveBeenCalled();
       await required(bot).emitText(telegramContext({ text: "next instruction" }));
       expect(emit).toHaveBeenCalledWith(
@@ -1017,9 +1021,7 @@ describe("telegramSourceModule", () => {
 
     const watchCtx = telegramContext({ text: "/watch api-1" });
     await bot.emitText(watchCtx);
-    expect(watchCtx.reply).toHaveBeenCalledWith(
-      "Bound this Telegram thread to Spur session api-1.",
-    );
+    expect(watchCtx.reply).toHaveBeenCalledWith("Bound this Telegram thread.");
 
     await bot.emitText(telegramContext());
 
@@ -1688,10 +1690,8 @@ describe("telegramSourceModule", () => {
       editMessageText,
     });
 
-    expect(answerCallbackQuery).toHaveBeenCalledWith("Bound api-2.");
-    expect(editMessageText).toHaveBeenCalledWith(
-      "Bound this Telegram thread to Spur session api-2.",
-    );
+    expect(answerCallbackQuery).toHaveBeenCalledWith("Bound.");
+    expect(editMessageText).toHaveBeenCalledWith("Bound this Telegram thread.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-2"');
   });
@@ -1733,6 +1733,30 @@ describe("telegramSourceModule", () => {
     ]);
     expect(readTelegramReplyTarget(dataDir, "api-2")).not.toHaveProperty("messageThreadId");
   });
+
+  it.each([123, -1001])(
+    "watch commands and callbacks retain identity outside forum topics: %s",
+    async (chatId) => {
+      const dataDir = await createTempDir("spur-telegram-watch-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir);
+      const ctx = telegramContext({
+        text: "/watch api-1",
+        chat: { id: chatId },
+        is_topic_message: false,
+      });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith("Bound this Telegram thread to Spur session api-1.");
+      const callback = cardCallback("spur_watch:api-2", {
+        message: { message_id: 700, chat: { id: chatId }, message_thread_id: 400 },
+      });
+      await required(bot).emitCallback(callback);
+      expect(callback.answerCallbackQuery).toHaveBeenCalledWith("Bound api-2.");
+      expect(callback.editMessageText).toHaveBeenCalledWith(
+        "Bound this Telegram thread to Spur session api-2.",
+      );
+    },
+  );
 
   it("routes inbound messages to agent-created topic bindings after startup", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -1878,7 +1902,9 @@ describe("telegramSourceModule", () => {
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning codex agent...");
-    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
+    expect(promptCtx.reply).toHaveBeenCalledWith(
+      isTopic ? "Spawned and bound." : "Spawned and bound: api-3.",
+    );
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "api-3"');
   });
@@ -1998,8 +2024,8 @@ describe("telegramSourceModule", () => {
     // callback ctx's `api`, not re-sent as a second `reply` — proves the
     // project-pick path's `replyShim` now forwards `api` like the direct
     // `/spawn <agent> <task>` path does.
-    expect(editMessageText).toHaveBeenCalledWith(-1001, 77, "Spawned and bound: api-3.");
-    expect(reply).not.toHaveBeenCalledWith("Spawned and bound: api-3.");
+    expect(editMessageText).toHaveBeenCalledWith(-1001, 77, "Spawned and bound.");
+    expect(reply).not.toHaveBeenCalledWith("Spawned and bound.");
   });
 
   it("asks for a prompt after a spawn callback", async () => {
@@ -2068,7 +2094,7 @@ describe("telegramSourceModule", () => {
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
     expect(promptCtx.reply).toHaveBeenCalledWith("Spawning claude agent...");
-    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound: api-3.");
+    expect(promptCtx.reply).toHaveBeenCalledWith("Spawned and bound.");
   });
 
   it("surfaces spawn progress and result", async () => {
@@ -2103,7 +2129,7 @@ describe("telegramSourceModule", () => {
     });
 
     expect(reply).toHaveBeenNthCalledWith(1, "Spawning codex agent...");
-    expect(reply).toHaveBeenNthCalledWith(2, "Spawned and bound: api-3.");
+    expect(reply).toHaveBeenNthCalledWith(2, "Spawned and bound.");
     expect(reply).toHaveBeenCalledTimes(2);
   });
 
@@ -3513,7 +3539,7 @@ describe("telegramSourceModule", () => {
     expect(spawnSession.mock.calls[0]?.[0]?.prompt).toContain(
       '"$SPUR_SESSION_TOOL_DIR/spur" source reply "<message>"',
     );
-    expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound: shp-1.");
+    expect(ctx.reply).toHaveBeenCalledWith("Spawned and bound.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-1"');
   });
@@ -3603,7 +3629,7 @@ describe("telegramSourceModule", () => {
 
     expect(spawnSession).toHaveBeenCalledTimes(1);
     expect(textCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining("is gone. Unbound."));
-    expect(textCtx.reply).toHaveBeenCalledWith("Spawned and bound: shp-3.");
+    expect(textCtx.reply).toHaveBeenCalledWith("Spawned and bound.");
     const statePath = join(dataDir, "source-state", "telegram", "api", "telegram.json");
     await expect(readFile(statePath, "utf8")).resolves.toContain('"sessionId": "shp-3"');
     await expect(readFile(statePath, "utf8")).resolves.not.toContain('"sessionId": "api-1"');
@@ -3681,7 +3707,7 @@ describe("telegramSourceModule", () => {
     await bot.emitText(ctx2);
 
     expect(spawnSession).toHaveBeenCalledTimes(2);
-    expect(ctx2.reply).toHaveBeenCalledWith("Spawned and bound: shp-4.");
+    expect(ctx2.reply).toHaveBeenCalledWith("Spawned and bound.");
   });
 
   it("keeps command and pending-spawn paths ahead of autoSpawn", async () => {
