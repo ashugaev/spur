@@ -140,7 +140,11 @@ printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] 
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
 printf '  %-14s %s\n' "agent-skills"  "$([ -e "$HOME/.claude/skills" ] || [ -e "$HOME/.codex" ] && echo leftover || echo clean)"
-repo_leftover=$(ls -d "$HOME"/*/.git 2>/dev/null | head -1)
+repo_leftover=""
+for d in "$HOME"/*/; do
+  [ -L "${d%/}" ] && continue
+  if [ -e "${d}.git" ]; then repo_leftover=$d; fi
+done
 printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] || [ -e "$HOME/spur-smoke" ] || [ -n "$repo_leftover" ] && echo leftover || echo clean)"
 printf '  %-14s %s\n' "agent-procs"   "$(pgrep -u "$(id -u)" -x 'claude|codex|opencode|tmux: server' >/dev/null && echo leftover || echo clean)"
 log "done"
