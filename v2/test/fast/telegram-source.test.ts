@@ -3447,7 +3447,9 @@ describe("telegramSourceModule voice notes", () => {
     expect(voiceCtx.reply).not.toHaveBeenCalledWith(
       expect.stringContaining("Voice transcription failed"),
     );
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed:"));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("telegram voice transcription failed:"),
+    );
     expect(emit).not.toHaveBeenCalled();
     expect(spawnSession).not.toHaveBeenCalled();
   });
@@ -3620,19 +3622,60 @@ describe("telegramSourceModule voice notes", () => {
     expect(voiceCtx.api.editMessageText).not.toHaveBeenCalled();
   });
 
-  it("A10: a rejected reply on the failure path logs a redacted warning with no unhandled rejection", async () => {
+  it("routes a trimmed transcript once when its echo edit and fallback reply reject", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
-    const { bot, logger } = await startSource(dataDir);
+    const { bot, emit, spawnSession, logger } = await startSource(dataDir);
     if (!bot) throw new Error("missing bot");
     await bot.emitText(telegramContext({ text: "/watch api-1" }));
 
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    vi.stubGlobal("fetch", mockTranscribeFetch("  fix the sidecar  "));
+    const voiceCtx = telegramVoiceContext();
+    voiceCtx.api.editMessageText.mockRejectedValue(new Error("edit failed token-123"));
+    voiceCtx.reply.mockResolvedValueOnce({ message_id: 55 });
+    voiceCtx.reply.mockRejectedValueOnce(new Error("reply failed token-123"));
+    voiceCtx.reply.mockRejectedValue(new Error("routing ack failed"));
+
+    await bot.emitVoice(voiceCtx);
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("telegram:message", {
+      sessionId: "api-1",
+      chatId: -1001,
+      messageThreadId: 22,
+      userId: 123,
+      username: "alek",
+      messageId: 10,
+      text: "fix the sidecar",
+    });
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(voiceCtx.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      55,
+      'Heard: "fix the sidecar"',
+    );
+    expect(voiceCtx.reply).toHaveBeenCalledWith('Heard: "fix the sidecar"');
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[source:api/telegram] telegram voice echo failed: reply failed <telegram-token>",
+    );
+    expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
+  });
+
+  it("A10: logs the redacted transcription error before a rejected failure notice without unhandled rejection", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, logger, emit, spawnSession } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down token-123")));
     const voiceCtx = telegramVoiceContext();
     voiceCtx.api.editMessageText.mockRejectedValue(new Error("edit failed"));
     voiceCtx.reply.mockImplementation((text: string) => {
       if (text === "Transcribing voice message...") return Promise.resolve({ message_id: 55 });
-      return Promise.reject(new Error("reply failed"));
+      return Promise.reject(new Error("reply failed token-123"));
     });
 
     let unhandled = false;
@@ -3643,9 +3686,22 @@ describe("telegramSourceModule voice notes", () => {
     try {
       await bot.emitVoice(voiceCtx);
       await vi.waitFor(() =>
-        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed:")),
+        expect(logger.warn).toHaveBeenCalledWith(
+          "[source:api/telegram] telegram voice failure notice failed: reply failed <telegram-token>",
+        ),
       );
       await new Promise((resolve) => setImmediate(resolve));
+      expect(logger.warn.mock.calls).toEqual([
+        [
+          "[source:api/telegram] telegram voice transcription failed: network down <telegram-token>",
+        ],
+        [
+          "[source:api/telegram] telegram voice failure notice failed: reply failed <telegram-token>",
+        ],
+      ]);
+      expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
+      expect(emit).not.toHaveBeenCalled();
+      expect(spawnSession).not.toHaveBeenCalled();
       expect(unhandled).toBe(false);
     } finally {
       process.removeListener("unhandledRejection", onUnhandled);
@@ -3718,7 +3774,7 @@ describe("telegramSourceModule voice notes", () => {
     );
   });
 
-  it("A1-G7: an abort landing while the echo reply is in flight emits nothing and spawns nothing", async () => {
+  it.each(["resolve", "reject"])("suppresses routing on echo %s after abort", async (result) => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     const emit = vi.fn();
@@ -3749,17 +3805,22 @@ describe("telegramSourceModule voice notes", () => {
     vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
 
     let resolveEcho: (() => void) | undefined;
-    const pendingEcho = new Promise<void>((resolve) => {
+    let rejectEcho: ((error: Error) => void) | undefined;
+    const pendingEcho = new Promise<void>((resolve, reject) => {
       resolveEcho = resolve;
+      rejectEcho = reject;
     });
     const voiceCtx = telegramVoiceContext();
     voiceCtx.api.editMessageText.mockImplementation(() => pendingEcho);
+    voiceCtx.reply.mockResolvedValueOnce({ message_id: 55 });
+    voiceCtx.reply.mockRejectedValue(new Error("echo fallback failed"));
 
     await bot.emitVoice(voiceCtx);
     await vi.waitFor(() => expect(voiceCtx.api.editMessageText).toHaveBeenCalled());
 
     controller.abort();
-    resolveEcho?.();
+    if (result === "resolve") resolveEcho?.();
+    else rejectEcho?.(new Error("echo edit failed"));
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
 

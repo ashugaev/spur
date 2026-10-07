@@ -1566,18 +1566,20 @@ async function transcribeAndRoute(
   try {
     transcript = await transcribeTelegramVoice(ctx, deps, webBaseUrl);
   } catch (error) {
-    if (isAborted(deps)) {
-      // An abort-cancelled fetch must not reply during shutdown, but the
-      // failure still gets logged so it isn't silent in the daemon's own log.
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
-      );
-    } else {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice transcription failed: ${redactedErrorText(deps, error)}`,
+    );
+    if (isAborted(deps)) return;
+    try {
       await editOrReply(
         ctx,
         message.chat.id,
         statusMessageId,
         `Voice transcription failed: ${redactedErrorText(deps, error)}`,
+      );
+    } catch (noticeError) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failure notice failed: ${redactedErrorText(deps, noticeError)}`,
       );
     }
     return;
@@ -1595,7 +1597,13 @@ async function transcribeAndRoute(
     return;
   }
 
-  await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+  try {
+    await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
+    );
+  }
   if (isAborted(deps)) return;
 
   await routeTelegramPrompt(runtime, ctx, message, from, trimmed);
