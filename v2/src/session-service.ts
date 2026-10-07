@@ -14361,7 +14361,20 @@ export class SessionService {
       const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
         const current = readSession(this.config.dataDir, sessionId);
         if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-        if (expectedLifecycle && !this.lifecycleStateMatches(current, expectedLifecycle)) {
+        const parkedDuringProbe =
+          expectedLifecycle?.status === "running" &&
+          isStaleParked(current) &&
+          current.agentLaunchId === hint.agentLaunchId &&
+          this.lifecycleStateMatches(current, {
+            ...expectedLifecycle,
+            status: "stopped",
+            stopReason: "stale_timeout",
+          });
+        if (
+          expectedLifecycle &&
+          !this.lifecycleStateMatches(current, expectedLifecycle) &&
+          !parkedDuringProbe
+        ) {
           return null;
         }
         if (current.tmuxSession !== hint.tmuxSession) {

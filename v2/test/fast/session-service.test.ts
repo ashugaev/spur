@@ -10458,15 +10458,22 @@ describe("SessionService", () => {
       ["explicit send", "pause during probe"],
       ["explicit send", "no pause"],
       ["explicit send", "stopped at start"],
+      ["explicit send", "stale park"],
+      ["explicit send", "stale replacement launch"],
+      ["explicit send", "stale replacement pane"],
     ] as const)(
       "guards dead-pane queued recovery: %s, %s (issue #907 P1)",
       async (caller, scenario) => {
+        const staleTransition = scenario.startsWith("stale ");
+        const standsDown =
+          scenario === "pause during probe" || scenario.startsWith("stale replacement");
         mockClaudeJsonlState("waiting");
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
           runningSession({
             agentSessionId: "session-uuid",
+            agentLaunchId: "launch-before-probe",
             ...(scenario === "stopped at start"
               ? { status: "stopped", stopReason: "manual_pause" }
               : {}),
@@ -10508,10 +10515,22 @@ describe("SessionService", () => {
             status: "stopped",
             stopReason: "manual_pause",
           });
+        } else if (staleTransition) {
+          const current = sessions.get("api-1");
+          if (!current) throw new Error("Expected running session");
+          sessions.set("api-1", {
+            ...current,
+            status: "stopped",
+            stopReason: "stale_timeout",
+            ...(scenario === "stale replacement launch"
+              ? { agentLaunchId: "replacement-launch" }
+              : {}),
+            ...(scenario === "stale replacement pane" ? { tmuxSession: "replacement-pane" } : {}),
+          });
         }
         releaseProbe();
         const result = await delivery;
-        if (scenario === "pause during probe") {
+        if (standsDown) {
           expect(createTmuxSessionMock).not.toHaveBeenCalled();
           expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
           expect(logSpurEventMock).not.toHaveBeenCalledWith(
@@ -10520,13 +10539,13 @@ describe("SessionService", () => {
           );
           expect(sessions.get("api-1")).toMatchObject({
             status: "stopped",
-            stopReason: "manual_pause",
+            stopReason: staleTransition ? "stale_timeout" : "manual_pause",
             queuedMessages: { messages: ["queued body"] },
           });
           if (caller === "explicit send") {
             expect(result).toMatchObject({
               status: "stopped",
-              stopReason: "manual_pause",
+              stopReason: staleTransition ? "stale_timeout" : "manual_pause",
               queuedMessages: { messages: ["queued body"] },
             });
           }
