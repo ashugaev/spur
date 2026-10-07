@@ -20,20 +20,35 @@ WEB_PID=""
 
 ensure_workspace_deps
 
+ENDPOINT_HELPER="$SCRIPT_DIR/../v2/bin/isolated-web-endpoint.mjs"
+RUNTIME_DEADLINE=$((SECONDS + 30))
+DAEMON_LIFECYCLE_ID=""
+validate_daemon_generation() {
+  node "$ENDPOINT_HELPER" --daemon-ready \
+    "${SPUR_ISOLATED_CONFIG:-}" "${SPUR_ISOLATED_UI_ENDPOINT_FILE:-}" \
+    "${SPUR_ISOLATED_DATA_DIR:-}" "${SPUR_ISOLATED_DAEMON_URL:-}" \
+    "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}" "${SPUR_ISOLATED_DAEMON_PID:-}" \
+    "${SPUR_ISOLATED_DAEMON_STARTTIME:-}" "$@"
+}
 for _ in $(seq 1 30); do
-  if [[ -f "$RUNTIME_FILE" ]]; then
-    break
+  (( SECONDS < RUNTIME_DEADLINE )) || break
+  unset SPUR_ISOLATED_CONFIG SPUR_ISOLATED_UI_ENDPOINT_FILE SPUR_ISOLATED_DATA_DIR \
+    SPUR_ISOLATED_DAEMON_URL SPUR_ISOLATED_TMUX_SOCKET_NAME SPUR_ISOLATED_DAEMON_PID \
+    SPUR_ISOLATED_DAEMON_STARTTIME SPUR_ISOLATED_PROJECT_CONFIG SPUR_ISOLATED_SOURCE_WORKTREE
+  if [[ -f "$RUNTIME_FILE" ]] && RUNTIME_SNAPSHOT="$(<"$RUNTIME_FILE")" 2>/dev/null; then
+    # Source this one snapshot; do not re-read after validation.
+    # shellcheck source=/dev/null
+    if source /dev/stdin <<<"$RUNTIME_SNAPSHOT" 2>/dev/null && DAEMON_LIFECYCLE_ID="$(validate_daemon_generation 2>/dev/null)"; then
+      break
+    fi
   fi
+  (( SECONDS < RUNTIME_DEADLINE )) || break
   sleep 1
 done
-
-if [[ ! -f "$RUNTIME_FILE" ]]; then
-  echo "Missing isolated runtime file: $RUNTIME_FILE" >&2
+if [[ -z "$DAEMON_LIFECYCLE_ID" ]]; then
+  echo "Timed out waiting for current isolated daemon runtime" >&2
   exit 1
 fi
-
-# shellcheck source=/dev/null
-source "$RUNTIME_FILE"
 
 UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")
 
@@ -71,6 +86,12 @@ setsid env -u npm_config_virtual_store_dir \
 WEB_PID=$!
 
 wait_for_http "http://127.0.0.1:$UI_PORT" 180
+if ! validate_daemon_generation "$DAEMON_LIFECYCLE_ID" >/dev/null; then
+  echo "Isolated daemon generation changed during UI startup" >&2
+  exit 1
+fi
+node "$SCRIPT_DIR/../v2/bin/isolated-web-endpoint.mjs" \
+  "$SPUR_ISOLATED_CONFIG" "$SPUR_ISOLATED_UI_ENDPOINT_FILE" "$UI_PORT" "$$"
 for _ in $(seq 1 5); do
   restore_next_type_files
   sleep 1
