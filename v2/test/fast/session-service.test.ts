@@ -674,6 +674,8 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  readInterfaceConsent: vi.fn(),
+  writeInterfaceConsent: vi.fn(),
   writeTelegramOffer: writeTelegramOfferMock,
   telegramBindingKey: (chatId: number, messageThreadId?: number) =>
     `${chatId}:${messageThreadId ?? "main"}`,
@@ -4653,6 +4655,104 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("workbench launch options shares daemon/project/explicit agent precedence and configured modes", async () => {
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue(config);
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api" })).resolves.toMatchObject({
+      agent: "claude",
+      mode: null,
+      modes: [],
+    });
+    const project = service.config.projects.api;
+    if (!project) throw new Error("Missing fixture project");
+    project.defaultAgent = "codex";
+    project.modes = {
+      manager: { skill: "manager", default: true },
+      worker: { skill: "developer" },
+    };
+    await expect(service.launchOptions({ project: "api" })).resolves.toEqual({
+      project: "api",
+      agent: "codex",
+      model: null,
+      mode: "manager",
+      modes: ["manager", "worker"],
+    });
+    await expect(
+      service.launchOptions({ project: "api", agent: "opencode", mode: "worker" }),
+    ).resolves.toMatchObject({
+      agent: "opencode",
+      model: null,
+      mode: "worker",
+    });
+    await expect(service.launchOptions({ project: "api", mode: "removed" })).rejects.toThrow(
+      "Unknown mode",
+    );
+    await expect(service.launchOptions({ project: "removed" })).rejects.toThrow();
+  });
+
+  it("workbench launch options matches Cursor spawn's model rewritten by inherited reasoning", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          defaultAgent: "cursor",
+          defaultModels: { cursor: "family-high" },
+          reasoningEffort: { cursor: "xhigh" },
+        },
+      },
+    });
+    resolveAgentReasoningEffortMock.mockImplementation(
+      async (agent: string, model: string | undefined, effort: string) => {
+        expect(agent).toBe("cursor");
+        expect(["family-high", "family-xhigh"]).toContain(model);
+        expect(effort).toBe("xhigh");
+        return { model: "family-xhigh", reasoningEffort: "xhigh" };
+      },
+    );
+    createSessionStore();
+    const service = await createDisposedSessionService();
+    const displayed = await service.launchOptions({ project: "api" });
+    expect(displayed.model).toBe("family-xhigh");
+    if (displayed.model === null) throw new Error("Missing fixture launch model");
+    await service.spawn({
+      project: "api",
+      agent: displayed.agent,
+      model: displayed.model,
+      prompt: "task",
+    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.any(String),
+      expect.objectContaining({ model: displayed.model, reasoningEffort: "xhigh" }),
+    );
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith("cursor", "family-high", "xhigh", {
+      codexHomePath: service.config.models.codexHome,
+    });
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+      "cursor",
+      "family-xhigh",
+      "xhigh",
+      { codexHomePath: service.config.models.codexHome },
+    );
+  });
+
+  it("workbench launch options rejects unsupported inherited reasoning without dropping it", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: { api: { ...baseConfig().projects.api, reasoningEffort: { cursor: "xhigh" } } },
+    });
+    resolveAgentReasoningEffortMock.mockRejectedValueOnce(
+      new Error("unsupported reasoning effort"),
+    );
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api", agent: "cursor" })).rejects.toThrow(
+      "unsupported reasoning effort",
+    );
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces a missing OpenCode executable before creating a worktree", async () => {
     validateOpenCodeModelMock.mockRejectedValueOnce(
       new Error(
@@ -7880,8 +7980,11 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      "api-1\nhello",
-      expect.objectContaining({ topicName: expect.stringContaining("api-1 claude") }),
+      "hello",
+      expect.objectContaining({
+        sessionLabel: "api-1",
+        topicName: expect.stringContaining("api-1 claude"),
+      }),
     );
     expect(result).toEqual({
       ok: true,
@@ -7960,8 +8063,8 @@ describe("SessionService", () => {
       expect(sendTelegramReplyMock).toHaveBeenCalledWith(
         telegramSource,
         expect.objectContaining({ chatId: -1001 }),
-        "api-1 — Fix login\nhello",
-        expect.anything(),
+        "hello",
+        expect.objectContaining({ sessionLabel: "api-1 — Fix login" }),
       );
       expect(recordTelegramMessagesMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
@@ -7971,6 +8074,62 @@ describe("SessionService", () => {
         [91, 92],
       );
     });
+
+    it.each(["sent", "failed"] as const)(
+      "preserves consent buttons and separate session label when delivery is %s",
+      async (delivery) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor());
+        const { service } = await serviceWithTelegramSession("Review interface");
+        const consentModule = await import("../../src/review-interface-consent.js");
+        const metadata = await import("../../src/metadata.js");
+        vi.spyOn(consentModule, "reconcileInterfaceConsent").mockResolvedValue(undefined);
+        vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+          repositories: ["owner/repo"],
+          approverUserId: 123,
+        });
+        vi.spyOn(consentModule, "repositoryOf").mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+        const readConsent = vi.spyOn(metadata, "readInterfaceConsent").mockReturnValue(null);
+        vi.spyOn(metadata, "writeInterfaceConsent").mockImplementation((_dir, consent) => {
+          readConsent.mockReturnValue(consent);
+        });
+        const failure = new Error("Telegram unavailable");
+        if (delivery === "failed") sendTelegramReplyMock.mockRejectedValueOnce(failure);
+        else sendTelegramReplyMock.mockResolvedValueOnce({ messageIds: [91] });
+
+        const result = service.replyToSource("api-1", {
+          message: "Review this interface",
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              { kind: "CLI", id: "run", before: [], after: ["--dry-run"], constraints: [] },
+            ],
+          },
+        });
+        if (delivery === "failed") await expect(result).rejects.toThrow(failure);
+        else await result;
+
+        expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.stringMatching(/^Review this interface\n\n/),
+          expect.objectContaining({
+            sessionLabel: "api-1 — Review interface",
+            buttons: [
+              expect.objectContaining({ text: "Approve interface" }),
+              expect.objectContaining({ text: "Reject interface" }),
+              expect.objectContaining({ text: "Revoke interface approval" }),
+            ],
+          }),
+        );
+        expect(metadata.writeInterfaceConsent).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery }),
+        );
+      },
+    );
 
     it("keeps a placeholder recorded while the reply was in flight", async () => {
       readTelegramReplyTargetMock
@@ -8601,8 +8760,9 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.anything(),
-      "api-1\nDeploy now?",
+      "Deploy now?",
       expect.objectContaining({
+        sessionLabel: "api-1",
         buttons: [
           { text: "Yes", callbackData: `spur_choice:${stored[0]?.token}` },
           { text: "Later", callbackData: `spur_choice:${stored[1]?.token}` },
@@ -8722,8 +8882,8 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: 4242 }),
-      "api-1\nheads up",
-      expect.anything(),
+      "heads up",
+      expect.objectContaining({ sessionLabel: "api-1" }),
     );
     expect(result).toEqual(
       expect.objectContaining({ sessionId: "api-1", sourceId: "agentChat", chatId: 4242 }),

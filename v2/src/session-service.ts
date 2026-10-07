@@ -459,6 +459,7 @@ import {
   type SessionPrBinding,
   type ProjectListEntry,
   type SpawnDefaultsResponse,
+  type SessionLaunchOptions,
   type PreflightRequest,
   type PreflightResponse,
   type PreflightTokenUsageView,
@@ -2640,6 +2641,14 @@ const SPUR_DEFAULT_MODELS: Partial<Record<AgentName, string>> = {
   claude: DEFAULT_CLAUDE_MODEL,
   cursor: DEFAULT_CURSOR_MODEL,
 };
+
+function resolveSpawnAgent(
+  requestedAgent: string | undefined,
+  project: ProjectConfig,
+  config: AppConfig,
+): AgentName {
+  return parseAgentName(requestedAgent ?? project.defaultAgent ?? config.defaultAgent);
+}
 
 // A model only ever applies to the agent it belongs to. An explicit request
 // model wins; otherwise the project defaultModels entry for the resolved agent
@@ -5519,6 +5528,29 @@ export class SessionService {
       model: model ?? null,
       reasoningEffort: project.reasoningEffort?.[agent] ?? null,
       worktree: resolveSpawnWorktree(project, undefined),
+    };
+  }
+
+  async launchOptions(request: {
+    project: string;
+    agent?: AgentName;
+    mode?: string;
+  }): Promise<SessionLaunchOptions> {
+    const project = this.getProject(request.project);
+    const agent = resolveSpawnAgent(request.agent, project, this.config);
+    const mode = resolveSessionMode(request.mode, project.modes);
+    const selection = await resolveSpawnRequestLaunchSelection(
+      { project: request.project, agent },
+      project,
+      agent,
+      this.config.models.codexHome,
+    );
+    return {
+      project: request.project,
+      agent,
+      model: selection.model ?? null,
+      mode: mode?.name ?? null,
+      modes: Object.keys(project.modes ?? {}),
     };
   }
 
@@ -10452,9 +10484,7 @@ export class SessionService {
     requestedAgent?: string,
   ): Promise<AgentSuggestionsResponse> {
     const project = this.getProject(projectId);
-    const agent = parseAgentName(
-      requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
-    );
+    const agent = resolveSpawnAgent(requestedAgent, project, this.config);
     return loadProjectSuggestions(agent, project.path);
   }
 
@@ -10999,7 +11029,7 @@ export class SessionService {
       throw new Error("prompt must be a non-empty string");
     }
     const project = this.getProject(request.project);
-    const agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+    const agent = resolveSpawnAgent(request.agent, project, this.config);
     const overrides = parseSpawnOverrides(request.overrides, "overrides");
     const worktree = resolveSpawnWorktree(project, overrides);
     const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
@@ -11450,7 +11480,7 @@ export class SessionService {
       worktree = resolveSpawnWorktree(project, overrides);
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
-      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      agent = resolveSpawnAgent(request.agent, project, this.config);
       launchSelection =
         options?.validatedLaunchSelection ??
         (await resolveSpawnRequestLaunchSelection(
@@ -12465,7 +12495,7 @@ export class SessionService {
       worktree = resolveSpawnWorktree(project, overrides);
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
-      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      agent = resolveSpawnAgent(request.agent, project, this.config);
       launchSelection = await resolveSpawnRequestLaunchSelection(
         request,
         project,
@@ -12624,9 +12654,7 @@ export class SessionService {
           id: sessionId,
           project: request.project,
           workspaceId: erroredWorkspaceId,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent: agent ?? resolveSpawnAgent(request.agent, project, this.config),
           prompt,
           branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
           ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
@@ -13752,8 +13780,9 @@ export class SessionService {
     const result = await sendTelegramReply(
       source,
       target,
-      `${telegramSessionLabel(view)}\n${message}${consent ? `\n\n${presentConsent(consent)}` : ""}`,
+      `${message}${consent ? `\n\n${presentConsent(consent)}` : ""}`,
       {
+        sessionLabel: telegramSessionLabel(view),
         topicName: telegramTopicName(view),
         ...(choices.length > 0
           ? {

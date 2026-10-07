@@ -4,6 +4,9 @@ import {
   type AgentName,
   type SelfDestructConfig,
   type SessionRecord,
+  type SessionLaunchOptions,
+  type SessionState,
+  type SessionStatus,
   type SourceConfig,
   type SourceType,
   type TelegramSpawnOrigin,
@@ -37,9 +40,39 @@ export interface SourceSpawnSessionRequest {
   prompt?: string;
   agent?: AgentName;
   model?: string;
+  mode?: string;
   selfDestruct?: SelfDestructConfig;
   /** Chat the spawn came from; becomes the session's reply target before the agent can speak. */
   telegramOrigin?: TelegramSpawnOrigin;
+}
+
+export type SourceLaunchOptions = SessionLaunchOptions;
+
+export interface SourceWorkSessionItem extends SourceSessionListItem {
+  agent: AgentName;
+  state: SessionState;
+  status: SessionStatus;
+  lastActivityAt: string;
+  runtimeAlive: boolean;
+  canContinue: boolean;
+  restorable: boolean;
+  mode?: string;
+  model: string | null;
+  prUrl?: string;
+}
+
+export interface SourceWorkbench {
+  launchOptions(request: {
+    project: string;
+    agent?: AgentName;
+    mode?: string;
+  }): Promise<SourceLaunchOptions>;
+  listSessions(): Promise<SourceWorkSessionItem[]>;
+  getSession(sessionId: string): Promise<SourceWorkSessionItem>;
+  restoreSession(request: {
+    sessionId: string;
+    expectedProject: string;
+  }): Promise<SourceWorkSessionItem>;
 }
 
 export interface SourceProjectListItem {
@@ -54,6 +87,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   config: TConfig;
   deferInitialSync?: boolean;
   listSessions?(): Promise<SourceSessionListItem[]>;
+  workbench?: SourceWorkbench;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;

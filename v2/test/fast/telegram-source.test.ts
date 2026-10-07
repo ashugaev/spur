@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import type {
   SourceProjectListItem,
   SourceSessionListItem,
+  SourceWorkbench,
+  SourceWorkSessionItem,
 } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
@@ -75,6 +77,11 @@ const { parseTelegramCommand, telegramSourceModule, wrapTelegramSpawnPrompt } =
   await import("../../src/event-sources/telegram.js");
 
 const tempDirs: string[] = [];
+
+function required<T>(value: T | undefined | null): T {
+  if (value === undefined || value === null) throw new Error("Missing test fixture");
+  return value;
+}
 
 function telegramContext(overrides: Record<string, unknown> = {}) {
   const { updateId, ...messageOverrides } = overrides;
@@ -154,6 +161,9 @@ async function startSource(
     config?: Record<string, unknown>;
     webBaseUrl?: string | null;
     resolveWebBaseUrl?: () => Promise<string | null>;
+    workbench?: SourceWorkbench;
+    signal?: AbortSignal;
+    spawnSession?: null;
   } = {},
 ) {
   const listSessions =
@@ -193,11 +203,12 @@ async function startSource(
       ...overrides.config,
     },
     emit,
-    signal: new AbortController().signal,
+    signal: overrides.signal ?? new AbortController().signal,
     logger,
     listSessions,
     ...(listProjects ? { listProjects } : {}),
-    spawnSession,
+    ...(overrides.spawnSession === null ? {} : { spawnSession }),
+    ...(overrides.workbench ? { workbench: overrides.workbench } : {}),
     resolveWebBaseUrl:
       overrides.resolveWebBaseUrl ??
       (() =>
@@ -277,6 +288,104 @@ describe("wrapTelegramSpawnPrompt", () => {
 });
 
 describe("telegramSourceModule", () => {
+  function workbenchFixture() {
+    const sessions: SourceWorkSessionItem[] = [
+      {
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        state: "needs_input",
+        status: "running",
+        runtimeAlive: true,
+        canContinue: true,
+        restorable: false,
+        lastActivityAt: "2026-10-04T12:00:00Z",
+        model: null,
+      },
+      {
+        id: "api-2",
+        project: "api",
+        agent: "claude",
+        state: "stopped",
+        status: "stopped",
+        runtimeAlive: false,
+        canContinue: false,
+        restorable: true,
+        lastActivityAt: "2026-10-04T11:00:00Z",
+        model: "auto",
+      },
+    ];
+    const capability = {
+      launchOptions: vi.fn(
+        async ({
+          project,
+          agent = "codex",
+          mode,
+        }: Parameters<SourceWorkbench["launchOptions"]>[0]) => ({
+          project,
+          agent,
+          model: agent === "codex" ? null : "auto",
+          mode: mode ?? "manager",
+          modes: ["manager", "developer"],
+        }),
+      ),
+      listSessions: vi.fn(async () => sessions),
+      getSession: vi.fn(async (id: string) => {
+        const session = sessions.find((entry) => entry.id === id);
+        if (!session) throw new Error("Session unavailable");
+        return session;
+      }),
+      restoreSession: vi.fn(
+        async ({ sessionId }: Parameters<SourceWorkbench["restoreSession"]>[0]) => {
+          const session = required(sessions.find((entry) => entry.id === sessionId));
+          session.canContinue = true;
+          session.restorable = false;
+          session.runtimeAlive = true;
+          session.status = "running";
+          session.state = "working";
+          return session;
+        },
+      ),
+    } satisfies SourceWorkbench;
+    return { sessions, capability };
+  }
+
+  function cardButton(mock: { mock: { calls: unknown[][] } }, text: string): string {
+    for (const call of [...mock.mock.calls].reverse()) {
+      const options = call[1] as ReplyMarkupOptions | undefined;
+      const button = options?.reply_markup?.inline_keyboard
+        .flat()
+        .find((entry) => entry.text === text);
+      if (button) return button.callback_data;
+    }
+    throw new Error(`No card button ${text}`);
+  }
+
+  function cardCallback(data: string, overrides: Record<string, unknown> = {}) {
+    return {
+      callbackQuery: {
+        data,
+        from: { id: 123 },
+        message: {
+          message_id: 700,
+          chat: { id: -1001 },
+          message_thread_id: 22,
+          is_topic_message: true,
+        },
+        ...overrides,
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText: vi.fn().mockResolvedValue(undefined),
+      reply: vi.fn().mockResolvedValue({ message_id: 701 }),
+    };
+  }
+
+  async function openWorkbench(bot: FakeBot, text: string) {
+    const ctx = telegramContext({ text });
+    ctx.reply.mockResolvedValue({ message_id: 700 });
+    await bot.emitText(ctx);
+    return ctx;
+  }
   beforeEach(() => {
     botInstances.splice(0);
     runMock.mockReset();
@@ -403,6 +512,622 @@ describe("telegramSourceModule", () => {
       }
     },
   );
+
+  it("workbench /new task plus project tap submits displayed defaults once with multiline task and origin", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "api-new", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    const ctx = await openWorkbench(
+      required(bot),
+      "/new@SpurProjectsBot Fix checkout\nKeep compatibility",
+    );
+    expect(spawn).not.toHaveBeenCalled();
+    const callback = cardCallback(cardButton(ctx.reply, "Launch api"));
+    await required(bot).emitCallback(callback);
+    await required(bot).emitCallback(cardCallback(callback.callbackQuery.data));
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn).toHaveBeenCalledWith({
+      project: "api",
+      agent: "codex",
+      mode: "manager",
+      prompt: wrapTelegramSpawnPrompt("Fix checkout\nKeep compatibility"),
+      telegramOrigin: {
+        projectId: "api",
+        sourceId: "telegram",
+        chatId: -1001,
+        messageThreadId: 22,
+      },
+    });
+    expect(callback.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining("Created api-new. Bound here."),
+      expect.anything(),
+    );
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-new",
+    );
+  });
+
+  it.each(["manual", "auto"])(
+    "legacy %s spawn without capability reports unavailable without leaving Spawning",
+    async (kind) => {
+      const dataDir = await createTempDir("spur-telegram-status-");
+      tempDirs.push(dataDir);
+      const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        spawnSession: null,
+        listProjects: vi.fn().mockResolvedValue([{ id: "api", name: "api" }]),
+        config: { autoSpawn: { enabled: true, project: "api", agent: "codex" } },
+      });
+      const ctx = telegramContext({ text: kind === "manual" ? "/spawn codex task" : "task" });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith(
+        "Spur spawn is not available for this Telegram source.",
+      );
+      expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining("Spawning"));
+    },
+  );
+
+  it.each(["success", "submitted_unknown", "binding_failure"])(
+    "legacy status ends in terminal text after %s",
+    async (outcome) => {
+      const dataDir = await createTempDir("spur-telegram-status-");
+      tempDirs.push(dataDir);
+      const spawn =
+        outcome === "submitted_unknown"
+          ? vi.fn().mockRejectedValue(new Error("boom token-123"))
+          : vi.fn().mockResolvedValue({
+              id: "created",
+              project: "api",
+              agent: "codex",
+              state: "working",
+            });
+      const { bot } = await startSource(dataDir, vi.fn(), spawn, {
+        listProjects: vi.fn().mockResolvedValue([{ id: "api", name: "api" }]),
+      });
+      const write =
+        outcome === "binding_failure"
+          ? vi
+              .spyOn(metadataModule, "writeTelegramBindings")
+              .mockRejectedValueOnce(new Error("Write failed"))
+          : undefined;
+      const ctx = telegramContext({ text: "/spawn codex task" });
+      ctx.reply.mockResolvedValue({ message_id: 900 });
+      await required(bot).emitText(ctx);
+      expect(ctx.reply).toHaveBeenCalledWith("Spawning codex agent...");
+      const expected =
+        outcome === "success"
+          ? "Spawned and bound: created."
+          : outcome === "binding_failure"
+            ? "Created created. Binding failed. Use /work to inspect."
+            : "Spawn failed: boom <telegram-token>";
+      expect(ctx.api.editMessageText).toHaveBeenLastCalledWith(-1001, 900, expected);
+      write?.mockRestore();
+    },
+  );
+
+  it("workbench rejects wrong owner/chat/topic/message without consuming valid revision", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "api-new", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, {
+      workbench: capability,
+      config: { allowedUsers: [123, 456] },
+    });
+    const ctx = await openWorkbench(required(bot), "/new task");
+    const data = cardButton(ctx.reply, "Launch api");
+    for (const overrides of [
+      { from: { id: 456 } },
+      {
+        message: {
+          message_id: 700,
+          chat: { id: -9 },
+          message_thread_id: 22,
+          is_topic_message: true,
+        },
+      },
+      {
+        message: {
+          message_id: 700,
+          chat: { id: -1001 },
+          message_thread_id: 23,
+          is_topic_message: true,
+        },
+      },
+      {
+        message: {
+          message_id: 999,
+          chat: { id: -1001 },
+          message_thread_id: 22,
+          is_topic_message: true,
+        },
+      },
+    ])
+      await required(bot).emitCallback(cardCallback(data, overrides));
+    expect(spawn).not.toHaveBeenCalled();
+    await required(bot).emitCallback(cardCallback(data));
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("workbench refreshes changed defaults without spawning and rejects removed project", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const { bot, spawnSession, listProjects } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      workbench: capability,
+    });
+    const ctx = await openWorkbench(required(bot), "/new task");
+    capability.launchOptions.mockImplementation(async ({ project }) => ({
+      project,
+      agent: "claude",
+      model: "auto",
+      mode: "manager",
+      modes: ["manager"],
+    }));
+    const callback = cardCallback(cardButton(ctx.reply, "Launch api"));
+    await required(bot).emitCallback(callback);
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(callback.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining("Defaults changed"),
+      expect.anything(),
+    );
+    required(listProjects).mockResolvedValue([{ id: "web", name: "web" }]);
+    const next = cardCallback(cardButton(callback.editMessageText, "Launch api"));
+    await required(bot).emitCallback(next);
+    expect(spawnSession).not.toHaveBeenCalled();
+    expect(next.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining("Project unavailable"),
+      expect.anything(),
+    );
+  });
+
+  it("workbench Settings edits the same message, selects configured mode/engine and clears overrides on project switch", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { workbench: capability });
+    const initial = await openWorkbench(required(bot), "/new task");
+    const settings = cardCallback(cardButton(initial.reply, "Settings"));
+    await required(bot).emitCallback(settings);
+    const project = cardCallback(cardButton(settings.editMessageText, "api"));
+    await required(bot).emitCallback(project);
+    const engine = cardCallback(cardButton(project.editMessageText, "claude"));
+    await required(bot).emitCallback(engine);
+    const mode = cardCallback(cardButton(engine.editMessageText, "developer"));
+    await required(bot).emitCallback(mode);
+    expect(capability.launchOptions).toHaveBeenLastCalledWith({
+      project: "api",
+      agent: "claude",
+      mode: "developer",
+    });
+    expect(mode.reply).not.toHaveBeenCalled();
+    const back = cardCallback(cardButton(mode.editMessageText, "Projects"));
+    await required(bot).emitCallback(back);
+    const nextSettings = cardCallback(cardButton(back.editMessageText, "Settings"));
+    await required(bot).emitCallback(nextSettings);
+    const web = cardCallback(cardButton(nextSettings.editMessageText, "web"));
+    await required(bot).emitCallback(web);
+    expect(capability.launchOptions).toHaveBeenLastCalledWith({ project: "web" });
+  });
+
+  it("workbench /work inspection leaves binding, pending wizard and mutations unchanged", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "new", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    const wizard = telegramContext({ text: "/spawn codex" });
+    await required(bot).emitText(wizard);
+    const projectData = spawnProjectCallbackData(wizard.reply, 0);
+    await required(bot).emitCallback(cardCallback(projectData));
+    const ctx = await openWorkbench(required(bot), "/work");
+    const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+    await required(bot).emitCallback(detail);
+    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    expect(capability.restoreSession).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    await required(bot).emitText(telegramContext({ text: "wizard task" }));
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["continue", "restore"])(
+    "workbench %s clears only same requester pending spawn then ordinary text reaches selected session",
+    async (kind) => {
+      const dataDir = await createTempDir("spur-telegram-workbench-");
+      tempDirs.push(dataDir);
+      const { capability, sessions } = workbenchFixture();
+      if (kind === "restore") {
+        required(sessions[0]).canContinue = false;
+        required(sessions[0]).restorable = true;
+      }
+      const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        workbench: capability,
+      });
+      const wizard = telegramContext({ text: "/spawn codex" });
+      await required(bot).emitText(wizard);
+      await required(bot).emitCallback(cardCallback(spawnProjectCallbackData(wizard.reply, 0)));
+      const ctx = await openWorkbench(required(bot), "/work");
+      const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+      await required(bot).emitCallback(detail);
+      const action = cardCallback(
+        cardButton(
+          detail.editMessageText,
+          kind === "restore" ? "Restore and continue here" : "Continue here",
+        ),
+      );
+      await required(bot).emitCallback(action);
+      expect(emit).not.toHaveBeenCalled();
+      await required(bot).emitText(telegramContext({ text: "next instruction" }));
+      expect(emit).toHaveBeenCalledWith(
+        "telegram:message",
+        expect.objectContaining({ sessionId: "api-1", text: "next instruction" }),
+      );
+      expect(spawnSession).not.toHaveBeenCalled();
+      expect(capability.restoreSession).toHaveBeenCalledTimes(kind === "restore" ? 1 : 0);
+      await required(bot).emitCallback(cardCallback(spawnProjectCallbackData(wizard.reply, 0)));
+      expect(spawnSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it("workbench failed restore preserves pending wizard and routing", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability, sessions } = workbenchFixture();
+    required(sessions[0]).canContinue = false;
+    required(sessions[0]).restorable = true;
+    capability.restoreSession.mockRejectedValue(new Error("Admission refused"));
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "new", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    const wizard = telegramContext({ text: "/spawn codex" });
+    await required(bot).emitText(wizard);
+    await required(bot).emitCallback(cardCallback(spawnProjectCallbackData(wizard.reply, 0)));
+    const ctx = await openWorkbench(required(bot), "/work");
+    const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+    await required(bot).emitCallback(detail);
+    await required(bot).emitCallback(
+      cardCallback(cardButton(detail.editMessageText, "Restore and continue here")),
+    );
+    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    await required(bot).emitText(telegramContext({ text: "wizard task" }));
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["rejection", "missing result"])(
+    "workbench ambiguous submitted spawn (%s) never offers another launch",
+    async (failure) => {
+      const dataDir = await createTempDir("spur-telegram-workbench-");
+      tempDirs.push(dataDir);
+      const { capability } = workbenchFixture();
+      const spawn =
+        failure === "rejection"
+          ? vi.fn().mockRejectedValue(new Error("Lost acknowledgement"))
+          : vi.fn().mockResolvedValue(undefined);
+      const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+      const ctx = await openWorkbench(required(bot), "/new task");
+      const action = cardCallback(cardButton(ctx.reply, "Launch api"));
+      await required(bot).emitCallback(action);
+      expect(action.editMessageText).toHaveBeenCalledWith(
+        expect.stringContaining("outcome unknown"),
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      await required(bot).emitCallback(cardCallback(action.callbackQuery.data));
+      expect(spawn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("workbench duplicate callbacks and source abort during core spawn never duplicate or bind stale result", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const controller = new AbortController();
+    let complete!: (session: SourceSessionListItem) => void;
+    const spawn = vi.fn(
+      () =>
+        new Promise<SourceSessionListItem>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, {
+      workbench: capability,
+      signal: controller.signal,
+    });
+    const ctx = await openWorkbench(required(bot), "/new task");
+    const data = cardButton(ctx.reply, "Launch api");
+    const first = required(bot).emitCallback(cardCallback(data));
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+    await required(bot).emitCallback(cardCallback(data));
+    controller.abort();
+    complete({ id: "created", project: "api", agent: "codex", state: "working" });
+    await first;
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+  });
+
+  it("workbench binding failure retains created id and recovery never spawns a replacement", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability, sessions } = workbenchFixture();
+    const created = { ...required(sessions[0]), id: "api-new" };
+    sessions.push(created);
+    const spawn = vi.fn().mockResolvedValue(created);
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    await required(bot).emitText(telegramContext({ text: "/watch api-1" }));
+    const oldTarget = readTelegramReplyTarget(dataDir, "api-1");
+    const write = vi
+      .spyOn(metadataModule, "writeTelegramBindings")
+      .mockRejectedValueOnce(new Error("Write failed"));
+    const ctx = await openWorkbench(required(bot), "/new task");
+    const action = cardCallback(cardButton(ctx.reply, "Launch api"));
+    await required(bot).emitCallback(action);
+    expect(action.editMessageText).toHaveBeenCalledWith(
+      expect.stringContaining("Created api-new. Not bound"),
+      expect.anything(),
+    );
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-1",
+    );
+    expect(readTelegramReplyTarget(dataDir, "api-1")).toEqual(oldTarget);
+    write.mockRestore();
+    await required(bot).emitCallback(
+      cardCallback(cardButton(action.editMessageText, "Continue here")),
+    );
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-new",
+    );
+  });
+
+  it("workbench duplicate deferred restore callbacks mutate once even when acknowledgement rejects", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability, sessions } = workbenchFixture();
+    const session = required(sessions[0]);
+    session.canContinue = false;
+    session.restorable = true;
+    let finish: ((session: SourceWorkSessionItem) => void) | undefined;
+    capability.restoreSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), { workbench: capability });
+    const ctx = await openWorkbench(required(bot), "/work");
+    const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+    await required(bot).emitCallback(detail);
+    const data = cardButton(detail.editMessageText, "Restore and continue here");
+    const action = cardCallback(data);
+    action.answerCallbackQuery.mockRejectedValue(new Error("Expired query"));
+    const first = required(bot).emitCallback(action);
+    await vi.waitFor(() => expect(capability.restoreSession).toHaveBeenCalledTimes(1));
+    await required(bot).emitCallback(cardCallback(data));
+    session.canContinue = true;
+    session.runtimeAlive = true;
+    session.restorable = false;
+    required(finish)(session);
+    await first;
+    expect(capability.restoreSession).toHaveBeenCalledTimes(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-1",
+    );
+  });
+
+  it("workbench replacing launcher during spawn leaves created session unbound", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    let finish: ((session: SourceSessionListItem) => void) | undefined;
+    const spawn = vi.fn(
+      () =>
+        new Promise<SourceSessionListItem>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    const ctx = await openWorkbench(required(bot), "/new first task");
+    const action = cardCallback(cardButton(ctx.reply, "Launch api"));
+    const first = required(bot).emitCallback(action);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+    await openWorkbench(required(bot), "/new replacement task");
+    required(finish)({ id: "created", project: "api", agent: "codex", state: "working" });
+    await first;
+    expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+    expect(action.editMessageText).not.toHaveBeenCalled();
+    expect(action.reply).toHaveBeenCalledWith(
+      "Task created is available but not bound here. Use /work to inspect and continue it.",
+    );
+  });
+
+  it.each(["replaced", "revoked", "aborted"])(
+    "workbench completed Restore reports unbound id only while still authorized (%s)",
+    async (reason) => {
+      const dataDir = await createTempDir("spur-telegram-restore-notice-");
+      tempDirs.push(dataDir);
+      const { capability, sessions } = workbenchFixture();
+      const session = required(sessions[0]);
+      session.canContinue = false;
+      session.restorable = true;
+      const controller = new AbortController();
+      const allowedUsers = [123];
+      let finish: ((session: SourceWorkSessionItem) => void) | undefined;
+      capability.restoreSession.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const { bot } = await startSource(dataDir, vi.fn(), vi.fn(), {
+        workbench: capability,
+        signal: controller.signal,
+        config: { allowedUsers },
+      });
+      const ctx = await openWorkbench(required(bot), "/work");
+      const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+      await required(bot).emitCallback(detail);
+      const action = cardCallback(cardButton(detail.editMessageText, "Restore and continue here"));
+      const pending = required(bot).emitCallback(action);
+      await vi.waitFor(() => expect(capability.restoreSession).toHaveBeenCalledTimes(1));
+      if (reason === "replaced") await openWorkbench(required(bot), "/work");
+      else if (reason === "revoked") allowedUsers.splice(0);
+      else controller.abort();
+      session.canContinue = true;
+      session.restorable = false;
+      session.runtimeAlive = true;
+      required(finish)(session);
+      await pending;
+      expect(readTelegramBindings(dataDir, "api", "telegram").size).toBe(0);
+      expect(action.editMessageText).not.toHaveBeenCalled();
+      if (reason === "replaced")
+        expect(action.reply).toHaveBeenCalledWith(
+          "Task api-1 is available but not bound here. Use /work to inspect and continue it.",
+        );
+      else expect(action.reply).not.toHaveBeenCalled();
+    },
+  );
+
+  it("workbench Continue leaves other users and topics pending wizards intact", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "created", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, {
+      workbench: capability,
+      config: { allowedUsers: [123, 456] },
+    });
+    for (const other of [
+      { from: { id: 456 }, message_thread_id: 22 },
+      { from: { id: 123 }, message_thread_id: 23 },
+    ]) {
+      const wizard = telegramContext({ text: "/spawn codex", ...other });
+      await required(bot).emitText(wizard);
+      const callback = cardCallback(spawnProjectCallbackData(wizard.reply, 0), {
+        from: other.from,
+        message: {
+          message_id: 700,
+          chat: { id: -1001 },
+          message_thread_id: other.message_thread_id,
+          is_topic_message: true,
+        },
+      });
+      await required(bot).emitCallback(callback);
+    }
+    const ctx = await openWorkbench(required(bot), "/work");
+    const detail = cardCallback(cardButton(ctx.reply, "api · api-1 · needs_input"));
+    await required(bot).emitCallback(detail);
+    await required(bot).emitCallback(
+      cardCallback(cardButton(detail.editMessageText, "Continue here")),
+    );
+    await required(bot).emitText(telegramContext({ text: "other user task", from: { id: 456 } }));
+    await required(bot).emitText(
+      telegramContext({ text: "other topic task", message_thread_id: 23 }),
+    );
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("workbench Recent completed rows do not revive legacy watch membership or old recorded replies", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability, sessions } = workbenchFixture();
+    sessions.push({
+      ...required(sessions[0]),
+      id: "completed",
+      status: "completed",
+      runtimeAlive: false,
+      canContinue: false,
+      restorable: false,
+    });
+    recordTelegramMessages(
+      dataDir,
+      "api",
+      "telegram",
+      { sessionId: "completed", chatId: -1001 },
+      [99],
+    );
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), { workbench: capability });
+    const watch = telegramContext({ text: "/watch completed" });
+    await required(bot).emitText(watch);
+    expect(watch.reply).toHaveBeenCalledWith("No active Spur session completed.");
+    const ctx = await openWorkbench(required(bot), "/work");
+    const recent = cardCallback(cardButton(ctx.reply, "recent"));
+    await required(bot).emitCallback(recent);
+    expect(cardButton(recent.editMessageText, "api · completed · needs_input")).toMatch(
+      /^spur_wb:/,
+    );
+    const reply = telegramContext({
+      text: "reply",
+      chat: { id: 123 },
+      message_thread_id: undefined,
+      reply_to_message: { message_id: 99 },
+    });
+    recordTelegramMessages(
+      dataDir,
+      "api",
+      "telegram",
+      { sessionId: "completed", chatId: 123 },
+      [99],
+    );
+    await required(bot).emitText(reply);
+    expect(reply.reply).toHaveBeenCalledWith(
+      "Spur session completed is gone. Message not delivered.",
+    );
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("workbench post-bind edit and reply failures do not roll back successful creation", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const spawn = vi
+      .fn()
+      .mockResolvedValue({ id: "api-new", project: "api", agent: "codex", state: "working" });
+    const { bot } = await startSource(dataDir, vi.fn(), spawn, { workbench: capability });
+    const ctx = await openWorkbench(required(bot), "/new task");
+    const action = cardCallback(cardButton(ctx.reply, "Launch api"));
+    action.editMessageText.mockRejectedValue(new Error("Edit rejected"));
+    action.reply.mockRejectedValue(new Error("Reply rejected"));
+    await required(bot).emitCallback(action);
+    await required(bot).emitCallback(cardCallback(action.callbackQuery.data));
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(readTelegramBindings(dataDir, "api", "telegram").get("-1001:22")?.sessionId).toBe(
+      "api-new",
+    );
+  });
+
+  it("workbench cards never consume ordinary text and missing capability leaves legacy available", async () => {
+    const dataDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(dataDir);
+    const { capability } = workbenchFixture();
+    const { bot, emit, spawnSession } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      workbench: capability,
+    });
+    await required(bot).emitText(telegramContext({ text: "/watch api-1" }));
+    await openWorkbench(required(bot), "/new task");
+    await required(bot).emitText(telegramContext({ text: "ordinary instruction" }));
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", text: "ordinary instruction" }),
+    );
+    expect(spawnSession).not.toHaveBeenCalled();
+    await openWorkbench(required(bot), "/new");
+    const otherDir = await createTempDir("spur-telegram-workbench-");
+    tempDirs.push(otherDir);
+    botInstances.splice(0);
+    const legacy = await startSource(otherDir);
+    const unavailable = telegramContext({ text: "/work" });
+    await required(legacy.bot).emitText(unavailable);
+    expect(unavailable.reply).toHaveBeenCalledWith("Workbench unavailable. Use /watch.");
+  });
 
   it("binds a Telegram thread with /watch and emits bound messages", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
@@ -3131,6 +3856,8 @@ describe("telegramSourceModule", () => {
       { command: "agents", description: "List active Spur agents" },
       { command: "watch", description: "Bind this chat to a Spur agent" },
       { command: "spawn", description: "Spawn a new Spur agent" },
+      { command: "new", description: "Launch a task with project defaults" },
+      { command: "work", description: "Inspect tasks needing attention" },
       { command: "unwatch", description: "Unbind this chat" },
     ]);
     expect(bot.api.setChatMenuButton).toHaveBeenCalledWith({
@@ -3141,6 +3868,68 @@ describe("telegramSourceModule", () => {
       expect.objectContaining({ sink: { concurrency: 1 } }),
     );
   });
+
+  it("registers the command menu on a new bot after source stop and restart", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const first = await startSource(dataDir);
+    const firstBot = required(first.bot);
+    await vi.waitFor(() => expect(firstBot.api.setChatMenuButton).toHaveBeenCalledTimes(1));
+    await first.handle.stop();
+
+    const second = await startSource(dataDir);
+    const secondBot = required(botInstances.at(-1));
+    expect(botInstances).toHaveLength(2);
+    expect(secondBot).not.toBe(firstBot);
+    await vi.waitFor(() => expect(secondBot.api.setChatMenuButton).toHaveBeenCalledTimes(1));
+    expect(firstBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+    expect(secondBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+    expect(secondBot.api.setMyCommands.mock.calls).toEqual(firstBot.api.setMyCommands.mock.calls);
+    expect(secondBot.api.setChatMenuButton).toHaveBeenCalledWith({
+      menu_button: { type: "commands" },
+    });
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(runMock.mock.calls[1]?.[0]).toBe(secondBot);
+    expect(first.stop).toHaveBeenCalledTimes(1);
+    expect(second.stop).not.toHaveBeenCalled();
+    await second.handle.stop();
+    expect(second.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["setMyCommands", "setChatMenuButton"] as const)(
+    "redacts %s menu setup failure while the runner continues",
+    async (method) => {
+      const dataDir = await createTempDir("spur-telegram-source-");
+      tempDirs.push(dataDir);
+      getMeMock.mockImplementationOnce(async () => {
+        required(botInstances.at(-1)).api[method].mockRejectedValueOnce(
+          new Error(`${method} rejected token-123`),
+        );
+        return { username: "SpurProjectsBot" };
+      });
+      const { bot, handle, logger, stop } = await startSource(dataDir);
+      const startedBot = required(bot);
+      await vi.waitFor(() =>
+        expect(logger.warn).toHaveBeenCalledWith(
+          `[source:api/telegram] telegram commands setup failed: ${method} rejected <telegram-token>`,
+        ),
+      );
+      expect(logger.warn.mock.calls.flat().join("\n")).not.toContain("token-123");
+      expect(startedBot.api.setMyCommands).toHaveBeenCalledTimes(1);
+      if (method === "setMyCommands") {
+        expect(startedBot.api.setChatMenuButton).not.toHaveBeenCalled();
+      } else {
+        expect(startedBot.api.setChatMenuButton).toHaveBeenCalledTimes(1);
+      }
+      expect(runMock).toHaveBeenCalledWith(startedBot, expect.anything());
+      expect(stop).not.toHaveBeenCalled();
+      const help = telegramContext({ text: "/help" });
+      await startedBot.emitText(help);
+      expect(help.reply).toHaveBeenCalledWith(expect.stringContaining("/new"));
+      await handle.stop();
+      expect(stop).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("stops the runner when the source stops", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");

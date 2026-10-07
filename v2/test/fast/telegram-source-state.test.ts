@@ -308,6 +308,53 @@ describe("sendTelegramReply formatting", () => {
     });
   });
 
+  it("bolds the escaped session signature without parsing title markdown", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55));
+    await sendTelegramReply(config, { chatId: 123 }, "\n\nDone **today**", {
+      sessionLabel: "api-1 — <checkout> & **literal** `title`",
+    });
+    expect(bodyOf(fetchMock, 0)).toEqual({
+      chat_id: 123,
+      text: "<b>api-1 — &lt;checkout&gt; &amp; **literal** `title`</b>\n\nDone <b>today</b>",
+      parse_mode: "HTML",
+    });
+  });
+
+  it("keeps one empty line after an id-only signature when editing a placeholder with buttons", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(77));
+    const result = await sendTelegramReply(config, { chatId: 123, statusMessageId: 77 }, "Pick", {
+      sessionLabel: "api-1",
+      buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+    });
+    expect(bodyOf(fetchMock, 0)).toMatchObject({
+      message_id: 77,
+      text: "<b>api-1</b>\n\nPick",
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]] },
+    });
+    expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
+  });
+
+  it("includes the signature in the first chunk limit without repeating it on continuation", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(okId(55)).mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: 123 }, "x".repeat(4096), { sessionLabel: "api-1" });
+    expect(bodyOf(fetchMock, 0)["text"]).toBe(`<b>api-1</b>\n\n${"x".repeat(4089)}`);
+    expect(bodyOf(fetchMock, 1)["text"]).toBe("x".repeat(7));
+  });
+
+  it("keeps the literal signature and separator on plain parse-error fallback", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(parseError()).mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: 123 }, "Done **today**", {
+      sessionLabel: "api-1 — <checkout>",
+    });
+    expect(bodyOf(fetchMock, 1)["text"]).toBe("api-1 — <checkout>\n\nDone **today**");
+    expect(bodyOf(fetchMock, 1)).not.toHaveProperty("parse_mode");
+  });
+
   it("resends one chunk as plain text when Telegram cannot parse entities", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(parseError()).mockResolvedValueOnce(okId(56));
