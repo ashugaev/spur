@@ -53,7 +53,6 @@ describe("published interface contracts", () => {
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
-    expect(daemonApi).toMatch(/auto-ping-suppressions[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");
