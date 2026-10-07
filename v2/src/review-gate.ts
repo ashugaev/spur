@@ -9,10 +9,10 @@ import {
 } from "./github-app.js";
 import { baselineDigest, digest, manifestDigest } from "./review-interface.js";
 import {
-  consentMarker,
-  parseConsentState,
+  isConsentBody,
+  readConsentBody,
+  isStateBody,
   readStateBody,
-  stateMarker,
   sameConsentScope,
   resolveConsentGeneration,
 } from "./review-state.js";
@@ -249,7 +249,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
           (row) =>
             integer(object(row.user).id) === actor &&
             typeof row.body === "string" &&
-            row.body.startsWith(stateMarker),
+            isStateBody(row.body),
         )
         .sort((a, b) => integer(b.id) - integer(a.id));
       const latest = rows[0];
@@ -305,13 +305,11 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
           (row) =>
             integer(object(row.user).id) === policy.codeActor &&
             typeof row.body === "string" &&
-            row.body.startsWith(consentMarker),
+            isConsentBody(row.body),
         )
         .map((row) => ({
           row,
-          state: parseConsentState(
-            JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
-          ),
+          state: readConsentBody(string(row.body)),
         }))
         .filter((entry) => sameConsentScope(entry.state, scope));
       const latest = history.sort((a, b) => integer(b.row.id) - integer(a.row.id))[0]?.row;

@@ -10,7 +10,7 @@ import {
 } from "./review-interface.js";
 import { parseConfig } from "./review-app.js";
 import { readInterfaceConsent, writeInterfaceConsent, readSession } from "./metadata.js";
-import { readStateBody, stateMarker, publishConsentState } from "./review-state.js";
+import { readStateBody, isStateBody, publishConsentState } from "./review-state.js";
 import { resolveWorkspaceState } from "./workspace-store.js";
 import { workspaceIdOf } from "./session-desk.js";
 
@@ -295,9 +295,7 @@ export async function reconcileInterfaceConsent(dataDir: string, sessionId: stri
     const comment = comments
       .filter(
         (row) =>
-          object(row.user).login === actor &&
-          typeof row.body === "string" &&
-          row.body.startsWith(stateMarker),
+          object(row.user).login === actor && typeof row.body === "string" && isStateBody(row.body),
       )
       .sort((a, b) => integer(b.id) - integer(a.id))[0];
     if (!comment || typeof comment.body !== "string")

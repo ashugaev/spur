@@ -7,7 +7,13 @@ import {
   type GatePolicy,
 } from "../../src/review-gate.js";
 import { produceGates } from "../../src/review-gate-producer.js";
-import { stateBody, readStateBody, consentMarker, type LaneState } from "../../src/review-state.js";
+import {
+  stateBody,
+  readStateBody,
+  consentMarker,
+  consentBody,
+  type LaneState,
+} from "../../src/review-state.js";
 import { manifestDigest, baselineDigest } from "../../src/review-interface.js";
 const H = "a".repeat(40),
   B = "b".repeat(40),
@@ -506,6 +512,25 @@ test("malformed newer authenticated state blocks, another actor cannot supersede
   snapshot.comments[2] = { id: 99, user: { id: 999 }, body: "Spur review state v1\nbroken" };
   expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("APPROVED");
 });
+test.each(["version", "missing-close", "duplicate"])(
+  "newest hidden malformed %s cannot disappear behind legacy approval",
+  (fault) => {
+    const snapshot = fixture();
+    const prior = snapshot.comments[0];
+    if (!prior) throw new Error("missing fixture state");
+    const value = readStateBody(String(prior.body));
+    prior.body = `Spur review state v1\n${JSON.stringify(value)}`;
+    const hidden = stateBody({ ...value, status: "PENDING" });
+    const body =
+      fault === "version"
+        ? hidden.replace("state v1", "state v2")
+        : fault === "missing-close"
+          ? hidden.replace("\n-->", "")
+          : `${hidden}\n${hidden}`;
+    snapshot.comments.push({ id: 100, user: { id: 11, type: "Bot" }, body });
+    expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("BLOCKED");
+  },
+);
 test("missing classification, uncovered paths, unresolved threads and native dismissal block", () => {
   for (const mutate of [
     (snapshot: GateSnapshot) => {
@@ -594,7 +619,13 @@ test("required semantics need matching consent; internal same-file edits reuse a
   snapshot.comments.push({
     id: 31,
     user: { id: 11, type: "Bot" },
-    body: `${consentMarker}${JSON.stringify({ ...consent, decision: "revoked", generation: 2, challenge: "two" })}`,
+    body: consentBody({
+      ...consent,
+      version: 1,
+      decision: "revoked",
+      generation: 2,
+      challenge: "two",
+    }),
   });
   snapshot.comments.push({
     id: 32,

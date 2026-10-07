@@ -2,9 +2,14 @@ import { afterEach, expect, test, vi } from "vitest";
 import { GitHubApp } from "../../src/github-app.js";
 import {
   consentMarker,
+  consentBody,
+  readConsentBody,
+  isStateBody,
+  isConsentBody,
   publishConsentState,
   readStateBody,
   stateBody,
+  stateMarker,
   type ConsentState,
   type LaneState,
 } from "../../src/review-state.js";
@@ -130,7 +135,11 @@ test.each([
       body: `${consentMarker}${JSON.stringify(state)}\n\nWritten by Spur · requester`,
       user: { login: "code[bot]" },
     });
-    const rows = [row(prior, 1)];
+    const rows = [
+      scenario === "duplicate"
+        ? { ...row(prior, 1), body: consentBody(prior, "requester") }
+        : row(prior, 1),
+    ];
     if (scenario === "hidden-revoke")
       rows.push(row({ ...candidate, generation: 1, challenge: "one" }, 2));
     if (scenario === "decision" || scenario === "challenge" || scenario === "renewal")
@@ -165,3 +174,64 @@ test.each([
     }
   },
 );
+test("new/legacy lane envelopes preserve fields and hide delimiter/Unicode payload safely", () => {
+  const value = { ...state, attempt: "close --> open <!-- <>& Ж" };
+  const body = stateBody(value);
+  expect(body).toMatch(/^Code review: pending\.\n\n<!-- Spur review state v1\n/);
+  expect(readStateBody(body)).toEqual(value);
+  expect(readStateBody(`${stateMarker}${JSON.stringify(value)}`)).toEqual(value);
+  expect(body.match(/-->/g)).toHaveLength(1);
+  expect(body.match(/Written by Spur · review-a/g)).toHaveLength(1);
+  expect(
+    readStateBody(body.replace("Code review: pending.", "Human text contradicts machine.")),
+  ).toEqual(value);
+});
+test.each([
+  "duplicate",
+  "mixed",
+  "version",
+  "missing-close",
+  "trailing-json",
+  "literal-close",
+  "oversize",
+])("malformed reserved hidden %s is recognized and rejects", (fault) => {
+  const body = stateBody(state);
+  const damaged =
+    fault === "duplicate"
+      ? `${body}\n${body}`
+      : fault === "mixed"
+        ? `${stateMarker}${JSON.stringify(state)}\n${body}`
+        : fault === "version"
+          ? body.replace("state v1", "state v2")
+          : fault === "missing-close"
+            ? body.replace("\n-->", "")
+            : fault === "trailing-json"
+              ? body.replace("\n-->", "{}\n-->")
+              : fault === "literal-close"
+                ? body.replace('"attempt":"a"', '"attempt":"-->"')
+                : `${body}${"Ж".repeat(150000)}`;
+  expect(isStateBody(damaged)).toBe(true);
+  expect(() => readStateBody(damaged)).toThrow();
+});
+test("hidden consent and legacy consent share reader, ordinary status/quotes never select evidence", () => {
+  const value: ConsentState = {
+    version: 1,
+    repo: "owner/repo",
+    pr: 5,
+    task: "workspace",
+    branch: "feature/example",
+    baseBranch: "main",
+    manifestDigest: "a".repeat(64),
+    baselineDigest: "b".repeat(64),
+    challenge: "--> <& Ж",
+    decision: "approved",
+    generation: 3,
+  };
+  expect(readConsentBody(consentBody(value, "requester"))).toEqual(value);
+  expect(readConsentBody(`${consentMarker}${JSON.stringify(value)}`)).toEqual(value);
+  expect(isConsentBody(consentBody(value))).toBe(true);
+  expect(isStateBody("Code review: approved. Written by Spur · fixture")).toBe(false);
+  expect(isStateBody("> Spur review state v1\n{}\n")).toBe(false);
+  expect(() => stateBody({ ...state, attempt: "Ж".repeat(150000) })).toThrow();
+  expect(() => readConsentBody(`${consentBody(value)}\n${stateBody(state)}`)).toThrow();
+});

@@ -2,6 +2,73 @@ import { integer, object, string, ReviewAppError, type GitHubApp } from "./githu
 import { parseAssessment, type InterfaceAssessment } from "./review-interface.js";
 
 export const stateMarker = "Spur review state v1\n";
+const BODY_LIMIT = 256 * 1024;
+const RESERVED = /(?:^|\n)(?:<!--[ \t]*)?Spur (?:review state|interface consent) v/g;
+function recognizesBody(body: string, marker: string): boolean {
+  const prefix = marker.slice(0, marker.indexOf("v1")) + "v";
+  return (
+    body.startsWith(prefix) ||
+    body
+      .split("\n")
+      .some((line) => line.replace(/^<!--[ \t]*/, "").startsWith(prefix) && line.startsWith("<!--"))
+  );
+}
+export function isStateBody(body: string): boolean {
+  return recognizesBody(body, stateMarker);
+}
+export function isConsentBody(body: string): boolean {
+  return recognizesBody(body, consentMarker);
+}
+function envelopeBody(
+  summary: string,
+  marker: string,
+  payload: LaneState | ConsentState,
+  session: string,
+): string {
+  const json = JSON.stringify(payload).replace(
+    /[<>&]/g,
+    (character) => ({ "<": "\\u003c", ">": "\\u003e", "&": "\\u0026" })[character] ?? character,
+  );
+  const footer = session.replace(
+    /[<>&]/g,
+    (character) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[character] ?? character,
+  );
+  const body = `${summary}\n\n<!-- ${marker}${json}\n-->\n\nWritten by Spur · ${footer}`;
+  if (Buffer.byteLength(body, "utf8") > BODY_LIMIT || /[\r\n]/.test(session))
+    throw new ReviewAppError("invalid-state-envelope");
+  return body;
+}
+function envelopePayload(body: string, marker: string): unknown {
+  if (Buffer.byteLength(body, "utf8") > BODY_LIMIT || [...body.matchAll(RESERVED)].length !== 1)
+    throw new ReviewAppError("invalid-state-envelope");
+  let json: string;
+  if (body.startsWith(marker)) {
+    const [payload, ...tail] = body.slice(marker.length).split("\n");
+    if (tail.length > 0 && !/^\nWritten by Spur · [^\r\n]+$/.test(tail.join("\n")))
+      throw new ReviewAppError("invalid-state-envelope");
+    json = payload ?? "";
+  } else {
+    const start = body.indexOf(`\n\n<!-- ${marker}`);
+    const end = body.indexOf("\n-->\n\nWritten by Spur · ");
+    const footer = body.slice(end + "\n-->\n\nWritten by Spur · ".length);
+    if (
+      start <= 0 ||
+      body.slice(0, start).includes("\n") ||
+      /<!--|-->/.test(body.slice(0, start)) ||
+      end < start ||
+      !footer ||
+      /[\r\n]|<!--|-->/.test(footer)
+    )
+      throw new ReviewAppError("invalid-state-envelope");
+    json = body.slice(start + `\n\n<!-- ${marker}`.length, end);
+    if (/[\r\n<>&]/.test(json)) throw new ReviewAppError("invalid-state-envelope");
+  }
+  try {
+    return JSON.parse(json) as unknown;
+  } catch {
+    throw new ReviewAppError("invalid-state-envelope");
+  }
+}
 export interface LaneState {
   version: 1;
   lane: "code" | "browser";
@@ -51,12 +118,24 @@ export function parseLaneState(value: unknown): LaneState {
   };
 }
 export function stateBody(state: LaneState): string {
-  return `${stateMarker}${JSON.stringify(parseLaneState(state))}\n\nWritten by Spur · ${state.session}`;
+  const value = parseLaneState(state);
+  const status = value.status.toLowerCase().replaceAll("_", " ");
+  const detail =
+    value.status === "BLOCKED"
+      ? " — Required review checks incomplete"
+      : value.status === "CHANGES_REQUESTED"
+        ? " — See the native review"
+        : "";
+  return envelopeBody(
+    `${value.lane === "code" ? "Code" : "Browser"} review: ${status}${detail}.`,
+    stateMarker,
+    value,
+    value.session,
+  );
 }
 export function readStateBody(body: string): LaneState {
-  if (!body.startsWith(stateMarker)) throw new ReviewAppError("invalid-lane-state");
   try {
-    return parseLaneState(JSON.parse(body.slice(stateMarker.length).split("\n")[0] ?? ""));
+    return parseLaneState(envelopePayload(body, stateMarker));
   } catch {
     throw new ReviewAppError("invalid-lane-state");
   }
@@ -83,7 +162,7 @@ export async function publishLaneState(app: GitHubApp, state: LaneState): Promis
       (row) =>
         object(row.user).login === access.actor &&
         typeof row.body === "string" &&
-        row.body.startsWith(stateMarker),
+        isStateBody(row.body),
     )
     .sort((a, b) => integer(b.id) - integer(a.id))[0];
   if (latest && exact(latest)) return;
@@ -93,6 +172,17 @@ export async function publishLaneState(app: GitHubApp, state: LaneState): Promis
   await fresh();
 }
 export const consentMarker = "Spur interface consent v1\n";
+export function consentBody(value: ConsentState, session = value.task): string {
+  const state = parseConsentState(value);
+  return envelopeBody(`Interface approval: ${state.decision}.`, consentMarker, state, session);
+}
+export function readConsentBody(body: string): ConsentState {
+  try {
+    return parseConsentState(envelopePayload(body, consentMarker));
+  } catch {
+    throw new ReviewAppError("invalid-consent-state");
+  }
+}
 export interface ConsentState {
   version: 1;
   repo: string;
@@ -165,7 +255,7 @@ export async function publishConsentState(
   session = value.task,
 ): Promise<void> {
   const state = parseConsentState(value);
-  const body = `${consentMarker}${JSON.stringify(state)}\n\nWritten by Spur · ${session}`;
+  const body = consentBody(state, session);
   const access = await app.authenticate();
   const exact = (value: unknown) => {
     const row = object(value);
@@ -178,15 +268,13 @@ export async function publishConsentState(
       (row) =>
         object(row.user).login === access.actor &&
         typeof row.body === "string" &&
-        row.body.startsWith(consentMarker),
+        isConsentBody(row.body),
     )
     .map((row) => {
       try {
         return {
           row,
-          state: parseConsentState(
-            JSON.parse(string(row.body).slice(consentMarker.length).split("\n")[0] ?? ""),
-          ),
+          state: readConsentBody(string(row.body)),
         };
       } catch {
         throw new ReviewAppError("invalid-consent-state");

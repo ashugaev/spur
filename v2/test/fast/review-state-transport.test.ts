@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { parseConfig, parseRequest, prepareReview, publishReview } from "../../src/review-app.js";
-import { stateBody } from "../../src/review-state.js";
+import { stateBody, readStateBody } from "../../src/review-state.js";
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -130,6 +130,8 @@ test("offline PENDING precedes auth; confirmed public PENDING permits native pub
   );
   expect(f.offlineObserved()).toBe(true);
   expect(f.comments[0]?.body).toContain('"status":"PENDING"');
+  expect(f.comments[0]?.body).toMatch(/^Code review: pending\.\n\n<!--/);
+  expect(readStateBody(f.comments[0]?.body ?? "").status).toBe("PENDING");
   expect((await publishReview(f.config, f.request, f.request.session, f.transport)).status).toBe(
     "APPROVED",
   );
