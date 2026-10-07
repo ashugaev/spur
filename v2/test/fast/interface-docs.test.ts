@@ -43,14 +43,13 @@ describe("published interface contracts", () => {
       readRepoFile(".claude/skills/spur/SKILL.md"),
     ]);
 
-    // Surface names, flags, and codes only — behavioral semantics (TTLs, scope
+    // Surface names and flags only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
     expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
     expect(commands).toContain("spur auto-ping unsubscribe --thread <handle>");
     expect(commands).toContain("spur auto-ping unsubscribe --subscription <handle>");
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
-    expect(commands).toContain("grant_not_ready");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
