@@ -10912,6 +10912,76 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
+    it.each(["wake", "no edit", "pause", "replacement pane"] as const)(
+      "revalidates restore after acknowledgement with %s (issue #907 P2)",
+      async (change) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
+        mockExitedThenRestoredProcess();
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const internals = sessionServiceInternals(service);
+        mockTimerPromisesSleepWithFakeTimers();
+        let releaseAck: () => void = () => {};
+        const ackGate = new Promise<void>((resolve) => {
+          releaseAck = resolve;
+        });
+        let ackHeld = false;
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+          ackHeld = true;
+          await ackGate;
+          return { found: true, lastScannedFile: null };
+        });
+        const restore = service.restore("api-1");
+        const outcome = restore.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        await vi.waitFor(() => expect(ackHeld).toBe(true));
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        const before = sessions.get("api-1");
+        if (!before) throw new Error("Expected provisional restore record");
+        if (change === "wake") {
+          vi.setSystemTime(Date.now() + 1_000);
+          await service.scheduleWake("api-1", { delayMs: 60_000, message: "Keep this wake" });
+          expect(sessions.get("api-1")?.updatedAt).not.toBe(before.updatedAt);
+          expect(sessions.get("api-1")?.scheduledWake?.message).toBe("Keep this wake");
+        } else if (change === "pause") {
+          await expect(service.pause("api-1")).resolves.toMatchObject({
+            status: "stopped",
+            stopReason: "manual_pause",
+          });
+        } else if (change === "replacement pane") {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid + 1 });
+        }
+        const concurrentRecord = sessions.get("api-1");
+        releaseAck();
+        if (change === "pause" || change === "replacement pane") {
+          await expect(outcome).resolves.toMatchObject({
+            error: expect.objectContaining({
+              message: expect.stringContaining("changed during restore"),
+            }),
+          });
+          expect(sessions.get("api-1")).toEqual(concurrentRecord);
+        } else {
+          await expect(outcome).resolves.toMatchObject({
+            value: { status: "running", tmuxSession: before.tmuxSession },
+          });
+          expect(sessions.get("api-1")?.agentLaunchId).toBe(before.agentLaunchId);
+          expect(sessions.get("api-1")?.scheduledWake).toEqual(concurrentRecord?.scheduledWake);
+          expect(logSpurEventMock).not.toHaveBeenCalledWith(
+            TEST_DATA_DIR,
+            expect.objectContaining({ event: "session.restore.failed" }),
+          );
+        }
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      },
+    );
+
     it("keeps restore input authorized when a status read observes its replacement launch", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));

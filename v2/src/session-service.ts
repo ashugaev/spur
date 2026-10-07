@@ -18856,7 +18856,7 @@ export class SessionService {
       if (
         !latestBeforeCommit ||
         this.reopensInFlight.get(sessionId)?.invalidated === true ||
-        !this.lifecycleStampMatches(latestBeforeCommit, claim) ||
+        !this.lifecycleStateMatches(latestBeforeCommit, claim) ||
         !(await this.paneGenerationMatches(latestBeforeCommit, restoreGeneration))
       ) {
         throw new Error(`Session ${sessionId} changed during restore`);
