@@ -8,6 +8,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook. Launcher exports `$SPUR_ISOLATED_CONFIG`, `$SPUR_ISOLATED_UI_ENDPOINT_FILE`; private runtime-file fields `SPUR_ISOLATED_DAEMON_PID`, `SPUR_ISOLATED_DAEMON_STARTTIME` consumed by UI: current-generation readiness/receipt contract, UI wait budget 30s, `/info` timeout 1s, timeout exits nonzero; `v2/src/isolated-web-endpoint.ts`, `scripts/spur-isolated-ui.sh`.
 `$SPUR_AGENT_LAUNCH_ID`: opaque, fresh per agent process generation; agent configuration cannot override it. Do not persist or reuse it.
+
 ## doctor
 
 Read-only host/config/daemon health check. `--scaffold` writes a minimal local `spur.yaml`. Checks: `sidecar-orphans`, `config-registry`, `session-headroom`, `home-disk-headroom`, `reclaimable-caches`, `claude-onboarding`, `opencode-executable`, `skills-symlinks`, `agent-process-ownership`, `github-poll-disabled` (reports only non-archived session records on configured `github` sources).
@@ -74,8 +75,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 `spur auto-ping unsubscribe --event <handle> [--session <id>] [--json]`: one occurrence, 24h post-work suppression — `v2/src/auto-ping.ts`.
 `spur auto-ping unsubscribe --thread <handle> [--session <id>] [--json]`: provider thread — `v2/src/auto-ping.ts`.
 `spur auto-ping unsubscribe --subscription <handle> [--session <id>] [--json]`: route; exactly one scope required, unredeemed handles expire after 30d — `v2/src/auto-ping.ts`.
-`spur auto-ping list [--session <id>] [--json]`; `spur auto-ping resume <suppressionId> [--session <id>] [--json]`; `SPUR_SESSION` supplies session inside agents; `grant_not_ready` requires retry.
-Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
+`spur auto-ping list [--session <id>] [--json]`; `spur auto-ping resume <suppressionId> [--session <id>] [--json]`; `SPUR_SESSION` supplies session inside agents; `grant_not_ready` requires retry. Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events). Owner: `v2/src/auto-ping.ts`.
 
 ## send, queue
 
