@@ -14315,7 +14315,7 @@ export class SessionService {
       return { view, attempt: null };
     }
     const activationStamp = this.lifecycleStamp(session);
-    await this.ensureReadyForQueuedSend(sessionId);
+    await this.ensureReadyForQueuedSend(sessionId, activationStamp);
     const activeRecord = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const readySession = readSession(this.config.dataDir, sessionId);
       if (!readySession) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);

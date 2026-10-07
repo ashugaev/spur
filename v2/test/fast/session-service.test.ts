@@ -10452,18 +10452,27 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
-    it.each(["pause during probe", "no pause", "explicit send from stopped"] as const)(
-      "guards dead-pane queued recovery: %s (issue #907 P1)",
-      async (scenario) => {
+    it.each([
+      ["runner", "pause during probe"],
+      ["runner", "no pause"],
+      ["explicit send", "pause during probe"],
+      ["explicit send", "no pause"],
+      ["explicit send", "stopped at start"],
+    ] as const)(
+      "guards dead-pane queued recovery: %s, %s (issue #907 P1)",
+      async (caller, scenario) => {
         mockClaudeJsonlState("waiting");
         const sessions = createSessionStore();
         sessions.set(
           "api-1",
           runningSession({
             agentSessionId: "session-uuid",
-            ...(scenario === "explicit send from stopped"
+            ...(scenario === "stopped at start"
               ? { status: "stopped", stopReason: "manual_pause" }
-              : { queuedMessages: { messages: ["queued body"], awaitingPrompt: false } }),
+              : {}),
+            ...(caller === "runner"
+              ? { queuedMessages: { messages: ["queued body"], awaitingPrompt: false } }
+              : {}),
           }),
         );
         mockExitedThenRestoredProcess();
@@ -10490,7 +10499,7 @@ describe("SessionService", () => {
           };
         });
         const delivery =
-          scenario === "explicit send from stopped"
+          caller === "explicit send"
             ? service.send("api-1", { message: "queued body" })
             : internals.tryDeliverQueuedMessage("api-1");
         await vi.waitFor(() => expect(probeStarted).toBe(true));
@@ -10501,7 +10510,7 @@ describe("SessionService", () => {
           });
         }
         releaseProbe();
-        await delivery;
+        const result = await delivery;
         if (scenario === "pause during probe") {
           expect(createTmuxSessionMock).not.toHaveBeenCalled();
           expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
@@ -10514,6 +10523,13 @@ describe("SessionService", () => {
             stopReason: "manual_pause",
             queuedMessages: { messages: ["queued body"] },
           });
+          if (caller === "explicit send") {
+            expect(result).toMatchObject({
+              status: "stopped",
+              stopReason: "manual_pause",
+              queuedMessages: { messages: ["queued body"] },
+            });
+          }
         } else {
           expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
           expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
