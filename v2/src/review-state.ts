@@ -7,10 +7,7 @@ const RESERVED = /(?:^|\n)(?:<!--[ \t]*)?Spur (?:review state|interface consent)
 function recognizesBody(body: string, marker: string): boolean {
   const prefix = marker.slice(0, marker.indexOf("v1")) + "v";
   return (
-    body.startsWith(prefix) ||
-    body
-      .split("\n")
-      .some((line) => line.replace(/^<!--[ \t]*/, "").startsWith(prefix) && line.startsWith("<!--"))
+    body.startsWith(prefix) || new RegExp(`(?:^|\\n)[\\t ]*<!--[\\t\\r\\n ]*${prefix}`).test(body)
   );
 }
 export function isStateBody(body: string): boolean {

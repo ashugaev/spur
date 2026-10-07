@@ -235,3 +235,37 @@ test("hidden consent and legacy consent share reader, ordinary status/quotes nev
   expect(() => stateBody({ ...state, attempt: "Ж".repeat(150000) })).toThrow();
   expect(() => readConsentBody(`${consentBody(value)}\n${stateBody(state)}`)).toThrow();
 });
+test.each(["indent", "tab", "split", "crlf"])(
+  "damaged %s HTML opener keeps reserved intent but remains invalid",
+  (damage) => {
+    const opener =
+      damage === "indent"
+        ? "  <!-- "
+        : damage === "tab"
+          ? "\t<!-- "
+          : damage === "split"
+            ? "<!--\n"
+            : " \t<!--\r\n";
+    const lane = stateBody(state).replace("<!-- ", opener);
+    expect(isStateBody(lane)).toBe(true);
+    expect(() => readStateBody(lane)).toThrow();
+    const value: ConsentState = {
+      version: 1,
+      repo: "owner/repo",
+      pr: 5,
+      task: "workspace",
+      branch: "feature/example",
+      baseBranch: "main",
+      manifestDigest: "a".repeat(64),
+      baselineDigest: "b".repeat(64),
+      challenge: "fixture",
+      decision: "revoked",
+      generation: 2,
+    };
+    const consent = consentBody(value).replace("<!-- ", opener);
+    expect(isConsentBody(consent)).toBe(true);
+    expect(() => readConsentBody(consent)).toThrow();
+    expect(isStateBody(`> ${opener}Spur review state v1\n{}`)).toBe(false);
+    expect(isStateBody("Ordinary text quotes `<!-- Spur review state v1`.")).toBe(false);
+  },
+);
