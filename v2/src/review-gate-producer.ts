@@ -7,6 +7,7 @@ import {
   GateGitHub,
   readGateSnapshot,
   evaluateSnapshot,
+  changedEvidenceCategories,
   workflowPath,
   type GatePolicy,
 } from "./review-gate.js";
@@ -67,7 +68,8 @@ export async function produceGates(api: GateGitHub, policy: GatePolicy): Promise
       checkId = integer(check.id);
       const before = await readGateSnapshot(api, policy, number);
       const result = evaluateSnapshot(policy, number, before);
-      const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
+      const finalSnapshot = await readGateSnapshot(api, policy, number);
+      const after = evaluateSnapshot(policy, number, finalSnapshot);
       const fresh =
         result.fingerprint === after.fingerprint &&
         result.H === H &&
@@ -80,7 +82,9 @@ export async function produceGates(api: GateGitHub, policy: GatePolicy): Promise
         conclusion: approved ? "success" : "failure",
         output: {
           title: approved ? "All approval gates pass" : "Approval blocked",
-          summary: fresh ? after.reason : "Evidence changed during evaluation",
+          summary: fresh
+            ? after.reason
+            : `Evidence changed during evaluation: ${changedEvidenceCategories(before, finalSnapshot)}`,
         },
       });
     } catch {
