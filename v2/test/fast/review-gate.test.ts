@@ -314,6 +314,29 @@ test("two actual App approvals and complete N/A coverage permit fork without con
   expect(evaluateSnapshot(policy, 5, fixture()).status).toBe("APPROVED");
 });
 test.each([
+  { designated: [], expected: "BLOCKED" },
+  { designated: [policy.codeActor], expected: "BLOCKED" },
+  { designated: [policy.browserActor], expected: "BLOCKED" },
+  { designated: [policy.codeActor, policy.browserActor], expected: "APPROVED" },
+])(
+  "designated approvals $designated cannot be replaced by two outsiders",
+  ({ designated, expected }) => {
+    const snapshot = fixture();
+    const outsiderReviews = [21, 22].map((id) => ({
+      ...snapshot.reviews[0],
+      id,
+      user: { id, type: "Bot" },
+    }));
+    snapshot.reviews = [
+      ...snapshot.reviews.filter((review) => designated.includes(Number(review.id))),
+      ...outsiderReviews,
+    ];
+    const result = evaluateSnapshot(policy, 5, snapshot);
+    expect(result.status).toBe(expected);
+    if (expected === "BLOCKED") expect(result.reason).toBe("native-approval-missing");
+  },
+);
+test.each([
   "queued",
   "in_progress",
   "success",
