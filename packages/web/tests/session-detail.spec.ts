@@ -4523,7 +4523,8 @@ test.describe("S5: Runtime sidebar", () => {
       expect(pendingSession.lifecycle).toEqual(
         lifecycleReceipt(restoreBodies[0].operationId, session.id, "restore", "pending", 1),
       );
-      await expect(page.getByText(/^working$/i)).toBeVisible();
+      await expect(page.getByText(/^starting$/i)).toBeVisible();
+      await expect(page.getByText(/^working$/i)).toHaveCount(0);
       for (const name of ["Desk agent", "Handoff", "Kill"]) {
         const control = page.getByRole("button", { name, exact: true });
         await expect(control).toBeVisible();
@@ -4559,6 +4560,8 @@ test.describe("S5: Runtime sidebar", () => {
       await page.getByRole("button", { name: "Continue anyway" }).click();
       await expect.poll(() => Boolean(release)).toBe(true);
       release?.();
+      await expect(page.getByText(/^starting$/i)).toHaveCount(0);
+      await expect(page.getByText(/^working$/i)).toBeVisible();
       await expect(page.getByText("100 / 100")).toBeVisible();
       await expect(page.getByPlaceholder("Message...")).toBeEnabled();
       await page.getByLabel("Tokens: 100", { exact: true }).focus();
