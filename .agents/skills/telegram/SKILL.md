@@ -8,9 +8,10 @@ TELEGRAM BOT SKILL: env TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 SESSION APPROVALS
 
   Send text/buttons through session-bound `spur source reply`; docs/commands.md owns command.
-  Attach UI screenshot through Bot API `sendPhoto`, using session's exact source token, chat and topic.
-  Resolve target through `readTelegramReplyTarget` in v2/src/metadata.ts; mirror source selection in `replyToSource`, v2/src/session-service.ts.
-  Preserve `message_thread_id`; never substitute global chat/token for session binding.
+  Attach UI screenshot through Bot API `sendPhoto`, using bound target or explicitly authorized configured recipient.
+  Read binding through `readTelegramReplyTarget`, v2/src/metadata.ts; resolve matching current-project source configuration.
+  Without binding, select one current-project source matching established integration token/chat pair; reject missing or ambiguous matches.
+  Preserve bound/configured topic and source chat allowlist; never guess chats or mix source credentials.
   Upload PNG as multipart photo; validate Telegram success, retain message ID as evidence.
   Keep credentials and target IDs out of output, artifacts and GitHub.
 
