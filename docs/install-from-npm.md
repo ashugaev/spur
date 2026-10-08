@@ -131,6 +131,10 @@ spur spawn <project-id> --branch <new-branch> "smoke test" --json
 
 `<new-branch>`: a branch not checked out in any worktree. The default branch fails.
 
+Before enabling review automation, check [Codex reviewer permissions](../TROUBLESHOOTING.md#codex-reviewer-cannot-run-commands-or-write-qa-output).
+Installer and project scaffold do not enable write restrictions.
+For reviews requiring QA output, verify a command runs and a disposable artifact can be written, read, and deleted.
+
 ## Upgrade
 
 ```bash

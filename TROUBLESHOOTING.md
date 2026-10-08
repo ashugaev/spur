@@ -59,3 +59,12 @@ bash scripts/setup.sh
 ## Session stays `spawning` with a shell prompt in the pane
 
 The agent launches through your login + interactive shell rc (`$SHELL -lic`). An rc prompt on startup (oh-my-zsh `Would you like to update? [Y/n]`) blocks it. Answer in the session's web terminal before the agent's ready timeout, or the spawn fails. Permanent fix: your rc tool's non-interactive update mode.
+
+## Codex reviewer cannot run commands or write QA output
+
+- Inspect reviewer [spawn configuration](docs/configuration.md#field-reference) for `restrictWrites: true` at spawn or block level; also check [CLI spawn](docs/commands.md#spawn) restrictions.
+- A read-only write rejection is expected with restrictions enabled.
+- A `bwrap` / `RTM_NEWADDR` error before command execution indicates host sandbox startup failure.
+- Preserve intentional restrictions and repair host sandbox support. For operator-approved full access, set `restrictWrites: false` on the Codex spawn block; this bypasses Codex sandbox and approval checks, granting host command and file access.
+- Keep reviewer source-edit policy separate from disposable QA/evidence writes; verify command execution and artifact write/read/cleanup.
+- Reload with [connect](docs/commands.md#connect-disconnect), then launch a new reviewer. Existing sessions retain stored restrictions, including on restore.
