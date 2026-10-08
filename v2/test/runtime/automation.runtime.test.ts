@@ -7,7 +7,7 @@ import { loadConfig, loadProjectConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
 import { AutoPingService } from "../../src/auto-ping.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
-import { _resetGhPathCacheForTests } from "../../src/gh.js";
+import { _resetGhPathCacheForTests, pollBudgetState } from "../../src/gh.js";
 import { SessionService } from "../../src/session-service.js";
 import { readPendingSendBatches, readSession } from "../../src/metadata.js";
 import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
@@ -608,8 +608,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         `    sources:
       pr-watch:
         type: github
-        intervalMs: 250
-        runOnStart: false
+        intervalMs: 3600000
+        runOnStart: true
         emitExisting: true
     triggers:
       pr-watch-ci-failed:
@@ -649,10 +649,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       const park = internals.parkStaleSession.bind(service);
       // Exercise one park/wake cycle; the fractional timeout must not park
       // the recovered fixture again while its delivery is being asserted.
-      const parkSpy = vi
-        .spyOn(internals, "parkStaleSession")
-        .mockResolvedValue(undefined)
-        .mockImplementationOnce(park);
+      const parkSpy = vi.spyOn(internals, "parkStaleSession").mockResolvedValue(undefined);
       const teardown = internals.teardownSessionSidecars.bind(service);
       const teardownSpy = vi
         .spyOn(internals, "teardownSessionSidecars")
@@ -702,6 +699,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
+        expect(handle.runOnStart).toBeTypeOf("function");
+        handle.runOnStart?.();
         const snapshotPath = join(
           context.dataDir,
           "source-state",
@@ -714,6 +713,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           timeoutMs: 15_000,
           accept: Boolean,
         });
+        parkSpy.mockImplementationOnce(park);
         await pollUntil(async () => teardownStarted, {
           timeoutMs: 20_000,
           accept: (value) => value,
@@ -744,9 +744,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
               }),
         });
 
+        handle.runOnStart?.();
         await pollUntil(
           async () => ({
             pending: readPendingSendBatches(context.dataDir).size,
+            sessionStatus: readSession(context.dataDir, session.id)?.status,
+            snapshot: readFileSync(snapshotPath, "utf8"),
+            budget: pollBudgetState(),
             warnings: sourceWarnings,
             events: readEventLog(context.dataDir).filter((entry) =>
               /^(source|trigger)\./.test(entry.event),
