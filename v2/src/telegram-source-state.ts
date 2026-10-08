@@ -316,7 +316,16 @@ export async function sendTelegramReply(
     sessionLabel?: string;
   } = {},
 ): Promise<TelegramReplySendResult> {
-  const label = options.sessionLabel ?? "";
+  const createdThreadId =
+    target.statusMessageId === undefined &&
+    target.messageThreadId === undefined &&
+    target.chatId < 0 &&
+    options.topicName
+      ? await createTelegramTopic(config, target.chatId, options.topicName)
+      : null;
+  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
+  const label =
+    target.chatId < 0 && messageThreadId !== undefined ? "" : (options.sessionLabel ?? "");
   const prefix = label ? `${label}\n\n` : "";
   const body = label ? text.replace(/^(?:\r?\n)+/u, "") : text;
   const rawChunks = splitTelegramText(prefix + body, prefix.length);
@@ -393,11 +402,6 @@ export async function sendTelegramReply(
     return { statusMessageIdConsumed: true, messageIds };
   }
 
-  const createdThreadId =
-    target.messageThreadId === undefined && target.chatId < 0 && options.topicName
-      ? await createTelegramTopic(config, target.chatId, options.topicName)
-      : null;
-  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
   for (const [index, chunk] of chunks.entries()) {
     collect(
       await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index)),

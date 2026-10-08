@@ -92,7 +92,7 @@ Routes: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [c
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Outside forum topics: bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 Telegram `/new <task>`: displayed project defaults, optional engine/mode Settings, runtime-only recent project; requester-owned cards expire after 10 min — `v2/src/event-sources/telegram.ts`, `v2/src/event-sources/telegram-workbench.ts`.
 Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, explicit Continue binds, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
 

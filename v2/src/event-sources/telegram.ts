@@ -740,7 +740,14 @@ async function bindSpawnedSession(
     bound = true;
     rememberSent(deps, session.id, chatId, statusMessageId);
     if (!options)
-      await editOrReply(ctx, chatId, statusMessageId, `Spawned and bound: ${session.id}.`);
+      await editOrReply(
+        ctx,
+        chatId,
+        statusMessageId,
+        chatId < 0 && messageThreadId !== undefined
+          ? "Spawned and bound."
+          : `Spawned and bound: ${session.id}.`,
+      );
     if (displacedId !== undefined && displacedId !== session.id) {
       await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
     }
@@ -1138,7 +1145,7 @@ async function handleWorkbenchCallback(
       }
       if (outcome.phase === "created") {
         await editWorkbenchCard(ctx, runtime, card, {
-          text: `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
+          text: `${outcome.bound && !outcome.error && owner.chatId < 0 && owner.threadId !== undefined ? "Created. Bound here." : `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}`}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
           rows: outcome.bound
             ? []
             : [
@@ -1204,7 +1211,7 @@ async function handleWorkbenchCallback(
         throw new Error("Continue unavailable");
       await bindWorkbenchSession(ctx, runtime, card, session);
       await editWorkbenchCard(ctx, runtime, card, {
-        text: `Bound ${session.id}. Plain messages here go to this task.`,
+        text: `${owner.chatId < 0 && owner.threadId !== undefined ? "Bound." : `Bound ${session.id}.`} Plain messages here go to this task.`,
         rows: [],
       });
       return;
@@ -1460,8 +1467,11 @@ async function handleTelegramCallback(
     }
     return;
   }
-  const reply = `Bound this Telegram thread to Spur session ${sessionId}.`;
-  await ctx.answerCallbackQuery(`Bound ${sessionId}.`);
+  const forum = message.chat.id < 0 && message.message_thread_id !== undefined;
+  const reply = forum
+    ? "Bound this Telegram thread."
+    : `Bound this Telegram thread to Spur session ${sessionId}.`;
+  await ctx.answerCallbackQuery(forum ? "Bound." : `Bound ${sessionId}.`);
   if (ctx.editMessageText) {
     await ctx.editMessageText(reply);
   } else {
@@ -1731,7 +1741,11 @@ async function handleTelegramText(
       );
       return;
     }
-    await ctx.reply(`Bound this Telegram thread to Spur session ${command.sessionId}.`);
+    await ctx.reply(
+      message.chat.id < 0 && message.message_thread_id !== undefined
+        ? "Bound this Telegram thread."
+        : `Bound this Telegram thread to Spur session ${command.sessionId}.`,
+    );
     return;
   }
   if (command?.kind === "watch_menu") {
