@@ -95,6 +95,7 @@ A few steps use your own accounts and each needs one interactive action — they
 
 - Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. At least one agent, fully onboarded, is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
+- Trust each connected repo for Claude — [Connect a project](#connect-a-project).
 - Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
 Spur installs and its services start without these; until the first two are done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
@@ -116,6 +117,11 @@ After a start/restart the units can take up to ~2 min to answer on a ~1 GB host 
 cd <repo>
 spur doctor --scaffold
 spur connect spur.yaml
+```
+
+Claude only, operator action: `cd <repo> && claude`, answer "Yes, I trust this folder" — covers every Spur worktree of that repo; once per connected repo. A setup agent never answers it: list it in the operator TODO, skip the smoke spawn until done.
+
+```bash
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
@@ -149,16 +155,17 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 ## Troubleshooting
 
-| Symptom                                  | Fix                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `status=203/EXEC`                        | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
-| `EACCES .../usr/lib/node_modules`        | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
-| units die after SSH logout               | linger off: `loginctl enable-linger $USER`                                                                    |
-| web terminal `/ws` won't connect         | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
-| `/ws` closes immediately                 | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
-| web unreachable over Tailscale           | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
-| mic button dead on the tailnet URL       | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
-| first spawn: `OAuth error: Invalid code` | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| Symptom                                             | Fix                                                                                                           |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC`                                   | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
+| `EACCES .../usr/lib/node_modules`                   | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
+| units die after SSH logout                          | linger off: `loginctl enable-linger $USER`                                                                    |
+| web terminal `/ws` won't connect                    | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
+| `/ws` closes immediately                            | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
+| web unreachable over Tailscale                      | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
+| mic button dead on the tailnet URL                  | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
+| first spawn: `OAuth error: Invalid code`            | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| `Timed out waiting for agent submit acknowledgment` | pane shows "Yes, I trust this folder": `cd <project repo> && claude`, accept trust, exit, re-spawn            |
 
 ## System-wide units (advanced)
 

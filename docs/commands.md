@@ -3,6 +3,8 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
+`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
+`review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 
 ## Session tools and environment
 
@@ -58,7 +60,6 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## list
 
 `spur list [--json]` reads `GET /sessions` ([daemon-api.md#session-routes](daemon-api.md#session-routes)). TTY: live selector (`Enter` attach, `l` log, `p` pause, `c` complete, `r` restore, `k` kill).
-
 `spur pause <sessionId> [--json]` — keeps the worktree.
 `spur complete <sessionId> [--pr-action leave_open|close] [--skip-pr-check] [--json]`.
 `spur kill <sessionId> [--force] [--pr-action leave_open|close] [--skip-pr-check] [--json]` — `--force` skips the dirty-worktree/unpushed-commit confirmation.
@@ -92,7 +93,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## source reply
 
-`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]` — agent-initiated send to the session's bound chat, `--button` repeatable up to 8 for inline choices. Bold session label (`<id> — <title>`, or `<id>`), one empty line before body. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Reply routing, binding and formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
+`spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Outside forum topics: bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).
 Telegram `/new <task>`: displayed project defaults, optional engine/mode Settings, runtime-only recent project; requester-owned cards expire after 10 min — `v2/src/event-sources/telegram.ts`, `v2/src/event-sources/telegram-workbench.ts`.
 Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routing unchanged, explicit Continue binds, eligible Restore keeps session id and core recovery/budget rules — `v2/src/event-sources/telegram.ts`, `v2/src/server.ts`.
 

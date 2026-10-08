@@ -21,7 +21,7 @@ INTERFACES
   Agent launch identity contract: `docs/commands.md#session-tools-and-environment`.
   Automatic reminder limits: `docs/configuration.md#automatic-reminders`.
   Spur ToDo: ledger starts empty, no code path seeds an item; the agent adds one item per step, before the step, and resolves it after. Empty or open/held work refuses an agent's own completion, self-destruct, and handoff — `todo_ledger_empty`/`todo_open_work` (409); a human `complete`/`handoff` from the CLI or UI is never blocked. Contract: `docs/commands.md#todo`.
-  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; users launch tasks and inspect attention cards. Routing: `docs/configuration.md#telegram-binding`; commands: `docs/commands.md#source-reply`.
+  Telegram: agents send with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`; users launch tasks and inspect attention cards. Binding, topic identity: `docs/configuration.md#telegram-binding`; replies: `docs/commands.md#source-reply`.
   Stop unwanted auto-pings with `spur auto-ping unsubscribe`. A thread that keeps coming back takes `--thread`; `--event` binds to one emitted occurrence only. Scopes and resume: `docs/commands.md#auto-ping`; API: `docs/daemon-api.md`.
 
 SAFETY
@@ -44,7 +44,7 @@ DOCS
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
-  Config: docs/configuration.md; events: docs/configuration.md#events
+  Config, reviewer App and consent policy: docs/configuration.md; events: docs/configuration.md#events
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
 

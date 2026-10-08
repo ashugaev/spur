@@ -7,6 +7,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  consentPolicy,
+  proposeConsent,
+  presentConsent,
+  repositoryOf,
+  reconcileInterfaceConsent,
+  type InterfaceConsent,
+} from "./review-interface-consent.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   annotateLifecycleError,
@@ -244,6 +252,8 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  readInterfaceConsent,
+  writeInterfaceConsent,
   recordTelegramMessages,
   writeTelegramOffer,
   readTelegramReplyTarget,
@@ -3174,13 +3184,21 @@ interface ResolvedTelegramNotice {
 }
 
 function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" | "slots">): string {
-  const head = `${telegramStatusEmoji(session.state)} ${session.id} ${session.agent}`;
+  const emoji = telegramStatusEmoji(session.state);
+  const identity = `${session.id} ${session.agent}`;
   const title = sessionTitle(session);
-  if (!title) return head;
-  const name = `${head} — ${title}`;
-  return name.length > TELEGRAM_TOPIC_NAME_MAX
-    ? `${name.slice(0, TELEGRAM_TOPIC_NAME_MAX - 1).trimEnd()}…`
-    : name;
+  if (!title) return `${emoji} ${identity}`;
+  const suffix = ` — ${identity}`;
+  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
+  const truncate = (value: string, limit: number): string =>
+    value.length > limit
+      ? value
+          .slice(0, limit - 1)
+          .replace(/[\uD800-\uDBFF]$/u, "")
+          .trimEnd() + "…"
+      : value;
+  if (titleLimit < 1) return truncate(`${emoji} ${title}${suffix}`, TELEGRAM_TOPIC_NAME_MAX);
+  return `${emoji} ${truncate(title, titleLimit)}${suffix}`;
 }
 
 export class SessionService {
@@ -7975,8 +7993,8 @@ export class SessionService {
   }
 
   /**
-   * Renames the agent's forum topic when its computed name (status emoji, id,
-   * agent, title) differs from the last name applied. The one place that calls
+   * Renames the agent's forum topic when its computed name (status emoji, title,
+   * id, agent) differs from the last name applied. The one place that calls
    * editTelegramTopic; group topics only.
    */
   private async syncTelegramTopicName(
@@ -14054,7 +14072,15 @@ export class SessionService {
     if (!message) {
       throw new InvalidSourceReplyInputError("message must be a non-empty string");
     }
-    const buttons = parseSourceReplyButtons(request.buttons);
+    let buttons = parseSourceReplyButtons(request.buttons);
+    await reconcileInterfaceConsent(this.config.dataDir, sessionId).catch(() => {
+      this.logEvent("source.interface-consent.blocked", {
+        level: "warn",
+        sessionId,
+        projectId: session.project,
+        message: "Interface consent publication blocked; decision retained locally",
+      });
+    });
 
     const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
     const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
@@ -14068,8 +14094,48 @@ export class SessionService {
       );
     }
 
+    let consent: InterfaceConsent | undefined;
+    if (request.requestInterfaceApproval !== undefined) {
+      if (buttons.length > 0)
+        throw new InvalidSourceReplyInputError("Interface approval owns its buttons");
+      const policy = await consentPolicy(source.allowedUsers);
+      const project = this.config.projects[session.project];
+      if (!project || target.projectId !== session.project)
+        throw new InvalidSourceReplyInputError("Interface approval source/project mismatch");
+      const repository = await repositoryOf(session.worktreePath);
+      const branch = await readCurrentBranch(session.worktreePath);
+      if (!policy.repositories.includes(repository) || branch !== session.branch)
+        throw new InvalidSourceReplyInputError("Interface approval repository/branch mismatch");
+      consent = proposeConsent(
+        {
+          session: sessionId,
+          authority: workspaceIdOf(session),
+          repository,
+          branch,
+          baseBranch: project.defaultBranch,
+          projectId: target.projectId,
+          sourceId: target.sourceId,
+          chatId: target.chatId,
+          approverUserId: policy.approverUserId,
+          manifest: request.requestInterfaceApproval as InterfaceConsent["manifest"],
+        },
+        readInterfaceConsent(this.config.dataDir, sessionId),
+      );
+      buttons = [
+        { text: "Approve interface", value: "approved" },
+        { text: "Reject interface", value: "rejected" },
+        { text: "Revoke interface approval", value: "revoked" },
+      ];
+      writeInterfaceConsent(this.config.dataDir, consent);
+    }
     const view = await this.enrich(session);
     const choices = buildTelegramChoices(sessionId, target, buttons);
+    if (consent)
+      for (const choice of choices)
+        choice.interfaceConsent = {
+          challenge: consent.challenge,
+          decision: choice.value as "approved" | "rejected" | "revoked",
+        };
     // Persisted before the send: a click can only arrive once Telegram has the
     // keyboard, and the row must already be there when it does.
     if (choices.length > 0) {
@@ -14080,18 +14146,35 @@ export class SessionService {
       });
     }
     this.claimTelegramPlaceholder(sessionId, target);
-    const result = await sendTelegramReply(source, target, message, {
-      sessionLabel: telegramSessionLabel(view),
-      topicName: telegramTopicName(view),
-      ...(choices.length > 0
-        ? {
-            buttons: choices.map((choice) => ({
-              text: choice.text,
-              callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
-            })),
-          }
-        : {}),
+    const result = await sendTelegramReply(
+      source,
+      target,
+      `${message}${consent ? `\n\n${presentConsent(consent)}` : ""}`,
+      {
+        sessionLabel: telegramSessionLabel(view),
+        topicName: telegramTopicName(view),
+        ...(choices.length > 0
+          ? {
+              buttons: choices.map((choice) => ({
+                text: choice.text,
+                callbackData: `${TELEGRAM_CHOICE_CALLBACK_PREFIX}${choice.token}`,
+              })),
+            }
+          : {}),
+      },
+    ).catch((error: unknown) => {
+      if (consent) {
+        const current = readInterfaceConsent(this.config.dataDir, sessionId);
+        if (current?.challenge === consent.challenge)
+          writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "failed" });
+      }
+      throw error;
     });
+    if (consent) {
+      const current = readInterfaceConsent(this.config.dataDir, sessionId);
+      if (current?.challenge === consent.challenge)
+        writeInterfaceConsent(this.config.dataDir, { ...current, delivery: "sent" });
+    }
     // A buttonless reply supersedes the question it answers, so it retires the
     // pending offer — after the send, since a throw leaves the keyboard up.
     if (choices.length === 0) {
@@ -16251,6 +16334,17 @@ export class SessionService {
       ...(nextPr ? { pr: nextPr } : {}),
     };
     const owner = this.writeWorkspaceStateWithLegacyMirror(session, nextState);
+    if (nextPr)
+      for (const member of this.listDeskSessions(session)) {
+        await reconcileInterfaceConsent(this.config.dataDir, member.id).catch(() => {
+          this.logEvent("source.interface-consent.blocked", {
+            level: "warn",
+            sessionId: member.id,
+            projectId: member.project,
+            message: "Interface consent publication blocked; decision retained locally",
+          });
+        });
+      }
     const displaySlots = deriveSessionSlots(nextState);
     this.logEvent("session.slots.updated", {
       level: "info",

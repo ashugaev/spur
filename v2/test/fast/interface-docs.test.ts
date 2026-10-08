@@ -45,9 +45,9 @@ describe("published interface contracts", () => {
 
     // Surface names and flags only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
-    expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --thread <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --subscription <handle>");
+    const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
+    expect(autoPing).toContain("spur auto-ping unsubscribe");
+    for (const flag of ["--event", "--thread", "--subscription"]) expect(autoPing).toContain(flag);
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");

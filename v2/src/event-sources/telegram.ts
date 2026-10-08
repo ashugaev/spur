@@ -3,6 +3,9 @@ import { Bot, type Context } from "grammy";
 import { logSpurEvent } from "../event-log.js";
 import {
   deleteTelegramReplyTarget,
+  readInterfaceConsent,
+  writeInterfaceConsent,
+  readSession,
   readTelegramBindings,
   readTelegramLastUpdateId,
   findTelegramChoice,
@@ -33,6 +36,14 @@ import type {
 } from "./types.js";
 import { formatTelegramSessionLabel } from "../telegram-source-state.js";
 import { telegramStatusEmoji } from "../telegram-status-emoji.js";
+import {
+  consentPolicy,
+  decideConsent,
+  reconcileInterfaceConsent,
+  repositoryOf,
+} from "../review-interface-consent.js";
+import { workspaceIdOf } from "../session-desk.js";
+import { readCurrentBranch } from "../workspace.js";
 import {
   TelegramWorkbench,
   WORKBENCH_CALLBACK_PREFIX,
@@ -695,8 +706,14 @@ async function bindSpawnedSession(
       return { phase: "not_submitted" };
     }
     if (!options) {
-      const status = await ctx.reply(`Spawning ${request.agent} agent...`);
-      statusMessageId = extractMessageId(status);
+      try {
+        const status = await ctx.reply(`Spawning ${request.agent} agent...`);
+        statusMessageId = extractMessageId(status);
+      } catch (error) {
+        deps.logger.warn?.(
+          `[source:${deps.projectId}/${deps.sourceId}] telegram spawn progress failed: ${redactedErrorText(deps, error)}`,
+        );
+      }
     }
     if (!current()) return { phase: "not_submitted" };
     submitted = true;
@@ -723,7 +740,14 @@ async function bindSpawnedSession(
     bound = true;
     rememberSent(deps, session.id, chatId, statusMessageId);
     if (!options)
-      await editOrReply(ctx, chatId, statusMessageId, `Spawned and bound: ${session.id}.`);
+      await editOrReply(
+        ctx,
+        chatId,
+        statusMessageId,
+        chatId < 0 && messageThreadId !== undefined
+          ? "Spawned and bound."
+          : `Spawned and bound: ${session.id}.`,
+      );
     if (displacedId !== undefined && displacedId !== session.id) {
       await detachDisplacedSession(runtime, ctx, chatId, messageThreadId, session, displacedId);
     }
@@ -1121,7 +1145,7 @@ async function handleWorkbenchCallback(
       }
       if (outcome.phase === "created") {
         await editWorkbenchCard(ctx, runtime, card, {
-          text: `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
+          text: `${outcome.bound && !outcome.error && owner.chatId < 0 && owner.threadId !== undefined ? "Created. Bound here." : `Created ${outcome.session.id}. ${outcome.bound ? "Bound here." : "Not bound; use Continue here or /work."}`}${outcome.error ? `\n${redactedErrorText(runtime.deps, outcome.error)}` : ""}`,
           rows: outcome.bound
             ? []
             : [
@@ -1187,7 +1211,7 @@ async function handleWorkbenchCallback(
         throw new Error("Continue unavailable");
       await bindWorkbenchSession(ctx, runtime, card, session);
       await editWorkbenchCard(ctx, runtime, card, {
-        text: `Bound ${session.id}. Plain messages here go to this task.`,
+        text: `${owner.chatId < 0 && owner.threadId !== undefined ? "Bound." : `Bound ${session.id}.`} Plain messages here go to this task.`,
         rows: [],
       });
       return;
@@ -1443,8 +1467,11 @@ async function handleTelegramCallback(
     }
     return;
   }
-  const reply = `Bound this Telegram thread to Spur session ${sessionId}.`;
-  await ctx.answerCallbackQuery(`Bound ${sessionId}.`);
+  const forum = message.chat.id < 0 && message.message_thread_id !== undefined;
+  const reply = forum
+    ? "Bound this Telegram thread."
+    : `Bound this Telegram thread to Spur session ${sessionId}.`;
+  await ctx.answerCallbackQuery(forum ? "Bound." : `Bound ${sessionId}.`);
   if (ctx.editMessageText) {
     await ctx.editMessageText(reply);
   } else {
@@ -1488,7 +1515,95 @@ async function handleAgentChoiceCallback(
     );
     return;
   }
-  const choice = takeTelegramChoice(
+  let choice: ReturnType<typeof takeTelegramChoice> = null;
+  if (pending.interfaceConsent) {
+    try {
+      const policy = await consentPolicy(deps.config.allowedUsers);
+      const record = readInterfaceConsent(deps.dataDir, pending.sessionId);
+      if (
+        !record ||
+        policy.approverUserId !== record.approverUserId ||
+        !policy.repositories.includes(record.repository)
+      )
+        throw new Error("Interface approval policy changed");
+      const actualSession = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !actualSession ||
+        actualSession.project !== record.projectId ||
+        actualSession.branch !== record.branch ||
+        workspaceIdOf(actualSession) !== record.authority ||
+        (await readCurrentBranch(actualSession.worktreePath)) !== record.branch
+      )
+        throw new Error("Interface approval task changed");
+      const relocated = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !relocated ||
+        relocated.project !== record.projectId ||
+        relocated.branch !== record.branch ||
+        workspaceIdOf(relocated) !== record.authority
+      )
+        throw new Error("Interface approval task changed");
+      const validatedPath = relocated.worktreePath;
+      if (validatedPath !== actualSession.worktreePath) {
+        const [branch, repository] = await Promise.all([
+          readCurrentBranch(validatedPath),
+          repositoryOf(validatedPath),
+        ]);
+        if (branch !== record.branch || repository !== record.repository)
+          throw new Error("Interface approval task changed");
+      }
+      const active = findTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      const current = readInterfaceConsent(deps.dataDir, pending.sessionId);
+      const currentSession = readSession(deps.dataDir, pending.sessionId);
+      if (
+        !active?.interfaceConsent ||
+        !current ||
+        current.generation !== record.generation ||
+        current.challenge !== record.challenge ||
+        current.authority !== record.authority ||
+        !currentSession ||
+        currentSession.project !== record.projectId ||
+        currentSession.branch !== record.branch ||
+        currentSession.worktreePath !== validatedPath ||
+        workspaceIdOf(currentSession) !== record.authority
+      )
+        throw new Error("Interface approval superseded");
+      const decision = decideConsent(current, {
+        session: pending.sessionId,
+        sourceId: deps.sourceId,
+        projectId: deps.projectId,
+        chatId: message.chat.id,
+        actor: from.id,
+        challenge: active.interfaceConsent.challenge,
+        decision: active.interfaceConsent.decision,
+      });
+      choice = takeTelegramChoice(
+        deps.dataDir,
+        deps.projectId,
+        deps.sourceId,
+        token,
+        message.chat.id,
+      );
+      if (!choice) throw new Error("Interface approval choice retired");
+      writeInterfaceConsent(deps.dataDir, decision);
+      // Failed external publication keeps the durable outbox for the next lifecycle call.
+      await reconcileInterfaceConsent(deps.dataDir, pending.sessionId).catch(() => {
+        deps.logger.warn?.("Interface consent publication blocked; decision retained locally.");
+      });
+    } catch {
+      await ctx.answerCallbackQuery(
+        "Interface approval is inactive or requires the designated approver.",
+      );
+      return;
+    }
+  }
+  choice ??= takeTelegramChoice(
     deps.dataDir,
     deps.projectId,
     deps.sourceId,
@@ -1626,7 +1741,11 @@ async function handleTelegramText(
       );
       return;
     }
-    await ctx.reply(`Bound this Telegram thread to Spur session ${command.sessionId}.`);
+    await ctx.reply(
+      message.chat.id < 0 && message.message_thread_id !== undefined
+        ? "Bound this Telegram thread."
+        : `Bound this Telegram thread to Spur session ${command.sessionId}.`,
+    );
     return;
   }
   if (command?.kind === "watch_menu") {
@@ -2036,18 +2155,20 @@ async function transcribeAndRoute(
   try {
     transcript = await transcribeTelegramVoice(ctx, deps, webBaseUrl);
   } catch (error) {
-    if (isAborted(deps)) {
-      // An abort-cancelled fetch must not reply during shutdown, but the
-      // failure still gets logged so it isn't silent in the daemon's own log.
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
-      );
-    } else {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice transcription failed: ${redactedErrorText(deps, error)}`,
+    );
+    if (isAborted(deps)) return;
+    try {
       await editOrReply(
         ctx,
         message.chat.id,
         statusMessageId,
         `Voice transcription failed: ${redactedErrorText(deps, error)}`,
+      );
+    } catch (noticeError) {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failure notice failed: ${redactedErrorText(deps, noticeError)}`,
       );
     }
     return;
@@ -2065,7 +2186,13 @@ async function transcribeAndRoute(
     return;
   }
 
-  await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+  try {
+    await editOrReply(ctx, message.chat.id, statusMessageId, `Heard: "${trimmed}"`);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice echo failed: ${redactedErrorText(deps, error)}`,
+    );
+  }
   if (isAborted(deps)) return;
 
   await routeTelegramPrompt(runtime, ctx, message, from, trimmed);

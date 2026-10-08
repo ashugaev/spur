@@ -11,12 +11,15 @@ ATTEMPT
 
   Separate local implementation verdict from live publication; no active PR leaves publication NOT REQUIRED, not BLOCKED.
   Local gates falsify spec/checks without shared receipts or GitHub writes; local APPROVED never counts as published approval.
-  Live caller supplies permitted shared receipt root and network/publication capability; probe effective access before work.
+  Require caller-owned App config; probe network/publication access after attempt registration.
+  Use caller's trusted `spur review-app` executable outside reviewed checkout for every transition.
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
   Capture repository, PR, lane, designated session, unique attempt, head H and base B.
-  Persist <caller-receipt-root>/<repository>/<PR>/<lane>.json before live work with status PENDING.
+  Register new attempt before live work with `spur review-app prepare`; caller App config owns receiptRoot and canonical repository/PR/lane receipt. Request schema: v2/src/review-app.ts.
+  Prepare identity/H/B/digest before checkout/QA; add verdict/body/evidence to separate publication input afterward.
+  Start QA only after confirmed App-authored public PENDING; failed transport blocks QA and owner continuation.
   Receipt fields: session, attempt, H, B, contractDigest, status, evidence, reviewId; use repository owner/name namespaces.
-  Serialize attempts per lane; unresolved/concurrent attempts block. Persist BLOCKED before GitHub publication/dismissal writes.
+  Persist review failure through `spur review-app block`; new attempt required after review blocker. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
   Receipt write failure blocks; notify owner. Never recover eligibility from historical approval alone.
   Checkout H; bind test environment and artifacts to H/B. Record configuration/environment fingerprints.
 
@@ -36,6 +39,7 @@ SCENARIOS
   Browser lane independently drives isolated UI, exercises affected user flows and visually inspects saved artifacts.
   Mock/unit/static evidence supplements required live/browser rows; never replaces them.
   Required unavailable/failing/unproven rows block approval; document bounded exclusions and evidence gaps.
+  Attest every changed path/caller as internal or semantic interface scope; assessment schema: v2/src/review-interface.ts. Missing, unknown or disagreeing lanes block exemption.
 
 DELTA
 
@@ -49,14 +53,15 @@ DELTA
 PUBLICATION
 
   Re-read H/B before publication; changed pair invalidates pass.
-  Submit GitHub REST POST /repos/{owner}/{repo}/pulls/{number}/reviews with commit_id=H and event APPROVE or REQUEST_CHANGES.
-  Use structured JSON/file input; gh pr review cannot pin commit. No unpinned fallback.
+  Publish through `spur review-app publish --app-config <file> --request <file> --json`.
+  Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
   Body: conclusion, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections.
   Code title: Code Review Conclusion. Browser title: Browser QA Conclusion. Use Objections: none only on clean pass.
   Verify returned review ID/state/commit_id; retrieve submitted review and compare. Re-read PR H/B afterward.
   Denial, self-author restriction, mismatch, missing evidence or observed race yields BLOCKED; never claim approval.
   Report local conclusion separately; self-author denial needs authorized non-author credentials, never COMMENT substituted for approval.
   Persist APPROVED only after verified publication/freshness; include returned reviewId in receipt.
+  Require confirmed App-authored final state alongside pinned native verdict; issue-comment state never replaces native approval.
   Persist CHANGES_REQUESTED only after verified publication; otherwise retain BLOCKED.
   Notify matching PR owner only on verdict/attempt/head change; include receipt and bounded aggregate-read request under existing user authorization.
   Resolve owner via Spur PR binding, excluding own session; absent owner/send failure records BLOCKED notification status.
@@ -78,3 +83,5 @@ OWNER GATE
   Recheck H/B and gate evidence at authorized action boundary; changed pair reruns affected gate.
   Resume authorized continuation after gate passes; human merge default, conditional authority only through caller-trusted agent-protocol.md.
   Before/after reads detect observed races, never atomicity; recurrence provides eventual review, no immediate push invalidation.
+  Use `spur review-gate evaluate` for authenticated public aggregation; trusted Actions writer requires activation proof before auto-merge.
+  Failed public transport before commit leaves historical remote state unchanged; hold continuation, never claim remote revocation.

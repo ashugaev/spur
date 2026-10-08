@@ -5,6 +5,7 @@ import {
   sendTelegramChatAction,
   sendTelegramReply,
 } from "../../src/telegram-source-state.js";
+import { presentConsent, proposeConsent } from "../../src/review-interface-consent.js";
 
 describe("sendTelegramReply", () => {
   beforeEach(() => {
@@ -241,6 +242,7 @@ describe("sendTelegramReply", () => {
 
     const result = await sendTelegramReply({ token: "token-123" }, { chatId: -1001 }, "hello", {
       topicName: "🟡 api-1 codex",
+      sessionLabel: "api-1 — Task title",
     });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -311,14 +313,69 @@ describe("sendTelegramReply formatting", () => {
   it("bolds the escaped session signature without parsing title markdown", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(okId(55));
-    await sendTelegramReply(config, { chatId: 123 }, "\n\nDone **today**", {
+    await sendTelegramReply(config, { chatId: 123, messageThreadId: 22 }, "\n\nDone **today**", {
       sessionLabel: "api-1 — <checkout> & **literal** `title`",
     });
     expect(bodyOf(fetchMock, 0)).toEqual({
       chat_id: 123,
       text: "<b>api-1 — &lt;checkout&gt; &amp; **literal** `title`</b>\n\nDone <b>today</b>",
       parse_mode: "HTML",
+      message_thread_id: 22,
     });
+  });
+
+  it.each([undefined, 77])(
+    "omits forum signatures for send/edit %s with buttons",
+    async (statusMessageId) => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(okId(statusMessageId ?? 55));
+      await sendTelegramReply(
+        config,
+        {
+          chatId: -1001,
+          messageThreadId: 22,
+          ...(statusMessageId !== undefined ? { statusMessageId } : {}),
+        },
+        "Done **today**",
+        {
+          sessionLabel: "api-1 — Task title",
+          buttons: [{ text: "Yes", callbackData: "spur_choice:t0" }],
+        },
+      );
+      expect(bodyOf(fetchMock, 0)).toMatchObject({
+        text: "Done <b>today</b>",
+        reply_markup: { inline_keyboard: [[{ text: "Yes", callback_data: "spur_choice:t0" }]] },
+      });
+    },
+  );
+
+  it("keeps the group-main signature when topic creation fails", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, description: "not a forum" }), { status: 400 }),
+      )
+      .mockResolvedValueOnce(okId(55));
+    await sendTelegramReply(config, { chatId: -1001 }, "Done", {
+      sessionLabel: "api-1 — Task title",
+      topicName: "Task title — api-1 codex",
+    });
+    expect(bodyOf(fetchMock, 1)).toMatchObject({ text: "<b>api-1 — Task title</b>\n\nDone" });
+    expect(bodyOf(fetchMock, 1)).not.toHaveProperty("message_thread_id");
+  });
+
+  it("omits forum signatures on chunking and plain parse-error fallback", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(parseError())
+      .mockResolvedValueOnce(okId(55))
+      .mockResolvedValueOnce(okId(56));
+    await sendTelegramReply(config, { chatId: -1001, messageThreadId: 22 }, "x".repeat(4097), {
+      sessionLabel: "api-1",
+    });
+    expect(bodyOf(fetchMock, 1)).toMatchObject({ text: "x".repeat(4096), message_thread_id: 22 });
+    expect(bodyOf(fetchMock, 1)).not.toHaveProperty("parse_mode");
+    expect(bodyOf(fetchMock, 2)).toMatchObject({ text: "x", message_thread_id: 22 });
   });
 
   it("keeps one empty line after an id-only signature when editing a placeholder with buttons", async () => {
@@ -336,6 +393,85 @@ describe("sendTelegramReply formatting", () => {
     });
     expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
   });
+  it.each([
+    { mode: "outside forum", chatId: 123, statusMessageId: undefined },
+    { mode: "forum send", chatId: -1001, statusMessageId: undefined },
+    { mode: "forum placeholder edit", chatId: -1001, statusMessageId: 55 },
+  ])(
+    "renders consent once with purpose keyboard/thread in $mode",
+    async ({ chatId, statusMessageId }) => {
+      const record = proposeConsent(
+        {
+          session: "api-1",
+          repository: "owner/repo",
+          branch: "feature/change",
+          baseBranch: "main",
+          projectId: "api",
+          sourceId: "telegram",
+          chatId,
+          approverUserId: 7,
+          manifest: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["no flag"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        },
+        null,
+      );
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(okId(55));
+      await sendTelegramReply(
+        config,
+        { chatId, messageThreadId: 22, ...(statusMessageId ? { statusMessageId } : {}) },
+        `Approve scope\n\n${presentConsent(record)}`,
+        {
+          sessionLabel: "api-1 — Scope <review>",
+          buttons: [
+            { text: "Approve interface", callbackData: "spur_choice:approve" },
+            { text: "Reject", callbackData: "spur_choice:reject" },
+            { text: "Revoke", callbackData: "spur_choice:revoke" },
+          ],
+        },
+      );
+      const payload = bodyOf(fetchMock, 0);
+      expect(payload).toMatchObject({
+        chat_id: chatId,
+        ...(statusMessageId ? { message_id: statusMessageId } : { message_thread_id: 22 }),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Approve interface", callback_data: "spur_choice:approve" }],
+            [{ text: "Reject", callback_data: "spur_choice:reject" }],
+            [{ text: "Revoke", callback_data: "spur_choice:revoke" }],
+          ],
+        },
+      });
+      if (typeof payload.text !== "string") throw new Error("missing Telegram text");
+      if (chatId > 0) {
+        expect(payload.text).toContain("<b>api-1 — Scope &lt;review&gt;</b>\n\nApprove scope");
+        expect(payload.text.match(/api-1/g)).toHaveLength(1);
+      } else {
+        expect(payload.text).toMatch(/^Approve scope/);
+        expect(payload.text).not.toContain("api-1");
+        expect(payload.text).not.toContain("Scope &lt;review&gt;");
+      }
+      for (const clause of ["Approve scope", "no flag", "--dry-run", "no process created"]) {
+        expect(payload.text.split(clause)).toHaveLength(2);
+      }
+      expect(fetchMock.mock.calls[0]?.[0]).toMatch(
+        statusMessageId ? /\/editMessageText$/ : /\/sendMessage$/,
+      );
+      expect(record.decision).toBe("pending");
+    },
+  );
 
   it("includes the signature in the first chunk limit without repeating it on continuation", async () => {
     const fetchMock = vi.mocked(fetch);

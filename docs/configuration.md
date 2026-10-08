@@ -5,6 +5,10 @@
 Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, tmux socket, default agent, UI port, `voice:` — see [voice.md](voice.md)). Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only. Merge order and per-session resolution: `v2/src/config.ts`.
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
+`SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
+Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
+Approval writer variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/review-approval.yml`.
 
 ## Config registry
 
@@ -45,7 +49,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 ## Telegram binding
 
-`/watch [sessionId]` binds chat/topic; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
+`/watch [sessionId]` binds chat/topic; successful forum binding confirmations omit session identity; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
 Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
 [`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
 Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
@@ -56,7 +60,7 @@ Private/forum placeholders: `Received. <label> is thinking...`, `is busy; your m
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
 Private/forum typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
-Forum topic names track status emoji, session id, agent and title — `v2/src/session-service.ts`.
+Forum topic names: status emoji, title, session id, agent; titled names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
 Generated Telegram launch instructions require source `chatId` and matching `telegram:message` send trigger; inbound origin/provenance selects Telegram readership and decisions, capability-only launches select user-requested sends — `v2/src/session-service.ts`.
 
 ## Event log retention

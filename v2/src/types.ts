@@ -378,6 +378,7 @@ export interface TelegramChoice {
   text: string;
   value: string;
   expiresAt: string;
+  interfaceConsent?: { challenge: string; decision: "approved" | "rejected" | "revoked" };
 }
 
 /** A bot message and the session that sent it, so a user reply routes back there. */
@@ -1510,6 +1511,7 @@ export interface SourceReplyButton {
 export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
+  requestInterfaceApproval?: unknown;
 }
 
 export interface SourceReplyResponse {
