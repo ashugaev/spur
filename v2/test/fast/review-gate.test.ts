@@ -102,6 +102,103 @@ function fixture(): GateSnapshot {
     ciAnchors: [{ runId: 1, merge: M, parents: [B, H] }],
   };
 }
+function sameRepositoryFixture(): GateSnapshot {
+  const snapshot = fixture();
+  for (const branch of ["head", "base"]) {
+    (snapshot.pr[branch] as Record<string, unknown>).repo = {
+      id: 1175941090,
+      full_name: policy.repository,
+      pushed_at: "2026-10-05T12:00:00Z",
+    };
+  }
+  return snapshot;
+}
+test.each(["head", "base", "both"])(
+  "same-repository %s timestamp drift preserves approved fingerprints and frozen evidence",
+  (branch) => {
+    const before = sameRepositoryFixture(),
+      after = sameRepositoryFixture();
+    for (const name of ["head", "base"]) {
+      const data = after.pr[name] as { repo: Record<string, unknown> };
+      if (branch === name || branch === "both") data.repo.pushed_at = null;
+      Object.freeze(data.repo);
+      Object.freeze(data);
+    }
+    Object.freeze(after.pr);
+    Object.freeze(after);
+    const original = JSON.stringify(after);
+    expect(evaluateSnapshot(policy, 5, before).status).toBe("APPROVED");
+    expect(evaluateSnapshot(policy, 5, after)).toEqual(evaluateSnapshot(policy, 5, before));
+    expect(changedEvidenceCategories(before, after)).toBe("other evidence");
+    expect(JSON.stringify(after)).toBe(original);
+  },
+);
+test.each([
+  ["id", undefined],
+  ["id", null],
+  ["id", "1175941090"],
+  ["id", 0],
+  ["id", -1],
+  ["id", 1.5],
+  ["id", NaN],
+  ["id", Infinity],
+  ["id", Number.MAX_SAFE_INTEGER + 1],
+  ["id", 2],
+  ["full_name", undefined],
+  ["full_name", null],
+  ["full_name", ""],
+  ["full_name", "owner/repo/extra"],
+  ["full_name", " owner/repo"],
+  ["full_name", "other/repo"],
+] as const)("ambiguous repository %s=%s retains head timestamp evidence", (key, value) => {
+  for (const branch of ["head", "base"]) {
+    const before = sameRepositoryFixture();
+    (before.pr[branch] as { repo: Record<string, unknown> }).repo[key] = value;
+    const after = structuredClone(before);
+    (after.pr.head as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+    expect(changedEvidenceCategories(before, after)).toBe("pr");
+  }
+});
+test.each(["", "owner/repo/extra", " owner/repo", 9])(
+  "matching invalid repository names %s never grant timestamp exemption",
+  (fullName) => {
+    const before = sameRepositoryFixture();
+    for (const branch of ["head", "base"])
+      (before.pr[branch] as { repo: Record<string, unknown> }).repo.full_name = fullName;
+    const after = structuredClone(before);
+    (after.pr.head as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+  },
+);
+test.each([null, [], "malformed"])("malformed head repository %s stays raw", (repo) => {
+  const before = sameRepositoryFixture();
+  (before.pr.head as Record<string, unknown>).repo = repo;
+  const after = structuredClone(before);
+  (after.pr.base as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+  expect(evaluateSnapshot(policy, 5, after)).toEqual(evaluateSnapshot(policy, 5, before));
+  expect((after.pr.head as Record<string, unknown>).repo).toEqual(repo);
+});
+test.each(["__proto__", "constructor", "prototype", "toJSON", "id", "full_name"])(
+  "same-repository head clone retains own %s evidence without prototype mutation",
+  (key) => {
+    const before = sameRepositoryFixture(),
+      after = sameRepositoryFixture();
+    const repo = (after.pr.head as { repo: Record<string, unknown> }).repo;
+    Object.defineProperty(repo, key, { value: "changed", enumerable: true });
+    Object.freeze(repo);
+    const raw = JSON.stringify(after);
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+    expect(JSON.stringify(after)).toBe(raw);
+    expect(Object.getPrototypeOf(repo)).toBe(Object.prototype);
+  },
+);
 test.each([undefined, null, "2026-10-05T12:00:00Z"])(
   "only base repository pushed_at %s is excluded without mutating frozen raw evidence",
   (timestamp) => {
@@ -174,9 +271,18 @@ test.each([
 ] as const)(
   "retained %s changes fingerprint even with identical BLOCKED verdicts",
   (path, value) => {
-    for (const missing of [false, true]) {
-      const before = fixture(),
-        after = fixture();
+    for (const [missing, sameRepository] of [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ]) {
+      if (sameRepository && path === "pr.head.repo.pushed_at") continue;
+      const before = sameRepository ? sameRepositoryFixture() : fixture(),
+        after = sameRepository ? sameRepositoryFixture() : fixture();
+      if (sameRepository)
+        for (const branch of ["head", "base"])
+          (after.pr[branch] as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
       if (missing) before.unresolved = after.unresolved = 2;
       const keys = path.split(".");
       let target: unknown = after;
@@ -626,6 +732,17 @@ test.each([
   "base-moved",
   "timestamp",
   "timestamp-missing-native",
+  "same-coupled",
+  "same-head",
+  "same-base",
+  "same-missing-native",
+  "same-mixed",
+  "same-mixed-blocked",
+  "same-approved-blocked",
+  "same-blocked-approved",
+  "same-fork",
+  "same-unknown",
+  "same-conflict",
   "metadata",
   "metadata-blocked",
   "pin-mismatch",
@@ -635,9 +752,18 @@ test.each([
 ])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
-    const snapshot = fixture();
+    const snapshot = mode.startsWith("same-") ? sameRepositoryFixture() : fixture();
     const writes: { status: string; conclusion?: string; output?: { summary: string } }[] = [];
     if (mode === "timestamp-missing-native" || mode === "metadata-blocked") snapshot.reviews = [];
+    if (["same-missing-native", "same-mixed-blocked", "same-blocked-approved"].includes(mode))
+      snapshot.reviews = [];
+    const headRepo = (snapshot.pr.head as { repo: Record<string, unknown> }).repo;
+    if (mode === "same-fork") {
+      headRepo.id = 2;
+      headRepo.full_name = "contributor/fork";
+    }
+    if (mode === "same-unknown") delete headRepo.id;
+    if (mode === "same-conflict") headRepo.full_name = "other/repo";
     const sentinel = "SECRET_TOKEN_OPERATOR_DETAIL";
     let reads = 0;
     const api = new GateGitHub("fixture", async (url, options) => {
@@ -672,6 +798,14 @@ test.each([
         if (mode === "pin-mismatch" && reads === 1)
           pr.base = { ...(pr.base as object), sha: "e".repeat(40) };
         if (reads > 2) {
+          if (mode.startsWith("same-")) {
+            if (mode !== "same-base")
+              (pr.head as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+            if (mode !== "same-head")
+              (pr.base as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+            if (mode.startsWith("same-mixed"))
+              (pr.head as { repo: Record<string, unknown> }).repo.updated_at = "changed";
+          }
           if (mode.startsWith("timestamp")) {
             ((pr.base as Record<string, unknown>).repo as Record<string, unknown>).pushed_at =
               "changed";
@@ -692,6 +826,8 @@ test.each([
       }
       if (path.endsWith("/reviews")) {
         if (mode === "read-denied") return new Response("denied", { status: 403 });
+        if (reads > 2 && mode === "same-approved-blocked") return Response.json([]);
+        if (reads > 2 && mode === "same-blocked-approved") return Response.json(fixture().reviews);
         return Response.json(snapshot.reviews);
       }
       if (path.endsWith("/comments")) return Response.json(snapshot.comments);
@@ -709,10 +845,21 @@ test.each([
     else await produceGates(api, policy);
     expect(writes[0]?.status).toBe("in_progress");
     expect(writes.at(-1)?.conclusion).toBe(
-      ["clean", "timestamp"].includes(mode) ? "success" : "failure",
+      ["clean", "timestamp", "same-coupled", "same-head", "same-base"].includes(mode)
+        ? "success"
+        : "failure",
     );
     const summary = writes.at(-1)?.output?.summary;
     if (mode === "timestamp-missing-native") expect(summary).toBe("native-approval-missing");
+    if (mode === "same-missing-native") expect(summary).toBe("native-approval-missing");
+    if (
+      ["same-fork", "same-unknown", "same-conflict", "same-mixed", "same-mixed-blocked"].includes(
+        mode,
+      )
+    )
+      expect(summary).toBe("Evidence changed during evaluation: pr");
+    if (["same-approved-blocked", "same-blocked-approved"].includes(mode))
+      expect(summary).toBe("Evidence changed during evaluation: reviews");
     if (["metadata", "metadata-blocked", "hostile"].includes(mode)) {
       expect(summary).toBe("Evidence changed during evaluation: pr");
     }

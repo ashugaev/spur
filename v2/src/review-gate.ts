@@ -117,7 +117,30 @@ function comparisonSnapshot(snapshot: GateSnapshot): GateSnapshot {
   // Repository-wide pushes do not change this PR's pinned base evidence.
   const comparedRepo: Record<string, unknown> = { ...repo };
   delete comparedRepo.pushed_at;
-  return { ...snapshot, pr: { ...comparedPr, base: { ...base, repo: comparedRepo } } };
+  const result = { ...snapshot, pr: { ...comparedPr, base: { ...base, repo: comparedRepo } } };
+  const head = comparedPr.head;
+  if (!head || typeof head !== "object" || Array.isArray(head)) return result;
+  const headRepo = (head as Record<string, unknown>).repo;
+  if (!headRepo || typeof headRepo !== "object" || Array.isArray(headRepo)) return result;
+  const originalRepo = repo as Record<string, unknown>,
+    originalHeadRepo = headRepo as Record<string, unknown>;
+  if (
+    typeof originalRepo.id !== "number" ||
+    !Number.isSafeInteger(originalRepo.id) ||
+    originalRepo.id <= 0 ||
+    typeof originalHeadRepo.id !== "number" ||
+    !Number.isSafeInteger(originalHeadRepo.id) ||
+    originalHeadRepo.id <= 0 ||
+    originalHeadRepo.id !== originalRepo.id ||
+    typeof originalRepo.full_name !== "string" ||
+    !/^[\w.-]+\/[\w.-]+$/.test(originalRepo.full_name) ||
+    originalHeadRepo.full_name !== originalRepo.full_name
+  )
+    return result;
+  // Same-repository PRs repeat the repository-wide timestamp in head metadata.
+  const comparedHeadRepo: Record<string, unknown> = { ...originalHeadRepo };
+  delete comparedHeadRepo.pushed_at;
+  return { ...result, pr: { ...result.pr, head: { ...head, repo: comparedHeadRepo } } };
 }
 export function changedEvidenceCategories(before: GateSnapshot, after: GateSnapshot): string {
   const first = comparisonSnapshot(before),
