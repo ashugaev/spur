@@ -9,6 +9,9 @@ import type {
 } from "../../src/event-sources/types.js";
 import { readEventLog } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
+import * as consentModule from "../../src/review-interface-consent.js";
+import * as workspaceModule from "../../src/workspace.js";
+import type { SessionRecord } from "../../src/types.js";
 import {
   findTelegramChoice,
   findTelegramMessageSession,
@@ -391,6 +394,216 @@ describe("telegramSourceModule", () => {
   afterEach(async () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
+  it.each([
+    "renewal",
+    "buttonless",
+    "revocation",
+    "compatible-relocation",
+    "wrong-branch",
+    "wrong-repo",
+    "second-relocation",
+    "workspace-changed",
+    "project-changed",
+    "stored-branch-changed",
+  ])(
+    "mixed workbench/choice callbacks cannot overwrite consent after %s while branch lookup awaits",
+    async (replacement) => {
+      const dataDir = await createTempDir("spur-consent-race-");
+      tempDirs.push(dataDir);
+      const record = {
+        ...consentModule.proposeConsent(
+          {
+            session: "api-1",
+            repository: "owner/repo",
+            branch: "feature/example",
+            baseBranch: "main",
+            projectId: "api",
+            sourceId: "telegram",
+            chatId: -1001,
+            approverUserId: 123,
+            manifest: {
+              version: 1,
+              repository: "owner/repo",
+              baseBranch: "main",
+              surfaces: [
+                { kind: "CLI", id: "run", before: ["old"], after: ["new"], constraints: [] },
+              ],
+            },
+          },
+          null,
+        ),
+        delivery: "sent" as const,
+      };
+      metadataModule.writeInterfaceConsent(dataDir, record);
+      metadataModule.writeSession(dataDir, {
+        id: "api-1",
+        project: "api",
+        branch: "feature/example",
+        worktreePath: "/fixture",
+        agent: "codex",
+        prompt: "fixture",
+        worktree: true,
+        tmuxSession: "fixture",
+        launchCommand: "fixture",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } satisfies SessionRecord);
+      const choice = {
+        token: "old",
+        offerId: "old",
+        sessionId: "api-1",
+        chatId: -1001,
+        text: "Approve",
+        value: "approved",
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+        interfaceConsent: { challenge: record.challenge, decision: "approved" as const },
+      };
+      writeTelegramOffer(dataDir, "api", "telegram", {
+        sessionId: "api-1",
+        chatId: -1001,
+        choices: [choice],
+      });
+      vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+        repositories: ["owner/repo"],
+        approverUserId: 123,
+      });
+      const reconcile = vi
+        .spyOn(consentModule, "reconcileInterfaceConsent")
+        .mockResolvedValue(undefined);
+      let entered!: () => void, release!: (branch: string) => void;
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.spyOn(consentModule, "repositoryOf").mockResolvedValue(
+        replacement === "wrong-repo" ? "other/repo" : "owner/repo",
+      );
+      vi.spyOn(workspaceModule, "readCurrentBranch").mockImplementation(async (path) => {
+        if (path !== "/fixture") {
+          if (replacement === "second-relocation") {
+            const latest = metadataModule.readSession(dataDir, "api-1");
+            if (!latest) throw new Error("missing fixture session");
+            metadataModule.writeSession(dataDir, { ...latest, worktreePath: "/third" });
+          }
+          return replacement === "wrong-branch" ? "feature/wrong" : "feature/example";
+        }
+        entered();
+        return new Promise<string>((resolve) => {
+          release = resolve;
+        });
+      });
+      try {
+        const { capability } = workbenchFixture();
+        const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+          workbench: capability,
+        });
+        if (!bot) throw new Error("missing bot");
+        const ordinary = { ...choice, token: "ordinary", offerId: "ordinary" };
+        delete (ordinary as { interfaceConsent?: unknown }).interfaceConsent;
+        writeTelegramOffer(dataDir, "api", "telegram", {
+          sessionId: "api-1",
+          chatId: -1001,
+          choices: [ordinary],
+        });
+        await bot.emitCallback(cardCallback("spur_choice:ordinary"));
+        expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
+        expect(reconcile).not.toHaveBeenCalled();
+        emit.mockClear();
+        writeTelegramOffer(dataDir, "api", "telegram", {
+          sessionId: "api-1",
+          chatId: -1001,
+          choices: [choice],
+        });
+        const inbox = await openWorkbench(bot, "/work");
+        const detail = cardCallback(cardButton(inbox.reply, "api · api-1 · needs_input"));
+        await bot.emitCallback(detail);
+        await bot.emitCallback(cardCallback(cardButton(detail.editMessageText, "Continue here")));
+        await bot.emitCallback(cardCallback("spur_wb:old"));
+        expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).not.toBeNull();
+        expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(record);
+        expect(reconcile).not.toHaveBeenCalled();
+        const callback = bot.emitCallback({
+          callbackQuery: {
+            data: "spur_choice:old",
+            from: { id: 123 },
+            message: { message_id: 7, chat: { id: -1001 } },
+          },
+          answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+        });
+        await waiting;
+        if (
+          [
+            "compatible-relocation",
+            "wrong-branch",
+            "wrong-repo",
+            "second-relocation",
+            "workspace-changed",
+            "project-changed",
+            "stored-branch-changed",
+          ].includes(replacement)
+        ) {
+          const latest = metadataModule.readSession(dataDir, "api-1");
+          if (!latest) throw new Error("missing fixture session");
+          metadataModule.writeSession(dataDir, {
+            ...latest,
+            worktreePath: "/replacement",
+            ...(replacement === "workspace-changed" ? { workspaceId: "other" } : {}),
+            ...(replacement === "project-changed" ? { project: "other" } : {}),
+            ...(replacement === "stored-branch-changed" ? { branch: "feature/other" } : {}),
+          });
+        }
+        const renewed =
+          replacement === "renewal"
+            ? { ...consentModule.proposeConsent(record, record), delivery: "sent" as const }
+            : replacement === "revocation"
+              ? consentModule.decideConsent(record, {
+                  session: "api-1",
+                  sourceId: "telegram",
+                  projectId: "api",
+                  chatId: -1001,
+                  actor: 123,
+                  challenge: record.challenge,
+                  decision: "revoked",
+                })
+              : record;
+        if (["renewal", "revocation"].includes(replacement))
+          metadataModule.writeInterfaceConsent(dataDir, renewed);
+        writeTelegramOffer(dataDir, "api", "telegram", {
+          sessionId: "api-1",
+          chatId: -1001,
+          choices:
+            replacement === "renewal"
+              ? [
+                  {
+                    ...choice,
+                    token: "new",
+                    offerId: "new",
+                    interfaceConsent: { challenge: renewed.challenge, decision: "approved" },
+                  },
+                ]
+              : replacement === "buttonless"
+                ? []
+                : [choice],
+        });
+        release("feature/example");
+        await callback;
+        if (replacement === "compatible-relocation") {
+          expect(metadataModule.readInterfaceConsent(dataDir, "api-1")?.decision).toBe("approved");
+          expect(reconcile).toHaveBeenCalledOnce();
+          expect(emit).toHaveBeenCalledOnce();
+          expect(findTelegramChoice(dataDir, "api", "telegram", "old", -1001)).toBeNull();
+          return;
+        }
+        if (replacement === "workspace-changed")
+          expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toBeNull();
+        else expect(metadataModule.readInterfaceConsent(dataDir, "api-1")).toEqual(renewed);
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
 
   it("workbench /new task plus project tap submits displayed defaults once with multiline task and origin", async () => {
     const dataDir = await createTempDir("spur-telegram-workbench-");
@@ -1977,7 +2190,7 @@ describe("telegramSourceModule", () => {
             ? "Spawn failed: spawn failed <telegram-token>"
             : outcome === "binding_failure"
               ? "Created api-new. Binding failed. Use /work to inspect."
-              : "Spawned and bound: api-new.";
+              : "Spawned and bound.";
         expect(taskCtx.reply).toHaveBeenCalledWith(terminal);
         if (outcome === "terminal_failure") {
           expect(taskCtx.reply).toHaveBeenLastCalledWith(
@@ -4650,7 +4863,7 @@ describe("telegramSourceModule voice notes", () => {
     voice.reply.mockRejectedValueOnce(new Error("echo failed token-123"));
     voice.reply.mockRejectedValueOnce(new Error("progress failed token-123"));
     await required(bot).emitVoice(voice);
-    await vi.waitFor(() => expect(voice.reply).toHaveBeenCalledWith("Spawned and bound: api-new."));
+    await vi.waitFor(() => expect(voice.reply).toHaveBeenCalledWith("Spawned and bound."));
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith({
       project: "api",

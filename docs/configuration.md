@@ -5,6 +5,10 @@
 Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, tmux socket, default agent, UI port, `voice:` — see [voice.md](voice.md)). Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only. Merge order and per-session resolution: `v2/src/config.ts`.
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
+`SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
+Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
+Approval writer variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/review-approval.yml`.
 
 ## Config registry
 

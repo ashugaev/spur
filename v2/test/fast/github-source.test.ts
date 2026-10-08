@@ -71,8 +71,13 @@ vi.mock("node:fs", () => ({
 
 const { githubSourceModule, tokenizeSearchQuery } =
   await import("../../src/event-sources/github.js");
-const { GH_POLL_MIN_GRAPHQL_REMAINING, _resetGhUsageForTests, recordGraphqlBudget } =
-  await import("../../src/gh.js");
+const {
+  GH_POLL_MIN_GRAPHQL_REMAINING,
+  _resetGhUsageForTests,
+  recordGraphqlBudget,
+  setGhEventSink,
+  flushGhPollCycles,
+} = await import("../../src/gh.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -265,6 +270,233 @@ describe("github source", () => {
   afterEach(() => {
     _resetGhUsageForTests();
     vi.useRealTimers();
+  });
+  it.each(["deferred-error", "deferred-success", "runOnStart-error", "runOnStart-success"])(
+    "drains %s query, registry/log effects and accounting before stop",
+    async (mode) => {
+      setGhEventSink("/tmp/spur-data");
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([]);
+      let enter!: () => void,
+        resolveQuery!: (value: string) => void,
+        rejectQuery!: (error: Error) => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const query = new Promise<string>((resolve, reject) => {
+        resolveQuery = resolve;
+        rejectQuery = reject;
+      });
+      ghTransportMock.mockImplementation(async () => {
+        enter();
+        return query;
+      });
+      const abort = new AbortController();
+      const manual = mode.startsWith("runOnStart");
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: manual,
+          emitExisting: false,
+          query: "repo:acme/api",
+        },
+        deferInitialSync: true,
+        signal: abort.signal,
+        emit: vi.fn(),
+        logger: { warn: vi.fn() },
+        resolveWebBaseUrl: async () => null,
+      });
+      if (manual) handle.runOnStart?.();
+      await entered;
+      if (manual) handle.runOnStart?.();
+      let stopped = false;
+      let effectsAtStop: { accounting: number; errors: number; registry: number } | null = null;
+      abort.abort();
+      const stop = Promise.resolve(handle.stop()).then(() => {
+        effectsAtStop = {
+          accounting: logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "gh.poll_cycle",
+          ).length,
+          errors: logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "source.work_item_poll.error",
+          ).length,
+          registry: recordWorkItemMock.mock.calls.length,
+        };
+        stopped = true;
+      });
+      try {
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle"),
+        ).toBe(false);
+      } finally {
+        if (mode.endsWith("error")) rejectQuery(new Error("controlled query failure"));
+        else
+          resolveQuery(
+            JSON.stringify([
+              {
+                number: 7,
+                title: "fixture",
+                url: "https://github.com/acme/api/pull/7",
+                repository: { nameWithOwner: "acme/api" },
+              },
+            ]),
+          );
+        await stop;
+        await flushPollCycle();
+      }
+      expect(stopped).toBe(true);
+      expect(effectsAtStop).toMatchObject({
+        accounting: 1,
+        ...(mode.endsWith("error") ? { errors: 1 } : { registry: 1 }),
+      });
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "gh.poll_cycle"),
+      ).toHaveLength(1);
+      if (mode.endsWith("error"))
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) => entry.event === "source.work_item_poll.error",
+          ),
+        ).toBe(true);
+      else expect(recordWorkItemMock).toHaveBeenCalled();
+      const calls = ghTransportMock.mock.calls.length,
+        events = logSpurEventMock.mock.calls.length;
+      flushGhPollCycles();
+      const flushedEvents = logSpurEventMock.mock.calls.length;
+      handle.runOnStart?.();
+      await handle.stop();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(calls);
+      expect(flushedEvents).toBeGreaterThanOrEqual(events);
+      expect(logSpurEventMock).toHaveBeenCalledTimes(flushedEvents);
+    },
+  );
+  it("idle source stop creates no zero-call accounting when runOnStart is requested later", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: true,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn: vi.fn() },
+      resolveWebBaseUrl: async () => null,
+    });
+    await handle.stop();
+    handle.runOnStart?.();
+    await handle.stop();
+    await flushPollCycle();
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle")).toBe(
+      false,
+    );
+  });
+  it("publishes poll ownership before a synchronous rebind warning reenters stop", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    readGitHubPollDisabledMock.mockReturnValue(
+      new Map([["api-a1b2", { prNumber: 41, disabledAtMs: 0, lastCheckedAtMs: 0 }]]),
+    );
+    clearGitHubPollDisabledSessionMock.mockImplementationOnce(() => {
+      throw new Error("controlled clear failure");
+    });
+    mockLifecyclePoll(prView());
+    let enterQuery!: () => void, releaseQuery!: () => void, enterStop!: () => void;
+    const enteredQuery = new Promise<void>((resolve) => {
+      enterQuery = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseQuery = resolve;
+    });
+    const enteredStop = new Promise<void>((resolve) => {
+      enterStop = resolve;
+    });
+    ghTransportMock.mockImplementation(async (cwd: string, ...args: string[]) => {
+      enterQuery();
+      await gate;
+      return legacyGhAdapter(cwd, ...args);
+    });
+    let stop: Promise<void> | undefined,
+      resolved = false,
+      accountingAtStop = -1;
+    const warn = vi.fn((message: string) => {
+      if (!message.includes("failed to clear poll-disabled") || stop) return;
+      stop = Promise.resolve(handle.stop()).then(() => {
+        resolved = true;
+        accountingAtStop = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "gh.poll_cycle",
+        ).length;
+      });
+      enterStop();
+    });
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: true, emitExisting: false },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn },
+      resolveWebBaseUrl: async () => null,
+    });
+    handle.runOnStart?.();
+    await enteredStop;
+    if (!stop) throw new Error("missing reentrant stop");
+    const first = await Promise.race([stop.then(() => "stop"), enteredQuery.then(() => "query")]);
+    try {
+      if (first === "stop") expect(accountingAtStop).toBe(1);
+      else expect(resolved).toBe(false);
+    } finally {
+      releaseQuery();
+      await handle.stop();
+      await stop;
+      await flushPollCycle();
+    }
+    expect(accountingAtStop).toBe(1);
+  });
+  it("stop before queued poll body dispatch starts no transport or accounting", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: true,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn: vi.fn() },
+      resolveWebBaseUrl: async () => null,
+    });
+    handle.runOnStart?.();
+    await handle.stop();
+    await flushPollCycle();
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle")).toBe(
+      false,
+    );
   });
 
   it("keeps the existing snapshot when gh pr view fails transiently", async () => {

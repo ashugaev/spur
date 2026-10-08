@@ -29,6 +29,9 @@ import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as telegramSourceStateModule from "../../src/telegram-source-state.js";
+import type * as interfaceConsentModule from "../../src/review-interface-consent.js";
+import type * as metadataModule from "../../src/metadata.js";
+import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
@@ -429,6 +432,10 @@ function inputLogEntries(sessionId: string): unknown[] {
     .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
 const writeTelegramOfferMock = vi.fn();
+const readInterfaceConsentMock = vi.fn();
+const writeInterfaceConsentMock = vi.fn();
+const consentPolicyMock = vi.fn();
+const consentRepositoryMock = vi.fn();
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
@@ -674,6 +681,8 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  readInterfaceConsent: readInterfaceConsentMock,
+  writeInterfaceConsent: writeInterfaceConsentMock,
   writeTelegramOffer: writeTelegramOfferMock,
   telegramBindingKey: (chatId: number, messageThreadId?: number) =>
     `${chatId}:${messageThreadId ?? "main"}`,
@@ -704,6 +713,12 @@ vi.mock("../../src/metadata.js", () => ({
   writeTelegramReplyTarget: writeTelegramReplyTargetMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
+}));
+
+vi.mock("../../src/review-interface-consent.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof interfaceConsentModule>()),
+  consentPolicy: consentPolicyMock,
+  repositoryOf: consentRepositoryMock,
 }));
 
 vi.mock("../../src/todo.js", async (importOriginal) => {
@@ -2241,6 +2256,10 @@ describe("SessionService", () => {
     readCursorTokenUsageMock.mockReset().mockResolvedValue(undefined);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     writeTelegramOfferMock.mockReset();
+    readInterfaceConsentMock.mockReset().mockReturnValue(null);
+    writeInterfaceConsentMock.mockReset();
+    consentPolicyMock.mockReset();
+    consentRepositoryMock.mockReset();
     readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
@@ -7935,78 +7954,164 @@ describe("SessionService", () => {
     expect(result.worktreePath).toBe("/repo/api");
   });
 
-  it("replies to the latest Telegram source target", async () => {
-    const config = baseConfig();
-    const telegramSource = {
-      type: "telegram" as const,
-      runOnStart: false,
-      token: "token-123",
-      allowedUsers: [123],
-    };
-    config.projects.api.sources = {
-      agentChat: telegramSource,
-    };
-    loadConfigMock.mockReturnValue(config);
-    const sessions = createSessionStore();
-    sessions.set("api-1", {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    readTelegramReplyTargetMock.mockReturnValue({
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "agentChat",
-      chatId: -1001,
-      messageThreadId: 22,
-      updatedAt: "2026-03-18T10:02:00.000Z",
-    });
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.replyToSource("api-1", { message: " hello " });
-
-    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
-      telegramSource,
-      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      "hello",
-      expect.objectContaining({
-        sessionLabel: "api-1",
-        topicName: expect.stringContaining("api-1 claude"),
-      }),
-    );
-    expect(result).toEqual({
-      ok: true,
-      source: "telegram",
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "agentChat",
-      chatId: -1001,
-      messageThreadId: 22,
-    });
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      expect.objectContaining({
-        event: "source.reply.sent",
+  it.each(["ordinary", "consent", "delivery-failure", "real-consent"])(
+    "replies to the latest Telegram source target: %s",
+    async (kind) => {
+      const config = baseConfig();
+      const telegramSource = {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      };
+      config.projects.api.sources = {
+        agentChat: telegramSource,
+      };
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      readTelegramReplyTargetMock.mockReturnValue({
         sessionId: "api-1",
         projectId: "api",
         sourceId: "agentChat",
-      }),
-    );
-    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
-    );
-  });
+        chatId: -1001,
+        messageThreadId: 22,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      let current: InterfaceConsent | null = null;
+      const semantic = kind !== "ordinary";
+      if (semantic) {
+        readInterfaceConsentMock.mockImplementation(() => current);
+        writeInterfaceConsentMock.mockImplementation((_dir, record: InterfaceConsent) => {
+          current = record;
+        });
+        consentPolicyMock.mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+        consentRepositoryMock.mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+      }
+      if (kind === "real-consent") {
+        const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing fixture session");
+        actual.writeSession(TEST_DATA_DIR, session);
+        readSessionMock.mockImplementation(actual.readSession);
+        listSessionsMock.mockImplementation(actual.listSessions);
+        readInterfaceConsentMock.mockImplementation(actual.readInterfaceConsent);
+        writeInterfaceConsentMock.mockImplementation(actual.writeInterfaceConsent);
+      }
+      if (kind === "delivery-failure")
+        sendTelegramReplyMock.mockRejectedValueOnce(new Error("Telegram unavailable"));
+      const reply = service.replyToSource("api-1", {
+        message: " hello ",
+        ...(semantic
+          ? {
+              requestInterfaceApproval: {
+                version: 1,
+                repository: "owner/repo",
+                baseBranch: "main",
+                surfaces: [
+                  {
+                    kind: "CLI",
+                    id: "run",
+                    before: ["old"],
+                    after: ["--dry-run"],
+                    constraints: ["no process created"],
+                  },
+                ],
+              },
+            }
+          : {}),
+      });
+      if (kind === "delivery-failure") {
+        await expect(reply).rejects.toThrow("Telegram unavailable");
+        expect(writeInterfaceConsentMock).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery: "failed", decision: "pending", outbox: "pending" }),
+        );
+        return;
+      }
+      const result = await reply;
+      if (kind === "real-consent") {
+        expect(listSessionsMock).toHaveBeenCalled();
+        expect(listSessionsMock(TEST_DATA_DIR).map((session: SessionRecord) => session.id)).toEqual(
+          ["api-1"],
+        );
+        expect(readInterfaceConsentMock(TEST_DATA_DIR, "api-1")).toMatchObject({
+          decision: "pending",
+          delivery: "sent",
+        });
+      }
+
+      expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+        telegramSource,
+        expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+        semantic ? expect.stringContaining("--dry-run") : "hello",
+        expect.objectContaining({
+          sessionLabel: "api-1",
+          topicName: expect.stringContaining("api-1 claude"),
+        }),
+      );
+      if (semantic) {
+        const body = sendTelegramReplyMock.mock.calls[0]?.[2] as string;
+        expect(body).toMatch(/^hello\n\n/);
+        expect(body).not.toMatch(/^api-1(?: — .*?)?\n/);
+        expect(writeInterfaceConsentMock).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery: "sent", decision: "pending", outbox: "pending" }),
+        );
+        expect(writeTelegramOfferMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          "api",
+          "agentChat",
+          expect.objectContaining({
+            choices: expect.arrayContaining([
+              expect.objectContaining({
+                interfaceConsent: expect.objectContaining({ decision: "approved" }),
+              }),
+            ]),
+          }),
+        );
+      }
+      expect(result).toEqual({
+        ok: true,
+        source: "telegram",
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "agentChat",
+        chatId: -1001,
+        messageThreadId: 22,
+        ...(semantic ? { buttons: 3 } : {}),
+      });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "source.reply.sent",
+          sessionId: "api-1",
+          projectId: "api",
+          sourceId: "agentChat",
+        }),
+      );
+      expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
+      );
+    },
+  );
 
   describe("Telegram reply bookkeeping", () => {
     const replyTargetFor = (extra: Record<string, unknown> = {}) => ({
@@ -8072,6 +8177,62 @@ describe("SessionService", () => {
         [91, 92],
       );
     });
+
+    it.each(["sent", "failed"] as const)(
+      "preserves consent buttons and separate session label when delivery is %s",
+      async (delivery) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor());
+        const { service } = await serviceWithTelegramSession("Review interface");
+        const consentModule = await import("../../src/review-interface-consent.js");
+        const metadata = await import("../../src/metadata.js");
+        vi.spyOn(consentModule, "reconcileInterfaceConsent").mockResolvedValue(undefined);
+        vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+          repositories: ["owner/repo"],
+          approverUserId: 123,
+        });
+        vi.spyOn(consentModule, "repositoryOf").mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+        const readConsent = vi.spyOn(metadata, "readInterfaceConsent").mockReturnValue(null);
+        vi.spyOn(metadata, "writeInterfaceConsent").mockImplementation((_dir, consent) => {
+          readConsent.mockReturnValue(consent);
+        });
+        const failure = new Error("Telegram unavailable");
+        if (delivery === "failed") sendTelegramReplyMock.mockRejectedValueOnce(failure);
+        else sendTelegramReplyMock.mockResolvedValueOnce({ messageIds: [91] });
+
+        const result = service.replyToSource("api-1", {
+          message: "Review this interface",
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              { kind: "CLI", id: "run", before: [], after: ["--dry-run"], constraints: [] },
+            ],
+          },
+        });
+        if (delivery === "failed") await expect(result).rejects.toThrow(failure);
+        else await result;
+
+        expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.stringMatching(/^Review this interface\n\n/),
+          expect.objectContaining({
+            sessionLabel: "api-1 — Review interface",
+            buttons: [
+              expect.objectContaining({ text: "Approve interface" }),
+              expect.objectContaining({ text: "Reject interface" }),
+              expect.objectContaining({ text: "Revoke interface approval" }),
+            ],
+          }),
+        );
+        expect(metadata.writeInterfaceConsent).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery }),
+        );
+      },
+    );
 
     it("keeps a placeholder recorded while the reply was in flight", async () => {
       readTelegramReplyTargetMock

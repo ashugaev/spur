@@ -1,0 +1,51 @@
+name: Spur Approval Writer
+
+on:
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, closed]
+  workflow_run:
+    workflows: [CI, Spur Review Wake]
+    types: [requested, in_progress, completed]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  checks: write
+
+concurrency:
+  group: spur-approval-writer
+  cancel-in-progress: false
+
+jobs:
+  approvals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve trusted source
+        id: source
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const repository = await github.rest.repos.get(context.repo);
+            const commit = await github.rest.repos.getCommit({ ...context.repo, ref: repository.data.default_branch });
+            core.setOutput('sha', commit.data.sha);
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: env -u SPUR_BUILD_RESTART pnpm --dir v2 build
+      - run: node v2/dist/review-gate-producer.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SPUR_CODE_REVIEW_ACTOR: ${{ vars.SPUR_CODE_REVIEW_ACTOR }}
+          SPUR_BROWSER_REVIEW_ACTOR: ${{ vars.SPUR_BROWSER_REVIEW_ACTOR }}
