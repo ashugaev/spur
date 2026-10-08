@@ -1204,6 +1204,65 @@ test.describe("S2: Actions bar", () => {
     expect(dialogShown).toBe(true);
   });
 
+  for (const action of ["restore", "reopen"] as const) {
+    test(`pending ${action} shows starting until a settled receipt`, async ({ page }) => {
+      const session = (action === "restore" ? makeStoppedSession : makeCompletedSession)({
+        id: `detail-pending-${action}`,
+        runtimeAlive: false,
+      });
+      await mockSessionDetail(page, session);
+      await mockSessionConversation(page, session.id, "waiting");
+      let settle!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      await page.route(`**/api/sessions/${session.id}/${action}`, async (route) => {
+        const body = route.request().postDataJSON() as { operationId: string };
+        session.lifecycle = lifecycleReceipt(body.operationId, session.id, action, "pending", 1);
+        await pending;
+        Object.assign(session, {
+          status: action === "restore" ? "running" : "errored",
+          state: action === "restore" ? "waiting" : "error",
+          runtimeAlive: action === "restore",
+          tmuxSession: action === "restore" ? `spur-${session.id}` : null,
+          lifecycle: lifecycleReceipt(
+            body.operationId,
+            session.id,
+            action,
+            action === "restore" ? "succeeded" : "failed",
+            2,
+          ),
+        });
+        await route.fulfill({ json: session });
+      });
+      await page.goto(`/sessions/${session.id}`);
+      await page.getByRole("button", { name: new RegExp(`^${action}$`, "i") }).click();
+      await expect(page.getByText("starting", { exact: true })).toBeVisible();
+      await expect(page.getByText("working", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      await expect(page.getByRole("button", { name: /^send now/i })).toHaveCount(0);
+      await expect(page.getByPlaceholder(/^Message\.\.\./)).toHaveCount(0);
+      await page.reload();
+      await expect(page.getByText("starting", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^handoff$/i })).toBeDisabled();
+      settle();
+      await expect(page.getByText("starting", { exact: true })).toHaveCount(0);
+      await expect(
+        page.getByText(action === "restore" ? "waiting" : "error", { exact: true }),
+      ).toBeVisible();
+      if (action === "restore") {
+        await expect(page.getByRole("button", { name: /^terminal$/i })).toBeEnabled();
+        await expect(page.getByRole("button", { name: /^pause$/i })).toBeEnabled();
+        await page.getByPlaceholder(/^Message\.\.\./).fill("Ready");
+        await expect(page.getByRole("button", { name: /^send now/i })).toBeEnabled();
+      } else {
+        await expect(page.getByRole("button", { name: /^restore$/i })).toBeEnabled();
+        await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+      }
+    });
+  }
+
   test("restore failure shows a persistent dismissible toast", async ({ page }) => {
     const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
     await mockSessionDetail(page, session);

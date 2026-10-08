@@ -2678,8 +2678,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return session.state;
   }, [conversation?.state, session]);
 
-  // The daemon queues a send to a spawning session and refuses Send now (409).
-  const sessionStarting = session?.status === "spawning";
+  const sessionStarting =
+    session?.status === "spawning" ||
+    session?.lifecyclePending === "restore" ||
+    session?.lifecyclePending === "reopen";
   // The daemon refuses every immediate send (409) while the last prompt is
   // unconfirmed; Queue stays, and PendingLaunchBanner submits the prompt.
   const launchPending = Boolean(session?.submitUnconfirmedAt);
