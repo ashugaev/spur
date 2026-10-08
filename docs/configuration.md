@@ -45,7 +45,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 
 ## Telegram binding
 
-`/watch [sessionId]` binds chat/topic; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
+`/watch [sessionId]` binds chat/topic; successful forum binding confirmations omit session identity; `/unwatch` drops binding; source `allowedUsers`/`allowedChats` gates access; `/spawn [agent] [task]`, `autoSpawn.*` handles unbound messages — `v2/src/event-sources/telegram.ts`.
 Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
 [`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
 Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
@@ -56,7 +56,7 @@ Private/forum placeholders: `Received. <label> is thinking...`, `is busy; your m
 Queued Telegram sends suppress `is waiting.` notices and ToDo nudges — `v2/src/session-service.ts`.
 Private/forum typing: delivered, unanswered messages while session works; 10 min cap — `v2/src/session-service.ts`.
 Agent Markdown: bold, strike, inline/fenced code, HTTP(S) links and headings render as HTML; Telegram parse rejection retries plain text — `v2/src/telegram-markdown.ts`, `v2/src/telegram-source-state.ts`.
-Forum topic names track status emoji, session id, agent and title — `v2/src/session-service.ts`.
+Forum topic names: status emoji, title, session id, agent; titled names capped at 128 UTF-16 units, title truncation preserves identity when it fits — `v2/src/session-service.ts`.
 Generated Telegram launch instructions require source `chatId` and matching `telegram:message` send trigger; inbound origin/provenance selects Telegram readership and decisions, capability-only launches select user-requested sends — `v2/src/session-service.ts`.
 
 ## Event log retention

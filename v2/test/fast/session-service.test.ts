@@ -8118,10 +8118,53 @@ describe("SessionService", () => {
         telegramSource,
         -1001,
         22,
-        expect.stringContaining("api-1 claude — Fix login"),
+        expect.stringContaining("Fix login — api-1 claude"),
       );
       expect(stored["topicName"]).toEqual(expect.stringContaining("Fix login"));
     });
+
+    it.each([undefined, "   ", "Fix login", "x".repeat(108) + "😀" + "y".repeat(30)])(
+      "keeps topic identity after title within 128 units: %s",
+      async (title) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ topicName: "old" }));
+        const { service } = await serviceWithTelegramSession(title);
+        await service.replyToSource("api-1", { message: "hello" });
+        const name = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+        expect(name.length).toBeLessThanOrEqual(128);
+        expect(name.endsWith("api-1 claude")).toBe(true);
+        if (!title?.trim()) expect(name).toMatch(/^\S+ api-1 claude$/u);
+        else if (title === "Fix login") expect(name).toMatch(/^\S+ Fix login — api-1 claude$/u);
+        else {
+          expect(name).toContain("… — api-1 claude");
+          expect(name).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+          );
+        }
+      },
+    );
+
+    it.each(["Task title", "x".repeat(123) + "😀tail"])(
+      "bounds titled topics when session identity exceeds 128 units: %s",
+      async (title) => {
+        const id = "x".repeat(120) + "-abcd";
+        const { service, sessions } = await serviceWithTelegramSession(title);
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing session");
+        sessions.delete("api-1");
+        sessions.set(id, { ...session, id, tmuxSession: id });
+        readTelegramReplyTargetMock.mockReturnValue(
+          replyTargetFor({ sessionId: id, topicName: "old" }),
+        );
+        await service.replyToSource(id, { message: "hello" });
+        const name = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+        expect(name.length).toBeLessThanOrEqual(128);
+        expect(name).toMatch(/^\S+ (?:Task title|x)/u);
+        expect(name.endsWith("…")).toBe(true);
+        expect(name).not.toMatch(
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+        );
+      },
+    );
 
     it("does not re-create a target that was removed while the send was in flight", async () => {
       let stored: Record<string, unknown> | null = replyTargetFor();
@@ -8225,7 +8268,7 @@ describe("SessionService", () => {
         telegramSource,
         -1001,
         22,
-        expect.stringContaining("New title"),
+        expect.stringContaining("New title — api-1 claude"),
       );
     });
 
@@ -8249,12 +8292,12 @@ describe("SessionService", () => {
         stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
       });
       sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44, messageIds: [91] });
-      const { service } = await serviceWithTelegramSession();
+      const { service } = await serviceWithTelegramSession("New topic");
 
       await service.replyToSource("api-1", { message: "hello" });
 
       expect(stored["messageThreadId"]).toBe(44);
-      expect(stored["topicName"]).toEqual(expect.stringContaining("api-1 claude"));
+      expect(stored["topicName"]).toEqual(expect.stringContaining("New topic — api-1 claude"));
       expect(editTelegramTopicMock).not.toHaveBeenCalled();
     });
 
@@ -22665,13 +22708,13 @@ describe("SessionService", () => {
       telegramSource,
       expect.anything(),
       expect.any(String),
-      expect.objectContaining({ topicName: "🔴 api-1 claude — Fix telegram notices" }),
+      expect.objectContaining({ topicName: "🔴 Fix telegram notices — api-1 claude" }),
     );
     expect(editTelegramTopicMock).toHaveBeenCalledWith(
       telegramSource,
       -1001,
       22,
-      "🔴 api-1 claude — Fix telegram notices",
+      "🔴 Fix telegram notices — api-1 claude",
     );
     service.dispose();
   });
