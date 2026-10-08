@@ -40,6 +40,7 @@ import {
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
 import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
+import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/types.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
 import { withTimeout } from "./promise-timeout.js";
@@ -53,6 +54,7 @@ import {
   InvalidSourceReplyInputError,
   InvalidSessionMemoryInputError,
   InvalidSessionSubscriptionInputError,
+  isRestorableSession,
   ForeignAgentProcessError,
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
@@ -107,6 +109,7 @@ import {
   type UpdateSessionSlotsRequest,
   type TodoActor,
   type TodoMutationRequest,
+  type SessionListView,
 } from "./types.js";
 import {
   InvalidTodoRequestError,
@@ -118,6 +121,78 @@ import {
 
 interface JsonError {
   error: string;
+}
+
+export function projectSourceSession(session: SessionListView): SourceWorkSessionItem {
+  const pending = session.lifecycle.operation?.phase === "pending";
+  const candidate =
+    session.pr?.url ?? session.slots?.links.find((link) => link.label === "pr")?.url;
+  let prUrl: string | undefined;
+  if (candidate) {
+    try {
+      const url = new URL(candidate);
+      if (
+        (url.protocol === "https:" || url.protocol === "http:") &&
+        !url.username &&
+        !url.password
+      ) {
+        prUrl = url.href;
+      }
+    } catch {
+      // External slot metadata is not necessarily a URL.
+    }
+  }
+  return {
+    id: session.id,
+    project: session.project,
+    agent: session.agent,
+    state: session.state,
+    status: session.status,
+    lastActivityAt: session.lastActivityAt,
+    runtimeAlive: session.runtimeAlive,
+    canContinue: session.runtimeAlive && !dropsQueuedSend(session) && !pending,
+    restorable: isRestorableSession(session) && !pending,
+    model: session.model ?? null,
+    ...(session.mode ? { mode: session.mode } : {}),
+    ...(session.slots?.title ? { title: session.slots.title } : {}),
+    ...(dropsQueuedSend(session) ? { inactive: true } : {}),
+    ...(prUrl ? { prUrl } : {}),
+  };
+}
+
+export function createSourceWorkbench(
+  service: Pick<SessionService, "listProjects" | "launchOptions" | "list" | "get" | "restore">,
+): SourceWorkbench {
+  const assertSpawnableProject = (project: string): void => {
+    if (!spawnableProjects(service.listProjects()).some((entry) => entry.id === project)) {
+      throw new SessionResourceNotFoundError("Project is no longer available for launch");
+    }
+  };
+  return {
+    async launchOptions(request) {
+      assertSpawnableProject(request.project);
+      return service.launchOptions(request);
+    },
+    async listSessions() {
+      return (await service.list({ view: "dashboard", includeCompleted: true })).map(
+        projectSourceSession,
+      );
+    },
+    async getSession(sessionId) {
+      return projectSourceSession(await service.get(sessionId));
+    },
+    async restoreSession({ sessionId, expectedProject }) {
+      const current = await service.get(sessionId);
+      assertSpawnableProject(expectedProject);
+      if (current.id !== sessionId || current.project !== expectedProject) {
+        throw new SessionResourceNotFoundError("Session is no longer in the selected project");
+      }
+      if (!projectSourceSession(current).restorable) {
+        throw new Error("Session is not available for restore");
+      }
+      return projectSourceSession(await service.restore(sessionId));
+    },
+  };
 }
 
 interface ServiceLogger {
@@ -722,6 +797,13 @@ export async function startServer(
   const bus = new EventBus();
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  // Closure over the reassignable `sources` above, so this stays correct
+  // across reloadAutomation recreating sources — registered once, not
+  // re-registered per (re)start.
+  service.setPollDisabledOverrideClearer(
+    (projectId, sourceId, sessionId) =>
+      sources?.clearPollDisabledOverride(projectId, sourceId, sessionId) ?? null,
+  );
   let backlogs: { stop(): void } | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
@@ -768,27 +850,15 @@ export async function startServer(
           ...(logger.warn ? { warn: logger.warn } : {}),
         },
         listSessions: async () =>
-          (await service.list({ view: "dashboard" })).map((session) => ({
-            id: session.id,
-            project: session.project,
-            agent: session.agent,
-            state: session.state,
-            ...(session.slots?.title ? { title: session.slots.title } : {}),
-            ...(dropsQueuedSend(session) ? { inactive: true } : {}),
-          })),
+          (await service.list({ view: "dashboard" })).map(projectSourceSession),
+        workbench: createSourceWorkbench(service),
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;
           const session = await service.spawn(
             spawnRequest,
             telegramOrigin ? { telegramOrigin } : undefined,
           );
-          return {
-            id: session.id,
-            project: session.project,
-            agent: session.agent,
-            state: session.state,
-            ...(session.slots?.title ? { title: session.slots.title } : {}),
-          };
+          return projectSourceSession(session);
         },
         listProjects: async () => spawnableProjects(service.listProjects()),
       });
@@ -1786,6 +1856,14 @@ export async function startServer(
       if (method === "POST" && sourceReplySessionId) {
         const body = await readJsonBody<SourceReplyRequest>(request);
         sendJson(response, 200, await service.replyToSource(sourceReplySessionId, body));
+        return;
+      }
+
+      const sourcePollEnableSessionId = path.match(
+        /^\/sessions\/([^/]+)\/source-poll-enable$/,
+      )?.[1];
+      if (method === "POST" && sourcePollEnableSessionId) {
+        sendJson(response, 200, await service.enableSourcePoll(sourcePollEnableSessionId));
         return;
       }
 

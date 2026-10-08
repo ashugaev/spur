@@ -45,11 +45,12 @@
 - `GET /sessions/:id/subscriptions`
 - `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
 - `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
+- `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head
 - `POST /sessions/:id/submit-failed/dismiss` — drops `submitFailedMessage`
-- `POST /sessions/:id/source-reply`
+- `POST /sessions/:id/source-reply`: `requestInterfaceApproval` semantic proposal; `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.

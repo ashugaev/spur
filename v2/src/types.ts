@@ -147,6 +147,7 @@ export type SourceType =
   | "sentry"
   | "service"
   | "telegram"
+  | "webhook"
   | "jira"
   | "github-ci";
 
@@ -178,6 +179,7 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
 /** Callback-data prefix for an agent-offered inline button. */
 export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
@@ -272,6 +274,10 @@ export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
   // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
   // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
   maxReviewBatchTargets?: number;
+  // How often a durably poll-disabled session (bound PR permanently not found) gets
+  // one bounded recheck request. Default 86400000 (24h, see
+  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+  pollDisabledRecheckMs?: number;
 };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
@@ -339,6 +345,14 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   autoSpawn?: TelegramAutoSpawnConfig;
 }
 
+export interface WebhookSourceConfig {
+  type: "webhook";
+  host: string;
+  port: number;
+  path: string;
+  secret: string;
+}
+
 export interface TelegramAutoSpawnConfig {
   enabled: boolean;
   project: string;
@@ -364,6 +378,7 @@ export interface TelegramChoice {
   text: string;
   value: string;
   expiresAt: string;
+  interfaceConsent?: { challenge: string; decision: "approved" | "rejected" | "revoked" };
 }
 
 /** A bot message and the session that sent it, so a user reply routes back there. */
@@ -390,6 +405,7 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
+  | WebhookSourceConfig
   | JiraSourceConfig
   | GitHubCiSourceConfig;
 
@@ -401,6 +417,11 @@ export interface TelegramMessageEventData {
   username?: string;
   messageId: number;
   text: string;
+}
+
+export interface WebhookReceivedEventData {
+  body: string;
+  receivedAt: string;
 }
 
 export interface SpawnOverrides {
@@ -1506,6 +1527,7 @@ export interface SourceReplyButton {
 export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
+  requestInterfaceApproval?: unknown;
 }
 
 export interface SourceReplyResponse {
@@ -1517,6 +1539,13 @@ export interface SourceReplyResponse {
   chatId: number;
   messageThreadId?: number;
   buttons?: number;
+}
+
+export interface SourcePollEnableResponse {
+  ok: true;
+  sessionId: string;
+  projectId: string;
+  cleared: { sourceId: string; prNumber: number }[];
 }
 
 export type WakeTarget = "scheduled" | "interval" | "daily";
@@ -1763,6 +1792,14 @@ export interface SpawnDefaultsResponse {
   model: string | null;
   reasoningEffort: ProviderReasoningEffort | null;
   worktree: boolean;
+}
+
+export interface SessionLaunchOptions {
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  mode: string | null;
+  modes: readonly string[];
 }
 
 export interface CreateProjectRequest {

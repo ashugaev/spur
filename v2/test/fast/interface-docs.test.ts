@@ -10,6 +10,24 @@ async function readRepoFile(path: string): Promise<string> {
 }
 
 describe("published interface contracts", () => {
+  it("documents launcher-owned isolated UI discovery environment", async () => {
+    const commands = await readRepoFile("docs/commands.md");
+    expect(commands).toContain("SPUR_ISOLATED_CONFIG");
+    expect(commands).toContain("SPUR_ISOLATED_UI_ENDPOINT_FILE");
+    expect(commands).toContain("SPUR_ISOLATED_DAEMON_PID");
+    expect(commands).toContain("SPUR_ISOLATED_DAEMON_STARTTIME");
+    expect(await readRepoFile("docs/configuration.md")).toContain("v2/src/ports.ts");
+  });
+  it("names isolated Telegram fixture inputs, stdin seed, and readiness failures", async () => {
+    const commands = await readRepoFile("docs/commands.md");
+    const configuration = await readRepoFile("docs/configuration.md");
+    expect(commands).toContain("isolated-ui");
+    expect(commands).toContain("--telegram-env-stdin");
+    expect(commands).toContain("Telegram NOT_CONNECTED/missing-fixture");
+    expect(commands).toContain("Telegram NOT_CONNECTED/owner-busy");
+    for (const field of ["BOT_TOKEN", "CHAT_ID", "ALLOWED_USERS", "ALLOWED_CHATS"])
+      expect(configuration).toContain(`TELEGRAM_TEST_${field}`);
+  });
   it("documents closeout ownership in command docs", async () => {
     const commands = await readRepoFile("docs/commands.md");
 
@@ -27,9 +45,9 @@ describe("published interface contracts", () => {
 
     // Surface names, flags, and codes only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
-    expect(commands).toContain("spur auto-ping unsubscribe --event <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --thread <handle>");
-    expect(commands).toContain("spur auto-ping unsubscribe --subscription <handle>");
+    const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
+    expect(autoPing).toContain("spur auto-ping unsubscribe");
+    for (const flag of ["--event", "--thread", "--subscription"]) expect(autoPing).toContain(flag);
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
     expect(commands).toContain("grant_not_ready");

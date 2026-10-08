@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { EventBus } from "../../src/event-bus.js";
 const logSpurEventMock = vi.fn();
 const cronStartMock = vi.fn();
 const jiraStartMock = vi.fn();
+const webhookStartMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -23,6 +24,13 @@ vi.mock("../../src/event-sources/jira.js", () => ({
   jiraSourceModule: {
     type: "jira",
     start: jiraStartMock,
+  },
+}));
+
+vi.mock("../../src/event-sources/webhook.js", () => ({
+  webhookSourceModule: {
+    type: "webhook",
+    start: webhookStartMock,
   },
 }));
 
@@ -54,11 +62,63 @@ describe("startConfiguredSources", () => {
     cronStartMock.mockResolvedValue({ stop: vi.fn() });
     jiraStartMock.mockReset();
     jiraStartMock.mockResolvedValue({ stop: vi.fn() });
+    webhookStartMock.mockReset();
+    webhookStartMock.mockResolvedValue({ stop: vi.fn() });
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(tmpDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("refreshes receipt-backed source callback through absent, ready, stopped, replacement UI", async () => {
+    const { publishIsolatedWebEndpoint } = await import("../../src/isolated-web-endpoint.js");
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const configPath = join(tmpDir, "config.yaml");
+    const filePath = join(tmpDir, "ui-endpoint.json");
+    writeFileSync(configPath, "server: {port: 4321}\n");
+    vi.stubEnv("SPUR_SESSION_TOOL_DIR", tmpDir);
+    vi.stubEnv("SPUR_ISOLATED_CONFIG", configPath);
+    vi.stubEnv("SPUR_ISOLATED_UI_ENDPOINT_FILE", filePath);
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+    const deps = cronStartMock.mock.calls[0]?.[0] as {
+      resolveWebBaseUrl(): Promise<string | null>;
+    };
+    expect(await deps.resolveWebBaseUrl()).toBeNull();
+    await publishIsolatedWebEndpoint({ configPath, filePath, port: 5642, pid: process.pid });
+    expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5642");
+    writeFileSync(filePath, "{}");
+    expect(await deps.resolveWebBaseUrl()).toBeNull();
+    await publishIsolatedWebEndpoint({ configPath, filePath, port: 5643, pid: process.pid });
+    expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5643");
+    await controller.stop();
+  });
+  it("preserves cached successful production endpoint", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    vi.stubEnv("SPUR_SESSION_TOOL_DIR", undefined);
+    vi.stubEnv("SPUR_ISOLATED_UI_ENDPOINT_FILE", undefined);
+    const config = buildConfig(tmpDir, {
+      api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+    });
+    const controller = await startConfiguredSources({
+      config: config as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+    });
+    const deps = cronStartMock.mock.calls[0]?.[0] as {
+      resolveWebBaseUrl(): Promise<string | null>;
+    };
+    expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5555");
+    config.ui.port = 5678;
+    expect(await deps.resolveWebBaseUrl()).toBe("http://127.0.0.1:5555");
+    await controller.stop();
   });
 
   it("starts sources when project path exists", async () => {
@@ -272,8 +332,56 @@ describe("startConfiguredSources", () => {
 
     const startDeps = cronStartMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect("listProjects" in startDeps).toBe(false);
+    expect("workbench" in startDeps).toBe(false);
 
     await controller.stop();
+  });
+
+  it("forwards the same optional workbench capability to source modules", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const workbench = {
+      launchOptions: vi.fn(),
+      listSessions: vi.fn(),
+      getSession: vi.fn(),
+      restoreSession: vi.fn(),
+    };
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      workbench,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].workbench).toBe(workbench);
+    await controller.stop();
+  });
+
+  it("registers webhook and stops earlier sources after a later start failure", async () => {
+    const cronStop = vi.fn();
+    cronStartMock.mockResolvedValue({ stop: cronStop });
+    webhookStartMock.mockRejectedValue(new Error("bind failed"));
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const config = buildConfig(tmpDir, {
+      api: {
+        path: tmpDir,
+        sources: {
+          nightly: { type: "cron" },
+          incoming: { type: "webhook" },
+        },
+      },
+    });
+
+    await expect(
+      startConfiguredSources({
+        config: config as never,
+        bus: new EventBus(),
+        listSessions: vi.fn().mockResolvedValue([]),
+      }),
+    ).rejects.toThrow("bind failed");
+
+    expect(webhookStartMock).toHaveBeenCalledTimes(1);
+    expect(cronStop).toHaveBeenCalledTimes(1);
   });
 });
 

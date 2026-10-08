@@ -132,7 +132,6 @@ describe("startServer", () => {
         "    sources:",
         "      pr-watch:",
         "        type: github",
-        '        query: "is:pr is:open"',
         "    triggers:",
         "      notify:",
         "        source: pr-watch",
@@ -2250,6 +2249,70 @@ describe("startServer", () => {
     } finally {
       SessionService.prototype.scheduleWake = scheduleWake;
       SessionService.prototype.cancelWake = cancelWake;
+      await server.stop();
+    }
+  });
+
+  it("routes source poll-enable and returns 404 for an unknown session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const enableSourcePoll = SessionService.prototype.enableSourcePoll;
+    SessionService.prototype.enableSourcePoll = async function mockEnableSourcePoll(sessionId) {
+      if (sessionId === "unknown-session") {
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      }
+      return {
+        ok: true,
+        sessionId,
+        projectId: "demo",
+        cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/source-poll-enable`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        sessionId: "demo-1",
+        projectId: "demo",
+        cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+      });
+
+      const missingResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/unknown-session/source-poll-enable`,
+        { method: "POST" },
+      );
+      expect(missingResponse.status).toBe(404);
+    } finally {
+      SessionService.prototype.enableSourcePoll = enableSourcePoll;
       await server.stop();
     }
   });

@@ -1131,6 +1131,48 @@ describe("OpenCode adapter", () => {
       }
     });
 
+    it("takes message identity from the id column for token usage, embedded id wins", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      const assistant = (tokens: { input: number; output: number }): string =>
+        JSON.stringify({
+          role: "assistant",
+          time: { completed: 1 },
+          tokens: { ...tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+        });
+      // Native shape: no id inside data.
+      insert.run("msg_a", "ses_1", 100, assistant({ input: 10, output: 5 }));
+      // Embedded id wins over the column: rows with different column ids but
+      // the same embedded id count once.
+      const embedded = (tokens: { input: number; output: number }): string =>
+        JSON.stringify({
+          id: "msg_embedded",
+          role: "assistant",
+          time: { completed: 2 },
+          tokens: { ...tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+        });
+      insert.run("msg_b", "ses_1", 200, embedded({ input: 7, output: 3 }));
+      insert.run("msg_c", "ses_1", 300, embedded({ input: 100, output: 50 }));
+      database.close();
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const result = await readOpenCodeStructuredState("ses_1");
+        expect(result.state).toMatchObject({ state: "waiting", reason: "assistant completed" });
+        expect(result.tokenUsage).toMatchObject({
+          inputTokens: 17,
+          outputTokens: 8,
+          totalTokens: 25,
+        });
+      } finally {
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
     it("classifies from the session's last message row without spawning the CLI", async () => {
       const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
       await mkdir(join(dataHome, "opencode"), { recursive: true });

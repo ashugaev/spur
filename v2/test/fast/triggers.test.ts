@@ -165,6 +165,30 @@ function spawnConfig() {
   };
 }
 
+function webhookSpawnConfig() {
+  return {
+    dataDir: DATA_DIR,
+    projects: {
+      api: {
+        sources: {
+          incoming: {
+            type: "webhook",
+          },
+        },
+        triggers: {
+          receive: {
+            source: "incoming",
+            event: "webhook:received",
+            spawn: {
+              blocks: [{ prompt: "Body={{body}} At={{receivedAt}}" }],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function spawnModelConfig() {
   return {
     dataDir: "/tmp/spur-data",
@@ -617,6 +641,19 @@ function cronEvent() {
     projectId: "api",
     sourceId: "morning",
     data: {},
+  };
+}
+
+function webhookEvent() {
+  return {
+    name: "webhook:received",
+    occurrenceId: "webhook-occurrence-1",
+    projectId: "api",
+    sourceId: "incoming",
+    data: {
+      body: '{"kind":"deploy"}',
+      receivedAt: "2026-09-08T12:00:00.000Z",
+    },
   };
 }
 
@@ -3667,6 +3704,31 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.completed",
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("renders webhook body and received time into one spawn", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-webhook" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: webhookSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(webhookEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: 'Body={"kind":"deploy"} At=2026-09-08T12:00:00.000Z',
+        });
+      });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
     } finally {
       await controller.stop();
     }

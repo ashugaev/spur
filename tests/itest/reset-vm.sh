@@ -30,7 +30,11 @@ log "killing leftover spur processes and tmux servers"
 pkill -f 'spur/dist/cli.js' 2>/dev/null
 pkill -f 'dist/cli.js daemon' 2>/dev/null
 pkill -f 'web-server.js' 2>/dev/null
-tmux ls 2>/dev/null | cut -d: -f1 | while read -r s; do tmux kill-session -t "$s" 2>/dev/null; done
+# Spur runs sessions on its own socket (`tmux -L spur-<port>`); a bare
+# `tmux ls` only sees the default one, so kill every server this user owns.
+for sock in /tmp/tmux-"$(id -u)"/*; do
+  [ -S "$sock" ] && tmux -S "$sock" kill-server 2>/dev/null
+done
 
 log "removing spur package, data, npm pin"
 rm -rf "$HOME/.local/lib/node_modules/@shugaev" "$HOME/.spur" "$HOME/.npmrc"
@@ -77,6 +81,8 @@ cp /etc/skel/.bashrc "$HOME/.bashrc"
 # avoids in interactive use.
 log "removing claude onboarding state"
 rm -f "$HOME/.claude.json"
+# Claude backs up .claude.json here; leaving it prompts a "restore from backup" hint.
+rm -rf "$HOME/.claude/backups"
 
 log "clearing run artifacts"
 rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
@@ -87,9 +93,15 @@ rm -rf "$HOME/spur-docs"
 # A tested agent finds that checkout's maintainer spur.yaml — real GitHub and
 # Telegram sources, paths that do not exist on this box — and spends turns
 # deciding what to do with it. ~/projects is whatever a run's smoke project
-# created. Both read as install friction; neither is.
+# created, ~/spur-smoke the name both tested agents pick for theirs. Both read
+# as install friction; neither is. Agents pick other names too (~/spur-smoke-test),
+# so every top-level git repo goes: the box holds none of its own outside hidden dirs.
 log "removing source-install clone and run projects"
-rm -rf "$HOME/spur" "$HOME/spur-mirror" "$HOME/projects"
+rm -rf "$HOME/spur" "$HOME/spur-mirror" "$HOME/projects" "$HOME/spur-smoke"
+for d in "$HOME"/*/; do
+  [ -L "${d%/}" ] && continue
+  if [ -e "${d}.git" ]; then rm -rf "${d%/}"; fi
+done
 
 # host-skills only creates these two — never `rm -rf "$HOME/.claude"`, that
 # destroys the planted credentials this harness relies on. Both dirs, once
@@ -128,5 +140,11 @@ printf '  %-14s %s\n' "agents"        "$([ -e "$HOME/.local/bin/cursor-agent" ] 
 printf '  %-14s %s\n' "harness"       "$([ -x "$HOME/.itest-harness/bin/claude" ] && echo claude || echo MISSING)"
 printf '  %-14s %s\n' "harness-creds" "$([ -s "$HOME/.claude/.credentials.json" ] && echo present || echo MISSING)"
 printf '  %-14s %s\n' "agent-skills"  "$([ -e "$HOME/.claude/skills" ] || [ -e "$HOME/.codex" ] && echo leftover || echo clean)"
-printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] && echo leftover || echo clean)"
+repo_leftover=""
+for d in "$HOME"/*/; do
+  [ -L "${d%/}" ] && continue
+  if [ -e "${d}.git" ]; then repo_leftover=$d; fi
+done
+printf '  %-14s %s\n' "source-clone"  "$([ -e "$HOME/spur" ] || [ -e "$HOME/spur-mirror" ] || [ -e "$HOME/projects" ] || [ -e "$HOME/spur-smoke" ] || [ -n "$repo_leftover" ] && echo leftover || echo clean)"
+printf '  %-14s %s\n' "agent-procs"   "$(pgrep -u "$(id -u)" -x 'claude|codex|opencode|tmux: server' >/dev/null && echo leftover || echo clean)"
 log "done"

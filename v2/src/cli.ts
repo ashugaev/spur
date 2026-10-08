@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  checkGitHubPollDisabled,
   collectHostInstallChecks,
   hasErrorSeverity,
   renderHostInstallChecks,
@@ -20,11 +21,14 @@ import {
 } from "./cache-retention.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
+import { readJson } from "./github-app.js";
 import { join, relative, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, Option, type Help } from "commander";
+import { registerReviewApp } from "./review-app.js";
+import { registerReviewGate } from "./review-gate.js";
 import {
   connectProjectConfig,
   deleteJson,
@@ -168,6 +172,7 @@ import {
   type SharedMemoryListResponse,
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
+  type SourcePollEnableResponse,
   type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
@@ -471,6 +476,15 @@ function parseButtonOption(
     throw new Error("--button takes <label> or <label>=<value>");
   }
   return [...(previous ?? []), { text, value }];
+}
+
+function renderSourcePollEnableResponse(response: SourcePollEnableResponse): string {
+  if (response.cleared.length === 0) {
+    return `Source polling was not disabled for ${response.sessionId}`;
+  }
+  return response.cleared
+    .map((entry) => `${entry.sourceId}: re-enabled polling for PR #${entry.prNumber}`)
+    .join("\n");
 }
 
 function renderStateSubscription(record: SessionStateSubscription): string {
@@ -2783,6 +2797,8 @@ async function ensureCliSpawnSubscriptionTargetsExist(
 
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
+  registerReviewApp(program);
+  registerReviewGate(program);
 
   program
     .name("spur")
@@ -2857,6 +2873,9 @@ export function createProgram(cliEntrypoint: string): Command {
           );
           if (instanceConfig.status === "ok") {
             collectedChecks.push(await checkAgentProcessOwnership(instanceConfig.config.dataDir));
+            collectedChecks.push(
+              checkGitHubPollDisabled(loadProjectScope(instanceConfig.config.configPath)),
+            );
           }
           // `configRegistryPaths` rides on the "config-registry" check purely
           // as an internal carrier from `collectHostInstallChecks` to here
@@ -4803,6 +4822,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<message...>", "Message to send")
     .option("--session <id>", "Session id; defaults to SPUR_SESSION")
     .option(
+      "--request-interface-approval <manifest-file>",
+      "Request designated human approval of a semantic interface manifest",
+    )
+    .option(
       "--button <label[=value]>",
       "Inline choice button; repeatable. A click arrives as a user message carrying the value.",
       parseButtonOption,
@@ -4811,7 +4834,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(
       async (
         messageParts: string[],
-        options: { session?: string; json?: boolean; button?: SourceReplyButton[] },
+        options: {
+          session?: string;
+          json?: boolean;
+          button?: SourceReplyButton[];
+          requestInterfaceApproval?: string;
+        },
         command: Command,
       ) => {
         const configPath = prepareInstanceConfig(
@@ -4825,6 +4853,9 @@ export function createProgram(cliEntrypoint: string): Command {
         const payload: SourceReplyRequest = {
           message: messageParts.join(" "),
           ...(buttons.length > 0 ? { buttons } : {}),
+          ...(options.requestInterfaceApproval
+            ? { requestInterfaceApproval: await readJson(options.requestInterfaceApproval) }
+            : {}),
         };
         await outputResult({
           json: Boolean(options.json),
@@ -4840,6 +4871,33 @@ export function createProgram(cliEntrypoint: string): Command {
         });
       },
     );
+
+  source
+    .command("poll-enable")
+    .description("Re-enable GitHub signal polling for a session disabled by a not-found PR.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { session?: string; json?: boolean }, command: Command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+      if (!sessionId) {
+        throw new Error("source poll-enable requires --session or SPUR_SESSION");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "re-enabling source polling",
+        action: () =>
+          postJson<SourcePollEnableResponse>(
+            cliEntrypoint,
+            `/sessions/${encodeURIComponent(sessionId)}/source-poll-enable`,
+            {},
+            configPath,
+          ),
+        render: renderSourcePollEnableResponse,
+      });
+    });
 
   const daemon = program
     .command("daemon", { hidden: true })

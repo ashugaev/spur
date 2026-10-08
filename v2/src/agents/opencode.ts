@@ -888,6 +888,18 @@ function shouldServeCachedOpenCodeState(
   );
 }
 
+// Native opencode.db keeps message identity in the `id` column; `data` omits
+// it. An id embedded in `data` wins.
+function openCodeMessageInfoFromRow(row: Record<string, unknown>, sessionId: string): unknown {
+  const id = row["id"];
+  const data = row["data"];
+  if (typeof id !== "string" || typeof data !== "string") {
+    throw new Error(`Unexpected opencode message row for ${sessionId}`);
+  }
+  const info = JSON.parse(data) as unknown;
+  return isRecord(info) && typeof info["id"] !== "string" ? { ...info, id } : info;
+}
+
 // Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase.
 // The state depends on the session's last message alone, so one indexed row
 // replaces a whole-transcript export; its `data` is the export's `info`, so the
@@ -901,15 +913,13 @@ export async function readOpenCodeStateFromDatabase(
   try {
     const row = database
       .prepare(
-        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
       )
       .get(sessionId);
     if (!row) return parseOpenCodeState({ messages: [] });
-    const data = row["data"];
-    if (typeof data !== "string") {
-      throw new Error(`Unexpected opencode message row for ${sessionId}`);
-    }
-    return parseOpenCodeState({ messages: [{ info: JSON.parse(data) as unknown }] });
+    return parseOpenCodeState({
+      messages: [{ info: openCodeMessageInfoFromRow(row, sessionId) }],
+    });
   } finally {
     database.close();
   }
@@ -923,15 +933,9 @@ async function readOpenCodeStructuredStateFromDatabase(
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const rows = database
-      .prepare("SELECT data FROM message WHERE session_id = ? ORDER BY time_created, id")
+      .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
       .all(sessionId);
-    const messages = rows.map((row) => {
-      const data = row["data"];
-      if (typeof data !== "string") {
-        throw new Error(`Unexpected opencode message row for ${sessionId}`);
-      }
-      return { info: JSON.parse(data) as unknown };
-    });
+    const messages = rows.map((row) => ({ info: openCodeMessageInfoFromRow(row, sessionId) }));
     const value = { id: sessionId, messages };
     const tokenUsage = parseOpenCodeTokenUsage(value);
     return {

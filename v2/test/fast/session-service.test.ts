@@ -29,6 +29,9 @@ import { npmPinConfigPath } from "../../src/npm-prefix.js";
 import type * as eventLogModule from "../../src/event-log.js";
 import type * as sessionSlotsModule from "../../src/session-slots.js";
 import type * as telegramSourceStateModule from "../../src/telegram-source-state.js";
+import type * as interfaceConsentModule from "../../src/review-interface-consent.js";
+import type * as metadataModule from "../../src/metadata.js";
+import type { InterfaceConsent } from "../../src/review-interface-consent.js";
 import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
@@ -151,6 +154,8 @@ const readAvailableBacklogItemsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
+const clearGitHubPollDisabledSessionMock = vi.fn();
+const listGitHubPollDisabledSourceIdsMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
@@ -441,6 +446,10 @@ function inputLogEntries(sessionId: string): unknown[] {
     .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
 const writeTelegramOfferMock = vi.fn();
+const readInterfaceConsentMock = vi.fn();
+const writeInterfaceConsentMock = vi.fn();
+const consentPolicyMock = vi.fn();
+const consentRepositoryMock = vi.fn();
 const readTelegramBindingsMock = vi.fn();
 const readTelegramReplyTargetMock = vi.fn();
 const sendTelegramReplyMock = vi.fn();
@@ -599,6 +608,7 @@ vi.mock("../../src/config.js", () => ({
       : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
+  validateWebhookSourceBindings: () => undefined,
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
@@ -685,10 +695,15 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  readInterfaceConsent: readInterfaceConsentMock,
+  writeInterfaceConsent: writeInterfaceConsentMock,
   writeTelegramOffer: writeTelegramOfferMock,
   telegramBindingKey: (chatId: number, messageThreadId?: number) =>
     `${chatId}:${messageThreadId ?? "main"}`,
   archiveSessions: archiveSessionsMock,
+  clearGitHubPollDisabledSession: clearGitHubPollDisabledSessionMock,
+  listGitHubPollDisabledSourceIds: (...args: unknown[]): string[] =>
+    (listGitHubPollDisabledSourceIdsMock(...args) as string[] | undefined) ?? [],
   deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
@@ -712,6 +727,12 @@ vi.mock("../../src/metadata.js", () => ({
   writeTelegramReplyTarget: writeTelegramReplyTargetMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
+}));
+
+vi.mock("../../src/review-interface-consent.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof interfaceConsentModule>()),
+  consentPolicy: consentPolicyMock,
+  repositoryOf: consentRepositoryMock,
 }));
 
 vi.mock("../../src/todo.js", async (importOriginal) => {
@@ -2268,6 +2289,10 @@ describe("SessionService", () => {
     readCursorTokenUsageMock.mockReset().mockResolvedValue(undefined);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     writeTelegramOfferMock.mockReset();
+    readInterfaceConsentMock.mockReset().mockReturnValue(null);
+    writeInterfaceConsentMock.mockReset();
+    consentPolicyMock.mockReset();
+    consentRepositoryMock.mockReset();
     readTelegramBindingsMock.mockReset().mockReturnValue(new Map());
     readTelegramReplyTargetMock.mockReset().mockReturnValue(null);
     sendTelegramReplyMock.mockReset().mockResolvedValue({ messageIds: [] });
@@ -4678,6 +4703,104 @@ describe("SessionService", () => {
     });
     expect(resolveCursorLaunchModelMock).toHaveBeenCalledWith("auto");
     service.dispose();
+  });
+
+  it("workbench launch options shares daemon/project/explicit agent precedence and configured modes", async () => {
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue(config);
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api" })).resolves.toMatchObject({
+      agent: "claude",
+      mode: null,
+      modes: [],
+    });
+    const project = service.config.projects.api;
+    if (!project) throw new Error("Missing fixture project");
+    project.defaultAgent = "codex";
+    project.modes = {
+      manager: { skill: "manager", default: true },
+      worker: { skill: "developer" },
+    };
+    await expect(service.launchOptions({ project: "api" })).resolves.toEqual({
+      project: "api",
+      agent: "codex",
+      model: null,
+      mode: "manager",
+      modes: ["manager", "worker"],
+    });
+    await expect(
+      service.launchOptions({ project: "api", agent: "opencode", mode: "worker" }),
+    ).resolves.toMatchObject({
+      agent: "opencode",
+      model: null,
+      mode: "worker",
+    });
+    await expect(service.launchOptions({ project: "api", mode: "removed" })).rejects.toThrow(
+      "Unknown mode",
+    );
+    await expect(service.launchOptions({ project: "removed" })).rejects.toThrow();
+  });
+
+  it("workbench launch options matches Cursor spawn's model rewritten by inherited reasoning", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          defaultAgent: "cursor",
+          defaultModels: { cursor: "family-high" },
+          reasoningEffort: { cursor: "xhigh" },
+        },
+      },
+    });
+    resolveAgentReasoningEffortMock.mockImplementation(
+      async (agent: string, model: string | undefined, effort: string) => {
+        expect(agent).toBe("cursor");
+        expect(["family-high", "family-xhigh"]).toContain(model);
+        expect(effort).toBe("xhigh");
+        return { model: "family-xhigh", reasoningEffort: "xhigh" };
+      },
+    );
+    createSessionStore();
+    const service = await createDisposedSessionService();
+    const displayed = await service.launchOptions({ project: "api" });
+    expect(displayed.model).toBe("family-xhigh");
+    if (displayed.model === null) throw new Error("Missing fixture launch model");
+    await service.spawn({
+      project: "api",
+      agent: displayed.agent,
+      model: displayed.model,
+      prompt: "task",
+    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "cursor",
+      expect.any(String),
+      expect.objectContaining({ model: displayed.model, reasoningEffort: "xhigh" }),
+    );
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith("cursor", "family-high", "xhigh", {
+      codexHomePath: service.config.models.codexHome,
+    });
+    expect(resolveAgentReasoningEffortMock).toHaveBeenCalledWith(
+      "cursor",
+      "family-xhigh",
+      "xhigh",
+      { codexHomePath: service.config.models.codexHome },
+    );
+  });
+
+  it("workbench launch options rejects unsupported inherited reasoning without dropping it", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: { api: { ...baseConfig().projects.api, reasoningEffort: { cursor: "xhigh" } } },
+    });
+    resolveAgentReasoningEffortMock.mockRejectedValueOnce(
+      new Error("unsupported reasoning effort"),
+    );
+    const service = await createDisposedSessionService();
+    await expect(service.launchOptions({ project: "api", agent: "cursor" })).rejects.toThrow(
+      "unsupported reasoning effort",
+    );
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("surfaces a missing OpenCode executable before creating a worktree", async () => {
@@ -7864,75 +7987,164 @@ describe("SessionService", () => {
     expect(result.worktreePath).toBe("/repo/api");
   });
 
-  it("replies to the latest Telegram source target", async () => {
-    const config = baseConfig();
-    const telegramSource = {
-      type: "telegram" as const,
-      runOnStart: false,
-      token: "token-123",
-      allowedUsers: [123],
-    };
-    config.projects.api.sources = {
-      agentChat: telegramSource,
-    };
-    loadConfigMock.mockReturnValue(config);
-    const sessions = createSessionStore();
-    sessions.set("api-1", {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude --dangerously-skip-permissions",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    readTelegramReplyTargetMock.mockReturnValue({
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "agentChat",
-      chatId: -1001,
-      messageThreadId: 22,
-      updatedAt: "2026-03-18T10:02:00.000Z",
-    });
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.replyToSource("api-1", { message: " hello " });
-
-    expect(sendTelegramReplyMock).toHaveBeenCalledWith(
-      telegramSource,
-      expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
-      "api-1\nhello",
-      expect.objectContaining({ topicName: expect.stringContaining("api-1 claude") }),
-    );
-    expect(result).toEqual({
-      ok: true,
-      source: "telegram",
-      sessionId: "api-1",
-      projectId: "api",
-      sourceId: "agentChat",
-      chatId: -1001,
-      messageThreadId: 22,
-    });
-    expect(logSpurEventMock).toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      expect.objectContaining({
-        event: "source.reply.sent",
+  it.each(["ordinary", "consent", "delivery-failure", "real-consent"])(
+    "replies to the latest Telegram source target: %s",
+    async (kind) => {
+      const config = baseConfig();
+      const telegramSource = {
+        type: "telegram" as const,
+        runOnStart: false,
+        token: "token-123",
+        allowedUsers: [123],
+      };
+      config.projects.api.sources = {
+        agentChat: telegramSource,
+      };
+      loadConfigMock.mockReturnValue(config);
+      const sessions = createSessionStore();
+      sessions.set("api-1", {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      readTelegramReplyTargetMock.mockReturnValue({
         sessionId: "api-1",
         projectId: "api",
         sourceId: "agentChat",
-      }),
-    );
-    expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
-      TEST_DATA_DIR,
-      expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
-    );
-  });
+        chatId: -1001,
+        messageThreadId: 22,
+        updatedAt: "2026-03-18T10:02:00.000Z",
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      let current: InterfaceConsent | null = null;
+      const semantic = kind !== "ordinary";
+      if (semantic) {
+        readInterfaceConsentMock.mockImplementation(() => current);
+        writeInterfaceConsentMock.mockImplementation((_dir, record: InterfaceConsent) => {
+          current = record;
+        });
+        consentPolicyMock.mockResolvedValue({ repositories: ["owner/repo"], approverUserId: 123 });
+        consentRepositoryMock.mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+      }
+      if (kind === "real-consent") {
+        const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing fixture session");
+        actual.writeSession(TEST_DATA_DIR, session);
+        readSessionMock.mockImplementation(actual.readSession);
+        listSessionsMock.mockImplementation(actual.listSessions);
+        readInterfaceConsentMock.mockImplementation(actual.readInterfaceConsent);
+        writeInterfaceConsentMock.mockImplementation(actual.writeInterfaceConsent);
+      }
+      if (kind === "delivery-failure")
+        sendTelegramReplyMock.mockRejectedValueOnce(new Error("Telegram unavailable"));
+      const reply = service.replyToSource("api-1", {
+        message: " hello ",
+        ...(semantic
+          ? {
+              requestInterfaceApproval: {
+                version: 1,
+                repository: "owner/repo",
+                baseBranch: "main",
+                surfaces: [
+                  {
+                    kind: "CLI",
+                    id: "run",
+                    before: ["old"],
+                    after: ["--dry-run"],
+                    constraints: ["no process created"],
+                  },
+                ],
+              },
+            }
+          : {}),
+      });
+      if (kind === "delivery-failure") {
+        await expect(reply).rejects.toThrow("Telegram unavailable");
+        expect(writeInterfaceConsentMock).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery: "failed", decision: "pending", outbox: "pending" }),
+        );
+        return;
+      }
+      const result = await reply;
+      if (kind === "real-consent") {
+        expect(listSessionsMock).toHaveBeenCalled();
+        expect(listSessionsMock(TEST_DATA_DIR).map((session: SessionRecord) => session.id)).toEqual(
+          ["api-1"],
+        );
+        expect(readInterfaceConsentMock(TEST_DATA_DIR, "api-1")).toMatchObject({
+          decision: "pending",
+          delivery: "sent",
+        });
+      }
+
+      expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+        telegramSource,
+        expect.objectContaining({ chatId: -1001, messageThreadId: 22 }),
+        semantic ? expect.stringContaining("--dry-run") : "hello",
+        expect.objectContaining({
+          sessionLabel: "api-1",
+          topicName: expect.stringContaining("api-1 claude"),
+        }),
+      );
+      if (semantic) {
+        const body = sendTelegramReplyMock.mock.calls[0]?.[2] as string;
+        expect(body).toMatch(/^hello\n\n/);
+        expect(body).not.toMatch(/^api-1(?: — .*?)?\n/);
+        expect(writeInterfaceConsentMock).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery: "sent", decision: "pending", outbox: "pending" }),
+        );
+        expect(writeTelegramOfferMock).toHaveBeenCalledWith(
+          TEST_DATA_DIR,
+          "api",
+          "agentChat",
+          expect.objectContaining({
+            choices: expect.arrayContaining([
+              expect.objectContaining({
+                interfaceConsent: expect.objectContaining({ decision: "approved" }),
+              }),
+            ]),
+          }),
+        );
+      }
+      expect(result).toEqual({
+        ok: true,
+        source: "telegram",
+        sessionId: "api-1",
+        projectId: "api",
+        sourceId: "agentChat",
+        chatId: -1001,
+        messageThreadId: 22,
+        ...(semantic ? { buttons: 3 } : {}),
+      });
+      expect(logSpurEventMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({
+          event: "source.reply.sent",
+          sessionId: "api-1",
+          projectId: "api",
+          sourceId: "agentChat",
+        }),
+      );
+      expect(writeTelegramReplyTargetMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ sessionId: "api-1", lastReplyAt: expect.any(String) }),
+      );
+    },
+  );
 
   describe("Telegram reply bookkeeping", () => {
     const replyTargetFor = (extra: Record<string, unknown> = {}) => ({
@@ -7987,8 +8199,8 @@ describe("SessionService", () => {
       expect(sendTelegramReplyMock).toHaveBeenCalledWith(
         telegramSource,
         expect.objectContaining({ chatId: -1001 }),
-        "api-1 — Fix login\nhello",
-        expect.anything(),
+        "hello",
+        expect.objectContaining({ sessionLabel: "api-1 — Fix login" }),
       );
       expect(recordTelegramMessagesMock).toHaveBeenCalledWith(
         TEST_DATA_DIR,
@@ -7998,6 +8210,62 @@ describe("SessionService", () => {
         [91, 92],
       );
     });
+
+    it.each(["sent", "failed"] as const)(
+      "preserves consent buttons and separate session label when delivery is %s",
+      async (delivery) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor());
+        const { service } = await serviceWithTelegramSession("Review interface");
+        const consentModule = await import("../../src/review-interface-consent.js");
+        const metadata = await import("../../src/metadata.js");
+        vi.spyOn(consentModule, "reconcileInterfaceConsent").mockResolvedValue(undefined);
+        vi.spyOn(consentModule, "consentPolicy").mockResolvedValue({
+          repositories: ["owner/repo"],
+          approverUserId: 123,
+        });
+        vi.spyOn(consentModule, "repositoryOf").mockResolvedValue("owner/repo");
+        readCurrentBranchMock.mockResolvedValue("api-1");
+        const readConsent = vi.spyOn(metadata, "readInterfaceConsent").mockReturnValue(null);
+        vi.spyOn(metadata, "writeInterfaceConsent").mockImplementation((_dir, consent) => {
+          readConsent.mockReturnValue(consent);
+        });
+        const failure = new Error("Telegram unavailable");
+        if (delivery === "failed") sendTelegramReplyMock.mockRejectedValueOnce(failure);
+        else sendTelegramReplyMock.mockResolvedValueOnce({ messageIds: [91] });
+
+        const result = service.replyToSource("api-1", {
+          message: "Review this interface",
+          requestInterfaceApproval: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              { kind: "CLI", id: "run", before: [], after: ["--dry-run"], constraints: [] },
+            ],
+          },
+        });
+        if (delivery === "failed") await expect(result).rejects.toThrow(failure);
+        else await result;
+
+        expect(sendTelegramReplyMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          expect.stringMatching(/^Review this interface\n\n/),
+          expect.objectContaining({
+            sessionLabel: "api-1 — Review interface",
+            buttons: [
+              expect.objectContaining({ text: "Approve interface" }),
+              expect.objectContaining({ text: "Reject interface" }),
+              expect.objectContaining({ text: "Revoke interface approval" }),
+            ],
+          }),
+        );
+        expect(metadata.writeInterfaceConsent).toHaveBeenLastCalledWith(
+          TEST_DATA_DIR,
+          expect.objectContaining({ delivery }),
+        );
+      },
+    );
 
     it("keeps a placeholder recorded while the reply was in flight", async () => {
       readTelegramReplyTargetMock
@@ -8044,10 +8312,53 @@ describe("SessionService", () => {
         telegramSource,
         -1001,
         22,
-        expect.stringContaining("api-1 claude — Fix login"),
+        expect.stringContaining("Fix login — api-1 claude"),
       );
       expect(stored["topicName"]).toEqual(expect.stringContaining("Fix login"));
     });
+
+    it.each([undefined, "   ", "Fix login", "x".repeat(108) + "😀" + "y".repeat(30)])(
+      "keeps topic identity after title within 128 units: %s",
+      async (title) => {
+        readTelegramReplyTargetMock.mockReturnValue(replyTargetFor({ topicName: "old" }));
+        const { service } = await serviceWithTelegramSession(title);
+        await service.replyToSource("api-1", { message: "hello" });
+        const name = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+        expect(name.length).toBeLessThanOrEqual(128);
+        expect(name.endsWith("api-1 claude")).toBe(true);
+        if (!title?.trim()) expect(name).toMatch(/^\S+ api-1 claude$/u);
+        else if (title === "Fix login") expect(name).toMatch(/^\S+ Fix login — api-1 claude$/u);
+        else {
+          expect(name).toContain("… — api-1 claude");
+          expect(name).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+          );
+        }
+      },
+    );
+
+    it.each(["Task title", "x".repeat(123) + "😀tail"])(
+      "bounds titled topics when session identity exceeds 128 units: %s",
+      async (title) => {
+        const id = "x".repeat(120) + "-abcd";
+        const { service, sessions } = await serviceWithTelegramSession(title);
+        const session = sessions.get("api-1");
+        if (!session) throw new Error("missing session");
+        sessions.delete("api-1");
+        sessions.set(id, { ...session, id, tmuxSession: id });
+        readTelegramReplyTargetMock.mockReturnValue(
+          replyTargetFor({ sessionId: id, topicName: "old" }),
+        );
+        await service.replyToSource(id, { message: "hello" });
+        const name = editTelegramTopicMock.mock.calls[0]?.[3] as string;
+        expect(name.length).toBeLessThanOrEqual(128);
+        expect(name).toMatch(/^\S+ (?:Task title|x)/u);
+        expect(name.endsWith("…")).toBe(true);
+        expect(name).not.toMatch(
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u,
+        );
+      },
+    );
 
     it("does not re-create a target that was removed while the send was in flight", async () => {
       let stored: Record<string, unknown> | null = replyTargetFor();
@@ -8151,7 +8462,7 @@ describe("SessionService", () => {
         telegramSource,
         -1001,
         22,
-        expect.stringContaining("New title"),
+        expect.stringContaining("New title — api-1 claude"),
       );
     });
 
@@ -8175,12 +8486,12 @@ describe("SessionService", () => {
         stored = { ...target, updatedAt: "2026-03-18T10:06:00.000Z" };
       });
       sendTelegramReplyMock.mockResolvedValue({ messageThreadId: 44, messageIds: [91] });
-      const { service } = await serviceWithTelegramSession();
+      const { service } = await serviceWithTelegramSession("New topic");
 
       await service.replyToSource("api-1", { message: "hello" });
 
       expect(stored["messageThreadId"]).toBe(44);
-      expect(stored["topicName"]).toEqual(expect.stringContaining("api-1 claude"));
+      expect(stored["topicName"]).toEqual(expect.stringContaining("New topic — api-1 claude"));
       expect(editTelegramTopicMock).not.toHaveBeenCalled();
     });
 
@@ -8375,6 +8686,198 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).not.toHaveBeenCalled();
   });
 
+  it("enableSourcePoll clears the disable in every github source of the project", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: {
+            "pr-watch": { type: "github" },
+            "pr-watch-2": { type: "github" },
+            agentChat: { type: "telegram", token: "token-123", allowedUsers: [123] },
+          },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockImplementation(
+      (_dataDir: string, _projectId: string, sourceId: string) =>
+        sourceId === "pr-watch" ? 42 : null,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({
+      ok: true,
+      sessionId: "api-1",
+      projectId: "api",
+      cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+    });
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "pr-watch",
+      "api-1",
+    );
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "pr-watch-2",
+      "api-1",
+    );
+    // The telegram source is never queried: only type "github" sources are cleared.
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("enableSourcePoll is a no-op returning an empty cleared list when nothing was disabled", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({ ok: true, sessionId: "api-1", projectId: "api", cleared: [] });
+  });
+
+  it("enableSourcePoll reports a clear sourced only from the live handle's in-process override when disk is already empty", async () => {
+    // Reproduces a session whose recordGitHubPollDisabledSession disk write
+    // previously failed: the disk-side clear is a no-op (nothing to clear),
+    // but the source handle still had the session gated via
+    // pendingPollDisabledOverrides. enableSourcePoll must still report it as
+    // cleared, not silently return an empty list while the caller believes
+    // polling resumed.
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    clearGitHubPollDisabledSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const overrideClearer = vi.fn(
+      (_projectId: string, sourceId: string, sessionId: string): number | null =>
+        sourceId === "pr-watch" && sessionId === "api-1" ? 42 : null,
+    );
+    service.setPollDisabledOverrideClearer(overrideClearer);
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result).toEqual({
+      ok: true,
+      sessionId: "api-1",
+      projectId: "api",
+      cleared: [{ sourceId: "pr-watch", prNumber: 42 }],
+    });
+    expect(overrideClearer).toHaveBeenCalledWith("api", "pr-watch", "api-1");
+  });
+
+  it("enableSourcePoll clears an entry left under a source no longer in config", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { "pr-watch": { type: "github" } },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listGitHubPollDisabledSourceIdsMock.mockReturnValue(["pr-watch", "old-renamed-source"]);
+    clearGitHubPollDisabledSessionMock.mockImplementation(
+      (_dataDir: string, _projectId: string, sourceId: string) =>
+        sourceId === "old-renamed-source" ? 7 : null,
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.enableSourcePoll("api-1");
+
+    expect(result.cleared).toEqual([{ sourceId: "old-renamed-source", prNumber: 7 }]);
+    expect(listGitHubPollDisabledSourceIdsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api");
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("enableSourcePoll throws SessionResourceNotFoundError for an unknown session", async () => {
+    loadConfigMock.mockReturnValue(baseConfig());
+    readSessionMock.mockReturnValue(null);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.enableSourcePoll("api-missing")).rejects.toThrow(
+      "Session not found: api-missing",
+    );
+  });
+
   it("renders agent choice buttons and persists one offer per reply", async () => {
     const config = baseConfig();
     const telegramSource = {
@@ -8436,8 +8939,9 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.anything(),
-      "api-1\nDeploy now?",
+      "Deploy now?",
       expect.objectContaining({
+        sessionLabel: "api-1",
         buttons: [
           { text: "Yes", callbackData: `spur_choice:${stored[0]?.token}` },
           { text: "Later", callbackData: `spur_choice:${stored[1]?.token}` },
@@ -8557,8 +9061,8 @@ describe("SessionService", () => {
     expect(sendTelegramReplyMock).toHaveBeenCalledWith(
       telegramSource,
       expect.objectContaining({ chatId: 4242 }),
-      "api-1\nheads up",
-      expect.anything(),
+      "heads up",
+      expect.objectContaining({ sessionLabel: "api-1" }),
     );
     expect(result).toEqual(
       expect.objectContaining({ sessionId: "api-1", sourceId: "agentChat", chatId: 4242 }),
@@ -22398,13 +22902,13 @@ describe("SessionService", () => {
       telegramSource,
       expect.anything(),
       expect.any(String),
-      expect.objectContaining({ topicName: "🔴 api-1 claude — Fix telegram notices" }),
+      expect.objectContaining({ topicName: "🔴 Fix telegram notices — api-1 claude" }),
     );
     expect(editTelegramTopicMock).toHaveBeenCalledWith(
       telegramSource,
       -1001,
       22,
-      "🔴 api-1 claude — Fix telegram notices",
+      "🔴 Fix telegram notices — api-1 claude",
     );
     service.dispose();
   });
@@ -33262,6 +33766,89 @@ describe("SessionService", () => {
     expect(restored.runtimeAlive).toBe(true);
   });
 
+  // A10
+  it("clears the github poll-disable registry on restore", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+          triggers: {},
+        },
+      },
+    });
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    clearGitHubPollDisabledSessionMock.mockReturnValue(42);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.restore("api-1");
+
+    expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      "api",
+      "gh",
+      "api-1",
+    );
+  });
+
+  // A11
+  it("restores when clearing the poll-disable registry throws", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+          triggers: {},
+        },
+      },
+    });
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    clearGitHubPollDisabledSessionMock.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const restored = await service.restore("api-1");
+
+    expect(restored.status).toBe("running");
+  });
+
   it("pins pnpm virtual store to the source repo when node_modules is symlinked into a worktree", async () => {
     const repoPath = resolve(process.cwd(), "..");
     loadConfigMock.mockReturnValue({
@@ -33707,6 +34294,44 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
+  // Gap the review found: a rejected restore (not restorable here) must be a
+  // no-op for the poll-disable registry too, or a poll-eligible session that
+  // never actually restored would pick up a spurious source.poll.disabled on its
+  // very next cycle. enableSourcePoll runs only past the restorability/
+  // foreign-process gates, not at restoreLocked's top.
+  it("does not clear the github poll-disable registry when restore is rejected as not restorable", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: { gh: { type: "github" } },
+        },
+      },
+    });
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService, SessionNotRestorableError } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.restore("api-1")).rejects.toThrow(SessionNotRestorableError);
+    expect(clearGitHubPollDisabledSessionMock).not.toHaveBeenCalled();
+  });
+
   it("offers respawn when restoring an errored session that is not restorable", async () => {
     createSessionStore({
       id: "api-1",
@@ -33921,6 +34546,39 @@ describe("SessionService", () => {
       expect(createWorktreeMock).not.toHaveBeenCalled();
       expect(removeWorktreeMock).not.toHaveBeenCalled();
       expect(reopened).toMatchObject({ id: "api-1", status: "running" });
+    });
+
+    // A10: reopen funnels through restoreLocked (session-service.ts reopenLocked's
+    // tail), which clears the github poll-disable registry only once the restore
+    // itself actually succeeds. A genuinely successful reopen, not a rejected one —
+    // the negative case lives at the restore level, since reopen funnels through
+    // the same restoreLocked gates: see "does not clear the github poll-disable
+    // registry when restore is rejected as not restorable".
+    it("clears the github poll-disable registry on a successful reopen", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sources: { gh: { type: "github" } },
+          },
+        },
+      });
+      seedReopenableSession();
+      clearGitHubPollDisabledSessionMock.mockReturnValue(42);
+
+      const service = await createDisposedSessionService();
+      mockTimerPromisesSleepWithFakeTimers();
+
+      const reopened = await service.reopen("api-1");
+
+      expect(reopened).toMatchObject({ id: "api-1", status: "running" });
+      expect(clearGitHubPollDisabledSessionMock).toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        "api",
+        "gh",
+        "api-1",
+      );
     });
 
     it("refuses before touching git when the stored worktree path is not this session's own (e.g. a desk anchor's)", async () => {

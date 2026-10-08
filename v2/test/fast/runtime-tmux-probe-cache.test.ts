@@ -1,8 +1,8 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
@@ -70,6 +70,23 @@ function installFleetTmuxMock(): void {
 }
 
 describe("runtime-tmux shared probe cache", () => {
+  // The mocked tmux never runs the pane, so the launcher's env file (a copy of
+  // the runner's process.env) is never consumed; keep it in a per-file dir
+  // that is removed afterwards.
+  const originalTmpdir = process.env["TMPDIR"];
+  let testTmpDir = "";
+
+  beforeAll(() => {
+    testTmpDir = mkdtempSync(join(tmpdir(), "spur-probe-cache-test-"));
+    process.env["TMPDIR"] = testTmpDir;
+  });
+
+  afterAll(() => {
+    if (originalTmpdir === undefined) delete process.env["TMPDIR"];
+    else process.env["TMPDIR"] = originalTmpdir;
+    rmSync(testTmpDir, { recursive: true, force: true });
+  });
+
   afterEach(() => {
     execFileAsyncMock.mockReset();
     vi.resetModules();
