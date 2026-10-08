@@ -25,7 +25,7 @@ APPROVAL
   Mirror current -> proposed change and approval request in current channel
   and authorized session Telegram; follow agent-protocol.md.
   Attach screenshot to Telegram through `telegram` skill; never substitute a link.
-  Send text/buttons through session-bound `spur source reply`; command owner: docs/commands.md.
+  Route text/buttons and screenshot to one authorized recipient per `telegram` skill.
   Reuse prior approval matching scope; still save and send screenshot proof.
   Return APPROVED or PENDING_APPROVAL; manager owns wait and revisions.
   Downstream agents read design-spec.md; changed scope needs matching approval.

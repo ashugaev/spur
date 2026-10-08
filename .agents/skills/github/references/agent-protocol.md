@@ -10,7 +10,7 @@ INTERFACE
 
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
-  Mirror reviewable scope and approval request in current channel and authorized session Telegram; text/buttons through session-bound source reply, UI screenshot through telegram skill.
+  Mirror reviewable scope and approval request in current channel and authorized session Telegram; route text/buttons and UI screenshot per telegram skill.
   Treat typed/button reply as human prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
   Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
