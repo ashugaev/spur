@@ -393,59 +393,85 @@ describe("sendTelegramReply formatting", () => {
     });
     expect(result).toEqual({ statusMessageIdConsumed: true, messageIds: [77] });
   });
-  it("renders semantic consent body once under the main session signature and preserves purpose keyboard/thread", async () => {
-    const record = proposeConsent(
-      {
-        session: "api-1",
-        repository: "owner/repo",
-        branch: "feature/change",
-        baseBranch: "main",
-        projectId: "api",
-        sourceId: "telegram",
-        chatId: 123,
-        approverUserId: 7,
-        manifest: {
-          version: 1,
+  it.each([
+    { mode: "outside forum", chatId: 123, statusMessageId: undefined },
+    { mode: "forum send", chatId: -1001, statusMessageId: undefined },
+    { mode: "forum placeholder edit", chatId: -1001, statusMessageId: 55 },
+  ])(
+    "renders consent once with purpose keyboard/thread in $mode",
+    async ({ chatId, statusMessageId }) => {
+      const record = proposeConsent(
+        {
+          session: "api-1",
           repository: "owner/repo",
+          branch: "feature/change",
           baseBranch: "main",
-          surfaces: [
-            {
-              kind: "CLI",
-              id: "run",
-              before: ["no flag"],
-              after: ["--dry-run"],
-              constraints: ["no process created"],
-            },
+          projectId: "api",
+          sourceId: "telegram",
+          chatId,
+          approverUserId: 7,
+          manifest: {
+            version: 1,
+            repository: "owner/repo",
+            baseBranch: "main",
+            surfaces: [
+              {
+                kind: "CLI",
+                id: "run",
+                before: ["no flag"],
+                after: ["--dry-run"],
+                constraints: ["no process created"],
+              },
+            ],
+          },
+        },
+        null,
+      );
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(okId(55));
+      await sendTelegramReply(
+        config,
+        { chatId, messageThreadId: 22, ...(statusMessageId ? { statusMessageId } : {}) },
+        `Approve scope\n\n${presentConsent(record)}`,
+        {
+          sessionLabel: "api-1 — Scope <review>",
+          buttons: [
+            { text: "Approve interface", callbackData: "spur_choice:approve" },
+            { text: "Reject", callbackData: "spur_choice:reject" },
+            { text: "Revoke", callbackData: "spur_choice:revoke" },
           ],
         },
-      },
-      null,
-    );
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(okId(55));
-    await sendTelegramReply(
-      config,
-      { chatId: 123, messageThreadId: 22 },
-      `Approve scope\n\n${presentConsent(record)}`,
-      {
-        sessionLabel: "api-1 — Scope <review>",
-        buttons: [{ text: "Approve interface", callbackData: "spur_choice:purpose" }],
-      },
-    );
-    const payload = bodyOf(fetchMock, 0);
-    expect(payload).toMatchObject({
-      chat_id: 123,
-      message_thread_id: 22,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Approve interface", callback_data: "spur_choice:purpose" }]],
-      },
-    });
-    expect(payload.text).toContain("<b>api-1 — Scope &lt;review&gt;</b>\n\nApprove scope");
-    if (typeof payload.text !== "string") throw new Error("missing Telegram text");
-    expect(payload.text.match(/api-1/g)).toHaveLength(1);
-    expect(payload.text).toContain("--dry-run");
-    expect(payload.text).toContain("no process created");
-  });
+      );
+      const payload = bodyOf(fetchMock, 0);
+      expect(payload).toMatchObject({
+        chat_id: chatId,
+        ...(statusMessageId ? { message_id: statusMessageId } : { message_thread_id: 22 }),
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Approve interface", callback_data: "spur_choice:approve" }],
+            [{ text: "Reject", callback_data: "spur_choice:reject" }],
+            [{ text: "Revoke", callback_data: "spur_choice:revoke" }],
+          ],
+        },
+      });
+      if (typeof payload.text !== "string") throw new Error("missing Telegram text");
+      if (chatId > 0) {
+        expect(payload.text).toContain("<b>api-1 — Scope &lt;review&gt;</b>\n\nApprove scope");
+        expect(payload.text.match(/api-1/g)).toHaveLength(1);
+      } else {
+        expect(payload.text).toMatch(/^Approve scope/);
+        expect(payload.text).not.toContain("api-1");
+        expect(payload.text).not.toContain("Scope &lt;review&gt;");
+      }
+      for (const clause of ["Approve scope", "no flag", "--dry-run", "no process created"]) {
+        expect(payload.text.split(clause)).toHaveLength(2);
+      }
+      expect(fetchMock.mock.calls[0]?.[0]).toMatch(
+        statusMessageId ? /\/editMessageText$/ : /\/sendMessage$/,
+      );
+      expect(record.decision).toBe("pending");
+    },
+  );
 
   it("includes the signature in the first chunk limit without repeating it on continuation", async () => {
     const fetchMock = vi.mocked(fetch);
