@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   evaluateSnapshot,
+  changedEvidenceCategories,
   readGateSnapshot,
   GateGitHub,
   type GateSnapshot,
@@ -101,6 +102,198 @@ function fixture(): GateSnapshot {
     ciAnchors: [{ runId: 1, merge: M, parents: [B, H] }],
   };
 }
+test.each([undefined, null, "2026-10-05T12:00:00Z"])(
+  "only base repository pushed_at %s is excluded without mutating frozen raw evidence",
+  (timestamp) => {
+    const snapshot = fixture();
+    const base = snapshot.pr.base as { repo: Record<string, unknown> };
+    if (timestamp !== undefined) base.repo.pushed_at = timestamp;
+    const original = JSON.stringify(snapshot);
+    Object.freeze(base.repo);
+    Object.freeze(base);
+    Object.freeze(snapshot.pr);
+    Object.freeze(snapshot);
+    const result = evaluateSnapshot(policy, 5, snapshot);
+    expect(result.status).toBe("APPROVED");
+    expect(result.fingerprint).toBe(evaluateSnapshot(policy, 5, fixture()).fingerprint);
+    expect(JSON.stringify(snapshot)).toBe(original);
+    const missing = { ...snapshot, reviews: [] };
+    expect(evaluateSnapshot(policy, 5, missing)).toMatchObject({
+      status: "BLOCKED",
+      reason: "native-approval-missing",
+      fingerprint: evaluateSnapshot(policy, 5, { ...fixture(), reviews: [] }).fingerprint,
+    });
+  },
+);
+test.each([
+  ["pr.head.sha", "e".repeat(40)],
+  ["pr.base.sha", "e".repeat(40)],
+  ["pr.head.ref", "feature/other"],
+  ["pr.base.ref", "other"],
+  ["pr.base.repo.full_name", "other/repo"],
+  ["pr.head.repo.full_name", "other/fork"],
+  ["pr.head.repo.pushed_at", "changed"],
+  ["pr.base.repo.updated_at", "changed"],
+  ["pr.base.repo.opaque", "changed"],
+  ["pr.user.id", 8],
+  ["pr.draft", true],
+  ["reviews.0.user.id", 8],
+  ["reviews.0.user.login", "changed"],
+  ["reviews.0.user.type", "User"],
+  ["reviews.0.id", 99],
+  ["reviews.0.state", "CHANGES_REQUESTED"],
+  ["reviews.0.commit_id", "e".repeat(40)],
+  ["reviews.0.body", "changed"],
+  ["reviews.0.submitted_at", "2026-10-05T13:00:00Z"],
+  ["comments.0.id", 99],
+  ["comments.0.user.id", 8],
+  ["comments.0.user.type", "User"],
+  ["comments.0.body", "changed"],
+  ["files.0.filename", "other.ts"],
+  ["unresolved", 1],
+  ["runs.0.run_attempt", 2],
+  ["runs.0.id", 2],
+  ["runs.0.run_started_at", "2026-10-05T13:00:00Z"],
+  ["runs.0.status", "queued"],
+  ["runs.0.conclusion", "failure"],
+  ["runs.0.repository.full_name", "other/repo"],
+  ["runs.0.workflow_id", 101],
+  ["runs.0.event", "push"],
+  ["runs.0.display_title", "changed"],
+  ["runs.0.pull_requests.0.base.sha", "e".repeat(40)],
+  ["ciAnchors.0.runId", 2],
+  ["ciAnchors.0.merge", "e".repeat(40)],
+  ["ciAnchors.0.parents.0", "e".repeat(40)],
+  ["jobs.0.id", 99],
+  ["jobs.0.run_attempt", 2],
+  ["jobs.0.run_id", 2],
+  ["jobs.0.name", "other"],
+  ["jobs.0.status", "queued"],
+  ["jobs.0.conclusion", "neutral"],
+  ["opaque", "changed"],
+] as const)(
+  "retained %s changes fingerprint even with identical BLOCKED verdicts",
+  (path, value) => {
+    for (const missing of [false, true]) {
+      const before = fixture(),
+        after = fixture();
+      if (missing) before.unresolved = after.unresolved = 2;
+      const keys = path.split(".");
+      let target: unknown = after;
+      for (const key of keys.slice(0, -1)) {
+        if (!target || typeof target !== "object") throw new Error("invalid fixture path");
+        target = (target as Record<string, unknown>)[key];
+      }
+      if (!target || typeof target !== "object") throw new Error("invalid fixture target");
+      const key = keys.at(-1);
+      if (!key) throw new Error("missing fixture key");
+      (target as Record<string, unknown>)[key] = value;
+      expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+        evaluateSnapshot(policy, 5, before).fingerprint,
+      );
+      if (missing) expect(evaluateSnapshot(policy, 5, before).status).toBe("BLOCKED");
+    }
+  },
+);
+test.each([{ value: null }, { value: [] }, { value: "malformed" }])(
+  "malformed base/repo $value remains fail-closed",
+  ({ value }) => {
+    for (const branch of ["base", "repo"]) {
+      const snapshot = fixture();
+      if (branch === "base") snapshot.pr.base = value;
+      else (snapshot.pr.base as Record<string, unknown>).repo = value;
+      if (branch === "base") expect(() => evaluateSnapshot(policy, 5, snapshot)).toThrow();
+      else expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("BLOCKED");
+      expect(snapshot.pr.base).toEqual(
+        branch === "base" ? value : expect.objectContaining({ repo: value }),
+      );
+    }
+  },
+);
+test.each([{ value: null }, { value: [] }, { value: "malformed" }])(
+  "malformed PR $value remains rejected without input normalization",
+  ({ value }) => {
+    const snapshot = { ...fixture(), pr: value } as unknown as GateSnapshot;
+    expect(() => evaluateSnapshot(policy, 5, snapshot)).toThrow();
+    expect(snapshot.pr).toBe(value);
+  },
+);
+test("diagnostic labels are fixed and bounded despite hostile raw keys and values", () => {
+  const before = fixture(),
+    after = fixture();
+  const sentinel = "SECRET_TOKEN_OPERATOR_DETAIL";
+  Object.assign(after, { [sentinel]: sentinel });
+  expect(changedEvidenceCategories(before, after)).toBe("other evidence");
+  after.pr[sentinel] = sentinel;
+  after.reviews[0] = { ...after.reviews[0], body: sentinel };
+  after.comments[0] = { ...after.comments[0], body: sentinel };
+  after.files.push({ filename: sentinel });
+  after.unresolved = 1;
+  after.runs.push({ [sentinel]: sentinel });
+  after.ciAnchors.push({ runId: 99, merge: sentinel, parents: [sentinel] });
+  after.jobs.push({ [sentinel]: sentinel });
+  const labels = changedEvidenceCategories(before, after);
+  expect(labels).toBe("pr, reviews, comments, files, threads, ci, anchors, jobs");
+  expect(Buffer.byteLength(labels)).toBeLessThanOrEqual(160);
+  expect(labels).not.toContain(sentinel);
+});
+test("lane attempts, coverage and chronological consent history remain fingerprint inputs", () => {
+  const before = fixture();
+  const prior = before.comments[0];
+  if (!prior) throw new Error("missing fixture state");
+  const state = readStateBody(String(prior.body));
+  for (const change of [
+    { attempt: "next" },
+    { evidenceDigest: "e".repeat(64) },
+    { status: "BLOCKED" as const },
+    { reviewId: 99 },
+    { H: "e".repeat(40) },
+    { B: "e".repeat(40) },
+    { assessment: null, status: "BLOCKED" as const },
+  ]) {
+    const after = fixture();
+    after.comments[0] = { ...prior, body: stateBody({ ...state, ...change }) };
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+  }
+  const consent = {
+    version: 1 as const,
+    repo: "owner/repo",
+    pr: 5,
+    task: "TEST",
+    branch: "feature/example",
+    baseBranch: "main",
+    manifestDigest: "c".repeat(64),
+    baselineDigest: "d".repeat(64),
+    challenge: "one",
+    decision: "approved" as const,
+    generation: 1,
+  };
+  before.comments.push({ id: 30, user: { id: 11, type: "Bot" }, body: consentBody(consent) });
+  for (const change of [
+    { generation: 2 },
+    { challenge: "two" },
+    { decision: "revoked" as const },
+    { task: "OTHER" },
+  ]) {
+    const after = structuredClone(before);
+    after.comments.push({
+      id: 31,
+      user: { id: 11, type: "Bot" },
+      body: consentBody({ ...consent, ...change }),
+    });
+    expect(evaluateSnapshot(policy, 5, after).status).toBe("APPROVED");
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+  }
+  const reordered = structuredClone(before);
+  reordered.reviews.reverse();
+  expect(evaluateSnapshot(policy, 5, reordered).fingerprint).not.toBe(
+    evaluateSnapshot(policy, 5, before).fingerprint,
+  );
+});
 const strictPolicy = {
   ...policy,
   ciJobs: ["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"],
@@ -427,11 +620,25 @@ test("same-head CI from an older base cannot pass fresh lane attestations", () =
   };
   expect(evaluateSnapshot(policy, 5, snapshot).reason).toBe("ci-not-success");
 });
-test.each(["clean", "moved", "read-denied"])(
+test.each([
+  "clean",
+  "moved",
+  "base-moved",
+  "timestamp",
+  "timestamp-missing-native",
+  "metadata",
+  "metadata-blocked",
+  "pin-mismatch",
+  "hostile",
+  "malformed-base",
+  "read-denied",
+])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
     const snapshot = fixture();
-    const writes: { status: string; conclusion?: string }[] = [];
+    const writes: { status: string; conclusion?: string; output?: { summary: string } }[] = [];
+    if (mode === "timestamp-missing-native" || mode === "metadata-blocked") snapshot.reviews = [];
+    const sentinel = "SECRET_TOKEN_OPERATOR_DETAIL";
     let reads = 0;
     const api = new GateGitHub("fixture", async (url, options) => {
       const path = new URL(String(url)).pathname;
@@ -461,10 +668,26 @@ test.each(["clean", "moved", "read-denied"])(
       if (path.endsWith("/pulls")) return Response.json([{ number: 5 }]);
       if (path.endsWith("/pulls/5")) {
         reads++;
+        const pr = structuredClone(snapshot.pr);
+        if (mode === "pin-mismatch" && reads === 1)
+          pr.base = { ...(pr.base as object), sha: "e".repeat(40) };
+        if (reads > 2) {
+          if (mode.startsWith("timestamp")) {
+            ((pr.base as Record<string, unknown>).repo as Record<string, unknown>).pushed_at =
+              "changed";
+          }
+          if (mode.startsWith("metadata")) {
+            ((pr.base as Record<string, unknown>).repo as Record<string, unknown>).updated_at =
+              "changed";
+          }
+          if (mode === "base-moved") pr.base = { ...(pr.base as object), sha: "e".repeat(40) };
+          if (mode === "hostile") pr[sentinel] = sentinel;
+          if (mode === "malformed-base") pr.base = null;
+        }
         return Response.json(
           mode === "moved" && reads > 2
             ? { ...snapshot.pr, head: { ...(snapshot.pr.head as object), sha: "d".repeat(40) } }
-            : snapshot.pr,
+            : pr,
         );
       }
       if (path.endsWith("/reviews")) {
@@ -481,11 +704,22 @@ test.each(["clean", "moved", "read-denied"])(
       if (path.endsWith("/jobs")) return Response.json({ jobs: snapshot.jobs });
       throw new Error("unexpected API path");
     });
-    if (mode === "read-denied")
+    if (["read-denied", "malformed-base"].includes(mode))
       await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
     else await produceGates(api, policy);
     expect(writes[0]?.status).toBe("in_progress");
-    expect(writes.at(-1)?.conclusion).toBe(mode === "clean" ? "success" : "failure");
+    expect(writes.at(-1)?.conclusion).toBe(
+      ["clean", "timestamp"].includes(mode) ? "success" : "failure",
+    );
+    const summary = writes.at(-1)?.output?.summary;
+    if (mode === "timestamp-missing-native") expect(summary).toBe("native-approval-missing");
+    if (["metadata", "metadata-blocked", "hostile"].includes(mode)) {
+      expect(summary).toBe("Evidence changed during evaluation: pr");
+    }
+    if (mode === "pin-mismatch")
+      expect(summary).toBe("Evidence changed during evaluation: other evidence");
+    if (mode === "malformed-base") expect(summary).toBe("Candidate evidence unavailable");
+    expect(summary).not.toContain(sentinel);
   },
 );
 test.each(["pending", "failure", "cancelled", "skipped", "neutral", "missing", "stale"])(

@@ -106,6 +106,37 @@ export interface GateSnapshot {
   jobs: Record<string, unknown>[];
   ciAnchors: { runId: number; merge: string; parents: string[] }[];
 }
+function comparisonSnapshot(snapshot: GateSnapshot): GateSnapshot {
+  const pr: unknown = snapshot.pr;
+  if (!pr || typeof pr !== "object" || Array.isArray(pr)) return snapshot;
+  const comparedPr = pr as Record<string, unknown>;
+  const base = comparedPr.base;
+  if (!base || typeof base !== "object" || Array.isArray(base)) return snapshot;
+  const repo = (base as Record<string, unknown>).repo;
+  if (!repo || typeof repo !== "object" || Array.isArray(repo)) return snapshot;
+  // Repository-wide pushes do not change this PR's pinned base evidence.
+  const comparedRepo: Record<string, unknown> = { ...repo };
+  delete comparedRepo.pushed_at;
+  return { ...snapshot, pr: { ...comparedPr, base: { ...base, repo: comparedRepo } } };
+}
+export function changedEvidenceCategories(before: GateSnapshot, after: GateSnapshot): string {
+  const first = comparisonSnapshot(before),
+    second = comparisonSnapshot(after);
+  const categories = [
+    ["pr", "pr"],
+    ["reviews", "reviews"],
+    ["comments", "comments"],
+    ["files", "files"],
+    ["unresolved", "threads"],
+    ["runs", "ci"],
+    ["ciAnchors", "anchors"],
+    ["jobs", "jobs"],
+  ] as const;
+  const changed = categories
+    .filter(([key]) => digest(first[key]) !== digest(second[key]))
+    .map(([, label]) => label);
+  return changed.length ? changed.join(", ") : "other evidence";
+}
 function ciRef(run: Record<string, unknown>) {
   if (typeof run.display_title !== "string") return null;
   const match = /^Spur CI v1 REF=refs\/pull\/([1-9]\d*)\/merge M=([a-f0-9]{40})$/.exec(
@@ -207,7 +238,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     reason,
     H: string(object(snapshot.pr.head).sha),
     B: string(object(snapshot.pr.base).sha),
-    fingerprint: digest(snapshot),
+    fingerprint: digest(comparisonSnapshot(snapshot)),
   });
   try {
     const pr = snapshot.pr,
@@ -367,7 +398,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       reason: "all-gates-pass",
       H,
       B,
-      fingerprint: digest(snapshot),
+      fingerprint: digest(comparisonSnapshot(snapshot)),
     };
   } catch {
     return blocked("malformed-evidence");
