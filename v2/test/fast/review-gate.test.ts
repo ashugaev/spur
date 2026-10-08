@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import {
   evaluateSnapshot,
   readGateSnapshot,
@@ -427,13 +427,25 @@ test("same-head CI from an older base cannot pass fresh lane attestations", () =
   };
   expect(evaluateSnapshot(policy, 5, snapshot).reason).toBe("ci-not-success");
 });
-test.each(["clean", "moved", "read-denied"])(
+test.each([
+  "clean",
+  "moved",
+  "read-denied",
+  "abort-read",
+  "abort-before-write",
+  "abort-during-success",
+])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
     const snapshot = fixture();
     const writes: { status: string; conclusion?: string }[] = [];
+    const controller = new AbortController();
+    const trace = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     let reads = 0;
-    const api = new GateGitHub("fixture", async (url, options) => {
+    let jobReads = 0;
+    let requestsAfterAbort = 0;
+    const transport: typeof fetch = async (url, options) => {
+      if (controller.signal.aborted) requestsAfterAbort++;
       const path = new URL(String(url)).pathname;
       if (path === "/graphql")
         return Response.json({
@@ -456,6 +468,18 @@ test.each(["clean", "moved", "read-denied"])(
       }
       if (path.endsWith("/check-runs/91")) {
         writes.push(JSON.parse(String(options?.body)) as { status: string; conclusion: string });
+        if (mode === "abort-during-success") {
+          // The server committed success; losing the response does not undo it.
+          expect(writes.at(-1)?.conclusion).toBe("success");
+          return new Promise<Response>((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new Error("lost acknowledgement")),
+              { once: true },
+            );
+            queueMicrotask(() => controller.abort());
+          });
+        }
         return Response.json({ id: 91 });
       }
       if (path.endsWith("/pulls")) return Response.json([{ number: 5 }]);
@@ -468,6 +492,7 @@ test.each(["clean", "moved", "read-denied"])(
         );
       }
       if (path.endsWith("/reviews")) {
+        if (mode === "abort-read") controller.abort();
         if (mode === "read-denied") return new Response("denied", { status: 403 });
         return Response.json(snapshot.reviews);
       }
@@ -478,14 +503,38 @@ test.each(["clean", "moved", "read-denied"])(
         return Response.json(snapshot.runs[0]);
       if (path.endsWith(`/commits/${M}`))
         return Response.json({ sha: M, parents: [{ sha: B }, { sha: H }] });
-      if (path.endsWith("/jobs")) return Response.json({ jobs: snapshot.jobs });
+      if (path.endsWith("/jobs")) {
+        if (++jobReads === 2 && mode === "abort-before-write") controller.abort();
+        return Response.json({ jobs: snapshot.jobs });
+      }
       throw new Error("unexpected API path");
-    });
-    if (mode === "read-denied")
-      await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
-    else await produceGates(api, policy);
-    expect(writes[0]?.status).toBe("in_progress");
-    expect(writes.at(-1)?.conclusion).toBe(mode === "clean" ? "success" : "failure");
+    };
+    const api = new GateGitHub("fixture", transport, controller.signal);
+    try {
+      if (mode.startsWith("abort-")) {
+        await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-timeout");
+        expect(requestsAfterAbort).toBe(0);
+        expect(writes).toHaveLength(mode === "abort-during-success" ? 2 : 1);
+        expect(trace.mock.calls.map(([line]) => String(line)).join("")).not.toContain(
+          "completion-confirmed",
+        );
+        if (mode === "abort-during-success") {
+          expect(writes.at(-1)?.conclusion).toBe("success");
+          expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain('"checkId":91');
+          expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain(
+            '"outcome":"UNKNOWN"',
+          );
+        }
+      } else {
+        if (mode === "read-denied")
+          await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
+        else await produceGates(api, policy);
+        expect(writes[0]?.status).toBe("in_progress");
+        expect(writes.at(-1)?.conclusion).toBe(mode === "clean" ? "success" : "failure");
+      }
+    } finally {
+      trace.mockRestore();
+    }
   },
 );
 test.each(["pending", "failure", "cancelled", "skipped", "neutral", "missing", "stale"])(

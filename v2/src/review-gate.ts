@@ -54,16 +54,20 @@ export class GateGitHub {
   constructor(
     private readonly token: string,
     private readonly transport: typeof fetch = fetch,
+    readonly scopeSignal?: AbortSignal,
   ) {
     if (!token) throw new ReviewAppError("missing-actions-token");
   }
   async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
+    if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
     let response: Response;
     try {
       response = await this.transport(`https://api.github.com${path}`, {
         method,
         redirect: "error",
-        signal: AbortSignal.timeout(30_000),
+        signal: this.scopeSignal
+          ? AbortSignal.any([this.scopeSignal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
         headers: {
           Authorization: `Bearer ${this.token}`,
           Accept: "application/vnd.github+json",
@@ -73,12 +77,17 @@ export class GateGitHub {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch {
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
       throw new ReviewAppError("gate-network");
     }
+    if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
     if (!response.ok) throw new ReviewAppError(`gate-http-${response.status}`);
     try {
-      return await response.json();
+      const value: unknown = await response.json();
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
+      return value;
     } catch {
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
       throw new ReviewAppError("gate-response");
     }
   }
