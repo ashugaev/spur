@@ -4391,6 +4391,78 @@ describe("SessionService", () => {
     });
   });
 
+  describe("work-item trigger origin", () => {
+    const triggerOrigin = {
+      triggerId: "review",
+      sourceId: "pr-watch",
+      externalId: "acme/api#7",
+      blockIndex: 1,
+    };
+
+    it("persists the trigger origin on the spawn record", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin });
+
+      expect(sessions.get("api-1")?.triggerOrigin).toEqual(triggerOrigin);
+      service.dispose();
+    });
+
+    it("omits the trigger origin for a spawn without one", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(sessions.get("api-1")).not.toHaveProperty("triggerOrigin");
+      service.dispose();
+    });
+
+    it("keeps triggerOrigin on the errored record of a hard spawn failure", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      createTmuxSessionMock.mockRejectedValueOnce(new Error("tmux boom"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin }),
+      ).rejects.toThrow();
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        launchCommand: "",
+        triggerOrigin,
+      });
+      service.dispose();
+    });
+
+    it("keeps triggerOrigin on a retained launched-error record", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      waitForTmuxReadyMock.mockRejectedValueOnce(new Error("agent prompt timeout"));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", prompt: "hello" }, { triggerOrigin }),
+      ).rejects.toThrow("agent prompt timeout");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "running",
+        error: "agent prompt timeout",
+        triggerOrigin,
+      });
+      service.dispose();
+    });
+  });
+
   describe("host.disk.low pre-spawn probe", () => {
     it("emits host.disk.low at level warn when readFreeKb is below the diskRetention.warnFreeGb threshold", async () => {
       mockClaudeJsonlState("waiting");

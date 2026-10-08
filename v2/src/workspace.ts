@@ -556,6 +556,25 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   return worktreePath;
 }
 
+export type DeleteLocalBranchOutcome = "deleted" | "checked_out" | "absent";
+
+// Takes the workspace lock once and does every git step inline: the lock is
+// not reentrant, so findWorktreePathForBranch (which locks) must not be called
+// from here.
+export async function deleteLocalBranch(
+  repoPath: string,
+  branch: string,
+): Promise<DeleteLocalBranchOutcome> {
+  return withWorkspaceGitLock(repoPath, async () => {
+    await pruneWorktrees(repoPath);
+    const entries = parseWorktreeList(await git(repoPath, "worktree", "list", "--porcelain"));
+    if (entries.some((entry) => entry.branch === branch)) return "checked_out";
+    if (!(await refExists(repoPath, `refs/heads/${branch}`))) return "absent";
+    await git(repoPath, "branch", "-D", branch);
+    return "deleted";
+  });
+}
+
 export async function removeWorktree(
   repoPath: string,
   worktreePath: string,
