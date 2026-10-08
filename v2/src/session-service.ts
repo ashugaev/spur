@@ -14939,9 +14939,18 @@ export class SessionService {
     recovered: SubmitAckTimeoutError | null,
   ): Promise<SessionRecord | null> {
     return this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+      const beforeProbe = readSession(this.config.dataDir, prepared.session.id);
+      if (!beforeProbe || workspaceIdOf(beforeProbe) !== workspaceIdOf(prepared.session))
+        return null;
+      const generationMatches = await this.paneGenerationMatches(beforeProbe, prepared.generation);
       const latest = readSession(this.config.dataDir, prepared.session.id);
-      if (!latest || workspaceIdOf(latest) !== workspaceIdOf(prepared.session)) return null;
-      const generationMatches = await this.paneGenerationMatches(latest, prepared.generation);
+      if (
+        !latest ||
+        workspaceIdOf(latest) !== workspaceIdOf(prepared.session) ||
+        latest.tmuxSession !== beforeProbe.tmuxSession ||
+        latest.agentLaunchId !== beforeProbe.agentLaunchId
+      )
+        return null;
       const lifecycleMatches =
         latest.status === prepared.status && latest.stopReason === prepared.stopReason;
       if (prepared.intent.kind === "direct" && (!generationMatches || !lifecycleMatches)) {

@@ -10262,6 +10262,81 @@ describe("SessionService", () => {
   });
 
   describe("issue #907 pane-first delivery transaction", () => {
+    it.each(["slot update", "no edit", "replacement pane"] as const)(
+      "commits from fresh owner metadata after generation lookup: %s (issue #907 AC4)",
+      async (scenario) => {
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set(
+          "api-1",
+          runningSession({
+            ...(scenario !== "replacement pane"
+              ? { queuedMessages: { messages: ["body", "remaining"], awaitingPrompt: true } }
+              : {}),
+          }),
+        );
+        createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        const service = await createDisposedSessionService({ realPaneGeneration: true });
+        const { readWorkspaceState } = await loadWorkspaceStoreModule();
+        const internals = sessionServiceInternals(service);
+        let acknowledged = false;
+        vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+          acknowledged = true;
+          return { found: true, lastScannedFile: null };
+        });
+        let releaseLookup: () => void = () => {};
+        const lookupGate = new Promise<void>((resolve) => {
+          releaseLookup = resolve;
+        });
+        let lookupHeld = false;
+        const matches = internals.paneGenerationMatches.bind(internals);
+        vi.spyOn(internals, "paneGenerationMatches").mockImplementation(
+          async (session, generation) => {
+            if (acknowledged) {
+              lookupHeld = true;
+              await lookupGate;
+            }
+            return matches(session, generation);
+          },
+        );
+        const delivery =
+          scenario === "replacement pane"
+            ? service.send("api-1", { message: "body", queue: false })
+            : service.flushQueuedMessage("api-1", "body");
+        await vi.waitFor(() => expect(lookupHeld).toBe(true));
+        if (scenario !== "no edit") {
+          await service.updateSlots("api-1", {
+            title: "Concurrent title",
+            links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+          });
+        }
+        const beforeCommit = sessions.get("api-1");
+        const workspace = readWorkspaceState(TEST_DATA_DIR, "api-1");
+        if (scenario === "replacement pane") {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid + 1 });
+        }
+        releaseLookup();
+        await delivery;
+        const committed = sessions.get("api-1");
+        if (scenario !== "no edit") {
+          expect(workspace?.slots?.title).toBe("Concurrent title");
+          expect(workspace?.pr?.number).toBe(42);
+          expect(committed?.slots).toEqual(workspace?.slots);
+          expect(committed?.pr).toEqual(workspace?.pr);
+          expect(readWorkspaceState(TEST_DATA_DIR, "api-1")).toEqual(workspace);
+        }
+        if (scenario === "replacement pane") {
+          expect(committed).toEqual(beforeCommit);
+        } else {
+          expect(committed?.queuedMessages?.messages).toEqual(["remaining"]);
+        }
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(internals.paneWriteLocks.size).toBe(0);
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+      },
+    );
+
     it.each(["submit", "pause", "replacement"] as const)(
       "keeps ToDo live during pending-submit liveness and respects %s (issue #907 R17)",
       async (transition) => {
