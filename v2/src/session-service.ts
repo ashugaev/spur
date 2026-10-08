@@ -3283,6 +3283,8 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  // Parking intentionally removes the runtime before committing stale state.
+  private readonly staleParksInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
@@ -6384,101 +6386,106 @@ export class SessionService {
         return;
       }
       if (hasRetainedSessionError(readSession(this.config.dataDir, latest.id) ?? latest)) return;
-      await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
-      // A throw here must never abort the park: the agent pane is already
-      // dead (confirmed above), so leaving status "running" on disk would
-      // make reconcileUnexpectedStop mark it errored with error evidence on
-      // the next tick — an "error" derived state is a closed state, and
-      // triggers.ts's clearBatch drops the pending event that woke this sweep
-      // for a closed session. Finishing the park (best-effort teardown or
-      // not) keeps the derived state "stale", which stays open, so the event
-      // survives to be replayed on the next wake.
+      this.staleParksInFlight.add(latest.id);
       try {
-        await this.teardownSessionSidecars(latest);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logEvent("session.stale.teardown_failed", {
-          level: "error",
-          sessionId: latest.id,
-          projectId: latest.project,
-          message: `Sidecar teardown failed while parking ${latest.id}: ${message}`,
-        });
-      }
-      const idleMs = Date.now() - parkActivityAt.getTime();
-      const staleAfterMs = this.resolveStaleAfterMs(latest);
-      // killAgentPaneAndConfirmExit/teardownSessionSidecars each take
-      // multi-second REAP_CONFIRM_INTERVAL_MS/REAP_GRACE_MS waits and
-      // teardownSessionSidecars clears recorded process identities.
-      // Anything a send/deliver/relaunch wrote to disk during that window
-      // would otherwise be silently clobbered by a park built from the
-      // pre-teardown `latest` snapshot — mirror the complete/pause re-read
-      // (see the `cleanedSession = readSession(...)` pattern above) and
-      // abandon the park rather than overwrite a record that moved.
-      const cleaned = readSession(this.config.dataDir, latest.id);
-      const abandonPark = (): void => {
-        this.logEvent("session.stale.park_aborted", {
-          level: "warn",
-          sessionId: latest.id,
-          projectId: latest.project,
-          message: `Abandoned parking ${latest.id}: record changed during teardown`,
-        });
-      };
-      const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
-      if (
-        !cleaned ||
-        cleaned.status !== "running" ||
-        hasRetainedSessionError(cleaned) ||
-        deliveryPending
-      ) {
-        abandonPark();
-        // deliveryPending means a message queued in mid-teardown, on a pane we
-        // just confirmed dead above — the record is left status:"running" with
-        // no live process. Left alone, that's a coin flip against the next
-        // reconcileUnexpectedStop tick: if reconcile wins it writes
-        // stopped/errored, shouldRunDelivery goes false, and the message is
-        // stranded for good — finishStaleWake only re-arms delivery for
-        // stopReason==="stale_timeout", never a plain stopped/errored record.
-        // Kick the delivery runner now, synchronously, so it (not reconcile)
-        // is the one racing for this session: ensureDeliveryRunner is a no-op
-        // if a loop is already running (deliveryRuns dedupe), and the loop's
-        // own tryDeliverQueuedMessage runs under the same lifecycle lock, so
-        // this can never start a second concurrent recovery attempt against
-        // the same pane. Queue the runner after this locked
-        // method returns; its promise starts on a later microtask and chains
-        // behind the lifecycle lock held here.
-        if (cleaned && cleaned.status === "running" && deliveryPending) {
-          this.scheduleDeliveryRunner(cleaned.id);
+        await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+        // A throw here must never abort the park: the agent pane is already
+        // dead (confirmed above), so leaving status "running" on disk would
+        // make reconcileUnexpectedStop mark it errored with error evidence on
+        // the next tick — an "error" derived state is a closed state, and
+        // triggers.ts's clearBatch drops the pending event that woke this sweep
+        // for a closed session. Finishing the park (best-effort teardown or
+        // not) keeps the derived state "stale", which stays open, so the event
+        // survives to be replayed on the next wake.
+        try {
+          await this.teardownSessionSidecars(latest);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logEvent("session.stale.teardown_failed", {
+            level: "error",
+            sessionId: latest.id,
+            projectId: latest.project,
+            message: `Sidecar teardown failed while parking ${latest.id}: ${message}`,
+          });
         }
-        return;
+        const idleMs = Date.now() - parkActivityAt.getTime();
+        const staleAfterMs = this.resolveStaleAfterMs(latest);
+        // killAgentPaneAndConfirmExit/teardownSessionSidecars each take
+        // multi-second REAP_CONFIRM_INTERVAL_MS/REAP_GRACE_MS waits and
+        // teardownSessionSidecars clears recorded process identities.
+        // Anything a send/deliver/relaunch wrote to disk during that window
+        // would otherwise be silently clobbered by a park built from the
+        // pre-teardown `latest` snapshot — mirror the complete/pause re-read
+        // (see the `cleanedSession = readSession(...)` pattern above) and
+        // abandon the park rather than overwrite a record that moved.
+        const cleaned = readSession(this.config.dataDir, latest.id);
+        const abandonPark = (): void => {
+          this.logEvent("session.stale.park_aborted", {
+            level: "warn",
+            sessionId: latest.id,
+            projectId: latest.project,
+            message: `Abandoned parking ${latest.id}: record changed during teardown`,
+          });
+        };
+        const deliveryPending: boolean = cleaned ? this.shouldRunDelivery(cleaned) : false;
+        if (
+          !cleaned ||
+          cleaned.status !== "running" ||
+          hasRetainedSessionError(cleaned) ||
+          deliveryPending
+        ) {
+          abandonPark();
+          // deliveryPending means a message queued in mid-teardown, on a pane we
+          // just confirmed dead above — the record is left status:"running" with
+          // no live process. Left alone, that's a coin flip against the next
+          // reconcileUnexpectedStop tick: if reconcile wins it writes
+          // stopped/errored, shouldRunDelivery goes false, and the message is
+          // stranded for good — finishStaleWake only re-arms delivery for
+          // stopReason==="stale_timeout", never a plain stopped/errored record.
+          // Kick the delivery runner now, synchronously, so it (not reconcile)
+          // is the one racing for this session: ensureDeliveryRunner is a no-op
+          // if a loop is already running (deliveryRuns dedupe), and the loop's
+          // own tryDeliverQueuedMessage runs under the same lifecycle lock, so
+          // this can never start a second concurrent recovery attempt against
+          // the same pane. Queue the runner after this locked
+          // method returns; its promise starts on a later microtask and chains
+          // behind the lifecycle lock held here.
+          if (cleaned && cleaned.status === "running" && deliveryPending) {
+            this.scheduleDeliveryRunner(cleaned.id);
+          }
+          return;
+        }
+        if (
+          await agentProcessAlive({
+            tmuxSession: cleaned.tmuxSession,
+            agent: cleaned.agent,
+            launchCommand: cleaned.launchCommand,
+          })
+        ) {
+          abandonPark();
+          return;
+        }
+        const parked: SessionRecord = {
+          ...this.sessionWithReleasedSidecarPorts(cleaned),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          updatedAt: nowIso(),
+          ...(staleSidecars.length ? { staleSidecars } : {}),
+        };
+        delete parked.error;
+        writeSession(this.config.dataDir, parked);
+        this.stateCache.delete(latest.id);
+        await this.refreshDashboardCacheEntry(parked);
+        this.logEvent("session.stale.parked", {
+          level: "info",
+          sessionId: latest.id,
+          projectId: latest.project,
+          message: `Parked ${latest.id} after ${Math.round(idleMs / 60_000)}m idle`,
+          details: { idleMs, staleAfterMs, staleSidecars },
+        });
+      } finally {
+        this.staleParksInFlight.delete(latest.id);
       }
-      if (
-        await agentProcessAlive({
-          tmuxSession: cleaned.tmuxSession,
-          agent: cleaned.agent,
-          launchCommand: cleaned.launchCommand,
-        })
-      ) {
-        abandonPark();
-        return;
-      }
-      const parked: SessionRecord = {
-        ...this.sessionWithReleasedSidecarPorts(cleaned),
-        status: "stopped",
-        stopReason: "stale_timeout",
-        updatedAt: nowIso(),
-        ...(staleSidecars.length ? { staleSidecars } : {}),
-      };
-      delete parked.error;
-      writeSession(this.config.dataDir, parked);
-      this.stateCache.delete(latest.id);
-      await this.refreshDashboardCacheEntry(parked);
-      this.logEvent("session.stale.parked", {
-        level: "info",
-        sessionId: latest.id,
-        projectId: latest.project,
-        message: `Parked ${latest.id} after ${Math.round(idleMs / 60_000)}m idle`,
-        details: { idleMs, staleAfterMs, staleSidecars },
-      });
     }
   }
 
@@ -20282,7 +20289,9 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
-    if (this.isDeliveryStopped()) return { session, runtime };
+    if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
+      return { session, runtime };
+    }
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
@@ -20325,7 +20334,9 @@ export class SessionService {
         // single transient tmux/list-windows blip would agree with itself on
         // both reads and mark a genuinely live session stopped.
         confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
-        if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
+        if (this.isDeliveryStopped() || this.staleParksInFlight.has(session.id)) {
+          return { session, runtime: confirmedRuntime };
+        }
       }
       if (
         live(confirmedRuntime) &&
