@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { loadConfig, loadProjectConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
@@ -9,13 +9,15 @@ import { AutoPingService } from "../../src/auto-ping.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
 import { SessionService } from "../../src/session-service.js";
+import { readPendingSendBatches, readSession } from "../../src/metadata.js";
 import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
-import type { SessionView } from "../../src/types.js";
+import type { SessionRecord, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
   createRuntimeTestContext,
   isTmuxAvailable,
+  killTmuxSession,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
   type RuntimeTestContext,
@@ -592,7 +594,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     },
   );
 
-  it("wakes a fractionally stale session from a real GitHub source event", async () => {
+  it.each(["ci_failed", "comment"] as const)("stale teardown retains GitHub %s", async (signal) => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-stale-${port}`;
@@ -608,10 +610,11 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         type: github
         intervalMs: 250
         runOnStart: false
+        emitExisting: true
     triggers:
       pr-watch-ci-failed:
         source: pr-watch
-        event: github:ci_failed
+        event: github:${signal}
         send:
           interrupt: false
 `,
@@ -633,6 +636,31 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       currentService = service;
+      const getSpy = vi.spyOn(service, "get");
+      let releaseTeardown!: () => void;
+      const teardownBarrier = new Promise<void>((resolve) => {
+        releaseTeardown = resolve;
+      });
+      let teardownStarted = false;
+      const internals = service as unknown as {
+        teardownSessionSidecars(session: SessionRecord): Promise<void>;
+        parkStaleSession(view: Pick<SessionView, "id">): Promise<void>;
+      };
+      const park = internals.parkStaleSession.bind(service);
+      // Exercise one park/wake cycle; the fractional timeout must not park
+      // the recovered fixture again while its delivery is being asserted.
+      const parkSpy = vi
+        .spyOn(internals, "parkStaleSession")
+        .mockResolvedValue(undefined)
+        .mockImplementationOnce(park);
+      const teardown = internals.teardownSessionSidecars.bind(service);
+      const teardownSpy = vi
+        .spyOn(internals, "teardownSessionSidecars")
+        .mockImplementationOnce(async (record) => {
+          await teardown(record);
+          teardownStarted = true;
+          await teardownBarrier;
+        });
       const session = await service.spawn({
         project: "api",
         agent: "claude",
@@ -653,6 +681,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         logger: { warn: () => {} },
       });
       const abortController = new AbortController();
+      const sourceWarnings: string[] = [];
       const handle = await githubSourceModule.start({
         sourceId: "pr-watch",
         projectId: "api",
@@ -668,16 +697,31 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           });
         },
         signal: abortController.signal,
-        logger: { warn: () => {} },
+        logger: { warn: (message) => sourceWarnings.push(message) },
         resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
       try {
-        const parked = await pollUntil(async () => service.get(session.id), {
-          timeoutMs: 20_000,
-          accept: (value) => value.status === "stopped" && value.state === "stale",
+        const snapshotPath = join(
+          context.dataDir,
+          "source-state",
+          "github",
+          "api",
+          "pr-watch",
+          `${session.id}.json`,
+        );
+        await pollUntil(async () => existsSync(snapshotPath), {
+          timeoutMs: 15_000,
+          accept: Boolean,
         });
-        expect(parked.stopReason).toBe("stale_timeout");
+        await pollUntil(async () => teardownStarted, {
+          timeoutMs: 20_000,
+          accept: (value) => value,
+        });
+        const held = await service.get(session.id);
+        expect(held).toMatchObject({ status: "running", state: "stopped", runtimeAlive: false });
+        const nativeSessionId = readSession(context.dataDir, session.id)?.agentSessionId;
+        expect(nativeSessionId).toBeTruthy();
 
         await context.writeGhState({
           prsByBranch: {
@@ -689,16 +733,62 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
               reviewDecision: null,
             },
           },
-          checksByPr: { "42": [{ name: "stale runtime", state: "FAILURE" }] },
+          ...(signal === "ci_failed"
+            ? { checksByPr: { "42": [{ name: "stale runtime", state: "FAILURE" }] } }
+            : {
+                commentsByPr: {
+                  "42": [
+                    { id: 1001, body: "Wake stale teardown once.", user: { login: "reviewer" } },
+                  ],
+                },
+              }),
         });
 
+        await pollUntil(
+          async () => ({
+            pending: readPendingSendBatches(context.dataDir).size,
+            warnings: sourceWarnings,
+            events: readEventLog(context.dataDir).filter((entry) =>
+              /^(source|trigger)\./.test(entry.event),
+            ),
+          }),
+          { timeoutMs: 15_000, accept: (value) => value.pending === 1 },
+        );
+        const readsBeforeFlush = getSpy.mock.calls.length;
+        await pollUntil(async () => getSpy.mock.calls.length, {
+          timeoutMs: 8_000,
+          accept: (value) => value > readsBeforeFlush,
+        });
+        await getSpy.mock.results.at(-1)?.value;
+        expect(readPendingSendBatches(context.dataDir).size).toBe(1);
+        const heldBatch = [...readPendingSendBatches(context.dataDir).values()][0];
+        expect(heldBatch?.claim).toBeUndefined();
+        expect(heldBatch?.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
+          true,
+        );
+        expect(
+          readEventLog(context.dataDir).filter((entry) => entry.event === "trigger.send.delivered"),
+        ).toHaveLength(0);
+        expect(
+          readEventLog(context.dataDir).filter((entry) => entry.event === "trigger.send.dropped"),
+        ).toHaveLength(0);
+        releaseTeardown();
+        const parked = await pollUntil(async () => readSession(context.dataDir, session.id), {
+          timeoutMs: 10_000,
+          accept: (value) => value?.stopReason === "stale_timeout",
+        });
+        expect(parked?.status).toBe("stopped");
+        const message =
+          signal === "ci_failed" ? "CI is failing: stale runtime." : "Wake stale teardown once.";
         const pane = await pollUntil(async () => captureTmuxPane(session.id), {
           timeoutMs: 25_000,
-          accept: (value) => value.includes("CI is failing: stale runtime."),
+          accept: (value) => value.includes(message),
         });
-        expect(pane).toContain("CI is failing: stale runtime.");
+        expect(pane).toContain(message);
         const recovered = await service.get(session.id);
         expect(recovered.status).toBe("running");
+        expect(recovered.id).toBe(session.id);
+        expect(readSession(context.dataDir, session.id)?.agentSessionId).toBe(nativeSessionId);
         expect(recovered).not.toHaveProperty("stopReason");
         const lifecycleEvents = await pollUntil(
           async () => readEventLog(context.dataDir).map((entry) => entry.event),
@@ -716,7 +806,48 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             "session.message.sent",
           ]),
         );
+        const pending = [...readPendingSendBatches(context.dataDir).values()];
+        if (signal === "comment") {
+          expect(pending).toHaveLength(0);
+          await killTmuxSession(session.id, context.tmuxSocketName);
+          const closed = await pollUntil(async () => service.get(session.id), {
+            timeoutMs: 10_000,
+            accept: (value) => value.status === "stopped",
+          });
+          expect(closed.state).toBe("stopped");
+          expect(closed).not.toHaveProperty("stopReason");
+          bus.emit({
+            name: "github:comment",
+            occurrenceId: randomUUID(),
+            projectId: "api",
+            sourceId: "pr-watch",
+            data: {
+              sessionId: session.id,
+              repo: "acme/api",
+              prUrl: "https://github.com/acme/api/pull/42",
+              prNumber: 42,
+              prTitle: "Wake stale runtime",
+              signals: [{ key: "comment:1002", kind: "comment", text: "Closed session update." }],
+            },
+          });
+          await pollUntil(async () => readEventLog(context.dataDir), {
+            timeoutMs: 8_000,
+            accept: (events) => events.some((entry) => entry.event === "trigger.send.dropped"),
+          });
+          expect(readPendingSendBatches(context.dataDir).size).toBe(0);
+        } else {
+          expect(pending).toHaveLength(1);
+          expect(pending[0]?.retryAccounting?.[0]?.deliveryAttempts).toBe(1);
+        }
+        await sleep(5_500);
+        expect(
+          readEventLog(context.dataDir).filter((entry) => entry.event === "trigger.send.delivered"),
+        ).toHaveLength(1);
       } finally {
+        releaseTeardown();
+        teardownSpy.mockRestore();
+        getSpy.mockRestore();
+        parkSpy.mockRestore();
         abortController.abort();
         handle.stop();
         await controller.stop();

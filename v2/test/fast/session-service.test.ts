@@ -52412,7 +52412,12 @@ describe("SessionService", () => {
         // Expire runtime/classification caches while the intentionally dead
         // agent is still awaiting sidecar teardown.
         await vi.advanceTimersByTimeAsync(5_000);
-        await Promise.all([service.get("api-1"), service.get("api-1")]);
+        const reads = await Promise.all([service.get("api-1"), service.get("api-1")]);
+        const { dropsQueuedSend } = await import("../../src/triggers.js");
+        for (const read of reads) {
+          expect(read).toMatchObject({ status: "running", state: "stopped", runtimeAlive: false });
+          expect(dropsQueuedSend(read)).toBe(false);
+        }
 
         expect(sessions.get("api-1")?.status).toBe("running");
         expect(teardown).toHaveBeenCalledTimes(1);
@@ -52441,7 +52446,8 @@ describe("SessionService", () => {
         expect(sessions.get("api-1")?.status).toBe("running");
         await killTmuxSessionMock("api-1");
         await vi.advanceTimersByTimeAsync(5_000);
-        await service.get("api-1");
+        const genuinelyStopped = await service.get("api-1");
+        expect(dropsQueuedSend(genuinelyStopped)).toBe(true);
         expect(sessions.get("api-1")?.status).toBe("stopped");
         expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
         expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(

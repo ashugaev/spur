@@ -592,14 +592,15 @@ function isClosedState(state: SessionView["state"]): boolean {
 
 /**
  * True when a queued send to this session is dropped instead of delivered.
- * A live server-error wedge and a stop written by the memory shed are exempt:
- * the shed's own pause must not destroy the batch it exists to cover.
+ * Defer a runtime stop until its persisted status settles, including Stale
+ * teardown. Live server-error wedges and memory-shed stops also retain work.
  */
 export function dropsQueuedSend(
   session: Pick<SessionView, "state" | "status" | "stopReason">,
 ): boolean {
   return (
     isClosedState(session.state) &&
+    !(session.state === "stopped" && session.status === "running") &&
     !isLiveServerErrorWedge(session) &&
     !(session.state === "stopped" && session.stopReason === "memory_shed")
   );
