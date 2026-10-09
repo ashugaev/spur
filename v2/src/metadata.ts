@@ -1105,6 +1105,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
+    ...(normalizedSession.agentLaunchId ? { agentLaunchId: normalizedSession.agentLaunchId } : {}),
     ...(normalizedSession.cursorRestoreBoundary &&
     typeof normalizedSession.cursorRestoreBoundary.filePath === "string" &&
     Number.isSafeInteger(normalizedSession.cursorRestoreBoundary.offset) &&

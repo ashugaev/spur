@@ -1150,6 +1150,8 @@ export interface SessionRecord {
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
+  /** Opaque identity shared only by one agent launch and its process tree. */
+  agentLaunchId?: string;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
   stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
@@ -1315,6 +1317,7 @@ export interface SessionSidecarView {
 export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
+  | "agentLaunchId"
   | "tokenUsage"
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
@@ -1365,6 +1368,7 @@ export type DashboardOmittedField =
   | "stateSubscriptions"
   | "allowedTriggers"
   | "agentSessionId"
+  | "agentLaunchId"
   | "branchSource"
   | "tokenUsage"
   | "preflightTokenUsage";
