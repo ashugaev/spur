@@ -5129,13 +5129,17 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
 
   async function startBound(
     getSession: Mock<(id: string) => Promise<SourceSessionListItem | null>>,
+    signal?: AbortSignal,
   ) {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
     writeTelegramBindings(dataDir, "api", "telegram", [
       { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
     ]);
-    const started = await startSource(dataDir, vi.fn(), vi.fn(), { getSession });
+    const started = await startSource(dataDir, vi.fn(), vi.fn(), {
+      getSession,
+      ...(signal ? { signal } : {}),
+    });
     if (!started.bot) throw new Error("missing bot");
     const catchHandler = started.bot.catch.mock.calls[0]?.[0] as (error: unknown) => Promise<void>;
     return { ...started, bot: started.bot, catchHandler, dataDir };
@@ -5247,6 +5251,25 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     await vi.waitFor(() => expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED));
     expect(ctx.reply.mock.calls.filter(([text]) => text === UNDELIVERED)).toHaveLength(1);
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("sends no notice when a voice route fails after the source stopped", async () => {
+    const controller = new AbortController();
+    const getSession = vi.fn().mockResolvedValue(bound);
+    const { bot, logger } = await startBound(getSession, controller.signal);
+    getSession.mockImplementation(async () => {
+      controller.abort();
+      throw new Error("lookup failed");
+    });
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    const ctx = telegramVoiceContext();
+
+    await bot.emitVoice(ctx);
+
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed")),
+    );
+    expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
   });
 
   it("logs and does not retry when the notice itself fails", async () => {

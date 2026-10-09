@@ -2252,6 +2252,7 @@ async function handleTelegramVoice(
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
       );
+      if (isAborted(deps)) return;
       await noticeUndelivered(deps, ctx);
     },
   );
