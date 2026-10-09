@@ -44,6 +44,10 @@ test("shared budget stops cumulative pagination and in-flight reads without star
     expect(transport.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
     await vi.advanceTimersByTimeAsync(500);
     expect(transport).toHaveBeenCalledTimes(3);
+    const phases = trace.mock.calls.map(([line]) => String(line)).join("");
+    expect(phases).not.toContain("completion-write");
+    expect(phases).not.toContain("completion-confirmed");
+    expect(phases).not.toContain('"outcome":"UNKNOWN"');
   } finally {
     trace.mockRestore();
     vi.useRealTimers();
