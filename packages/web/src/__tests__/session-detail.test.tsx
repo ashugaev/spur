@@ -7599,6 +7599,27 @@ describe("SessionDetail lifecycle operation", () => {
     },
   );
 
+  it.each(["restore", "reopen"] as const)(
+    "blocks immediate send during pending %s with an already live runtime",
+    async (action) => {
+      mockLifecycleFetch(
+        () => sessionFixture({ lifecycle: receipt("server-operation", "pending", 1, action) }),
+        async () => new Response("{}"),
+      );
+      render(<SessionDetail sessionId="api-a1" />);
+      await advance();
+      fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+        target: { value: "Wait for settlement" },
+      });
+      expect(screen.getByRole("button", { name: /Send now/ })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Queue" })).toBeDisabled();
+      expect(
+        screen.getByText("Session is starting. Queued messages send after launch."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
+    },
+  );
+
   it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
     const delivery = deferred<Response>();
     let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
@@ -7615,8 +7636,21 @@ describe("SessionDetail lifecycle operation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     await advance();
     expect(operationId).toMatch(/^[\da-f-]{36}$/);
+    expect(screen.getByText("starting")).toBeInTheDocument();
+    expect(screen.queryByText("working")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/^Message\.\.\./)).not.toBeInTheDocument();
     current = sessionFixture({ state: "waiting", lifecycle: receipt(operationId, "succeeded", 2) });
     await advance(4_000);
+    expect(screen.queryByText("starting")).not.toBeInTheDocument();
+    expect(screen.getByText("waiting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
+    fireEvent.change(screen.getByPlaceholderText(/^Message\.\.\./), {
+      target: { value: "Ready" },
+    });
+    expect(screen.getByRole("button", { name: /Send now/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
     current = sessionFixture({
@@ -7652,10 +7686,14 @@ describe("SessionDetail lifecycle operation", () => {
     const mounted = render(<SessionDetail sessionId="api-a1" />);
     await advance();
     expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByText("starting")).toBeInTheDocument();
     mounted.unmount();
     render(<SessionDetail sessionId="api-a1" />);
     await advance();
     expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+    expect(screen.getByText("starting")).toBeInTheDocument();
+    expect(screen.queryByText("working")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
     current = sessionFixture({
       status: "errored",
       state: "error",
@@ -7664,6 +7702,8 @@ describe("SessionDetail lifecycle operation", () => {
     });
     await advance(4_000);
     expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.queryByText("starting")).not.toBeInTheDocument();
+    expect(screen.getByText("error")).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
   });
 
@@ -7696,12 +7736,24 @@ describe("SessionDetail lifecycle operation", () => {
       current = { ...current, lifecycle: receipt(operationId, "pending", 1, action) };
       await advance(12_000);
       expect(posts).toBe(1);
+      if (action === "reopen") {
+        expect(screen.getByText("starting")).toBeInTheDocument();
+        expect(screen.queryByText("working")).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Handoff" })).toBeDisabled();
+        expect(screen.queryByRole("button", { name: /Send now/ })).not.toBeInTheDocument();
+      } else {
+        expect(screen.queryByText("starting")).not.toBeInTheDocument();
+      }
       current = sessionFixture({
         state: "waiting",
         lifecycle: receipt(operationId, "succeeded", 2, action),
       });
       await advance(4_000);
       expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+      expect(screen.queryByText("starting")).not.toBeInTheDocument();
+      expect(screen.getByText("waiting")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Terminal" })).toBeEnabled();
       current = sessionFixture({ lifecycle: receipt(operationId, "pending", 1, action) });
       await advance(4_000);
       expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();

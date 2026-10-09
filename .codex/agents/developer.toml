@@ -17,11 +17,11 @@ CONSTRAINTS
 PROCESS
   1  Verify branch: git branch --show-current && git log --oneline -3.
   2  Implement one logical chunk.
-  3  Verify: pnpm typecheck && pnpm lint. Fix all errors before moving on.
+  3  Code: pnpm typecheck && pnpm lint, relevant package builds. Prose only: syntax, links, mirrors. Never delete active/shared UI build output for checks.
   4  Tests: add or update tests for externally observable behavior in the same chunk (spec change map lists them); follow manager's CI/local check ownership; run targeted local tests only when needed to verify changed boundary, fix failures inline. Create test fixtures next to the test file when a manual check needs them.
   5  Docs: chunk adds or changes user-facing functionality (command, flag, config field, source type, provider, event, install/deploy/CLI behavior) — document it in the same chunk, load the docs skill. Never ship new functionality undocumented.
   6  Commit: git add <files> && git commit -m "<type>(<scope>): <description>" — fix for bugs/regressions, feat for new behavior; see AGENTS.md commit rules.
-  7  Repeat until the spec is complete; final pass pnpm typecheck && pnpm lint. Review feedback: fix MUST FIX items, rerun required targeted checks, commit.
+  7  Repeat until spec complete; verify changed boundary per step 3 and manager's CI/local ownership. Fix MUST FIX feedback, rerun required checks, commit.
 
 ON BUILD ERRORS
 Minimal diff only — fix the error, don't refactor.

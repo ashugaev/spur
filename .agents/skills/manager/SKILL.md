@@ -26,7 +26,7 @@ Route to minimize expected cost per successful task, not per-run tokens. Score e
 
   Spur runtime (CLI, daemon, sessions) touched          `tester` loads the `spur` skill
   Telegram source, agent sends, or Telegram suffix touched   manager runs `telegram-e2e` after `tester`, before close-out
-  New/changed visible `packages/web` UI                 manager runs `design-author` in the main Claude session before `architect` (only place `DesignSync` works, never a Task subagent); hard-stop before implementation; non-Claude runtime or no `DesignSync`: consume-only, else route to a Claude session, never stall
+  New/changed visible `packages/web` UI                 `design-author` before `architect`; proposed UI screenshot + approval evidence per `design`, any runtime
   Visible change in `packages/web`                      `designer`; `tester` opens the local site with browser tooling, saves screenshots to artifacts, self-analyzes
   `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, `.cursor/BUGBOT.md` touched   `skill-writer` (caveman pass) before `reviewer`
   New user-facing surface (command, flag, config field, source type, provider, event, install/deploy/CLI) or published docs touched   `docs` before `reviewer`; `developer` documents the surface and updates the owning doc, same change
@@ -49,7 +49,7 @@ PROCESS
      Apply .agents/skills/github/references/agent-protocol.md product/interface gates; route independent classification/approval check before dependent coding.
   2  Per-todo plan: score with `shallow-scoring` for a tier. Build the team from tier plus property modifiers. Track each todo in Spur ToDo.
   3  Execute the canonical gate order above, one delegation per step. Critic selects one approach. Clarify only when ambiguity changes implementation, one batched round.
-       - Design (before architect, visible UI only): manager runs `design-author` in the main session, never a Task subagent. Ping the user (`telegram` skill) with project URL + summary, HARD-STOP for approval; iterate on change requests; never proceed until `design-spec.md` is approved.
+       - Design (before architect, visible UI only): save proposed UI screenshot to artifacts; send screenshot and current -> proposed change to authorized session Telegram, mirror request in current channel. Reuse matching approval; missing approval stops dependent implementation.
        - Docs: same change as the surface; never stale or missing.
        - Close-out: mandatory after any code change, never without an open PR.
   4  Gate retry loop: run reviewer/tester/fix cycles while in-scope defects remain. `CHANGES_REQUESTED`/`FAIL` -> `developer` fixes -> same gate reruns. `SPEC_CHANGES_REQUESTED`/`SPEC_REJECTED` -> `architect` fixes, never `developer` -> `spec-critic` reruns. No verdict at all — subagent died, returned empty, no parsable verdict — is never a pass: rerun the same gate, no fix cycle first. Downstream gates run only when their input changed. Stop only for true external blocker, user cancellation, or new out-of-scope work requiring user decision; name blocker in Missing.
@@ -61,7 +61,7 @@ RULES
   - Collapse phases for trivial work; do not skip the skill.
   - One manager step = one Spur ToDo item = one phase = one owner = one output; each dispatched gate comes from the ledger, never invented ad hoc.
   - Refine the ledger as work reveals itself (tier raised, review finding, new user request): add the item before the work, never retroactively.
-  - Sole exception to "manager never touches code": the design-authoring gate, run by the manager itself in the main session — the only place `DesignSync` works — following the `design-author` process; even then it never touches implementation code.
+  - At each stop, state exact blocker, rule/tool source, current -> proposed change and required action in 2–3 lines. Send approval requests in current channel and authorized session Telegram; follow agent-protocol.md for delivery and matching approval.
   - Assign smoke and full automated suites to CI.
   - Require agent-operated manual affected-behavior proof on a real isolated sidecar; run targeted local automated checks only when needed to verify changed boundary.
   - Block release without successful manual proof and required CI checks, tied to final reviewed revision. CI query permission stays in `AGENTS.md`/`CLAUDE.md`.

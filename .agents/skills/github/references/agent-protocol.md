@@ -10,10 +10,10 @@ INTERFACE
 
   Classify UI, CLI, config, prompts and workflow surfaces; architect records proposed behavior/constraints, scope digest and approval evidence/absence.
   Obtain matching user authorization before dependent coding; prior explicit approval covering proposed scope counts.
-  Present reviewable scope through authorized Telegram source reply when configured; otherwise use available user channel or block dependent work.
-  Treat ordinary text/buttons as prompt approval, never authenticated CI consent.
+  Mirror reviewable scope and approval request in current channel and authorized session Telegram; route text/buttons and UI screenshot per telegram skill.
+  Treat typed/button reply as human prompt approval, never authenticated CI consent.
   Require spec-critic to independently check classification and matching authorization; implementer cannot self-exempt scope.
-  Preserve visible UI design gate; changed surface revision invalidates affected approval.
+  Preserve screenshot approval gate per design skill; matching prior approval counts, changed scope invalidates affected approval.
   Require reviewer to compare final diff with approved scope; missing/stale approval blocks, never claim retroactive consent.
   Request required interface consent before coding with `spur source reply --request-interface-approval`; schema: v2/src/review-interface.ts.
   Require designated purpose-bound Telegram callback for CI consent; retain approved semantics across internal edits only with fresh independent lane assessments.
