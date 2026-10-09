@@ -3,7 +3,7 @@ name: design
 description: Author and export a UI design via Claude Design (claude.ai/design) for the pre-implementation design gate. Load when producing/exporting a design or defining the export contract. Covers Artifact authoring, the export bundle, and the approval protocol.
 ---
 
-DESIGN: export contract, rationale + gate wiring in docs/design-workflow.md.
+DESIGN: export contract; gate wiring in docs/design-workflow.md.
 
 AUTHORING: use Artifact tool in main Claude session. Start a Design canvas
 with Artifact quickstart intent=design; update only task components.
