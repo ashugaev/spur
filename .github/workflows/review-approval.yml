@@ -45,6 +45,7 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: env -u SPUR_BUILD_RESTART pnpm --dir v2 build
       - run: node v2/dist/review-gate-producer.js
+        timeout-minutes: 20
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SPUR_CODE_REVIEW_ACTOR: ${{ vars.SPUR_CODE_REVIEW_ACTOR }}

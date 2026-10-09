@@ -54,16 +54,20 @@ export class GateGitHub {
   constructor(
     private readonly token: string,
     private readonly transport: typeof fetch = fetch,
+    readonly scopeSignal?: AbortSignal,
   ) {
     if (!token) throw new ReviewAppError("missing-actions-token");
   }
   async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
+    if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
     let response: Response;
     try {
       response = await this.transport(`https://api.github.com${path}`, {
         method,
         redirect: "error",
-        signal: AbortSignal.timeout(30_000),
+        signal: this.scopeSignal
+          ? AbortSignal.any([this.scopeSignal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
         headers: {
           Authorization: `Bearer ${this.token}`,
           Accept: "application/vnd.github+json",
@@ -73,12 +77,17 @@ export class GateGitHub {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch {
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
       throw new ReviewAppError("gate-network");
     }
+    if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
     if (!response.ok) throw new ReviewAppError(`gate-http-${response.status}`);
     try {
-      return await response.json();
+      const value: unknown = await response.json();
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
+      return value;
     } catch {
+      if (this.scopeSignal?.aborted) throw new ReviewAppError("gate-reconciliation-timeout");
       throw new ReviewAppError("gate-response");
     }
   }
@@ -149,10 +158,12 @@ function ciCandidate(number: number, snapshot: GateSnapshot, run: Record<string,
         run.pull_requests.some((value) => object(value).number === number)))
   );
 }
-function selectCiRun(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
-  const candidates = snapshot.runs.filter(
+function ciCandidates(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
+  return snapshot.runs.filter(
     (run) => ciIdentity(policy, run) && ciCandidate(number, snapshot, run),
   );
+}
+function selectCiRun(candidates: GateSnapshot["runs"]) {
   const active = candidates.find((run) => run.status !== "completed");
   if (active) return active;
   const starts = candidates
@@ -170,6 +181,13 @@ function selectCiRun(policy: GatePolicy, number: number, snapshot: GateSnapshot)
   if (new Set(starts.map(({ time }) => time)).size !== starts.length)
     throw new ReviewAppError("ci-attempt-time-ambiguous");
   return starts[0]?.run;
+}
+function serializeGateEvidence(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : entry,
+  );
 }
 function ciProvenance(
   policy: GatePolicy,
@@ -207,7 +225,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     reason,
     H: string(object(snapshot.pr.head).sha),
     B: string(object(snapshot.pr.base).sha),
-    fingerprint: digest(snapshot),
+    fingerprint: digest({ domain: "gate-blocked-v1", snapshot }),
   });
   try {
     const pr = snapshot.pr,
@@ -233,6 +251,8 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     if ([...effective.values()].some((row) => row.state === "CHANGES_REQUESTED"))
       return blocked("changes-requested");
     const assessments = [];
+    const lanes = [];
+    let consentEvidence: unknown = null;
     for (const lane of ["code", "browser"] as const) {
       const actor = lane === "code" ? policy.codeActor : policy.browserActor;
       const vote = effective.get(actor);
@@ -280,6 +300,14 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       )
         return blocked("interface-coverage-incomplete");
       assessments.push(assessment);
+      lanes.push({
+        rows: rows.map((row) => ({
+          id: row.id,
+          actor: { id: object(row.user).id, type: object(row.user).type },
+          body: row.body,
+        })),
+        state,
+      });
     }
     const first = assessments[0],
       second = assessments[1];
@@ -338,8 +366,18 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
         consent.baselineDigest !== baselineDigest(first.manifest)
       )
         return blocked("consent-not-approved");
+      consentEvidence = {
+        history: history.map(({ row, state }) => ({
+          id: row.id,
+          actor: { id: object(row.user).id, type: object(row.user).type },
+          body: row.body,
+          state,
+        })),
+        consent,
+      };
     }
-    const run = selectCiRun(policy, number, snapshot);
+    const candidates = ciCandidates(policy, number, snapshot);
+    const run = selectCiRun(candidates);
     if (
       !run ||
       run.status !== "completed" ||
@@ -367,7 +405,70 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
       reason: "all-gates-pass",
       H,
       B,
-      fingerprint: digest(snapshot),
+      fingerprint: digest(
+        serializeGateEvidence({
+          domain: "gate-approved-v1",
+          policy,
+          number,
+          pr: {
+            state: pr.state,
+            draft: pr.draft,
+            merged: pr.merged,
+            author: object(pr.user).id,
+            head: {
+              sha: H,
+              ref: head.ref,
+              repository:
+                head.repo !== null && typeof head.repo === "object"
+                  ? (head.repo as Record<string, unknown>).full_name
+                  : head.repo,
+            },
+            base: { sha: B, ref: base.ref, repository: object(base.repo).full_name },
+          },
+          reviews: snapshot.reviews.map((row) => ({
+            id: row.id,
+            actor: { id: object(row.user).id, type: object(row.user).type },
+            state: row.state,
+            body: row.body,
+            commit_id: row.commit_id,
+            submitted_at: row.submitted_at,
+          })),
+          lanes,
+          consent: consentEvidence,
+          paths: snapshot.files.map((file) => file.filename),
+          unresolved: snapshot.unresolved,
+          runs: candidates.map((candidate) => ({
+            id: candidate.id,
+            workflow_id: candidate.workflow_id,
+            path: candidate.path,
+            repository: object(candidate.repository).full_name,
+            event: candidate.event,
+            head_sha: candidate.head_sha,
+            head_branch: candidate.head_branch,
+            display_title: candidate.display_title,
+            pull_requests: candidate.pull_requests,
+            run_started_at: candidate.run_started_at,
+            run_attempt: candidate.run_attempt,
+            status: candidate.status,
+            conclusion: candidate.conclusion,
+          })),
+          selected: { id: run.id, attempt: run.run_attempt },
+          anchors: snapshot.ciAnchors.filter((anchor) =>
+            candidates.some((candidate) => candidate.id === anchor.runId),
+          ),
+          jobs: snapshot.jobs
+            .map((job) => ({
+              id: job.id,
+              name: job.name,
+              run_id: job.run_id,
+              run_attempt: job.run_attempt,
+              status: job.status,
+              conclusion: job.conclusion,
+            }))
+            .map(serializeGateEvidence)
+            .sort(),
+        }),
+      ),
     };
   } catch {
     return blocked("malformed-evidence");
@@ -477,7 +578,7 @@ export async function readGateSnapshot(
     }
   }
   const snapshot = { pr, reviews, comments, files, unresolved, runs, jobs: [], ciAnchors };
-  const run = selectCiRun(policy, number, snapshot);
+  const run = selectCiRun(ciCandidates(policy, number, snapshot));
   const jobs = run
     ? await api.pages(
         `${path}/actions/runs/${integer(run.id)}/attempts/${integer(run.run_attempt)}/jobs`,
