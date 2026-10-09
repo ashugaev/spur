@@ -2021,6 +2021,89 @@ function parseSessionGc(value: unknown): AppConfig["sessionGc"] {
   };
 }
 
+const OPENCODE_GC_STATUSES = ["completed", "killed", "stopped"] as const;
+const OPENCODE_LOG_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"] as const;
+
+export const DEFAULT_OPENCODE_GC: AppConfig["opencodeGc"] = {
+  enabled: false,
+  olderThanDays: 14,
+  intervalMinutes: 360,
+  maxSessionsPerSweep: 20,
+  // isTerminalSessionStatus exactly. "stopped" is NOT here even though
+  // sessionGc collects it: an opencode session resumes by
+  // `--session <agentSessionId>`, so deleting a stopped session's store rows
+  // turns the resume into a silent empty session.
+  statuses: ["completed", "killed"],
+  logLevel: "WARN",
+  // Same numbers as DEFAULT_EVENT_LOG_HOT_BYTES / _SHARD_HOT_BYTES, written
+  // out rather than imported: Spur's own jsonl retention and a vendor log are
+  // independent policies, and sharing the constant would let a change to
+  // either silently move the other.
+  logMaxBytes: 134_217_728,
+  logTailBytes: 16_777_216,
+};
+
+function parseOpenCodeGcStatuses(value: unknown): AppConfig["opencodeGc"]["statuses"] {
+  if (value === undefined) {
+    return [...DEFAULT_OPENCODE_GC.statuses];
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("opencodeGc.statuses must be a non-empty array of completed|killed|stopped");
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string" || !(OPENCODE_GC_STATUSES as readonly string[]).includes(entry)) {
+      throw new Error(
+        `opencodeGc.statuses must only contain completed|killed|stopped (got ${JSON.stringify(entry)})`,
+      );
+    }
+    return entry as (typeof OPENCODE_GC_STATUSES)[number];
+  });
+}
+
+function parseOpenCodeLogLevel(value: unknown): AppConfig["opencodeGc"]["logLevel"] {
+  if (value === undefined) {
+    return DEFAULT_OPENCODE_GC.logLevel;
+  }
+  if (typeof value !== "string" || !(OPENCODE_LOG_LEVELS as readonly string[]).includes(value)) {
+    throw new Error(
+      `opencodeGc.logLevel must be one of DEBUG|INFO|WARN|ERROR (got ${JSON.stringify(value)})`,
+    );
+  }
+  return value as (typeof OPENCODE_LOG_LEVELS)[number];
+}
+
+// Instance-only, same footgun as sessionGc/authRotation/rateLimitReactivation:
+// parsed only when mode === "instance", so a per-project opencodeGc block is
+// silently ignored (the daemon sweep and `spur opencode-gc` both always read
+// the merged instance config, never a project one).
+function parseOpenCodeGc(value: unknown): AppConfig["opencodeGc"] {
+  if (value === undefined) {
+    return DEFAULT_OPENCODE_GC;
+  }
+  const root = asObject(value, "opencodeGc");
+  return {
+    enabled:
+      asOptionalBoolean(root["enabled"], "opencodeGc.enabled") ?? DEFAULT_OPENCODE_GC.enabled,
+    olderThanDays:
+      asNonNegativeNumber(root["olderThanDays"], "opencodeGc.olderThanDays") ??
+      DEFAULT_OPENCODE_GC.olderThanDays,
+    intervalMinutes:
+      asNonNegativeNumber(root["intervalMinutes"], "opencodeGc.intervalMinutes") ??
+      DEFAULT_OPENCODE_GC.intervalMinutes,
+    maxSessionsPerSweep:
+      asOptionalPositiveInteger(root["maxSessionsPerSweep"], "opencodeGc.maxSessionsPerSweep") ??
+      DEFAULT_OPENCODE_GC.maxSessionsPerSweep,
+    statuses: parseOpenCodeGcStatuses(root["statuses"]),
+    logLevel: parseOpenCodeLogLevel(root["logLevel"]),
+    logMaxBytes:
+      asNonNegativeNumber(root["logMaxBytes"], "opencodeGc.logMaxBytes") ??
+      DEFAULT_OPENCODE_GC.logMaxBytes,
+    logTailBytes:
+      asNonNegativeNumber(root["logTailBytes"], "opencodeGc.logTailBytes") ??
+      DEFAULT_OPENCODE_GC.logTailBytes,
+  };
+}
+
 // Measured over 640 anchor dirs holding 26.78 GB of agent-history artifacts
 // (99.6% of all session-artifact bytes): the 2 GiB / 500-file caps keep 9.64 GB
 // and reclaim 17.14 GB, while the 30d age prune contributes ~4% because 25.4 GB
@@ -2538,6 +2621,7 @@ function parseConfigFile(
     diskRetention:
       mode === "instance" ? parseDiskRetention(root["diskRetention"]) : DEFAULT_DISK_RETENTION,
     sessionGc: mode === "instance" ? parseSessionGc(root["sessionGc"]) : DEFAULT_SESSION_GC,
+    opencodeGc: mode === "instance" ? parseOpenCodeGc(root["opencodeGc"]) : DEFAULT_OPENCODE_GC,
     artifactRetention:
       mode === "instance"
         ? parseArtifactRetention(root["artifactRetention"])

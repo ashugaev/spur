@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-import type { ProviderReasoningEffort, SidecarMcpBinding, TranscriptEntry } from "../types.js";
+import type {
+  OpenCodeLogLevel,
+  ProviderReasoningEffort,
+  SidecarMcpBinding,
+  TranscriptEntry,
+} from "../types.js";
 import type { ProviderTokenUsageSample } from "../token-usage.js";
 import {
   agentExecutableCommand,
@@ -25,7 +30,7 @@ const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
 // whole document, so every JSON read of the CLI goes through here.
 export async function readOpenCodeJson(
   args: string[],
-  options: { cwd?: string; timeoutMs: number },
+  options: { cwd?: string; timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): Promise<string> {
   const directory = await mkdtemp(join(resolveTempDir(), "spur-opencode-"));
   const outputPath = join(directory, "out.json");
@@ -35,6 +40,9 @@ export async function readOpenCodeJson(
       await new Promise<void>((resolve, reject) => {
         const child = spawn(opencodeCommand(), args, {
           ...(options.cwd ? { cwd: options.cwd } : {}),
+          // Merged over process.env, never replacing it: a bare env would
+          // strip PATH and HOME from the child.
+          ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
           stdio: ["ignore", handle.fd, "ignore"],
         });
         const timer = setTimeout(() => {
@@ -83,8 +91,16 @@ export function buildOpenCodeConfig(
   mcpBindings: SidecarMcpBinding[] | undefined,
   restrictWrites: boolean | undefined,
   reasoning?: { model: string; reasoningEffort: ProviderReasoningEffort; variantNames: string[] },
+  // opencode logs INFO by default and never rotates `log/opencode.log`;
+  // INFO is ~99% of its volume. Capping here rides the existing
+  // OPENCODE_CONFIG_CONTENT channel — no new launch flag. Future volume only;
+  // the existing file is `opencodeGc.logMaxBytes`' job.
+  logLevel?: OpenCodeLogLevel,
 ): string | undefined {
   const config: Record<string, unknown> = {};
+  if (logLevel) {
+    config["logLevel"] = logLevel;
+  }
   if (mcpBindings?.length) {
     config["mcp"] = Object.fromEntries(
       mcpBindings.map((binding) => [
