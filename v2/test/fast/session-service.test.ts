@@ -741,6 +741,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 }));
 
 vi.mock("../../src/agents/codex.js", () => ({
+  CODEX_HOME_DIR: "codex-home",
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
   findLatestCodexSessionFile: findLatestCodexSessionFileMock,
@@ -25194,7 +25195,7 @@ describe("SessionService", () => {
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -25964,9 +25965,9 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    // The closing sibling's own tool dir is per-session and must not leak.
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
+    // The closing sibling's own tool dir is per-session; its codex-home survives completion.
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2", ["codex-home"]);
   });
 
   it("keeps the workspace state file while completing a desk member with a live sibling", async () => {
@@ -26037,7 +26038,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
     expect(removeWorktreeMock).not.toHaveBeenCalled();
   });
 
@@ -26121,7 +26122,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
   });
 
   it("deletes the workspace state file only on the last member's teardown", async () => {
@@ -26186,7 +26187,7 @@ describe("SessionService", () => {
     await service.complete("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
   });
 
   describe("M2: desk-shared project sidecars", () => {
@@ -26310,6 +26311,40 @@ describe("SessionService", () => {
       );
       expect(result.id).toBe("api-2");
       expect(sessions.get("api-2")?.sidecarNames).toBeUndefined();
+    });
+
+    it("rebuilds the owner's tool wrappers when its session-tools dir already exists", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sidecars: { daemon: { command: "pnpm daemon", autoStart: false } },
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      // A completed Codex anchor leaves only codex-home behind.
+      mkdirSync(join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home"), { recursive: true });
+      sidecarTmuxAliveMock.mockResolvedValue(false);
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.startSidecar("api-1", "daemon");
+
+      expect(ensureSessionSlotToolMock).toHaveBeenCalledWith(
+        expect.objectContaining({ dataDir: TEST_DATA_DIR, sessionId: "api-1" }),
+      );
     });
 
     it("stops a project sidecar requested from a desk sibling and preserves the anchor's slot", async () => {
@@ -29588,7 +29623,7 @@ describe("SessionService", () => {
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
@@ -31880,7 +31915,7 @@ describe("SessionService", () => {
 
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -31922,7 +31957,7 @@ describe("SessionService", () => {
 
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(deleteAgentHookStateMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
     expect(deleteTelegramSourceStateForSessionMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       "api",
@@ -32239,7 +32274,7 @@ describe("SessionService", () => {
     await service.kill("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(true);
-    expect(removeSessionSlotToolMock).not.toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    expect(removeSessionSlotToolMock.mock.calls.filter(([, id]) => id === "api-1")).toEqual([]);
   });
 
   it("removes the shared artifacts dir and anchor tool dir when killing the last non-terminal desk member", async () => {
@@ -32272,7 +32307,35 @@ describe("SessionService", () => {
     await service.kill("api-2");
 
     expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
-    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1");
+    // Completed anchor can be reopened: its codex-home outlives the sibling's kill.
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", ["codex-home"]);
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-2", []);
+  });
+
+  it("removes the whole anchor tool dir when killing the last desk member and the anchor was killed", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      deskId: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1", status: "killed" as const });
+    store.set("api-2", { ...base, id: "api-2", tmuxSession: "api-2", status: "running" as const });
+    mkdirSync(artifactDirForSession("api-1"), { recursive: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-2");
+
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api-1", []);
   });
 
   it("preserves startup attachments under the desk anchor id when killing the last desk member", async () => {

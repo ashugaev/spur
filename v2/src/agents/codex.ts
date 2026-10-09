@@ -26,7 +26,7 @@ const MAX_SESSION_SCAN_DEPTH = 4;
 const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
-const CODEX_HOME_DIR = "codex-home";
+export const CODEX_HOME_DIR = "codex-home";
 const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
 const CODEX_RESTRICT_WRITES_DENY_COMMAND =
   "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
