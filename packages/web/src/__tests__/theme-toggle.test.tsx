@@ -3,95 +3,69 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { THEME_STORAGE_KEY, ThemeProvider } from "@/lib/theme-context";
 
-function stubMatchMedia(matches: boolean) {
-  window.matchMedia = ((query: string) => ({
-    matches,
-    media: query,
-    onchange: null,
-    addListener: () => undefined,
-    removeListener: () => undefined,
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-    dispatchEvent: () => false,
-  })) as typeof window.matchMedia;
-}
-
 const originalMatchMedia = window.matchMedia;
 
 describe("ThemeToggle", () => {
   beforeEach(() => {
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
-    stubMatchMedia(false);
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(prefers-color-scheme: dark)" ? false : false,
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    })) as typeof window.matchMedia;
   });
 
   afterEach(() => {
-    delete document.documentElement.dataset.theme;
     window.matchMedia = originalMatchMedia;
   });
 
-  it("reflects the dark theme by default: aria-pressed false, label offers switch to light", () => {
-    render(
-      <ThemeProvider>
-        <ThemeToggle />
-      </ThemeProvider>,
-    );
+  function openMenu() {
+    render(<ThemeProvider><ThemeToggle /></ThemeProvider>);
+    const trigger = screen.getByRole("button", { name: "Theme" });
+    fireEvent.click(trigger);
+    return trigger;
+  }
 
-    const button = screen.getByRole("button", { name: "Switch to light theme" });
-    expect(button).toHaveAttribute("aria-pressed", "false");
-    expect(button).toHaveAttribute("title", "Switch to light theme");
-  });
-
-  it("clicking flips theme, writes localStorage, toggles data-theme, and swaps the label", () => {
-    render(
-      <ThemeProvider>
-        <ThemeToggle />
-      </ThemeProvider>,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Switch to light theme" }));
-
-    const button = screen.getByRole("button", { name: "Switch to dark theme" });
-    expect(button).toHaveAttribute("aria-pressed", "true");
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+  it("opens without changing the theme and starts with Auto selected", () => {
+    const trigger = openMenu();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("checkbox", { name: "Auto theme" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "false");
     expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+  });
 
-    fireEvent.click(button);
-
-    expect(screen.getByRole("button", { name: "Switch to light theme" })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+  it("keeps the menu open and exactly one mode selected across picks", () => {
+    const trigger = openMenu();
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
+    expect(screen.getByRole("checkbox", { name: "Auto theme" })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+    fireEvent.click(screen.getByRole("radio", { name: "Light" }));
+    expect(screen.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "false");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Auto theme" }));
+    expect(screen.getByRole("checkbox", { name: "Auto theme" })).toBeChecked();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("rotates the mark toward light theme when motion is not reduced", () => {
-    render(
-      <ThemeProvider>
-        <ThemeToggle />
-      </ThemeProvider>,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Switch to light theme" }));
-
-    const svg = screen.getByRole("button", { name: "Switch to dark theme" }).querySelector("svg");
-    expect(svg).toHaveClass("rotate-180");
-    expect(svg).toHaveClass("transition-transform");
+  it("unchecking Auto pins the resolved color without a visual change", () => {
+    openMenu();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Auto theme" }));
+    expect(screen.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "true");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
   });
 
-  it("omits the rotate/transition classes when prefers-reduced-motion is set", () => {
-    stubMatchMedia(true);
-    render(
-      <ThemeProvider>
-        <ThemeToggle />
-      </ThemeProvider>,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Switch to light theme" }));
-
-    const svg = screen.getByRole("button", { name: "Switch to dark theme" }).querySelector("svg");
-    expect(svg).not.toHaveClass("rotate-180");
-    expect(svg).not.toHaveClass("transition-transform");
+  it("Escape closes and restores trigger focus", () => {
+    const trigger = openMenu();
+    screen.getByRole("checkbox", { name: "Auto theme" }).focus();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(trigger).toHaveFocus();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
   });
 });

@@ -1,98 +1,133 @@
 import {
-  test,
-  expect,
-  makeWorkingSession,
-  mockSessions,
-  mockTagCatalog,
-  gotoMocked,
+  test, expect, mockSessions, mockTagCatalog, gotoMocked, makeWorkingSession,
   type ProjectInfo,
 } from "./fixtures.js";
 
-const LIGHT_BG = "rgb(255, 255, 255)";
-const DARK_BG = "rgb(13, 13, 14)";
+type FirstFrame = { dataTheme: string | null; colorScheme: string };
 
-// T1: Theme persistence
-test.describe("T1: Theme persistence", () => {
-  test("toggling to light persists across a reload", async ({ page }) => {
-    await mockTagCatalog(page);
-    await mockSessions(page, []);
-    await page.goto("/");
-
-    await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-    await page.getByRole("button", { name: "Switch to light theme" }).click();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-
-    await page.reload();
-
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-    await expect(page.locator("body")).toHaveCSS("background-color", LIGHT_BG);
-    await expect(page.getByRole("button", { name: "Switch to dark theme" })).toBeVisible();
-  });
-
-  test("light theme and the project filter both survive a reload at /?project=<id>", async ({
-    page,
-  }) => {
-    const pageErrors: Error[] = [];
-    page.on("pageerror", (error) => pageErrors.push(error));
-
-    await page.addInitScript(() => {
-      window.localStorage.setItem("spur:theme", "light");
+async function prepare(page: Parameters<typeof mockSessions>[0], stored: string | null, os: "light" | "dark") {
+  await page.emulateMedia({ colorScheme: os });
+  await page.addInitScript((value) => {
+    if (value === null) localStorage.removeItem("spur:theme");
+    else localStorage.setItem("spur:theme", value);
+    const frames: FirstFrame[] = [];
+    const capture = () => ({
+      dataTheme: document.documentElement.getAttribute("data-theme"),
+      colorScheme: document.documentElement.style.colorScheme,
     });
+    const observer = new MutationObserver(() => { frames.push(capture()); });
+    observer.observe(document, { subtree: true, attributes: true, attributeFilter: ["data-theme", "style"] });
+    requestAnimationFrame(() => {
+      (window as typeof window & { firstThemeFrame?: FirstFrame; themeMutations?: FirstFrame[] }).firstThemeFrame = capture();
+      (window as typeof window & { firstThemeFrame?: FirstFrame; themeMutations?: FirstFrame[] }).themeMutations = frames;
+      observer.disconnect();
+    });
+  }, stored);
+  await mockTagCatalog(page);
+  await mockSessions(page, []);
+  await page.goto("/");
+}
 
-    await mockTagCatalog(page);
-    const projects: ProjectInfo[] = [{ id: "test-project", name: "test-project" }];
-    await gotoMocked(page, "/?project=test-project", [makeWorkingSession()], projects);
-
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-    // The project restore must not get stuck on the SSR default: a single
-    // synchronous layout effect derives locationSearch + projectId together
-    // from the URL pre-paint (see Dashboard.tsx), so once the page settles
-    // the button must already read the requested project, not "All
-    // Projects". This doesn't prove zero visible frames of "All Projects" —
-    // that one frame is an accepted, out-of-scope SSR characteristic (this
-    // is a client component with no server-side query awareness) and
-    // Playwright has no reliable, non-flaky way to assert wall-clock paint
-    // timing — but it does catch a regression where the restore silently
-    // fails to apply.
-    await expect(page.getByRole("button", { name: /^Project filter:/ })).toHaveAccessibleName(
-      "Project filter: test-project",
-    );
-
-    // Checked last, not right after navigation: `pageerror` events surface
-    // asynchronously, so asserting immediately after `gotoMocked` could pass
-    // before an error the run above would produce actually arrives.
-    expect(pageErrors).toEqual([]);
+for (const [stored, os, expected] of [
+  [null, "light", "light"],
+  ["auto", "dark", "dark"],
+  ["light", "dark", "light"],
+  ["dark", "light", "dark"],
+] as const) {
+  test(`first frame resolves ${stored ?? "absent/Auto"} with OS ${os} to ${expected}`, async ({ page }) => {
+    await prepare(page, stored, os);
+    await expect.poll(() => page.evaluate(() =>
+      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
+    )).toEqual({ dataTheme: expected === "light" ? "light" : null, colorScheme: expected });
+    await expect(page.locator("html")).toHaveCSS("color-scheme", expected);
   });
+}
 
-  test("toggling back to dark persists across a reload", async ({ page }) => {
-    await mockTagCatalog(page);
-    await mockSessions(page, []);
-    await page.goto("/");
+test("Auto follows an OS change in an open tab; fixed mode ignores later changes", async ({ page }) => {
+  await prepare(page, "auto", "light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
+  await page.getByRole("button", { name: "Theme" }).click();
+  await expect(page.getByRole("checkbox", { name: "Auto theme" })).toBeChecked();
+  await page.getByRole("radio", { name: "Light" }).click();
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
 
-    // Start from light (rather than seeding localStorage via addInitScript,
-    // which re-fires on every reload and would clobber the toggle-to-dark
-    // write below on the reload assertion further down).
-    await page.getByRole("button", { name: "Switch to light theme" }).click();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+test("stored Light and the project filter survive reload", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("spur:theme", "light"));
+  await mockTagCatalog(page);
+  const projects: ProjectInfo[] = [{ id: "test-project", name: "test-project" }];
+  await gotoMocked(page, "/?project=test-project", [makeWorkingSession()], projects);
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.getByRole("button", { name: /^Project filter:/ })).toHaveAccessibleName(
+    "Project filter: test-project",
+  );
+});
 
-    await page.getByRole("button", { name: "Switch to dark theme" }).click();
-    await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+for (const mode of ["auto", "light", "dark"] as const) {
+  for (const os of ["light", "dark"] as const) {
+    test(`${mode} menu with OS ${os} has one selection`, async ({ page }) => {
+      await prepare(page, mode, os);
+      await page.getByRole("button", { name: "Theme" }).click();
+      const auto = page.getByRole("checkbox", { name: "Auto theme" });
+      const light = page.getByRole("radio", { name: "Light" });
+      const dark = page.getByRole("radio", { name: "Dark" });
+      await expect(auto).toHaveJSProperty("checked", mode === "auto");
+      await expect(light).toHaveAttribute("aria-checked", String(mode === "light"));
+      await expect(dark).toHaveAttribute("aria-checked", String(mode === "dark"));
+      await expect(page.locator("html")).toHaveCSS("color-scheme", mode === "auto" ? os : mode);
+    });
+  }
+}
 
-    await page.reload();
-
-    await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-    await expect(page.locator("body")).toHaveCSS("background-color", DARK_BG);
+test("menu aligns labels and marks, fits a 320px viewport, and Escape restores focus", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await prepare(page, "light", "dark");
+  const trigger = page.getByRole("button", { name: "Theme" });
+  await trigger.click();
+  const panel = page.getByRole("group", { name: "Theme" });
+  const geometry = await panel.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const styles = getComputedStyle(node);
+    const label = node.querySelector("div > span")?.getBoundingClientRect();
+    const row = node.querySelector('[role="radio"] > span')?.getBoundingClientRect();
+    const checkbox = node.querySelector("input")?.getBoundingClientRect();
+    const mark = node.querySelector('[role="radio"] > span:nth-child(2)')?.getBoundingClientRect();
+    if (!label || !row || !checkbox || !mark) throw new Error("Theme menu geometry targets missing");
+    return { left: rect.left, right: rect.right, width: rect.width, padding: styles.paddingLeft,
+      labelX: label.x, rowX: row.x, checkboxCenter: checkbox.x + checkbox.width / 2,
+      markCenter: mark.x + mark.width / 2 };
   });
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(320);
+  expect(geometry.width).toBeGreaterThanOrEqual(180);
+  expect(geometry.padding).toBe("8px");
+  expect(Math.abs(geometry.labelX - geometry.rowX)).toBeLessThanOrEqual(1);
+  expect(Math.abs(geometry.checkboxCenter - geometry.markCenter)).toBeLessThanOrEqual(1);
+  await page.getByRole("checkbox", { name: "Auto theme" }).focus();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
 
-  test("served HTML contains the pre-hydration theme script before </head>", async ({ page }) => {
-    const response = await page.request.get("/");
-    const body = await response.text();
-
-    const scriptIndex = body.indexOf('localStorage.getItem("spur:theme")');
-    const headCloseIndex = body.indexOf("</head>");
-
-    expect(scriptIndex).toBeGreaterThan(-1);
-    expect(headCloseIndex).toBeGreaterThan(-1);
-    expect(scriptIndex).toBeLessThan(headCloseIndex);
-  });
+test("keyboard reaches Auto, Light, and Dark in order", async ({ page }) => {
+  await prepare(page, "auto", "light");
+  const trigger = page.getByRole("button", { name: "Theme" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("checkbox", { name: "Auto theme" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("radio", { name: "Light" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("radio", { name: "Dark" })).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
 });
