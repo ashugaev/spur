@@ -10,17 +10,12 @@ async function prepare(page: Parameters<typeof mockSessions>[0], stored: string 
   await page.addInitScript((value) => {
     if (value === null) localStorage.removeItem("spur:theme");
     else localStorage.setItem("spur:theme", value);
-    const frames: FirstFrame[] = [];
     const capture = () => ({
       dataTheme: document.documentElement.getAttribute("data-theme"),
       colorScheme: document.documentElement.style.colorScheme,
     });
-    const observer = new MutationObserver(() => { frames.push(capture()); });
-    observer.observe(document, { subtree: true, attributes: true, attributeFilter: ["data-theme", "style"] });
     requestAnimationFrame(() => {
-      (window as typeof window & { firstThemeFrame?: FirstFrame; themeMutations?: FirstFrame[] }).firstThemeFrame = capture();
-      (window as typeof window & { firstThemeFrame?: FirstFrame; themeMutations?: FirstFrame[] }).themeMutations = frames;
-      observer.disconnect();
+      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame = capture();
     });
   }, stored);
   await mockTagCatalog(page);
