@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSourceWorkbench, projectSourceSession } from "../../src/server.js";
+import {
+  createSourceWorkbench,
+  projectSourceSession,
+  sourceSessionById,
+} from "../../src/server.js";
+import { SessionLifecycleError } from "../../src/session-lifecycle.js";
+import { SessionResourceNotFoundError } from "../../src/session-service.js";
 import type { SourceSpawnSessionRequest, SourceWorkbench } from "../../src/event-sources/types.js";
 import type { ProjectListEntry, SessionView } from "../../src/types.js";
 
@@ -206,6 +212,82 @@ describe("source workbench adapter", () => {
       workbench.restoreSession({ sessionId: "demo-1", expectedProject: "demo" }),
     ).rejects.toThrow("gone");
     expect(service.restore).not.toHaveBeenCalled();
+  });
+});
+
+function lifecycleError(code: "session_lifecycle_snapshot_changed" | "session_lifecycle_conflict") {
+  return new SessionLifecycleError(code, 503, {
+    code,
+    lifecycle: { instanceId: "test", revision: 1, operation: null },
+  });
+}
+
+describe("sourceSessionById", () => {
+  const pendingRestore = {
+    operationId: "op-1",
+    action: "restore" as const,
+    phase: "pending" as const,
+    targetIds: ["demo-1"],
+    outcomes: [],
+  };
+
+  it.each([
+    ["running", session(), true],
+    ["completed", session({ status: "completed" }), false],
+    ["killed", session({ status: "killed" }), false],
+    ["killed with retainInList", session({ status: "killed", retainInList: true }), true],
+    [
+      "killed with pending restore",
+      session({
+        status: "killed",
+        lifecycle: { instanceId: "test", revision: 1, operation: pendingRestore },
+      }),
+      true,
+    ],
+  ])("%s -> listed %s", async (_name, view, listed) => {
+    const service = { get: vi.fn(async () => view) };
+    const item = await sourceSessionById(service, "demo-1");
+    expect(item === null).toBe(!listed);
+    if (item) expect(item.id).toBe("demo-1");
+  });
+
+  it("marks a retained killed session inactive", async () => {
+    const service = {
+      get: vi.fn(async () => session({ status: "killed", state: "killed", retainInList: true })),
+    };
+    expect(await sourceSessionById(service, "demo-1")).toMatchObject({ inactive: true });
+  });
+
+  it("returns null when the session is missing", async () => {
+    const service = {
+      get: vi.fn(async () => {
+        throw new SessionResourceNotFoundError("gone");
+      }),
+    };
+    expect(await sourceSessionById(service, "demo-1")).toBeNull();
+  });
+
+  it("retries once after a snapshot change", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockResolvedValueOnce(session());
+    expect(await sourceSessionById({ get }, "demo-1")).toMatchObject({ id: "demo-1" });
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("rethrows a second snapshot change", async () => {
+    const error = lifecycleError("session_lifecycle_snapshot_changed");
+    const get = vi.fn().mockRejectedValue(error);
+    await expect(sourceSessionById({ get }, "demo-1")).rejects.toBe(error);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry other lifecycle errors", async () => {
+    const error = lifecycleError("session_lifecycle_conflict");
+    const get = vi.fn().mockRejectedValue(error);
+    await expect(sourceSessionById({ get }, "demo-1")).rejects.toBe(error);
+    expect(get).toHaveBeenCalledTimes(1);
   });
 });
 

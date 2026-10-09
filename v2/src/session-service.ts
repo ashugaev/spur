@@ -510,6 +510,7 @@ import {
   type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
+  type LifecycleOperation,
   type SessionQueuedMessagesView,
   type SessionState,
   type SessionTokenUsageView,
@@ -1223,6 +1224,17 @@ interface SidecarObservation {
   processes: ProcSnapshot;
   starttimes: ReadonlyMap<number, number | null>;
   revision: number;
+}
+
+/** Whether list() includes a row; shared with by-id source lookups. */
+export function isListedSessionView(
+  view: { status: SessionStatus; retainInList?: boolean },
+  operation: LifecycleOperation | null | undefined,
+  includeCompleted: boolean,
+): boolean {
+  if (operation?.phase === "pending" && operation.action !== "complete") return true;
+  if (view.status === "completed") return includeCompleted || view.retainInList === true;
+  return view.status !== "killed" || view.retainInList === true;
 }
 
 function isRestorableStatus(status: SessionStatus): boolean {
@@ -10009,13 +10021,12 @@ export class SessionService {
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
     this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
-    const included = (view: { id: string; status: SessionStatus; retainInList?: boolean }) => {
-      const operation = this.lifecycle.snapshot(view.id).operation;
-      if (operation?.phase === "pending" && operation.action !== "complete") return true;
-      if (view.status === "completed")
-        return options?.includeCompleted === true || view.retainInList === true;
-      return view.status !== "killed" || view.retainInList === true;
-    };
+    const included = (view: { id: string; status: SessionStatus; retainInList?: boolean }) =>
+      isListedSessionView(
+        view,
+        this.lifecycle.snapshot(view.id).operation,
+        options?.includeCompleted === true,
+      );
     if (options?.view === "dashboard") {
       if (this.dashboardCacheReady) {
         await this.dashboardCacheReady;
