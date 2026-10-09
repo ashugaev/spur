@@ -1,5 +1,10 @@
 import {
-  test, expect, mockSessions, mockTagCatalog, gotoMocked, makeWorkingSession,
+  test,
+  expect,
+  mockSessions,
+  mockTagCatalog,
+  gotoMocked,
+  makeWorkingSession,
   type ProjectInfo,
 } from "./fixtures.js";
 
@@ -14,7 +19,11 @@ function recordFirstFrame() {
   });
 }
 
-async function prepare(page: Parameters<typeof mockSessions>[0], stored: string | null, os: "light" | "dark") {
+async function prepare(
+  page: Parameters<typeof mockSessions>[0],
+  stored: string | null,
+  os: "light" | "dark",
+) {
   await page.emulateMedia({ colorScheme: os });
   await page.addInitScript((value) => {
     if (value === null) localStorage.removeItem("spur:theme");
@@ -41,16 +50,24 @@ for (const [stored, os, expected] of [
   ["light", "dark", "light"],
   ["dark", "light", "dark"],
 ] as const) {
-  test(`first frame resolves ${stored ?? "absent/Auto"} with OS ${os} to ${expected}`, async ({ page }) => {
+  test(`first frame resolves ${stored ?? "absent/Auto"} with OS ${os} to ${expected}`, async ({
+    page,
+  }) => {
     await prepare(page, stored, os);
-    await expect.poll(() => page.evaluate(() =>
-      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
-    )).toEqual({ dataTheme: expected === "light" ? "light" : null, colorScheme: expected });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
+        ),
+      )
+      .toEqual({ dataTheme: expected === "light" ? "light" : null, colorScheme: expected });
     await expect(page.locator("html")).toHaveCSS("color-scheme", expected);
   });
 }
 
-test("Auto follows an OS change in an open tab; fixed mode ignores later changes", async ({ page }) => {
+test("Auto follows an OS change in an open tab; fixed mode ignores later changes", async ({
+  page,
+}) => {
   await prepare(page, "auto", "light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await page.emulateMedia({ colorScheme: "dark" });
@@ -64,7 +81,9 @@ test("Auto follows an OS change in an open tab; fixed mode ignores later changes
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
 
-test("persisted Auto resolves the changed OS before the first frame on reload", async ({ page }) => {
+test("persisted Auto resolves the changed OS before the first frame on reload", async ({
+  page,
+}) => {
   await page.emulateMedia({ colorScheme: "light" });
   await page.addInitScript(recordFirstFrame);
   await mockTagCatalog(page);
@@ -78,9 +97,13 @@ test("persisted Auto resolves the changed OS before the first frame on reload", 
   for (const os of ["dark", "light"] as const) {
     await page.emulateMedia({ colorScheme: os });
     await page.reload();
-    await expect.poll(() => page.evaluate(() =>
-      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
-    )).toEqual({ dataTheme: os === "light" ? "light" : null, colorScheme: os });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
+        ),
+      )
+      .toEqual({ dataTheme: os === "light" ? "light" : null, colorScheme: os });
     expect(await page.evaluate(() => localStorage.getItem("spur:theme"))).toBe("auto");
   }
 });
@@ -113,7 +136,9 @@ for (const mode of ["auto", "light", "dark"] as const) {
   }
 }
 
-test("menu aligns labels and marks, fits a 320px viewport, and Escape restores focus", async ({ page }) => {
+test("menu aligns labels and marks, fits a 320px viewport, and Escape restores focus", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 320, height: 640 });
   await prepare(page, "light", "dark");
   const trigger = page.getByRole("button", { name: "Theme" });
@@ -126,10 +151,18 @@ test("menu aligns labels and marks, fits a 320px viewport, and Escape restores f
     const row = node.querySelector('[role="radio"] > span')?.getBoundingClientRect();
     const checkbox = node.querySelector("input")?.getBoundingClientRect();
     const mark = node.querySelector('[role="radio"] > span:nth-child(2)')?.getBoundingClientRect();
-    if (!label || !row || !checkbox || !mark) throw new Error("Theme menu geometry targets missing");
-    return { left: rect.left, right: rect.right, width: rect.width, padding: styles.paddingLeft,
-      labelX: label.x, rowX: row.x, checkboxCenter: checkbox.x + checkbox.width / 2,
-      markCenter: mark.x + mark.width / 2 };
+    if (!label || !row || !checkbox || !mark)
+      throw new Error("Theme menu geometry targets missing");
+    return {
+      left: rect.left,
+      right: rect.right,
+      width: rect.width,
+      padding: styles.paddingLeft,
+      labelX: label.x,
+      rowX: row.x,
+      checkboxCenter: checkbox.x + checkbox.width / 2,
+      markCenter: mark.x + mark.width / 2,
+    };
   });
   expect(geometry.left).toBeGreaterThanOrEqual(0);
   expect(geometry.right).toBeLessThanOrEqual(320);

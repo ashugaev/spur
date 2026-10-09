@@ -22,7 +22,11 @@ describe("ThemeToggle", () => {
   });
 
   function openMenu() {
-    render(<ThemeProvider><ThemeToggle /></ThemeProvider>);
+    render(
+      <ThemeProvider>
+        <ThemeToggle />
+      </ThemeProvider>,
+    );
     const trigger = screen.getByRole("button", { name: "Theme" });
     fireEvent.click(trigger);
     return trigger;

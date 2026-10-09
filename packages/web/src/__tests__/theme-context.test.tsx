@@ -26,8 +26,10 @@ describe("ThemeProvider", () => {
     window.matchMedia = ((query: string) => ({
       matches: query === "(prefers-color-scheme: dark)" && systemDark,
       media: query,
-      addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
-      removeEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) =>
+        listeners.add(listener),
+      removeEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) =>
+        listeners.delete(listener),
     })) as typeof window.matchMedia;
   });
 
@@ -77,8 +79,12 @@ describe("ThemeProvider", () => {
   });
 
   it("treats inaccessible storage as Auto and falls back to dark if media is unavailable", () => {
-    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => { throw new DOMException("blocked", "SecurityError"); });
-    window.matchMedia = (() => { throw new Error("unavailable"); }) as typeof window.matchMedia;
+    vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    window.matchMedia = (() => {
+      throw new Error("unavailable");
+    }) as typeof window.matchMedia;
     const { result } = renderProvider();
     expect(result.current).toMatchObject({ mode: "auto", theme: "dark" });
     expect(document.documentElement.style.colorScheme).toBe("dark");
@@ -98,10 +104,16 @@ describe("ThemeProvider", () => {
   it("syncs another tab's mode without writing it back", () => {
     const write = vi.spyOn(window.localStorage, "setItem");
     const { result } = renderProvider();
-    act(() => window.dispatchEvent(new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "dark" })));
+    act(() =>
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: "dark" }),
+      ),
+    );
     expect(result.current).toMatchObject({ mode: "dark", theme: "dark" });
     setSystemDark(true);
-    act(() => window.dispatchEvent(new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: null })));
+    act(() =>
+      window.dispatchEvent(new StorageEvent("storage", { key: THEME_STORAGE_KEY, newValue: null })),
+    );
     expect(result.current).toMatchObject({ mode: "auto", theme: "dark" });
     expect(write).not.toHaveBeenCalled();
   });

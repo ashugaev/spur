@@ -35,7 +35,10 @@ export function useTheme(): ThemeContextValue {
   return useContext(ThemeContext);
 }
 
-export function normalizeTheme(value: string | null, systemDark: boolean): { mode: ThemeMode; theme: Theme } {
+export function normalizeTheme(
+  value: string | null,
+  systemDark: boolean,
+): { mode: ThemeMode; theme: Theme } {
   if (value === "light" || value === "dark") return { mode: value, theme: value };
   return { mode: "auto", theme: systemDark ? "dark" : "light" };
 }

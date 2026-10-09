@@ -108,7 +108,11 @@ export function ThemeToggle() {
               </span>
             </label>
           </div>
-          <div role="radiogroup" aria-label="Fixed theme" className="col-span-full grid grid-cols-subgrid gap-y-0.5">
+          <div
+            role="radiogroup"
+            aria-label="Fixed theme"
+            className="col-span-full grid grid-cols-subgrid gap-y-0.5"
+          >
             {fixedRow("light", "Light")}
             {fixedRow("dark", "Dark")}
           </div>
