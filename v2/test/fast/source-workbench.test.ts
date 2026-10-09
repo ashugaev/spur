@@ -276,6 +276,15 @@ describe("sourceSessionById", () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
+  it("returns null when the retry finds the session gone", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockRejectedValueOnce(new SessionResourceNotFoundError("gone"));
+    expect(await sourceSessionById({ get }, "demo-1")).toBeNull();
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
   it("rethrows a second snapshot change", async () => {
     const error = lifecycleError("session_lifecycle_snapshot_changed");
     const get = vi.fn().mockRejectedValue(error);

@@ -368,6 +368,21 @@ describe("startConfiguredSources", () => {
     await controller.stop();
   });
 
+  it("forwards the by-id session lookup to source modules", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const getSession = vi.fn().mockResolvedValue(null);
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].getSession).toBe(getSession);
+    await controller.stop();
+  });
+
   it("registers webhook and stops earlier sources after a later start failure", async () => {
     const cronStop = vi.fn();
     cronStartMock.mockResolvedValue({ stop: cronStop });

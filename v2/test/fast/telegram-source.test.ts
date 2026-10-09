@@ -4629,6 +4629,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger,
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5013,6 +5014,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5079,6 +5081,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5182,6 +5185,35 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
     expect(ctx.reply).toHaveBeenCalledTimes(1);
     expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED);
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("refuses to start without a by-id session lookup", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    await expect(
+      telegramSourceModule.start({
+        sourceId: "telegram",
+        projectId: "api",
+        dataDir,
+        config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve(null),
+      }),
+    ).rejects.toThrow("requires getSession");
+  });
+
+  it("sends no notice when a text update fails after the source stopped", async () => {
+    const error = new Error("lookup failed");
+    const controller = new AbortController();
+    const { catchHandler } = await startBound(vi.fn().mockRejectedValue(error), controller.signal);
+    const ctx = telegramContext();
+    controller.abort();
+
+    await catchHandler({ error, ctx });
+
+    expect(ctx.reply).not.toHaveBeenCalled();
   });
 
   it("does not notify a sender that is not allowed", async () => {

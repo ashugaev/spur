@@ -436,7 +436,8 @@ async function findSession(
   deps: SourceStartDeps<TelegramSourceConfig>,
   sessionId: string,
 ): Promise<SourceSessionListItem | null> {
-  return deps.getSession ? deps.getSession(sessionId) : null;
+  if (!deps.getSession) throw new Error("Telegram source requires getSession");
+  return deps.getSession(sessionId);
 }
 
 function sessionLabel(session: SourceSessionListItem): string {
@@ -2261,6 +2262,7 @@ async function handleTelegramVoice(
 async function startTelegramSource(
   deps: SourceStartDeps<TelegramSourceConfig>,
 ): Promise<SourceHandle> {
+  if (!deps.getSession) throw new Error("Telegram source requires getSession");
   const bindings = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
   const lastUpdateId = readTelegramLastUpdateId(deps.dataDir, deps.projectId, deps.sourceId);
   let writeQueue = Promise.resolve();
@@ -2312,6 +2314,7 @@ async function startTelegramSource(
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${redactedErrorText(deps, error)}`,
     );
+    if (isAborted(deps)) return;
     if (typeof error !== "object" || error === null || !("ctx" in error)) return;
     await noticeUndelivered(deps, error.ctx as TelegramTextContext | TelegramCallbackContext);
   });

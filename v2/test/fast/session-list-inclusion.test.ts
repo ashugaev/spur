@@ -28,6 +28,22 @@ describe("isListedSessionView", () => {
       true,
     ],
     [
+      "killed with pending complete",
+      "killed",
+      undefined,
+      operation("complete", "pending"),
+      false,
+      false,
+    ],
+    [
+      "killed with settled restore",
+      "killed",
+      undefined,
+      operation("restore", "succeeded"),
+      false,
+      false,
+    ],
+    [
       "running with pending complete",
       "running",
       undefined,
