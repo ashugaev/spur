@@ -1,4 +1,6 @@
 import { expect, test, vi } from "vitest";
+import { pathToFileURL } from "node:url";
+import type * as GateModule from "../../src/review-gate.js";
 import {
   evaluateSnapshot,
   readGateSnapshot,
@@ -106,6 +108,83 @@ const strictPolicy = {
   ...policy,
   ciJobs: ["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"],
 };
+type GateReader = Pick<typeof GateModule, "GateGitHub" | "readGateSnapshot" | "evaluateSnapshot">;
+function unlistedJob() {
+  return {
+    id: 113418892331,
+    name: "Spur Approval Gate",
+    run_id: 1,
+    run_attempt: 1,
+    status: "completed",
+    conclusion: "failure",
+  };
+}
+test.each(["insert", "remove", "id", "status", "conclusion"])(
+  "approved evidence ignores valid unlisted job %s",
+  (mode) => {
+    const before = fixture();
+    if (mode !== "insert") before.jobs.push(unlistedJob());
+    const after = structuredClone(before);
+    if (mode === "insert") after.jobs.push(unlistedJob());
+    else if (mode === "remove") after.jobs.pop();
+    else {
+      const extra = after.jobs.at(-1);
+      if (!extra) throw new Error("missing fixture job");
+      if (mode === "id") extra.id = 99;
+      if (mode === "status") extra.status = "in_progress";
+      if (mode === "conclusion") extra.conclusion = "success";
+    }
+    const original = structuredClone(after);
+    const initial = evaluateSnapshot(policy, 5, before);
+    expect(initial.status).toBe("APPROVED");
+    expect(evaluateSnapshot(policy, 5, after)).toEqual(initial);
+    expect(after).toEqual(original);
+  },
+);
+test.each(["required", "unlisted"])("%s jobs require every row identity field", (mode) => {
+  const faults: [string, unknown][] = [
+    ["name", undefined],
+    ["name", ""],
+    ["name", 7],
+    ...["run_id", "run_attempt"].flatMap((field) =>
+      [undefined, null, 1.5, true, 0, -1, 2].map((value): [string, unknown] => [field, value]),
+    ),
+  ];
+  for (const [field, value] of faults) {
+    const snapshot = fixture();
+    if (mode === "unlisted") snapshot.jobs.push(unlistedJob());
+    const job = mode === "required" ? snapshot.jobs[0] : snapshot.jobs.at(-1);
+    if (!job) throw new Error("missing fixture job");
+    if (value === undefined) {
+      if (field === "name") delete job.name;
+      if (field === "run_id") delete job.run_id;
+      if (field === "run_attempt") delete job.run_attempt;
+    } else job[field] = value;
+    expect(evaluateSnapshot(policy, 5, snapshot).status, `${field}:${String(value)}`).toBe(
+      "BLOCKED",
+    );
+  }
+});
+test.each(["success", "failure", "in_progress"])("duplicate required %s row blocks", (status) => {
+  const snapshot = fixture();
+  snapshot.jobs.push({
+    ...snapshot.jobs[0],
+    status: status === "in_progress" ? status : "completed",
+    conclusion: status,
+  });
+  snapshot.jobs.push(unlistedJob());
+  expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("BLOCKED");
+});
+test("a configured Gate name remains required and selected run failure blocks", () => {
+  const snapshot = fixture();
+  snapshot.jobs.push(unlistedJob());
+  expect(
+    evaluateSnapshot({ ...policy, ciJobs: [...policy.ciJobs, unlistedJob().name] }, 5, snapshot)
+      .status,
+  ).toBe("BLOCKED");
+  snapshot.runs[0] = { ...snapshot.runs[0], conclusion: "failure" };
+  expect(evaluateSnapshot(policy, 5, snapshot).reason).toBe("ci-not-success");
+});
 const equivalentChanges = [
   "pr-order",
   "mergeable-state",
@@ -421,14 +500,16 @@ async function readCiFixture(
     attemptMismatch?: boolean;
     runMismatch?: boolean;
     jobFault?: string;
+    extraJob?: Record<string, unknown>;
     unavailableCommitStatus?: 403 | 404;
     historicalCommit?: Record<string, unknown>;
     associationMismatch?: boolean;
     threadFault?: "graphql" | "node" | "cursor";
   } = {},
+  gate: GateReader = { GateGitHub, readGateSnapshot, evaluateSnapshot },
 ) {
   const paths: string[] = [];
-  const api = new GateGitHub("fixture", async (url) => {
+  const api = new gate.GateGitHub("fixture", async (url) => {
     const path = new URL(String(url)).pathname;
     paths.push(path);
     if (path === "/graphql")
@@ -466,7 +547,7 @@ async function readCiFixture(
       const run = snapshot.runs.find((value) => value.id === Number(match[1]));
       if (!run) throw new Error("unknown run");
       if (match[3]) {
-        const jobs = strictPolicy.ciJobs.map((name) => ({
+        const jobs: GateSnapshot["jobs"] = strictPolicy.ciJobs.map((name) => ({
           name,
           run_id: run.id,
           run_attempt: Number(match[2]),
@@ -474,6 +555,7 @@ async function readCiFixture(
           conclusion: options.jobFault ?? "success",
         }));
         if (options.jobFault === "missing") jobs.pop();
+        if (options.extraJob) jobs.push(options.extraJob);
         return Response.json({ jobs });
       }
       return Response.json(
@@ -488,9 +570,32 @@ async function readCiFixture(
     }
     throw new Error("unexpected CI fixture API");
   });
-  const fresh = await readGateSnapshot(api, strictPolicy, 5);
-  return { result: evaluateSnapshot(strictPolicy, 5, fresh), paths };
+  const fresh = await gate.readGateSnapshot(api, strictPolicy, 5);
+  return { result: gate.evaluateSnapshot(strictPolicy, 5, fresh), paths, snapshot: fresh };
 }
+test.each(["source", "built"])(
+  "%s HTTP reader retains five raw rows and approves four required jobs",
+  async (mode) => {
+    const gate: GateReader =
+      mode === "built"
+        ? await import(
+            /* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate.js`).href
+          )
+        : { GateGitHub, readGateSnapshot, evaluateSnapshot };
+    const baseline = await readCiFixture(fixture(), {}, gate);
+    const extra = await readCiFixture(fixture(), { extraJob: unlistedJob() }, gate);
+    expect(extra.snapshot.jobs).toHaveLength(5);
+    expect(extra.result.status).toBe("APPROVED");
+    expect(extra.result).toEqual(baseline.result);
+    expect(extra.paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1/jobs");
+    const corrupt = await readCiFixture(
+      fixture(),
+      { extraJob: { ...unlistedJob(), run_attempt: null } },
+      gate,
+    );
+    expect(corrupt.result.status).toBe("BLOCKED");
+  },
+);
 test.each(["association", "graphql", "node", "cursor"] as const)(
   "reader %s errors cannot be hidden by evidence projection",
   async (mode) => {
@@ -763,6 +868,8 @@ test.each([
   ...equivalentChanges,
   "new-successful-attempt",
   "new-successful-run",
+  "unlisted-churn",
+  "corrupt-unlisted",
   "moved",
   "read-denied",
   "abort-read",
@@ -772,6 +879,7 @@ test.each([
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
     const snapshot = fixture();
+    if (mode === "unlisted-churn" || mode === "corrupt-unlisted") snapshot.jobs.push(unlistedJob());
     if (
       mode === "noncandidate-delete" ||
       mode === "noncandidate-metadata" ||
@@ -827,6 +935,12 @@ test.each([
         reads++;
         if (reads === 3) {
           changeEquivalent(snapshot, mode);
+          if (mode === "unlisted-churn") snapshot.jobs.pop();
+          if (mode === "corrupt-unlisted") {
+            const extra = snapshot.jobs.at(-1);
+            if (!extra) throw new Error("missing fixture job");
+            extra.run_attempt = null;
+          }
           if (mode === "new-successful-attempt") {
             snapshot.runs[0] = { ...snapshot.runs[0], run_attempt: 2 };
             snapshot.jobs.forEach((job) => {
@@ -891,7 +1005,9 @@ test.each([
         else await produceGates(api, policy);
         expect(writes[0]?.status).toBe("in_progress");
         expect(writes.at(-1)?.conclusion).toBe(
-          mode === "clean" || equivalentChanges.some((change) => change === mode)
+          mode === "clean" ||
+            mode === "unlisted-churn" ||
+            equivalentChanges.some((change) => change === mode)
             ? "success"
             : "failure",
         );
