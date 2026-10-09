@@ -87,6 +87,7 @@ describe("startConfiguredSources", () => {
       }) as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
     const deps = cronStartMock.mock.calls[0]?.[0] as {
       resolveWebBaseUrl(): Promise<string | null>;
@@ -111,6 +112,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
     const deps = cronStartMock.mock.calls[0]?.[0] as {
       resolveWebBaseUrl(): Promise<string | null>;
@@ -134,6 +136,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     expect(cronStartMock).toHaveBeenCalledTimes(1);
@@ -165,6 +168,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus,
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
     const startDeps = cronStartMock.mock.calls[0]?.[0] as
       | { emit(name: string, data?: unknown): void }
@@ -203,6 +207,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     expect(cronStartMock).not.toHaveBeenCalled();
@@ -235,6 +240,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     expect(jiraStartMock).not.toHaveBeenCalled();
@@ -255,6 +261,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     expect(jiraStartMock).toHaveBeenCalledTimes(1);
@@ -279,6 +286,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     expect(cronStartMock).toHaveBeenCalledTimes(1);
@@ -305,6 +313,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
       listProjects,
     });
 
@@ -328,6 +337,7 @@ describe("startConfiguredSources", () => {
       config: config as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     const startDeps = cronStartMock.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -351,9 +361,25 @@ describe("startConfiguredSources", () => {
       }) as never,
       bus: new EventBus(),
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
       workbench,
     });
     expect(cronStartMock.mock.calls[0]?.[0].workbench).toBe(workbench);
+    await controller.stop();
+  });
+
+  it("forwards the by-id session lookup to source modules", async () => {
+    const { startConfiguredSources } = await loadStartConfiguredSources();
+    const getSession = vi.fn().mockResolvedValue(null);
+    const controller = await startConfiguredSources({
+      config: buildConfig(tmpDir, {
+        api: { path: tmpDir, sources: { nightly: { type: "cron" } } },
+      }) as never,
+      bus: new EventBus(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      getSession,
+    });
+    expect(cronStartMock.mock.calls[0]?.[0].getSession).toBe(getSession);
     await controller.stop();
   });
 
@@ -377,6 +403,7 @@ describe("startConfiguredSources", () => {
         config: config as never,
         bus: new EventBus(),
         listSessions: vi.fn().mockResolvedValue([]),
+        getSession: vi.fn().mockResolvedValue(null),
       }),
     ).rejects.toThrow("bind failed");
 

@@ -29,6 +29,7 @@ interface StartConfiguredSourcesDeps {
   bus: EventBus;
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
+  getSession(sessionId: string): Promise<SourceSessionListItem | null>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   listProjects?(): Promise<SourceProjectListItem[]>;
   workbench?: SourceWorkbench;
@@ -134,6 +135,7 @@ export async function startConfiguredSources(
           config: source,
           deferInitialSync: true,
           listSessions: deps.listSessions,
+          getSession: deps.getSession,
           ...(deps.workbench ? { workbench: deps.workbench } : {}),
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),

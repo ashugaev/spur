@@ -152,6 +152,7 @@ async function startSource(
   spawnSession = vi.fn(),
   overrides: {
     listSessions?: Mock<() => Promise<SourceSessionListItem[]>>;
+    getSession?: Mock<(sessionId: string) => Promise<SourceSessionListItem | null>>;
     // `null` (as opposed to the default `undefined`) omits `listProjects`
     // from the deps passed to `telegramSourceModule.start` entirely, to
     // exercise the "dep not supplied" path.
@@ -173,6 +174,14 @@ async function startSource(
       { id: "api-2", project: "api", agent: "claude", state: "working" },
       { id: "web-1", project: "web", agent: "cursor", state: "waiting" },
     ] as SourceSessionListItem[]);
+  const getSession =
+    overrides.getSession ??
+    vi.fn(
+      async (sessionId: string): Promise<SourceSessionListItem | null> =>
+        ((await listSessions()) as SourceSessionListItem[]).find(
+          (entry) => entry.id === sessionId,
+        ) ?? null,
+    );
   const listProjects =
     overrides.listProjects === null
       ? undefined
@@ -206,6 +215,7 @@ async function startSource(
     signal: overrides.signal ?? new AbortController().signal,
     logger,
     listSessions,
+    getSession,
     ...(listProjects ? { listProjects } : {}),
     ...(overrides.spawnSession === null ? {} : { spawnSession }),
     ...(overrides.workbench ? { workbench: overrides.workbench } : {}),
@@ -4619,6 +4629,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger,
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5003,6 +5014,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5069,6 +5081,7 @@ describe("telegramSourceModule voice notes", () => {
       signal: controller.signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       listSessions,
+      getSession: async () => (await listSessions())[0],
       spawnSession,
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
@@ -5101,4 +5114,216 @@ describe("telegramSourceModule voice notes", () => {
     expect(emit).not.toHaveBeenCalled();
     expect(spawnSession).not.toHaveBeenCalled();
   });
+});
+
+describe("telegramSourceModule inbound delivery under lookup failure", () => {
+  const UNDELIVERED = "Message not delivered. Send it again.";
+  const bound = { id: "api-1", project: "api", agent: "codex", state: "waiting" } as const;
+
+  beforeEach(() => {
+    botInstances.splice(0);
+    runMock.mockReset();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function startBound(
+    getSession: Mock<(id: string) => Promise<SourceSessionListItem | null>>,
+    signal?: AbortSignal,
+  ) {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    writeTelegramBindings(dataDir, "api", "telegram", [
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+    ]);
+    const started = await startSource(dataDir, vi.fn(), vi.fn(), {
+      getSession,
+      ...(signal ? { signal } : {}),
+    });
+    if (!started.bot) throw new Error("missing bot");
+    const catchHandler = started.bot.catch.mock.calls[0]?.[0] as (error: unknown) => Promise<void>;
+    return { ...started, bot: started.bot, catchHandler, dataDir };
+  }
+
+  it("delivers a topic message while the fleet list throws", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    writeTelegramBindings(dataDir, "api", "telegram", [
+      { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+    ]);
+    const listSessions = vi.fn().mockRejectedValue(new Error("session_lifecycle_snapshot_changed"));
+    const getSession = vi.fn().mockResolvedValue(bound);
+    const { bot, emit } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      listSessions,
+      getSession,
+    });
+    if (!bot) throw new Error("missing bot");
+    const ctx = telegramContext();
+
+    await bot.emitText(ctx);
+
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith(
+      "telegram:message",
+      expect.objectContaining({ sessionId: "api-1", messageThreadId: 22 }),
+    );
+    expect(listSessions).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
+  });
+
+  it("replies once with the notice when a text update fails", async () => {
+    const error = new Error("lookup failed");
+    const { bot, emit, catchHandler } = await startBound(vi.fn().mockRejectedValue(error));
+    const ctx = telegramContext();
+
+    await expect(bot.emitText(ctx)).rejects.toBe(error);
+    await catchHandler({ error, ctx });
+
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("refuses to start without a by-id session lookup", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    await expect(
+      telegramSourceModule.start({
+        sourceId: "telegram",
+        projectId: "api",
+        dataDir,
+        config: { type: "telegram", runOnStart: false, token: "token-123", allowedUsers: [123] },
+        emit: vi.fn(),
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve(null),
+      }),
+    ).rejects.toThrow("requires getSession");
+  });
+
+  it("sends no notice when a text update fails after the source stopped", async () => {
+    const error = new Error("lookup failed");
+    const controller = new AbortController();
+    const { catchHandler } = await startBound(vi.fn().mockRejectedValue(error), controller.signal);
+    const ctx = telegramContext();
+    controller.abort();
+
+    await catchHandler({ error, ctx });
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it("does not notify a sender that is not allowed", async () => {
+    const error = new Error("lookup failed");
+    const { bot, catchHandler } = await startBound(vi.fn().mockRejectedValue(error));
+    const ctx = telegramContext({ from: { id: 999 } });
+
+    await bot.emitText(ctx);
+    await catchHandler({ error, ctx });
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it("replies once and keeps the offer clickable when a choice callback fails", async () => {
+    const error = new Error("lookup failed");
+    const { bot, catchHandler, dataDir } = await startBound(vi.fn().mockRejectedValue(error));
+    writeTelegramOffer(dataDir, "api", "telegram", {
+      sessionId: "api-1",
+      chatId: -1001,
+      choices: [
+        {
+          token: "tok0",
+          offerId: "offer-1",
+          sessionId: "api-1",
+          chatId: -1001,
+          messageThreadId: 22,
+          text: "Yes",
+          value: "yes",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const ctx = {
+      callbackQuery: {
+        data: "spur_choice:tok0",
+        message: {
+          message_id: 90,
+          message_thread_id: 22,
+          text: "Deploy?",
+          is_topic_message: true,
+          chat: { id: -1001 },
+        },
+        from: { id: 123, username: "alek" },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText: vi.fn().mockResolvedValue(undefined),
+      reply: vi.fn().mockResolvedValue({}),
+    };
+
+    await expect(bot.emitCallback(ctx)).rejects.toBe(error);
+    await catchHandler({ error, ctx });
+
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED);
+    expect(findTelegramChoice(dataDir, "api", "telegram", "tok0", -1001)).not.toBeNull();
+  });
+
+  it("replies once when a detached voice route fails", async () => {
+    const getSession = vi.fn().mockResolvedValue(bound);
+    const { bot, emit } = await startBound(getSession);
+    getSession.mockRejectedValue(new Error("lookup failed"));
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    const ctx = telegramVoiceContext();
+
+    await bot.emitVoice(ctx);
+
+    await vi.waitFor(() => expect(ctx.reply).toHaveBeenCalledWith(UNDELIVERED));
+    expect(ctx.reply.mock.calls.filter(([text]) => text === UNDELIVERED)).toHaveLength(1);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("sends no notice when a voice route fails after the source stopped", async () => {
+    const controller = new AbortController();
+    const getSession = vi.fn().mockResolvedValue(bound);
+    const { bot, logger } = await startBound(getSession, controller.signal);
+    getSession.mockImplementation(async () => {
+      controller.abort();
+      throw new Error("lookup failed");
+    });
+    vi.stubGlobal("fetch", mockTranscribeFetch("fix the sidecar"));
+    const ctx = telegramVoiceContext();
+
+    await bot.emitVoice(ctx);
+
+    await vi.waitFor(() =>
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram voice failed")),
+    );
+    expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
+  });
+
+  it("logs and does not retry when the notice itself fails", async () => {
+    const error = new Error("lookup failed");
+    const { catchHandler, logger } = await startBound(vi.fn());
+    const ctx = telegramContext();
+    ctx.reply.mockRejectedValue(new Error("send failed"));
+
+    await expect(catchHandler({ error, ctx })).resolves.toBeUndefined();
+
+    expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("undelivered notice failed"));
+  });
+
+  it.each([["boom"], [null], [{ error: new Error("x") }]])(
+    "logs without replying when the failure carries no context: %j",
+    async (error) => {
+      const { catchHandler, logger } = await startBound(vi.fn());
+
+      await expect(catchHandler(error)).resolves.toBeUndefined();
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("telegram update failed"));
+    },
+  );
 });

@@ -66,6 +66,7 @@ const PROJECTS_MENU_CALLBACK = "spur_projects";
 const PENDING_SPAWN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_SPAWNS = 100;
 const SPAWN_EXPIRED_TEXT = "Spawn expired. Run /spawn again.";
+const UNDELIVERED_TEXT = "Message not delivered. Send it again.";
 
 const TELEGRAM_COMMANDS = [
   { command: "start", description: "Show Spur bot help" },
@@ -385,6 +386,25 @@ function isAllowed(
   return true;
 }
 
+/** Tell an allowed sender their update failed; never rethrows, never retries. */
+async function noticeUndelivered(
+  deps: SourceStartDeps<TelegramSourceConfig>,
+  ctx: TelegramTextContext | TelegramCallbackContext,
+): Promise<void> {
+  const message = "message" in ctx ? ctx.message : undefined;
+  const callback = "callbackQuery" in ctx ? ctx.callbackQuery : undefined;
+  const chat = message?.chat ?? callback?.message?.chat;
+  const from = message?.from ?? callback?.from;
+  if (!chat || !isAllowed(deps.config, chat.id, from)) return;
+  try {
+    await ctx.reply?.(UNDELIVERED_TEXT);
+  } catch (error) {
+    deps.logger.warn?.(
+      `[source:${deps.projectId}/${deps.sourceId}] telegram undelivered notice failed: ${redactedErrorText(deps, error)}`,
+    );
+  }
+}
+
 function eventData(
   message: TelegramTextMessage,
   sessionId: string,
@@ -416,7 +436,8 @@ async function findSession(
   deps: SourceStartDeps<TelegramSourceConfig>,
   sessionId: string,
 ): Promise<SourceSessionListItem | null> {
-  return (await allSessions(deps)).find((entry) => entry.id === sessionId) ?? null;
+  if (!deps.getSession) throw new Error("Telegram source requires getSession");
+  return deps.getSession(sessionId);
 }
 
 function sessionLabel(session: SourceSessionListItem): string {
@@ -2227,16 +2248,21 @@ async function handleTelegramVoice(
     );
   }
 
-  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch((error: unknown) => {
-    deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
-    );
-  });
+  void transcribeAndRoute(runtime, ctx, message, from, statusMessageId).catch(
+    async (error: unknown) => {
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] telegram voice failed: ${redactedErrorText(deps, error)}`,
+      );
+      if (isAborted(deps)) return;
+      await noticeUndelivered(deps, ctx);
+    },
+  );
 }
 
 async function startTelegramSource(
   deps: SourceStartDeps<TelegramSourceConfig>,
 ): Promise<SourceHandle> {
+  if (!deps.getSession) throw new Error("Telegram source requires getSession");
   const bindings = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId);
   const lastUpdateId = readTelegramLastUpdateId(deps.dataDir, deps.projectId, deps.sourceId);
   let writeQueue = Promise.resolve();
@@ -2284,10 +2310,13 @@ async function startTelegramSource(
     .setMyCommands(TELEGRAM_COMMANDS)
     .then(() => bot.api.setChatMenuButton({ menu_button: { type: "commands" } }))
     .catch((error: unknown) => logSetupError(deps, error));
-  bot.catch((error: unknown) => {
+  bot.catch(async (error: unknown) => {
     deps.logger.warn?.(
       `[source:${deps.projectId}/${deps.sourceId}] telegram update failed: ${redactedErrorText(deps, error)}`,
     );
+    if (isAborted(deps)) return;
+    if (typeof error !== "object" || error === null || !("ctx" in error)) return;
+    await noticeUndelivered(deps, error.ctx as TelegramTextContext | TelegramCallbackContext);
   });
   bot.on("message:text", async (ctx: Context) => {
     await handleTelegramText(ctx as TelegramTextContext, runtime);

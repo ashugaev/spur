@@ -108,6 +108,7 @@ projects:
       config,
       bus,
       listSessions: vi.fn().mockResolvedValue([]),
+      getSession: vi.fn().mockResolvedValue(null),
     });
 
     try {
