@@ -5,23 +5,35 @@ import {
 
 type FirstFrame = { dataTheme: string | null; colorScheme: string };
 
+function recordFirstFrame() {
+  requestAnimationFrame(() => {
+    (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame = {
+      dataTheme: document.documentElement.getAttribute("data-theme"),
+      colorScheme: document.documentElement.style.colorScheme,
+    };
+  });
+}
+
 async function prepare(page: Parameters<typeof mockSessions>[0], stored: string | null, os: "light" | "dark") {
   await page.emulateMedia({ colorScheme: os });
   await page.addInitScript((value) => {
     if (value === null) localStorage.removeItem("spur:theme");
     else localStorage.setItem("spur:theme", value);
-    const capture = () => ({
-      dataTheme: document.documentElement.getAttribute("data-theme"),
-      colorScheme: document.documentElement.style.colorScheme,
-    });
-    requestAnimationFrame(() => {
-      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame = capture();
-    });
   }, stored);
+  await page.addInitScript(recordFirstFrame);
   await mockTagCatalog(page);
   await mockSessions(page, []);
   await page.goto("/");
 }
+
+test("served HTML runs the theme bootstrap in head before hydration", async ({ page }) => {
+  const response = await page.request.get("/");
+  const html = await response.text();
+  const bootstrap = html.indexOf('localStorage.getItem("spur:theme")');
+  const headClose = html.indexOf("</head>");
+  expect(bootstrap).toBeGreaterThan(-1);
+  expect(headClose).toBeGreaterThan(bootstrap);
+});
 
 for (const [stored, os, expected] of [
   [null, "light", "light"],
@@ -50,6 +62,27 @@ test("Auto follows an OS change in an open tab; fixed mode ignores later changes
   await page.emulateMedia({ colorScheme: "light" });
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+});
+
+test("persisted Auto resolves the changed OS before the first frame on reload", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.addInitScript(recordFirstFrame);
+  await mockTagCatalog(page);
+  await mockSessions(page, []);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Theme" }).click();
+  await page.getByRole("radio", { name: "Dark" }).click();
+  await page.getByRole("checkbox", { name: "Auto theme" }).check();
+  expect(await page.evaluate(() => localStorage.getItem("spur:theme"))).toBe("auto");
+
+  for (const os of ["dark", "light"] as const) {
+    await page.emulateMedia({ colorScheme: os });
+    await page.reload();
+    await expect.poll(() => page.evaluate(() =>
+      (window as typeof window & { firstThemeFrame?: FirstFrame }).firstThemeFrame,
+    )).toEqual({ dataTheme: os === "light" ? "light" : null, colorScheme: os });
+    expect(await page.evaluate(() => localStorage.getItem("spur:theme"))).toBe("auto");
+  }
 });
 
 test("stored Light and the project filter survive reload", async ({ page }) => {
@@ -125,4 +158,34 @@ test("keyboard reaches Auto, Light, and Dark in order", async ({ page }) => {
   await expect(page.getByRole("radio", { name: "Dark" })).toBeFocused();
   await page.keyboard.press("Space");
   await expect(page.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
+});
+
+test("hover opens, click pins, and focus leaving the menu dismisses it", async ({ page }) => {
+  await prepare(page, "auto", "dark");
+  const trigger = page.getByRole("button", { name: "Theme" });
+  const menu = page.getByRole("group", { name: "Theme" });
+  await trigger.hover();
+  await expect(menu).toBeVisible();
+  await page.mouse.move(10, 10);
+  await expect(menu).toBeHidden();
+
+  await trigger.click();
+  await page.mouse.move(10, 10);
+  await expect(menu).toBeVisible();
+  await page.getByRole("checkbox", { name: "Auto theme" }).focus();
+  await page.getByRole("button", { name: /^Project filter:/ }).focus();
+  await expect(menu).toBeHidden();
+});
+
+test.describe("touch theme menu", () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test("tap outside dismisses the pinned menu", async ({ page }) => {
+    await prepare(page, "auto", "dark");
+    await page.getByRole("button", { name: "Theme" }).tap();
+    const menu = page.getByRole("group", { name: "Theme" });
+    await expect(menu).toBeVisible();
+    await page.touchscreen.tap(10, 10);
+    await expect(menu).toBeHidden();
+  });
 });
