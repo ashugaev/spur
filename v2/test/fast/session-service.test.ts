@@ -52564,6 +52564,181 @@ describe("SessionService", () => {
         expect(internals.sessionLifecycleLocks.has("api-1")).toBe(false);
       });
 
+      async function setupParkingReadRace() {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          staleAfterMinutes: 60,
+          projects: {
+            api: {
+              ...baseConfig().projects.api,
+              sidecars: { proxy: { command: "pnpm proxy" } },
+            },
+          },
+        });
+        mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+        const sessions = createSessionStore(staleParkableSession({ sidecarNames: ["proxy"] }));
+        listSessionsMock.mockReturnValue([]);
+        sidecarTmuxAliveMock.mockResolvedValue(true);
+        let paneAlive = true;
+        tmuxSessionExistsMock.mockImplementation(async () => paneAlive);
+        isProcessRunningInTmuxMock.mockImplementation(async () => paneAlive);
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") paneAlive = false;
+        });
+        createTmuxSessionMock.mockImplementation(async () => {
+          paneAlive = true;
+        });
+        const service = await createDisposedSessionService();
+        const internals = staleInternals(service);
+        const view = await service.get("api-1");
+        let releaseTeardown!: () => void;
+        const teardownBarrier = new Promise<void>((resolve) => {
+          releaseTeardown = resolve;
+        });
+        let teardownStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          teardownStarted = resolve;
+        });
+        const teardown = vi
+          .spyOn(internals, "teardownSessionSidecars")
+          .mockImplementationOnce(async () => {
+            teardownStarted();
+            await teardownBarrier;
+          });
+        return { service, internals, sessions, view, teardown, started, releaseTeardown };
+      }
+
+      it("preserves stale parking under concurrent get calls", async () => {
+        const { service, internals, sessions, view, teardown, started, releaseTeardown } =
+          await setupParkingReadRace();
+        const park = internals.parkStaleSession(view);
+        await started;
+        // Expire runtime/classification caches while the intentionally dead
+        // agent is still awaiting sidecar teardown.
+        await vi.advanceTimersByTimeAsync(5_000);
+        const reads = await Promise.all([service.get("api-1"), service.get("api-1")]);
+        const { dropsQueuedSend } = await import("../../src/triggers.js");
+        for (const read of reads) {
+          expect(read).toMatchObject({ status: "running", state: "stopped", runtimeAlive: false });
+          expect(dropsQueuedSend(read)).toBe(false);
+        }
+
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(teardown).toHaveBeenCalledTimes(1);
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "session.runtime.stopped",
+        );
+        releaseTeardown();
+        await park;
+
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+        });
+        expect((await service.get("api-1")).state).toBe("stale");
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "session.stale.park_aborted",
+        );
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+          "session.runtime.errored",
+        );
+        // Successful parking must also release its exemption: a subsequent
+        // wake followed by a genuine runtime loss still reconciles normally.
+        sidecarTmuxAliveMock.mockResolvedValue(false);
+        await service.send("api-1", { message: "wake", queue: false });
+        expect(sessions.get("api-1")?.status).toBe("running");
+        await killTmuxSessionMock("api-1");
+        await vi.advanceTimersByTimeAsync(5_000);
+        const genuinelyStopped = await service.get("api-1");
+        expect(dropsQueuedSend(genuinelyStopped)).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("stopped");
+        expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+          "session.runtime.stopped",
+        );
+      });
+
+      it("rechecks parking intent after unexpected-stop confirmation", async () => {
+        const { service, internals, sessions, view, teardown, started, releaseTeardown } =
+          await setupParkingReadRace();
+        const absent = {
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          probeUnresponsive: false,
+        };
+        let releaseConfirmation!: () => void;
+        const confirmationBarrier = new Promise<void>((resolve) => {
+          releaseConfirmation = resolve;
+        });
+        let confirmationStarted!: () => void;
+        const confirming = new Promise<void>((resolve) => {
+          confirmationStarted = resolve;
+        });
+        vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+          .mockResolvedValueOnce(absent)
+          .mockImplementationOnce(async () => {
+            confirmationStarted();
+            await confirmationBarrier;
+            return absent;
+          });
+        const read = service.get("api-1");
+        await confirming;
+        const park = internals.parkStaleSession(view);
+        await started;
+        releaseConfirmation();
+        await read;
+
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(teardown).toHaveBeenCalledTimes(1);
+        releaseTeardown();
+        await park;
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+        });
+        expect((await service.get("api-1")).state).toBe("stale");
+      });
+
+      it.each(["throw", "abort"] as const)(
+        "clears parking intent before later unexpected-stop reconciliation after %s",
+        async (outcome) => {
+          loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+          mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
+          const sessions = createSessionStore(staleParkableSession());
+          listSessionsMock.mockReturnValue([]);
+          const service = await createDisposedSessionService();
+          const internals = staleInternals(service);
+          const view = await service.get("api-1");
+          const teardown = vi.spyOn(internals, "teardownSessionSidecars").mockResolvedValue();
+          if (outcome === "throw") {
+            killTmuxSessionMock.mockRejectedValueOnce(new Error("kill failed"));
+            await expect(internals.parkStaleSession(view)).rejects.toThrow("kill failed");
+          } else {
+            // The surviving process makes parking abandon its final commit.
+            await internals.parkStaleSession(view);
+            expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+              "session.stale.park_aborted",
+            );
+          }
+          expect(sessions.get("api-1")?.status).toBe("running");
+          teardown.mockClear();
+          tmuxSessionExistsMock.mockResolvedValue(false);
+          isProcessRunningInTmuxMock.mockResolvedValue(false);
+          await vi.advanceTimersByTimeAsync(5_000);
+          await service.get("api-1");
+
+          expect(sessions.get("api-1")?.status).toBe("stopped");
+          expect(sessions.get("api-1")).not.toHaveProperty("stopReason");
+          expect(teardown).toHaveBeenCalledTimes(1);
+          expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+            "session.runtime.stopped",
+          );
+        },
+      );
+
       it("serializes park-first teardown before wake recovery and delivery", async () => {
         loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
         mockClaudeJsonlState("waiting", { lastMtimeMs: STALE_PARK_ACTIVITY_MS });
