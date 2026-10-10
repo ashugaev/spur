@@ -8,6 +8,7 @@ import { EventBus } from "../../src/event-bus.js";
 import { AutoPingService } from "../../src/auto-ping.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { _resetGhPathCacheForTests } from "../../src/gh.js";
+import { readGitHubSourceSnapshot } from "../../src/metadata.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers as startTriggerController } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
@@ -871,6 +872,145 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         abortController.abort();
         handle.stop();
         await controller.stop();
+      }
+    });
+  });
+
+  it("suppresses foreign same-name fork fixes and emits owned fixes through an isolated source poll", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-fork-owner-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    await execFileAsync(
+      "git",
+      ["config", "remote.upstream.pushurl", "https://github.com/owned/api.git"],
+      { cwd: context.repoDir },
+    );
+    const configPath = await context.writeConfig(
+      "github-fork-owner.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 250
+        runOnStart: false
+    triggers: {}
+`,
+      ),
+    );
+    const branch = "feature-runtime-fork-owner";
+    const fakePrState = (headRepository: string) => ({
+      prsByBranch: {
+        [branch]: {
+          number: 42,
+          title: "Check fork ownership",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          headRefName: branch,
+          headRepository,
+          reviewDecision: "CHANGES_REQUESTED",
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        },
+      },
+      checksByPr: { "42": [{ name: "fork check", state: "FAILURE" }] },
+      commentsByPr: {
+        "42": [{ id: 7001, body: "Reviewer feedback", user: { login: "reviewer" } }],
+      },
+    });
+    await context.writeGhState(fakePrState("foreign/api"));
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      currentService = service;
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch,
+        prompt: "initial fork ownership runtime prompt",
+      });
+      const sessionPath = join(context.dataDir, "sessions", "api", `${session.id}.json`);
+      await pollUntil(
+        async () => JSON.parse(readFileSync(sessionPath, "utf8")) as { pr?: { number?: number } },
+        { timeoutMs: 20_000, accept: (value) => value.pr?.number === 42 },
+      );
+      const { stdout: pushRef } = await execFileAsync(
+        "git",
+        ["for-each-ref", "--format=%(refname)\t%(push:remotename)", `refs/heads/${branch}`],
+        { cwd: session.worktreePath },
+      );
+      expect(pushRef.trim()).toBe(`refs/heads/${branch}\tupstream`);
+      const { stdout: pushUrl } = await execFileAsync(
+        "git",
+        ["remote", "get-url", "--push", "--all", "upstream"],
+        { cwd: session.worktreePath },
+      );
+      expect(pushUrl.trim()).toBe("https://github.com/owned/api.git");
+
+      const events: Array<{ name: string; data?: unknown }> = [];
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: {
+          type: "github",
+          intervalMs: 250,
+          runOnStart: false,
+          emitExisting: false,
+        },
+        emit(name, data) {
+          events.push({ name, data });
+        },
+        signal: abortController.signal,
+        logger: { warn: () => {} },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      try {
+        const snapshot = () =>
+          readGitHubSourceSnapshot(context.dataDir, "api", "pr-watch", session.id);
+        const foreign = await pollUntil(async () => snapshot(), {
+          timeoutMs: 20_000,
+          accept: (value) => value?.signals.has("comment:7001") === true,
+        });
+        if (!foreign) throw new Error("missing foreign PR snapshot");
+        expect(foreign.prNumber).toBe(42);
+        for (const key of ["changes_requested", "ci_failed", "merge_conflict"]) {
+          expect(foreign.signals.has(key), key).toBe(false);
+        }
+        expect(
+          events.some((event) =>
+            ["github:changes_requested", "github:ci_failed", "github:merge_conflict"].includes(
+              event.name,
+            ),
+          ),
+        ).toBe(false);
+
+        await context.writeGhState(fakePrState("owned/api"));
+        const owned = await pollUntil(async () => snapshot(), {
+          timeoutMs: 20_000,
+          accept: (value) =>
+            value !== null &&
+            ["changes_requested", "ci_failed", "merge_conflict"].every((key) =>
+              value.signals.has(key),
+            ),
+        });
+        if (!owned) throw new Error("missing owned PR snapshot");
+        expect(owned.signals.has("comment:7001")).toBe(true);
+        await pollUntil(async () => events.map((event) => event.name), {
+          timeoutMs: 10_000,
+          accept: (names) =>
+            ["github:changes_requested", "github:ci_failed", "github:merge_conflict"].every(
+              (name) => names.includes(name),
+            ),
+        });
+      } finally {
+        abortController.abort();
+        handle.stop();
       }
     });
   });
