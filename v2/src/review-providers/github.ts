@@ -14,12 +14,13 @@ import {
 import {
   claimPollPrLookup,
   gqlErrorsByAlias,
+  parseRepoSlugFromRemoteUrl,
   resolvePrLookupRepo,
   type PollPrLookupClaim,
   type PrLookupOutcome,
 } from "../pr-lookup.js";
 import { PR_LOOKUP_LIVE_CAP_MS, type PrRepoSlug } from "../pr-lookup-cache.js";
-import { readCurrentBranch } from "../workspace.js";
+import { readBranchPushUrl, readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
   GitHubPrSummary,
@@ -438,7 +439,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName author{login} reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
@@ -938,6 +939,8 @@ function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
   node: Record<string, unknown>,
+  expectedHead: PrRepoSlug | null,
+  prHost: string,
   dataDir: string,
   projectId: string,
   sourceId: string,
@@ -974,9 +977,20 @@ function collectSignalsFromNode(
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
       : summarizeFailingCi(checks);
+  const headRepository = isRecord(node.headRepository)
+    ? readString(node.headRepository.nameWithOwner)
+    : null;
+  const headParts = headRepository?.split("/");
+  const matchingHead =
+    readString(node.headRefName) === session.branch &&
+    expectedHead !== null &&
+    expectedHead.host.toLowerCase() === prHost.toLowerCase() &&
+    headParts?.length === 2 &&
+    headParts[0]?.toLowerCase() === expectedHead.owner.toLowerCase() &&
+    headParts[1]?.toLowerCase() === expectedHead.name.toLowerCase();
   const ownsPr =
     !session.pr ||
-    readString(node.headRefName) === session.branch ||
+    matchingHead ||
     isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
   const viewerRequestedChanges = currentReviews.some(
     (review) =>
@@ -1607,6 +1621,7 @@ async function runReviewRepoBatch(
   projectId: string,
   sourceId: string,
   maxTargets: number,
+  expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -1832,12 +1847,27 @@ async function runReviewRepoBatch(
       continue;
     }
     for (const matching of matchingTargets) {
+      const session = matching.session;
+      let expectedHead: PrRepoSlug | null = null;
+      if (session.pr && session.branch && session.worktreePath) {
+        const key = JSON.stringify([session.worktreePath, session.branch]);
+        let pending = expectedHeads.get(key);
+        if (!pending) {
+          pending = readBranchPushUrl(session.worktreePath, session.branch).then((url) =>
+            url ? parseRepoSlugFromRemoteUrl(url) : null,
+          );
+          expectedHeads.set(key, pending);
+        }
+        expectedHead = await pending;
+      }
       results.set(matching.session.id, {
         status: "ok",
         collected: collectSignalsFromNode(
-          matching.session,
+          session,
           selected.summary,
           selected.node,
+          expectedHead,
+          matching.slug.host,
           dataDir,
           projectId,
           sourceId,
@@ -1857,6 +1887,7 @@ export async function collectGitHubSignalsBatch(
   maxTargets?: number,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
+  const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
   for (const session of sessions) {
     const target = await targetForSession(session);
@@ -1945,7 +1976,7 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit),
+          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit, expectedHeads),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

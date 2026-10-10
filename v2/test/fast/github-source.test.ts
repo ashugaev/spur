@@ -26,6 +26,7 @@ const clearGitHubPollDisabledSessionMock = vi.fn();
 const markGitHubPollDisabledCheckedMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
+const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -59,6 +60,7 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  readBranchPushUrl: readBranchPushUrlMock,
   readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
@@ -1299,6 +1301,7 @@ describe("github source", () => {
       title: "Fix CI alert",
       url: "https://github.com/acme/api/pull/42",
       headRefName: "feature/native-pr-binding",
+      headRepository: { nameWithOwner: "acme/api" },
       author: { login: "someone-else" },
       reviewDecision: null,
       mergeable: "MERGEABLE",
@@ -1323,6 +1326,7 @@ describe("github source", () => {
 
   beforeEach(() => {
     ghMock.mockReset();
+    readBranchPushUrlMock.mockReset().mockResolvedValue("git@github.com:acme/api.git");
   });
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
@@ -1835,6 +1839,29 @@ describe("github source", () => {
 
       const handle = await startLifecycle(emit);
 
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
+
+  it.each([
+    { head: "other/api", pushUrl: "git@github.com:acme/api.git", ownsPr: false },
+    { head: "contributor/api", pushUrl: "git@github.com:contributor/api.git", ownsPr: true },
+  ])(
+    "checks same-name fork ownership in a source poll ($head)",
+    async ({ head, pushUrl, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      readBranchPushUrlMock.mockResolvedValue(pushUrl);
+      mockLifecyclePoll(
+        prView({
+          headRepository: { nameWithOwner: head },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+
+      const handle = await startLifecycle(vi.fn());
       const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
       expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
       handle.stop();

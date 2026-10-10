@@ -108,6 +108,10 @@ function runtimeEnv(context: RuntimeTestContext) {
 }
 
 async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
+  await execFileAsync("git", ["config", "push.default", "current"], { cwd: context.repoDir });
+  await execFileAsync("git", ["config", "remote.pushDefault", "upstream"], {
+    cwd: context.repoDir,
+  });
   await syncTmuxEnvironment(runtimeEnv(context));
 }
 

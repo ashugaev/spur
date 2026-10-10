@@ -94,6 +94,7 @@ export interface FakeGhState {
       title: string;
       url: string;
       headRefName?: string;
+      headRepository?: string;
       reviewDecision?: string | null;
       mergeable?: string | null;
       mergeStateStatus?: string | null;
@@ -111,6 +112,7 @@ export interface FakeGhState {
       title: string;
       url: string;
       headRefName?: string;
+      headRepository?: string;
       reviewDecision?: string | null;
       mergeable?: string | null;
       mergeStateStatus?: string | null;
@@ -824,6 +826,7 @@ function pullRequestNode(state, pr) {
     headRefName: pr.headRefName || Object.keys(state.prsByBranch || {}).find(
       (branch) => state.prsByBranch[branch]?.number === pr.number,
     ) || null,
+    headRepository: { nameWithOwner: pr.headRepository || "acme/api" },
     reviewDecision: pr.reviewDecision || null,
     mergeable: pr.mergeable || "MERGEABLE",
     mergeStateStatus: pr.mergeStateStatus || "CLEAN",

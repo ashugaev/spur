@@ -99,6 +99,7 @@ import {
   hasUncommittedChanges,
   hasUnpushedCommits,
   pruneRepoWorktrees,
+  readBranchPushUrl,
   readCurrentBranch,
   readDoctorBranchHint,
   readRemoteUrls,
@@ -1230,5 +1231,46 @@ describe("git read probes", () => {
     mockGitFailure("not a git repository", 128);
 
     await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
+  });
+
+  it("reads the exact branch's configured push URL", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin");
+    mockGitSuccess("git@github.com:acme/api.git");
+
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
+      "git@github.com:acme/api.git",
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      ["for-each-ref", "--format=%(refname)\t%(push:remotename)", "refs/heads/feature/issue"],
+      readOpts,
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["remote", "get-url", "--push", "--all", "origin"],
+      readOpts,
+    );
+  });
+
+  it.each([
+    ["", "missing branch"],
+    ["refs/heads/feature/issue/subtask\torigin", "descendant only"],
+    ["refs/heads/feature/issue\t", "missing push remote"],
+    ["refs/heads/feature/issue\torigin\nrefs/heads/feature/issue/subtask\torigin", "multiple refs"],
+  ])("rejects %s (%s)", async (refs) => {
+    mockGitSuccess(refs);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects multiple push URLs and Git failures", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin");
+    mockGitSuccess("git@github.com:acme/api.git\nhttps://github.com/other/api.git");
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+
+    mockGitFailure("not a git repository", 128);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
   });
 });

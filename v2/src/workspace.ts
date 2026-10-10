@@ -331,6 +331,30 @@ export async function readRemoteUrls(repoPath: string): Promise<Map<string, stri
   return urls;
 }
 
+export async function readBranchPushUrl(repoPath: string, branch: string): Promise<string | null> {
+  const ref = `refs/heads/${branch}`;
+  try {
+    const refs = await runGit(
+      repoPath,
+      ["for-each-ref", "--format=%(refname)\t%(push:remotename)", ref],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const rows = refs.split("\n");
+    if (rows.length !== 1) return null;
+    const [name, remote] = rows[0]?.split("\t") ?? [];
+    if (name !== ref || !remote) return null;
+    const urls = await runGit(
+      repoPath,
+      ["remote", "get-url", "--push", "--all", remote],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const candidates = urls.split("\n").filter(Boolean);
+    return candidates.length === 1 ? (candidates[0] ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeBranchHint(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "HEAD") {
