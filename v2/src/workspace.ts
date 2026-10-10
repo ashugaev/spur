@@ -336,13 +336,20 @@ export async function readBranchPushUrl(repoPath: string, branch: string): Promi
   try {
     const refs = await runGit(
       repoPath,
-      ["for-each-ref", "--format=%(refname)\t%(push:remotename)", ref],
+      ["for-each-ref", "--format=%(refname)\t%(push:remotename)\t%(push)", ref],
       GIT_READ_TIMEOUT_MS,
     );
     const rows = refs.split("\n");
     if (rows.length !== 1) return null;
-    const [name, remote] = rows[0]?.split("\t") ?? [];
-    if (name !== ref || !remote) return null;
+    const [name, remote, push] = rows[0]?.split("\t") ?? [];
+    if (name !== ref || !remote || push !== `refs/remotes/${remote}/${branch}`) return null;
+    const fetch = await runGit(
+      repoPath,
+      ["config", "--get-all", `remote.${remote}.fetch`],
+      GIT_READ_TIMEOUT_MS,
+    );
+    const canonicalFetch = `refs/heads/*:refs/remotes/${remote}/*`;
+    if (fetch !== canonicalFetch && fetch !== `+${canonicalFetch}`) return null;
     const urls = await runGit(
       repoPath,
       ["remote", "get-url", "--push", "--all", remote],

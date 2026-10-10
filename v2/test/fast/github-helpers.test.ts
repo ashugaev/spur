@@ -797,6 +797,9 @@ describe("GitHub review batching", () => {
     },
     { name: "descendant-only local ref", head: "acme/api", pushUrl: null, owns: false },
     { name: "missing push destination", head: "acme/api", pushUrl: null, owns: false },
+    { name: "push targets another branch", head: "acme/api", pushUrl: null, owns: false },
+    { name: "custom fetch map", head: "acme/api", pushUrl: null, owns: false },
+    { name: "past explicit push without upstream", head: "acme/api", pushUrl: null, owns: false },
     {
       name: "case-insensitive repository",
       head: "ACME/API",
