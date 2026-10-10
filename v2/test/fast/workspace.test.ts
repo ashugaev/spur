@@ -99,6 +99,7 @@ import {
   hasUncommittedChanges,
   hasUnpushedCommits,
   pruneRepoWorktrees,
+  readBranchPushUrl,
   readCurrentBranch,
   readDoctorBranchHint,
   readRemoteUrls,
@@ -1230,5 +1231,81 @@ describe("git read probes", () => {
     mockGitFailure("not a git repository", 128);
 
     await expect(readRemoteUrls("/wt")).resolves.toEqual(new Map());
+  });
+
+  it("reads the exact branch's configured push URL", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("git@github.com:acme/api.git");
+
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
+      "git@github.com:acme/api.git",
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      1,
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname)\t%(push:remotename)\t%(push)",
+        "refs/heads/feature/issue",
+      ],
+      readOpts,
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["config", "--get-all", "remote.origin.fetch"],
+      readOpts,
+    );
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(
+      3,
+      "git",
+      ["remote", "get-url", "--push", "--all", "origin"],
+      readOpts,
+    );
+  });
+
+  it.each([
+    ["", "missing branch"],
+    [
+      "refs/heads/feature/issue/subtask\torigin\trefs/remotes/origin/feature/issue",
+      "descendant only",
+    ],
+    ["refs/heads/feature/issue\t\trefs/remotes/origin/feature/issue", "missing push remote"],
+    ["refs/heads/feature/issue\torigin", "missing push destination"],
+    ["refs/heads/feature/issue\torigin\trefs/remotes/origin/other", "different push destination"],
+    [
+      "refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue\nrefs/heads/feature/issue/subtask\torigin\trefs/remotes/origin/feature/issue",
+      "multiple refs",
+    ],
+  ])("rejects %s (%s)", async (refs) => {
+    mockGitSuccess(refs);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["refs/heads/*:refs/remotes/origin/*", true],
+    ["+refs/heads/other:refs/remotes/origin/feature/issue", false],
+    ["+refs/heads/*:refs/remotes/origin/*\n+refs/other/*:refs/remotes/origin/other/*", false],
+    ["", false],
+  ])("checks fetch mapping %s", async (fetch, accepted) => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess(fetch);
+    if (accepted) mockGitSuccess("git@github.com:acme/api.git");
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBe(
+      accepted ? "git@github.com:acme/api.git" : null,
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(accepted ? 3 : 2);
+  });
+
+  it("rejects multiple push URLs and Git failures", async () => {
+    mockGitSuccess("refs/heads/feature/issue\torigin\trefs/remotes/origin/feature/issue");
+    mockGitSuccess("+refs/heads/*:refs/remotes/origin/*");
+    mockGitSuccess("git@github.com:acme/api.git\nhttps://github.com/other/api.git");
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
+
+    mockGitFailure("not a git repository", 128);
+    await expect(readBranchPushUrl("/wt", "feature/issue")).resolves.toBeNull();
   });
 });

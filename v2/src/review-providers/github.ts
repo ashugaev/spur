@@ -14,12 +14,13 @@ import {
 import {
   claimPollPrLookup,
   gqlErrorsByAlias,
+  parseRepoSlugFromRemoteUrl,
   resolvePrLookupRepo,
   type PollPrLookupClaim,
   type PrLookupOutcome,
 } from "../pr-lookup.js";
 import { PR_LOOKUP_LIVE_CAP_MS, type PrRepoSlug } from "../pr-lookup-cache.js";
-import { readCurrentBranch } from "../workspace.js";
+import { readBranchPushUrl, readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
   GitHubPrSummary,
@@ -73,7 +74,7 @@ const GITHUB_BOUND_PR_NODE_BUDGET =
   1 +
   GITHUB_CONNECTION_PAGE_SIZE +
   GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
-  GITHUB_CONNECTION_PAGE_SIZE * 2 +
+  GITHUB_CONNECTION_PAGE_SIZE * 3 +
   GITHUB_REVIEW_REQUEST_COUNT;
 const GITHUB_UNBOUND_PR_CANDIDATES = 5;
 const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
@@ -438,13 +439,14 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
+  latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
   comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
@@ -684,10 +686,12 @@ function reviewSignalsFromComments(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  viewerLogin: string | null,
 ): ReviewSignal[] {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (isViewerAuthor(comment.user?.login, viewerLogin)) continue;
     if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
@@ -711,11 +715,22 @@ function reviewSignalsFromComments(
   return signals;
 }
 
-function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[] {
+function isViewerAuthor(
+  authorLogin: string | null | undefined,
+  viewerLogin: string | null,
+): boolean {
+  return !!authorLogin && !!viewerLogin && authorLogin.toLowerCase() === viewerLogin.toLowerCase();
+}
+
+function reviewSummarySignalsFromReviews(
+  reviews: ReviewEntry[],
+  viewerLogin: string | null,
+): ReviewSignal[] {
   const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
     const login = review.user?.login ?? null;
+    if (isViewerAuthor(login, viewerLogin)) continue;
     // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
     // body (no inline comments) is otherwise invisible: it is not an issue comment,
     // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
@@ -750,19 +765,24 @@ function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[]
   return signals;
 }
 
-function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal[] {
+function issueCommentSignalsFromComments(
+  comments: IssueComment[],
+  viewerLogin: string | null,
+): ReviewSignal[] {
   // Dedup is handled by the persisted snapshot diff, not by marking comments seen
   // here. Recording seen at generation time dropped the comment from the next poll's
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
   // at first delivery — silently losing the comment. Mirror the inline-comment path.
-  return comments.map((comment) => {
-    const author = comment.user?.login ?? "unknown";
-    return {
-      key: `comment:${String(comment.id)}`,
-      kind: "comment",
-      text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    };
-  });
+  return comments
+    .filter((comment) => !isViewerAuthor(comment.user?.login, viewerLogin))
+    .map((comment) => {
+      const author = comment.user?.login ?? "unknown";
+      return {
+        key: `comment:${String(comment.id)}`,
+        kind: "comment",
+        text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
+      };
+    });
 }
 
 function parseSignalId(signal: ReviewSignal, prefix: string): string | null {
@@ -919,27 +939,69 @@ function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
   node: Record<string, unknown>,
+  expectedHead: PrRepoSlug | null,
+  prHost: string,
   dataDir: string,
   projectId: string,
   sourceId: string,
   viewerLogin: string | null,
 ): GitHubCollectedSignals {
   const checks = checksFromPrNode(node);
+  const reviews = reviewsFromPrNode(node);
+  const currentReviewConnection = isRecord(node.latestOpinionatedReviews)
+    ? node.latestOpinionatedReviews
+    : null;
+  const currentReviews = currentReviewConnection
+    ? reviewsFromPrNode({ reviews: currentReviewConnection })
+    : [];
+  const currentReviewsComplete =
+    currentReviewConnection &&
+    isRecord(currentReviewConnection.pageInfo) &&
+    currentReviewConnection.pageInfo.hasPreviousPage === false;
   const reviewSignals = reviewSignalsFromComments(
     reviewCommentsFromPrNode(node),
     dataDir,
     projectId,
     sourceId,
+    viewerLogin,
   );
-  const commentSignals = issueCommentSignalsFromComments(issueCommentsFromPrNode(node));
+  const commentSignals = issueCommentSignalsFromComments(
+    issueCommentsFromPrNode(node),
+    viewerLogin,
+  );
   const approvalSignals =
     pr.state === "MERGED" || pr.state === "CLOSED"
       ? []
-      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node));
+      : reviewSummarySignalsFromReviews(reviews, viewerLogin);
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
       : summarizeFailingCi(checks);
+  const headRepository = isRecord(node.headRepository)
+    ? readString(node.headRepository.nameWithOwner)
+    : null;
+  const headParts = headRepository?.split("/");
+  const matchingHead =
+    readString(node.headRefName) === session.branch &&
+    expectedHead !== null &&
+    expectedHead.host.toLowerCase() === prHost.toLowerCase() &&
+    headParts?.length === 2 &&
+    headParts[0]?.toLowerCase() === expectedHead.owner.toLowerCase() &&
+    headParts[1]?.toLowerCase() === expectedHead.name.toLowerCase();
+  const ownsPr =
+    !session.pr ||
+    matchingHead ||
+    isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
+  const viewerRequestedChanges = currentReviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      isViewerAuthor(review.user?.login, viewerLogin),
+  );
+  const anotherReviewerRequestedChanges = currentReviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      !isViewerAuthor(review.user?.login, viewerLogin),
+  );
   const snapshot = new Map<string, ReviewSignal>();
   // Terminal PRs are excluded for the same reason approvals are: closing a PR
   // does not clear its pending review requests, and a review on a dead PR is
@@ -956,21 +1018,25 @@ function collectSignalsFromNode(
       text: `Review requested from ${viewerLogin} on this PR.`,
     });
   }
-  if (pr.reviewDecision === "changes_requested") {
+  if (
+    ownsPr &&
+    pr.reviewDecision === "changes_requested" &&
+    (!currentReviewsComplete || !viewerRequestedChanges || anotherReviewerRequestedChanges)
+  ) {
     snapshot.set("changes_requested", {
       key: "changes_requested",
       kind: "changes_requested",
       text: "Changes requested in review.",
     });
   }
-  if (ciText) {
+  if (ownsPr && ciText) {
     snapshot.set("ci_failed", {
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
     });
   }
-  if (hasMergeConflict(pr)) {
+  if (ownsPr && hasMergeConflict(pr)) {
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",
@@ -1555,6 +1621,7 @@ async function runReviewRepoBatch(
   projectId: string,
   sourceId: string,
   maxTargets: number,
+  expectedHeads: Map<string, Promise<PrRepoSlug | null>>,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
   const slug = targets[0]?.slug;
@@ -1780,12 +1847,27 @@ async function runReviewRepoBatch(
       continue;
     }
     for (const matching of matchingTargets) {
+      const session = matching.session;
+      let expectedHead: PrRepoSlug | null = null;
+      if (session.pr && session.branch && session.worktreePath) {
+        const key = JSON.stringify([session.worktreePath, session.branch]);
+        let pending = expectedHeads.get(key);
+        if (!pending) {
+          pending = readBranchPushUrl(session.worktreePath, session.branch).then((url) =>
+            url ? parseRepoSlugFromRemoteUrl(url) : null,
+          );
+          expectedHeads.set(key, pending);
+        }
+        expectedHead = await pending;
+      }
       results.set(matching.session.id, {
         status: "ok",
         collected: collectSignalsFromNode(
-          matching.session,
+          session,
           selected.summary,
           selected.node,
+          expectedHead,
+          matching.slug.host,
           dataDir,
           projectId,
           sourceId,
@@ -1805,6 +1887,7 @@ export async function collectGitHubSignalsBatch(
   maxTargets?: number,
 ): Promise<Map<string, GitHubSignalBatchResult>> {
   const results = new Map<string, GitHubSignalBatchResult>();
+  const expectedHeads = new Map<string, Promise<PrRepoSlug | null>>();
   const byRepo = new Map<string, GitHubBatchTarget[]>();
   for (const session of sessions) {
     const target = await targetForSession(session);
@@ -1893,7 +1976,7 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit),
+          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit, expectedHeads),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

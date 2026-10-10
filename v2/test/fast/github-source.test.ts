@@ -26,6 +26,7 @@ const clearGitHubPollDisabledSessionMock = vi.fn();
 const markGitHubPollDisabledCheckedMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
+const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -59,6 +60,7 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  readBranchPushUrl: readBranchPushUrlMock,
   readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
@@ -190,6 +192,15 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     const item = value as Record<string, unknown>;
     return { ...item, databaseId: item.id, author: graphqlAuthor(item.user) };
   };
+  const latestByAuthor = new Map<string, Record<string, unknown>>();
+  for (const [index, review] of (Array.isArray(reviews) ? reviews : []).entries()) {
+    const mapped = mapAuthor(review);
+    const login = graphqlAuthor((review as Record<string, unknown>).user)?.login;
+    latestByAuthor.set(
+      typeof login === "string" ? login.toLowerCase() : `unknown-${index}`,
+      mapped,
+    );
+  }
   const node = {
     ...record,
     commits: {
@@ -215,6 +226,10 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     },
     comments: { nodes: Array.isArray(issueComments) ? issueComments.map(mapAuthor) : [] },
     reviews: { nodes: Array.isArray(reviews) ? reviews.map(mapAuthor) : [] },
+    latestOpinionatedReviews: record.latestOpinionatedReviews ?? {
+      nodes: [...latestByAuthor.values()],
+      pageInfo: { hasPreviousPage: false },
+    },
   };
   const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
   return JSON.stringify({
@@ -1285,6 +1300,9 @@ describe("github source", () => {
       number: 42,
       title: "Fix CI alert",
       url: "https://github.com/acme/api/pull/42",
+      headRefName: "feature/native-pr-binding",
+      headRepository: { nameWithOwner: "acme/api" },
+      author: { login: "someone-else" },
       reviewDecision: null,
       mergeable: "MERGEABLE",
       mergeStateStatus: "CLEAN",
@@ -1308,6 +1326,7 @@ describe("github source", () => {
 
   beforeEach(() => {
     ghMock.mockReset();
+    readBranchPushUrlMock.mockReset().mockResolvedValue("git@github.com:acme/api.git");
   });
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
@@ -1736,6 +1755,227 @@ describe("github source", () => {
         ],
       }),
     );
+    handle.stop();
+  });
+
+  it("does not echo the viewer's review body while delivering another review", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ headRefName: "feature/native-pr-binding" }),
+      JSON.stringify([
+        {
+          id: 610,
+          state: "CHANGES_REQUESTED",
+          body: "my own review",
+          user: { login: "review-bot" },
+        },
+        {
+          id: 611,
+          state: "CHANGES_REQUESTED",
+          body: "fix this",
+          user: { login: "other-reviewer" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review:611"]);
+    handle.stop();
+  });
+
+  it("does not echo the viewer's inline or issue comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 620, body: "my reply", user: { login: "REVIEW-BOT" } },
+          { id: 621, body: "please fix", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 622, body: "my note", user: { login: "review-bot" } },
+          { id: 623, body: "please check", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it.each([
+    { headRefName: "someone-elses-branch", author: "someone-else", ownsPr: false },
+    { headRefName: "feature/native-pr-binding", author: "someone-else", ownsPr: true },
+    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: true },
+  ])(
+    "scopes fix instructions to an owned PR ($headRefName, $author)",
+    async ({ headRefName, author, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({
+          headRefName,
+          author: { login: author },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
+
+  it.each([
+    { head: "other/api", pushUrl: "git@github.com:acme/api.git", ownsPr: false },
+    { head: "contributor/api", pushUrl: "git@github.com:contributor/api.git", ownsPr: true },
+  ])(
+    "checks same-name fork ownership in a source poll ($head)",
+    async ({ head, pushUrl, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      readBranchPushUrlMock.mockResolvedValue(pushUrl);
+      mockLifecyclePoll(
+        prView({
+          headRepository: { nameWithOwner: head },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+
+      const handle = await startLifecycle(vi.fn());
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
+
+  it.each([
+    { reviewer: "review-bot", actionable: false },
+    { reviewer: "other-reviewer", actionable: true },
+  ])(
+    "does not turn the viewer's change request into a fix alert ($reviewer)",
+    async ({ reviewer, actionable }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({ reviewDecision: "CHANGES_REQUESTED" }),
+        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", user: { login: reviewer } }]),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(actionable);
+      handle.stop();
+    },
+  );
+
+  it("keeps another reviewer's change request when the viewer also reviewed", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED" }),
+      JSON.stringify([
+        { id: 631, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+        { id: 632, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("ignores an external change request superseded by that reviewer's approval", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "APPROVED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([
+        { id: 640, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+        { id: 641, state: "APPROVED", user: { login: "other-reviewer" } },
+        { id: 642, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+      ]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("keeps an external current change request absent from historical page", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "CHANGES_REQUESTED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([{ id: 650, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("keeps the aggregate change request when current reviewer list is incomplete", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [{ state: "CHANGES_REQUESTED", author: { login: "review-bot" } }],
+          pageInfo: { hasPreviousPage: true },
+        },
+      }),
+      JSON.stringify([{ id: 660, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
     handle.stop();
   });
 
