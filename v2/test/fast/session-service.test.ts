@@ -11489,6 +11489,26 @@ describe("SessionService", () => {
       expect(internals.paneWriteLocks.size).toBe(0);
     });
 
+    it("restores through a same-state rewrite that bumps updatedAt during launch", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession({ agentSessionId: "session-uuid" }));
+      let restoredTmuxCreated = false;
+      let launches = 0;
+      createTmuxSessionMock.mockImplementation(async () => {
+        launches += 1;
+        const record = sessions.get("api-1")!;
+        sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
+        restoredTmuxCreated = true;
+      });
+      isProcessRunningInTmuxMock.mockImplementation(async () => restoredTmuxCreated);
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+
+      await expect(service.restore("api-1")).resolves.toMatchObject({ status: "running" });
+      expect(internals.sessionLifecycleLocks.size).toBe(0);
+    });
+
     it("does not switch auth over a pause that lands during unlocked classification", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
