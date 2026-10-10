@@ -2468,6 +2468,7 @@ describe("github source rearm", () => {
         number: 42,
         title: "Keep branch mergeable",
         url: "https://github.com/acme/api/pull/42",
+        headRefName: "feature/test",
         reviewDecision: null,
         mergeable: "MERGEABLE",
         mergeStateStatus: "CLEAN",
