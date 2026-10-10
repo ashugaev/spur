@@ -943,6 +943,7 @@ function collectSignalsFromNode(
   viewerLogin: string | null,
 ): GitHubCollectedSignals {
   const checks = checksFromPrNode(node);
+  const reviews = reviewsFromPrNode(node);
   const reviewSignals = reviewSignalsFromComments(
     reviewCommentsFromPrNode(node),
     dataDir,
@@ -957,7 +958,7 @@ function collectSignalsFromNode(
   const approvalSignals =
     pr.state === "MERGED" || pr.state === "CLOSED"
       ? []
-      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node), viewerLogin);
+      : reviewSummarySignalsFromReviews(reviews, viewerLogin);
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
@@ -966,6 +967,16 @@ function collectSignalsFromNode(
     !session.pr ||
     readString(node.headRefName) === session.branch ||
     isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
+  const viewerRequestedChanges = reviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      isViewerAuthor(review.user?.login, viewerLogin),
+  );
+  const anotherReviewerRequestedChanges = reviews.some(
+    (review) =>
+      normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
+      !isViewerAuthor(review.user?.login, viewerLogin),
+  );
   const snapshot = new Map<string, ReviewSignal>();
   // Terminal PRs are excluded for the same reason approvals are: closing a PR
   // does not clear its pending review requests, and a review on a dead PR is
@@ -982,7 +993,11 @@ function collectSignalsFromNode(
       text: `Review requested from ${viewerLogin} on this PR.`,
     });
   }
-  if (ownsPr && pr.reviewDecision === "changes_requested") {
+  if (
+    ownsPr &&
+    pr.reviewDecision === "changes_requested" &&
+    (!viewerRequestedChanges || anotherReviewerRequestedChanges)
+  ) {
     snapshot.set("changes_requested", {
       key: "changes_requested",
       kind: "changes_requested",

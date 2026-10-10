@@ -1828,6 +1828,47 @@ describe("github source", () => {
     },
   );
 
+  it.each([
+    { reviewer: "review-bot", actionable: false },
+    { reviewer: "other-reviewer", actionable: true },
+  ])(
+    "does not turn the viewer's change request into a fix alert ($reviewer)",
+    async ({ reviewer, actionable }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({ reviewDecision: "CHANGES_REQUESTED" }),
+        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", user: { login: reviewer } }]),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(actionable);
+      handle.stop();
+    },
+  );
+
+  it("keeps another reviewer's change request when the viewer also reviewed", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED" }),
+      JSON.stringify([
+        { id: 631, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+        { id: 632, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
   it("ignores a whitespace-only review body", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
