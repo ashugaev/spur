@@ -190,6 +190,15 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     const item = value as Record<string, unknown>;
     return { ...item, databaseId: item.id, author: graphqlAuthor(item.user) };
   };
+  const latestByAuthor = new Map<string, Record<string, unknown>>();
+  for (const [index, review] of (Array.isArray(reviews) ? reviews : []).entries()) {
+    const mapped = mapAuthor(review);
+    const login = graphqlAuthor((review as Record<string, unknown>).user)?.login;
+    latestByAuthor.set(
+      typeof login === "string" ? login.toLowerCase() : `unknown-${index}`,
+      mapped,
+    );
+  }
   const node = {
     ...record,
     commits: {
@@ -215,6 +224,10 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     },
     comments: { nodes: Array.isArray(issueComments) ? issueComments.map(mapAuthor) : [] },
     reviews: { nodes: Array.isArray(reviews) ? reviews.map(mapAuthor) : [] },
+    latestOpinionatedReviews: record.latestOpinionatedReviews ?? {
+      nodes: [...latestByAuthor.values()],
+      pageInfo: { hasPreviousPage: false },
+    },
   };
   const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
   return JSON.stringify({
@@ -1863,6 +1876,76 @@ describe("github source", () => {
     const emit = vi.fn();
 
     const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("ignores an external change request superseded by that reviewer's approval", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "APPROVED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([
+        { id: 640, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+        { id: 641, state: "APPROVED", user: { login: "other-reviewer" } },
+        { id: 642, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+      ]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("keeps an external current change request absent from historical page", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "CHANGES_REQUESTED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([{ id: 650, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("keeps the aggregate change request when current reviewer list is incomplete", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [{ state: "CHANGES_REQUESTED", author: { login: "review-bot" } }],
+          pageInfo: { hasPreviousPage: true },
+        },
+      }),
+      JSON.stringify([{ id: 660, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
 
     const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
     expect(snapshot.signals.has("changes_requested")).toBe(true);

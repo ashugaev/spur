@@ -73,7 +73,7 @@ const GITHUB_BOUND_PR_NODE_BUDGET =
   1 +
   GITHUB_CONNECTION_PAGE_SIZE +
   GITHUB_REVIEW_THREAD_COUNT * (1 + GITHUB_CONNECTION_PAGE_SIZE) +
-  GITHUB_CONNECTION_PAGE_SIZE * 2 +
+  GITHUB_CONNECTION_PAGE_SIZE * 3 +
   GITHUB_REVIEW_REQUEST_COUNT;
 const GITHUB_UNBOUND_PR_CANDIDATES = 5;
 const GITHUB_UNBOUND_TARGET_NODE_BUDGET =
@@ -445,6 +445,7 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName author{lo
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
+  latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
   comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
@@ -944,6 +945,16 @@ function collectSignalsFromNode(
 ): GitHubCollectedSignals {
   const checks = checksFromPrNode(node);
   const reviews = reviewsFromPrNode(node);
+  const currentReviewConnection = isRecord(node.latestOpinionatedReviews)
+    ? node.latestOpinionatedReviews
+    : null;
+  const currentReviews = currentReviewConnection
+    ? reviewsFromPrNode({ reviews: currentReviewConnection })
+    : [];
+  const currentReviewsComplete =
+    currentReviewConnection &&
+    isRecord(currentReviewConnection.pageInfo) &&
+    currentReviewConnection.pageInfo.hasPreviousPage === false;
   const reviewSignals = reviewSignalsFromComments(
     reviewCommentsFromPrNode(node),
     dataDir,
@@ -967,12 +978,12 @@ function collectSignalsFromNode(
     !session.pr ||
     readString(node.headRefName) === session.branch ||
     isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
-  const viewerRequestedChanges = reviews.some(
+  const viewerRequestedChanges = currentReviews.some(
     (review) =>
       normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
       isViewerAuthor(review.user?.login, viewerLogin),
   );
-  const anotherReviewerRequestedChanges = reviews.some(
+  const anotherReviewerRequestedChanges = currentReviews.some(
     (review) =>
       normalizeReviewState(review.state) === "CHANGES_REQUESTED" &&
       !isViewerAuthor(review.user?.login, viewerLogin),
@@ -996,7 +1007,7 @@ function collectSignalsFromNode(
   if (
     ownsPr &&
     pr.reviewDecision === "changes_requested" &&
-    (!viewerRequestedChanges || anotherReviewerRequestedChanges)
+    (!currentReviewsComplete || !viewerRequestedChanges || anotherReviewerRequestedChanges)
   ) {
     snapshot.set("changes_requested", {
       key: "changes_requested",
