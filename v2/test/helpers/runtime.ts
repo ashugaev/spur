@@ -93,6 +93,7 @@ export interface FakeGhState {
       number: number;
       title: string;
       url: string;
+      headRefName?: string;
       reviewDecision?: string | null;
       mergeable?: string | null;
       mergeStateStatus?: string | null;
@@ -109,6 +110,7 @@ export interface FakeGhState {
       number: number;
       title: string;
       url: string;
+      headRefName?: string;
       reviewDecision?: string | null;
       mergeable?: string | null;
       mergeStateStatus?: string | null;
@@ -819,6 +821,9 @@ function pullRequestNode(state, pr) {
     number: pr.number,
     title: pr.title,
     url: pr.url,
+    headRefName: pr.headRefName || Object.keys(state.prsByBranch || {}).find(
+      (branch) => state.prsByBranch[branch]?.number === pr.number,
+    ) || null,
     reviewDecision: pr.reviewDecision || null,
     mergeable: pr.mergeable || "MERGEABLE",
     mergeStateStatus: pr.mergeStateStatus || "CLEAN",

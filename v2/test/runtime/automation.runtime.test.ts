@@ -841,6 +841,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
               number: 42,
               title: "Keep CI green",
               url: "https://github.com/acme/api/pull/42",
+              headRefName: "feature-runtime-ci",
               repo: "acme/api",
               reviewDecision: null,
             },
