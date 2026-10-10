@@ -123,6 +123,8 @@ spur connect spur.yaml
 Claude only, operator action: `cd <repo> && claude`, answer "Yes, I trust this folder" — covers every Spur worktree of that repo; once per connected repo. A setup agent never answers it: list it in the operator TODO, skip the smoke spawn until done.
 
 ```bash
+# after agent login + trust only; a setup agent puts this line in the operator TODO, never runs it —
+# before trust it times out on submit acknowledgment and leaves an errored session
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
