@@ -438,7 +438,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
-const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url reviewDecision mergeable mergeStateStatus isDraft state
+const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
     ... on CheckRun{name conclusion status}
     ... on StatusContext{context state}
@@ -684,10 +684,12 @@ function reviewSignalsFromComments(
   dataDir: string,
   projectId: string,
   sourceId: string,
+  viewerLogin: string | null,
 ): ReviewSignal[] {
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
+    if (isViewerAuthor(comment.user?.login, viewerLogin)) continue;
     if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
@@ -711,11 +713,22 @@ function reviewSignalsFromComments(
   return signals;
 }
 
-function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[] {
+function isViewerAuthor(
+  authorLogin: string | null | undefined,
+  viewerLogin: string | null,
+): boolean {
+  return !!authorLogin && !!viewerLogin && authorLogin.toLowerCase() === viewerLogin.toLowerCase();
+}
+
+function reviewSummarySignalsFromReviews(
+  reviews: ReviewEntry[],
+  viewerLogin: string | null,
+): ReviewSignal[] {
   const approvedIdentities = new Set<string>();
   const signals: ReviewSignal[] = [];
   for (const review of reviews) {
     const login = review.user?.login ?? null;
+    if (isViewerAuthor(login, viewerLogin)) continue;
     // A review submitted as COMMENTED/CHANGES_REQUESTED with substance only in the
     // body (no inline comments) is otherwise invisible: it is not an issue comment,
     // not an inline review comment, and COMMENTED does not move reviewDecision. Surface
@@ -750,19 +763,24 @@ function reviewSummarySignalsFromReviews(reviews: ReviewEntry[]): ReviewSignal[]
   return signals;
 }
 
-function issueCommentSignalsFromComments(comments: IssueComment[]): ReviewSignal[] {
+function issueCommentSignalsFromComments(
+  comments: IssueComment[],
+  viewerLogin: string | null,
+): ReviewSignal[] {
   // Dedup is handled by the persisted snapshot diff, not by marking comments seen
   // here. Recording seen at generation time dropped the comment from the next poll's
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
   // at first delivery — silently losing the comment. Mirror the inline-comment path.
-  return comments.map((comment) => {
-    const author = comment.user?.login ?? "unknown";
-    return {
-      key: `comment:${String(comment.id)}`,
-      kind: "comment",
-      text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    };
-  });
+  return comments
+    .filter((comment) => !isViewerAuthor(comment.user?.login, viewerLogin))
+    .map((comment) => {
+      const author = comment.user?.login ?? "unknown";
+      return {
+        key: `comment:${String(comment.id)}`,
+        kind: "comment",
+        text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
+      };
+    });
 }
 
 function parseSignalId(signal: ReviewSignal, prefix: string): string | null {
@@ -930,16 +948,24 @@ function collectSignalsFromNode(
     dataDir,
     projectId,
     sourceId,
+    viewerLogin,
   );
-  const commentSignals = issueCommentSignalsFromComments(issueCommentsFromPrNode(node));
+  const commentSignals = issueCommentSignalsFromComments(
+    issueCommentsFromPrNode(node),
+    viewerLogin,
+  );
   const approvalSignals =
     pr.state === "MERGED" || pr.state === "CLOSED"
       ? []
-      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node));
+      : reviewSummarySignalsFromReviews(reviewsFromPrNode(node), viewerLogin);
   const ciText =
     normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
       ? null
       : summarizeFailingCi(checks);
+  const ownsPr =
+    !session.pr ||
+    readString(node.headRefName) === session.branch ||
+    isViewerAuthor(isRecord(node.author) ? readString(node.author.login) : null, viewerLogin);
   const snapshot = new Map<string, ReviewSignal>();
   // Terminal PRs are excluded for the same reason approvals are: closing a PR
   // does not clear its pending review requests, and a review on a dead PR is
@@ -956,21 +982,21 @@ function collectSignalsFromNode(
       text: `Review requested from ${viewerLogin} on this PR.`,
     });
   }
-  if (pr.reviewDecision === "changes_requested") {
+  if (ownsPr && pr.reviewDecision === "changes_requested") {
     snapshot.set("changes_requested", {
       key: "changes_requested",
       kind: "changes_requested",
       text: "Changes requested in review.",
     });
   }
-  if (ciText) {
+  if (ownsPr && ciText) {
     snapshot.set("ci_failed", {
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
     });
   }
-  if (hasMergeConflict(pr)) {
+  if (ownsPr && hasMergeConflict(pr)) {
     snapshot.set("merge_conflict", {
       key: "merge_conflict",
       kind: "merge_conflict",

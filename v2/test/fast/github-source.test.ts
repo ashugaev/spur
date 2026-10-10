@@ -1285,6 +1285,8 @@ describe("github source", () => {
       number: 42,
       title: "Fix CI alert",
       url: "https://github.com/acme/api/pull/42",
+      headRefName: "feature/native-pr-binding",
+      author: { login: "someone-else" },
       reviewDecision: null,
       mergeable: "MERGEABLE",
       mergeStateStatus: "CLEAN",
@@ -1738,6 +1740,93 @@ describe("github source", () => {
     );
     handle.stop();
   });
+
+  it("does not echo the viewer's review body while delivering another review", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ headRefName: "feature/native-pr-binding" }),
+      JSON.stringify([
+        {
+          id: 610,
+          state: "CHANGES_REQUESTED",
+          body: "my own review",
+          user: { login: "review-bot" },
+        },
+        {
+          id: 611,
+          state: "CHANGES_REQUESTED",
+          body: "fix this",
+          user: { login: "other-reviewer" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review:611"]);
+    handle.stop();
+  });
+
+  it("does not echo the viewer's inline or issue comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 620, body: "my reply", user: { login: "REVIEW-BOT" } },
+          { id: 621, body: "please fix", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 622, body: "my note", user: { login: "review-bot" } },
+          { id: 623, body: "please check", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it.each([
+    { headRefName: "someone-elses-branch", author: "someone-else", ownsPr: false },
+    { headRefName: "feature/native-pr-binding", author: "someone-else", ownsPr: true },
+    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: true },
+  ])(
+    "scopes fix instructions to an owned PR ($headRefName, $author)",
+    async ({ headRefName, author, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({
+          headRefName,
+          author: { login: author },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
 
   it("ignores a whitespace-only review body", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
