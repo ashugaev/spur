@@ -53,6 +53,7 @@ A mode is a prompt suffix naming a skill, set via `projects.<id>.modes.<name>.{s
 Task launch and attention cards: [`/new`, `/work`](commands.md#source-reply).
 [`source reply`](commands.md#source-reply) targets latest inbound chat, else `chatId`; sends claim chat and enroll attention pushes — `v2/src/session-service.ts`.
 Bot-message replies in private chats and group main reach recorded sender ahead of binding; confirmed forum topics (`is_topic_message`) and plain messages follow binding; gone or stopped/error/killed targets answer `not delivered` without delivery — `v2/src/event-sources/telegram.ts`.
+Failed inbound update from an allowed user answers `Message not delivered. Send it again.` once in the same chat/topic; taps on buttons older than 48h answer in the group main — `v2/src/event-sources/telegram.ts`.
 `/spawn` changes plain-message recipient; group-main replies retain sender routing; forum takeover detaches old session — `v2/src/event-sources/telegram.ts`.
 Recorded bot-message owners: 1000 per source, oldest evicted first — `v2/src/metadata.ts`.
 Pending button choices: 200 per source, oldest offers evicted first; session cleanup retires its choices — `v2/src/metadata.ts`.

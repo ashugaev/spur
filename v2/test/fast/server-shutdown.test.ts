@@ -34,11 +34,16 @@ const delayedSourcesStop = vi.hoisted(() => ({ enabled: false, delayMs: 20 }));
 // pre-finally flush entirely.
 const throwingRuntimeLogsStop = vi.hoisted(() => ({ enabled: false }));
 
+const capturedSourceDeps = vi.hoisted(
+  () => ({ deps: undefined }) as { deps: { getSession(id: string): Promise<unknown> } | undefined },
+);
+
 vi.mock("../../src/event-sources/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof EventSourcesModule>();
   return {
     ...actual,
     startConfiguredSources: async (deps: Parameters<typeof actual.startConfiguredSources>[0]) => {
+      capturedSourceDeps.deps = deps;
       const controller = await actual.startConfiguredSources(deps);
       if (hangingSourcesStop.enabled) {
         return { stop: () => new Promise<void>(() => undefined) };
@@ -236,6 +241,22 @@ describe("forceShutdownExit", () => {
       expect(windowEvents[0]?.details?.["calls"]).toBe(1);
     } finally {
       setGhEventSink(null);
+    }
+  });
+});
+
+describe("startServer source wiring", () => {
+  it("hands sources a by-id session lookup that returns null for a missing session", async () => {
+    const { configPath } = await writeDaemonConfig();
+    const { startServer } = await import("../../src/server.js");
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+    try {
+      await expect(capturedSourceDeps.deps?.getSession("missing-1")).resolves.toBeNull();
+    } finally {
+      await server.stop();
     }
   });
 });
