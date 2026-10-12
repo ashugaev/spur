@@ -606,17 +606,24 @@ const LEGACY_RUNTIME_DIAGNOSTICS = [
 
 function recoverableRuntimeError(session: SessionRecord): boolean {
   if (session.error === INFERRED_RUNTIME_EXIT_ERROR) {
-    return session.errorSource === "inferred_runtime_exit" ||
-      (session.errorSource === undefined && session.launchCommand !== "");
+    return (
+      session.errorSource === "inferred_runtime_exit" ||
+      (session.errorSource === undefined && session.launchCommand !== "")
+    );
   }
-  if (!session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
-      session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return false;
+  if (
+    !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
+    session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+  )
+    return false;
   if (session.errorSource === "runtime_probe") return true;
   if (session.errorSource !== undefined) return false;
   const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
-  return diagnostic === "runtime state unknown" ||
+  return (
+    diagnostic === "runtime state unknown" ||
     diagnostic === "runtime probe (tmux or ps) timed out; runtime state unknown" ||
-    LEGACY_RUNTIME_DIAGNOSTICS.some((prefix) => diagnostic.startsWith(prefix));
+    LEGACY_RUNTIME_DIAGNOSTICS.some((prefix) => diagnostic.startsWith(prefix))
+  );
 }
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
@@ -6664,7 +6671,11 @@ export class SessionService {
       if (!current || hasRetainedSessionError(current)) return;
       const confirmed = await this.readRuntimeSnapshot(current, { fresh: true });
       if (confirmed.probeUnresponsive) {
-        this.retainDetectionError(current, confirmed.diagnostic ?? "runtime state unknown", "runtime_probe");
+        this.retainDetectionError(
+          current,
+          confirmed.diagnostic ?? "runtime state unknown",
+          "runtime_probe",
+        );
         return;
       }
       if (hasRetainedSessionError(readSession(this.config.dataDir, latest.id) ?? latest)) return;
@@ -18906,7 +18917,11 @@ export class SessionService {
           ) {
             throw error;
           }
-          const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recoveredBase } = latest;
+          const {
+            error: _ignoredError,
+            errorSource: _ignoredErrorSource,
+            ...recoveredBase
+          } = latest;
           const recovered: SessionRecord = this.applyReservedSidecars(
             {
               ...recoveredBase,
@@ -19023,7 +19038,11 @@ export class SessionService {
       ) {
         throw new Error(`Session ${sessionId} changed during restore`);
       }
-      const { error: _ignoredError, errorSource: _ignoredErrorSource, ...restoredBase } = latestBeforeCommit;
+      const {
+        error: _ignoredError,
+        errorSource: _ignoredErrorSource,
+        ...restoredBase
+      } = latestBeforeCommit;
       let restored: SessionRecord = this.applyReservedSidecars(
         {
           ...restoredBase,
@@ -21852,10 +21871,13 @@ export class SessionService {
     if (!latest || latest.status !== "errored") {
       return latest ?? session;
     }
-    if (!sameSessionRuntimeOwner(latest, session) ||
-        latest.agentLaunchId !== session.agentLaunchId ||
-        latest.error !== session.error ||
-        latest.errorSource !== session.errorSource) return latest;
+    if (
+      !sameSessionRuntimeOwner(latest, session) ||
+      latest.agentLaunchId !== session.agentLaunchId ||
+      latest.error !== session.error ||
+      latest.errorSource !== session.errorSource
+    )
+      return latest;
 
     const shouldClear = !latest.serverErrorAt && recoverableRuntimeError(latest);
     const updated: SessionRecord = {
@@ -21970,8 +21992,7 @@ export class SessionService {
     if (isTerminalSessionStatus(latest.status)) return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
     if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
-    if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
-        !recoverableRuntimeError(latest))
+    if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) && !recoverableRuntimeError(latest))
       return latest;
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
@@ -22870,7 +22891,11 @@ export class SessionService {
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
       if (session)
-        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`, "other");
+        this.retainDetectionError(
+          session,
+          `Resource readout ${tmuxSession}: ${error.message}`,
+          "other",
+        );
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
   }

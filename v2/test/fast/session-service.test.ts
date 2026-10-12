@@ -26203,7 +26203,11 @@ describe("SessionService", () => {
     sessions.set(record.id, record);
     tmuxSessionExistsMock.mockResolvedValue(true);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
-    probeWorkspaceMock.mockReturnValue({ exists: false, missing: false, diagnostic: "stat denied" });
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "stat denied",
+    });
     const service = await createDisposedSessionService();
 
     expect((await service.get(record.id)).status).toBe("errored");
@@ -26376,11 +26380,18 @@ describe("SessionService", () => {
 
   it.each([
     { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
-    { error: "Session status detection failed: ps failed: classifier", errorSource: "other" as const },
+    {
+      error: "Session status detection failed: ps failed: classifier",
+      errorSource: "other" as const,
+    },
     { error: "Session status detection failed: workspace failed" },
     { error: "Provider request failed" },
     { error: "Agent runtime exited unexpectedly.", launchCommand: "" },
-    { error: "Agent runtime exited unexpectedly.", errorSource: "inferred_runtime_exit" as const, serverErrorAt: "2026-03-18T10:01:00.000Z" },
+    {
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit" as const,
+      serverErrorAt: "2026-03-18T10:01:00.000Z",
+    },
   ])("preserves a non-runtime retained error on a live session: $error", async (patch) => {
     const sessions = createSessionStore();
     const record = runningSession({ id: "api-1", ...patch });
@@ -37634,7 +37645,9 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")?.error).toBe("Session status detection failed: EIO: i/o error, close");
+    expect(sessions.get("api-1")?.error).toBe(
+      "Session status detection failed: EIO: i/o error, close",
+    );
   });
 
   it("startSidecar refuses an errored session whose agent process is gone even when the pane is usable", async () => {
