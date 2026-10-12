@@ -22870,6 +22870,7 @@ describe("SessionService", () => {
       id: "api-1",
       status: "errored",
       error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
     });
   });
 
@@ -26115,7 +26116,7 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
-  it("promotes a stale errored record while preserving its unrelated error", async () => {
+  it("heals a stale errored record carrying a marked inferred runtime exit", async () => {
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -26129,6 +26130,7 @@ describe("SessionService", () => {
       launchCommand: "agent --force",
       status: "errored",
       error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -26142,9 +26144,10 @@ describe("SessionService", () => {
     const persisted = sessions.get("api-1");
 
     expect(result.status).toBe("running");
-    expect(result.state).toBe("error");
+    expect(result.state).toBe("working");
     expect(persisted?.status).toBe("running");
-    expect(persisted?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(persisted?.error).toBeUndefined();
+    expect(persisted?.errorSource).toBeUndefined();
     expect(logSpurEventMock).toHaveBeenCalledWith(
       TEST_DATA_DIR,
       expect.objectContaining({
@@ -26154,6 +26157,75 @@ describe("SessionService", () => {
         message: expect.stringContaining("from errored to running"),
       }),
     );
+  });
+
+  it.each([undefined, "inferred_runtime_exit"] as const)(
+    "heals an already-running inferred exit without relaunch (source=%s)",
+    async (errorSource) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        id: "api-1",
+        error: "Agent runtime exited unexpectedly.",
+        ...(errorSource ? { errorSource } : {}),
+      });
+      sessions.set(record.id, record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      mockClaudeJsonlState("waiting");
+
+      const service = await createDisposedSessionService();
+      const result = await service.get(record.id);
+
+      expect(result.status).toBe("running");
+      expect(result.state).toBe("waiting");
+      expect(result.error).toBeUndefined();
+      expect("errorSource" in result).toBe(false);
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+    },
+  );
+
+  it.each(["ps failed: transient", "runtime state unknown"])(
+    "heals a persisted legacy runtime diagnostic: %s",
+    async (diagnostic) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        id: "api-1",
+        error: `Session status detection failed: ${diagnostic}`,
+      });
+      sessions.set(record.id, record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      mockClaudeJsonlState("waiting");
+
+      const service = await createDisposedSessionService();
+      expect((await service.get(record.id)).state).toBe("waiting");
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+    },
+  );
+
+  it.each([
+    { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
+    { error: "Session status detection failed: ps failed: classifier", errorSource: "other" as const },
+    { error: "Session status detection failed: workspace failed" },
+    { error: "Provider request failed" },
+    { error: "Agent runtime exited unexpectedly.", launchCommand: "" },
+    { error: "Agent runtime exited unexpectedly.", errorSource: "inferred_runtime_exit" as const, serverErrorAt: "2026-03-18T10:01:00.000Z" },
+  ])("preserves a non-runtime retained error on a live session: $error", async (patch) => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1", ...patch });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+
+    const service = await createDisposedSessionService();
+    const result = await service.get(record.id);
+
+    expect(result.state).toBe("error");
+    expect(result.error).toBe(patch.error);
+    expect(sessions.get(record.id)?.error).toBe(patch.error);
+    expect(sessions.get(record.id)?.errorSource).toBe(patch.errorSource);
   });
 
   it("does not promote a stale errored record when the pane is dead", async () => {
@@ -26414,7 +26486,7 @@ describe("SessionService", () => {
     service.dispose();
   });
 
-  it("keeps a healed session running with its unrelated error when its sidecar restart fails", async () => {
+  it("keeps a healed session running when its sidecar restart fails", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -26462,7 +26534,7 @@ describe("SessionService", () => {
     });
 
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(sessions.get("api-1")?.error).toBeUndefined();
 
     service.dispose();
   });
@@ -26615,6 +26687,7 @@ describe("SessionService", () => {
       launchCommand: "claude --dangerously-skip-permissions",
       status: "errored",
       error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -26632,6 +26705,7 @@ describe("SessionService", () => {
       stopReason: "manual_pause",
     });
     expect(persisted).not.toHaveProperty("error");
+    expect(persisted).not.toHaveProperty("errorSource");
     expect(result.status).toBe("stopped");
     expect(result.state).toBe("stopped");
   });
@@ -37340,7 +37414,7 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(sessions.get("api-1")?.error).toBeUndefined();
   });
 
   it("startSidecar heals a stale errored session even when the agent transcript read rejects", async () => {
@@ -37389,7 +37463,7 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.status).toBe("running");
-    expect(sessions.get("api-1")?.error).toBe("Agent runtime exited unexpectedly.");
+    expect(sessions.get("api-1")?.error).toBe("Session status detection failed: EIO: i/o error, close");
   });
 
   it("startSidecar refuses an errored session whose agent process is gone even when the pane is usable", async () => {
@@ -57174,7 +57248,7 @@ describe("SessionService", () => {
 
         expect(result.session.status).toBe("running");
         expect(sessions.get("shp-1")?.status).toBe("running");
-        expect(sessions.get("shp-1")?.error).toBe("Agent runtime exited unexpectedly.");
+        expect(sessions.get("shp-1")?.error).toBeUndefined();
       });
 
       it("promotes a stopped shepherd back to running while its runtime is alive", async () => {
@@ -59363,6 +59437,7 @@ describe("SessionService", () => {
         expect(first.state).toBe("error");
         expect(first.session.status).toBe("running");
         expect(first.session.error).toContain(diagnostic);
+        expect(first.session.errorSource).toBe("runtime_probe");
         const restarted = await createDisposedSessionService();
         await sessionServiceInternals(restarted).classifySessionRecord(
           sessions.get(record.id) ?? record,
@@ -59392,6 +59467,7 @@ describe("SessionService", () => {
           sessions.get(record.id) ?? record,
         );
         expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.errorSource).toBeUndefined();
       },
     );
 

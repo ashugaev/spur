@@ -596,6 +596,28 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
+const INFERRED_RUNTIME_EXIT_ERROR = "Agent runtime exited unexpectedly.";
+const LEGACY_RUNTIME_DIAGNOSTICS = [
+  "tmux list-windows failed:",
+  "tmux list-panes failed:",
+  "ps failed:",
+  "tmux process failed:",
+];
+
+function recoverableRuntimeError(session: SessionRecord): boolean {
+  if (session.error === INFERRED_RUNTIME_EXIT_ERROR) {
+    return session.errorSource === "inferred_runtime_exit" ||
+      (session.errorSource === undefined && session.launchCommand !== "");
+  }
+  if (!session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
+      session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return false;
+  if (session.errorSource === "runtime_probe") return true;
+  if (session.errorSource !== undefined) return false;
+  const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
+  return diagnostic === "runtime state unknown" ||
+    diagnostic === "runtime probe (tmux or ps) timed out; runtime state unknown" ||
+    LEGACY_RUNTIME_DIAGNOSTICS.some((prefix) => diagnostic.startsWith(prefix));
+}
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
@@ -6474,6 +6496,7 @@ export class SessionService {
             this.retainDetectionError(
               latest,
               runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
+              runtime.probeUnresponsive || runtime.diagnostic ? "runtime_probe" : "other",
             );
             return undefined;
           }
@@ -6639,7 +6662,7 @@ export class SessionService {
       if (!current || hasRetainedSessionError(current)) return;
       const confirmed = await this.readRuntimeSnapshot(current, { fresh: true });
       if (confirmed.probeUnresponsive) {
-        this.retainDetectionError(current, confirmed.diagnostic ?? "runtime state unknown");
+        this.retainDetectionError(current, confirmed.diagnostic ?? "runtime state unknown", "runtime_probe");
         return;
       }
       if (hasRetainedSessionError(readSession(this.config.dataDir, latest.id) ?? latest)) return;
@@ -6728,6 +6751,7 @@ export class SessionService {
         ...(staleSidecars.length ? { staleSidecars } : {}),
       };
       delete parked.error;
+      delete parked.errorSource;
       writeSession(this.config.dataDir, parked);
       this.stateCache.delete(latest.id);
       await this.refreshDashboardCacheEntry(parked);
@@ -12454,6 +12478,7 @@ export class SessionService {
             createdAt: createdAt ?? nowIso(),
             updatedAt: nowIso(),
             error: message,
+            errorSource: "other",
           };
           const killed = this.spawnWasKilled(sessionId);
           const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
@@ -13053,6 +13078,7 @@ export class SessionService {
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
+          errorSource: "other",
         });
       }
       this.logEvent("session.spawn.failed", {
@@ -13595,6 +13621,7 @@ export class SessionService {
             status: "errored",
             updatedAt: nowIso(),
             error: message,
+            errorSource: "other",
           });
       if (persistedFailure) {
         writeSession(this.config.dataDir, persistedFailure);
@@ -15357,7 +15384,7 @@ export class SessionService {
       return await this.enrich(persisted);
     } catch (error) {
       if (error instanceof TmuxProbeUnknownError && initialSession) {
-        this.retainDetectionError(initialSession, error.message);
+        this.retainDetectionError(initialSession, error.message, "other");
       }
       if (
         error instanceof SessionRateLimitedError ||
@@ -17249,6 +17276,7 @@ export class SessionService {
         delete migrated.retainInList;
       }
       delete migrated.error;
+      delete migrated.errorSource;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       if (options?.skipEnrichment) return;
@@ -17268,6 +17296,7 @@ export class SessionService {
           delete record.retainInList;
         }
         delete record.error;
+        delete record.errorSource;
         writeSession(this.config.dataDir, record);
         this.stateCache.delete(sessionId);
         if (options?.skipEnrichment) return;
@@ -17351,6 +17380,7 @@ export class SessionService {
     }
     if (targetStatus === "stopped") {
       delete record.error;
+      delete record.errorSource;
     }
     if (startupAttachmentsCleaned) {
       delete record.startupAttachmentIds;
@@ -17678,7 +17708,7 @@ export class SessionService {
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       const diagnostic =
         runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown";
-      this.retainDetectionError(session, diagnostic);
+      this.retainDetectionError(session, diagnostic, "runtime_probe");
       throw new TmuxProbeUnknownError(diagnostic);
     }
     const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -17694,7 +17724,7 @@ export class SessionService {
 
     const workspace = probeWorkspace(session.worktreePath);
     if (workspace.diagnostic) {
-      this.retainDetectionError(current, workspace.diagnostic);
+      this.retainDetectionError(current, workspace.diagnostic, "other");
       throw new TmuxProbeUnknownError(workspace.diagnostic);
     }
     const workspacePresent = workspace.exists;
@@ -17955,6 +17985,7 @@ export class SessionService {
       const {
         agentSessionId: _staleAgentSessionId,
         error: _staleError,
+        errorSource: _staleErrorSource,
         sidecarProcs: _staleSidecarProcs,
         ...freshBase
       } = sessionWithAgentId;
@@ -18227,6 +18258,7 @@ export class SessionService {
     // the old prompt was pending in.
     const {
       error: _ignoredError,
+      errorSource: _ignoredErrorSource,
       submitUnconfirmedAt: _replacedLaunch,
       queuedMessageTyped: _replacedTyped,
       submitRequeuedMessage: _replacedRequeue,
@@ -18332,6 +18364,7 @@ export class SessionService {
           const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
           const {
             error: _ignoredError,
+            errorSource: _ignoredErrorSource,
             stopReason: _ignoredStopReason,
             ...stoppedBase
           } = latestNoPorts;
@@ -18871,7 +18904,7 @@ export class SessionService {
           ) {
             throw error;
           }
-          const { error: _ignoredError, ...recoveredBase } = latest;
+          const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recoveredBase } = latest;
           const recovered: SessionRecord = this.applyReservedSidecars(
             {
               ...recoveredBase,
@@ -18988,7 +19021,7 @@ export class SessionService {
       ) {
         throw new Error(`Session ${sessionId} changed during restore`);
       }
-      const { error: _ignoredError, ...restoredBase } = latestBeforeCommit;
+      const { error: _ignoredError, errorSource: _ignoredErrorSource, ...restoredBase } = latestBeforeCommit;
       let restored: SessionRecord = this.applyReservedSidecars(
         {
           ...restoredBase,
@@ -19184,6 +19217,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.error;
+    delete record.errorSource;
     delete record.queuedMessages;
     if (record.pipeline) {
       record.pipeline = { ...record.pipeline, status: "completed" };
@@ -20155,7 +20189,7 @@ export class SessionService {
         // attempt, not only the send itself). The message stays queued; the
         // loop's own sleep-and-continue retries it on the next poll.
         if (error instanceof TmuxProbeUnknownError) {
-          this.retainDetectionError(session, error.message);
+          this.retainDetectionError(session, error.message, "other");
         }
         const failure = error instanceof Error ? error.message : String(error);
         // Log-once-per-transition: a permanently broken session (e.g. a
@@ -21582,6 +21616,7 @@ export class SessionService {
         session: this.retainDetectionError(
           session,
           runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
+          "runtime_probe",
         ),
         runtime,
       };
@@ -21639,6 +21674,7 @@ export class SessionService {
           session,
           confirmedRuntime.diagnostic ??
             "runtime probe (tmux or ps) timed out; runtime state unknown",
+          "runtime_probe",
         );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
@@ -21674,6 +21710,7 @@ export class SessionService {
     if (terminalUnavailable) {
       const {
         error: _ignoredError,
+        errorSource: _ignoredErrorSource,
         stopReason: _ignoredStopReason,
         ...stoppedBase
       } = latestNoPorts;
@@ -21686,7 +21723,8 @@ export class SessionService {
       updated = {
         ...latestNoPorts,
         status: "errored",
-        error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
+        error: workspaceGone ? "Agent worktree is missing." : INFERRED_RUNTIME_EXIT_ERROR,
+        errorSource: workspaceGone ? "other" : "inferred_runtime_exit",
         updatedAt,
       };
     }
@@ -21763,7 +21801,7 @@ export class SessionService {
       return latest;
     }
 
-    const { error: _ignoredError, ...runningBase } = latest;
+    const { error: _ignoredError, errorSource: _ignoredErrorSource, ...runningBase } = latest;
     const updated: SessionRecord = {
       ...runningBase,
       status: "running",
@@ -21812,13 +21850,21 @@ export class SessionService {
     if (!latest || latest.status !== "errored") {
       return latest ?? session;
     }
+    if (!sameSessionRuntimeOwner(latest, session) ||
+        latest.agentLaunchId !== session.agentLaunchId ||
+        latest.error !== session.error ||
+        latest.errorSource !== session.errorSource) return latest;
 
-    const runningBase = latest;
+    const shouldClear = !latest.serverErrorAt && recoverableRuntimeError(latest);
     const updated: SessionRecord = {
-      ...runningBase,
+      ...latest,
       status: "running",
       updatedAt: nowIso(),
     };
+    if (shouldClear) {
+      delete updated.error;
+      delete updated.errorSource;
+    }
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
@@ -21892,7 +21938,7 @@ export class SessionService {
         throw error;
       }
       const diagnostic = error instanceof Error ? error.message : String(error);
-      const retained = this.retainDetectionError(session, diagnostic);
+      const retained = this.retainDetectionError(session, diagnostic, "other");
       return {
         session: retained,
         runtime: {
@@ -21912,7 +21958,11 @@ export class SessionService {
     }
   }
 
-  private retainDetectionError(session: SessionRecord, diagnostic: string): SessionRecord {
+  private retainDetectionError(
+    session: SessionRecord,
+    diagnostic: string,
+    errorSource: "runtime_probe" | "other",
+  ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     if (isTerminalSessionStatus(latest.status)) return latest;
@@ -21921,7 +21971,7 @@ export class SessionService {
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
     if (latest.error === message) return latest;
-    const retained = { ...latest, error: message, updatedAt: nowIso() };
+    const retained = { ...latest, error: message, errorSource, updatedAt: nowIso() };
     writeSession(this.config.dataDir, retained);
     this.stateCache.delete(session.id);
     this.logEvent("session.runtime.probe_unresponsive", {
@@ -21950,6 +22000,7 @@ export class SessionService {
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
+      errorSource: "other",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, retained);
@@ -22034,14 +22085,15 @@ export class SessionService {
         runtime.diagnostic ??
           workspace.diagnostic ??
           "runtime probe (tmux or ps) timed out; runtime state unknown",
+        runtime.probeUnresponsive || runtime.diagnostic ? "runtime_probe" : "other",
       );
     } else if (
       workspace.exists &&
       runtime.runtimeAlive &&
       runtime.paneUsable &&
       runtime.processAlive &&
-      session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
-      !session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+      !session.serverErrorAt &&
+      recoverableRuntimeError(session)
     ) {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -22049,12 +22101,16 @@ export class SessionService {
       if (
         !isTerminalSessionStatus(latest.status) &&
         sameSessionRuntimeOwner(latest, session) &&
-        latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
-        !latest.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+        latest.agentLaunchId === session.agentLaunchId &&
+        latest.error === session.error &&
+        latest.errorSource === session.errorSource &&
+        !latest.serverErrorAt &&
+        recoverableRuntimeError(latest)
       ) {
-        const { error: _ignoredError, ...recovered } = latest;
+        const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
+        this.stateCache.delete(session.id);
       }
     }
     let state: SessionState;
@@ -22625,6 +22681,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       branchSource: _branchSource,
       error: _error,
+      errorSource: _errorSource,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -22793,7 +22850,7 @@ export class SessionService {
           sameSessionRuntimeOwner(latest, session) &&
           latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
         ) {
-          const { error: _error, ...recovered } = latest;
+          const { error: _error, errorSource: _errorSource, ...recovered } = latest;
           writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
           this.stateCache.delete(session.id);
         }
@@ -22802,7 +22859,7 @@ export class SessionService {
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
       if (session)
-        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`);
+        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`, "other");
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
   }
@@ -22976,6 +23033,7 @@ export class SessionService {
       codexRestoreStartedAt: _codexRestoreStartedAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
+      errorSource: _errorSource,
       ...sessionWithoutDetailFields
     } = session;
 

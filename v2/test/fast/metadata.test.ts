@@ -943,6 +943,35 @@ describe("session workspaceId normalization", () => {
     expect(readSession(dataDir, "api-2")?.workspaceId).toBe("api-1");
   });
 
+  it("persists only valid error provenance beside an error", async () => {
+    const dataDir = await newDataDir();
+    const record: SessionRecord = {
+      ...legacyBase,
+      id: "api-1",
+      tmuxSession: "api-1",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+    };
+    writeSession(dataDir, record);
+    expect(readSession(dataDir, record.id)?.errorSource).toBe("inferred_runtime_exit");
+
+    writeSession(dataDir, { ...record, errorSource: "runtime_probe" });
+    expect(readSession(dataDir, record.id)?.errorSource).toBe("runtime_probe");
+    writeSession(dataDir, { ...record, errorSource: "other" });
+    expect(readSession(dataDir, record.id)?.errorSource).toBe("other");
+
+    writeSession(dataDir, { ...record, errorSource: "invalid" } as unknown as SessionRecord);
+    expect(readSession(dataDir, record.id)?.errorSource).toBeUndefined();
+
+    const { error: _error, ...withoutError } = record;
+    writeSession(dataDir, withoutError);
+    expect(readSession(dataDir, record.id)?.errorSource).toBeUndefined();
+
+    const { errorSource: _errorSource, ...legacy } = record;
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, record.id)?.errorSource).toBeUndefined();
+  });
+
   it("derives it from the legacy deskId of a record written before the field existed", async () => {
     const dataDir = await newDataDir();
     const legacy = { ...legacyBase, id: "api-2", deskId: "api-1", tmuxSession: "api-2" };

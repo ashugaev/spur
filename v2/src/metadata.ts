@@ -1202,6 +1202,12 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       : {}),
     ...(stateSubscriptions ? { stateSubscriptions } : {}),
     ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
+    ...(normalizedSession.error &&
+    (normalizedSession.errorSource === "inferred_runtime_exit" ||
+      normalizedSession.errorSource === "runtime_probe" ||
+      normalizedSession.errorSource === "other")
+      ? { errorSource: normalizedSession.errorSource }
+      : {}),
     ...(normalizedSession.todoLedgerVersion === 1 ? { todoLedgerVersion: 1 as const } : {}),
   };
 }
