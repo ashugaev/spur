@@ -386,10 +386,20 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     )
       return blocked("ci-not-success");
     if (
-      snapshot.jobs.length !== policy.ciJobs.length ||
+      snapshot.jobs.some(
+        (job) =>
+          !string(job.name) ||
+          integer(job.run_id) !== run.id ||
+          integer(job.run_attempt) !== run.run_attempt,
+      )
+    )
+      return blocked("ci-jobs-not-success");
+    const requiredJobs = snapshot.jobs.filter((job) => policy.ciJobs.includes(string(job.name)));
+    if (
+      requiredJobs.length !== policy.ciJobs.length ||
       policy.ciJobs.some(
         (name) =>
-          snapshot.jobs.filter(
+          requiredJobs.filter(
             (job) =>
               job.name === name &&
               job.run_id === run.id &&
@@ -456,7 +466,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
           anchors: snapshot.ciAnchors.filter((anchor) =>
             candidates.some((candidate) => candidate.id === anchor.runId),
           ),
-          jobs: snapshot.jobs
+          jobs: requiredJobs
             .map((job) => ({
               id: job.id,
               name: job.name,
