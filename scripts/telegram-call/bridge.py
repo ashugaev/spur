@@ -341,13 +341,13 @@ class Tools:
         self.call, self.shepherd, self.live, self.types = call, shepherd, live, types
         self.pending = None
         self.pending_id = None
-        self.dispatch_tasks = set()
+        self.dispatch_tasks = {}
 
     def schedule(self, function):
         task = asyncio.create_task(self.handle(function))
-        self.dispatch_tasks.add(task)
+        self.dispatch_tasks[task] = function.id
         def completed(finished):
-            self.dispatch_tasks.discard(finished)
+            self.dispatch_tasks.pop(finished, None)
             if not finished.cancelled() and finished.exception():
                 event("tool_response_failed", correlation=self.call.correlation)
                 self.call.task.cancel()
@@ -399,10 +399,14 @@ class Tools:
 
     async def cancel(self, ids):
         # Gemini withdrew its function request; delegated jobs remain owned by Shepherd.
+        tasks = [task for task, function_id in self.dispatch_tasks.items() if function_id in ids]
         if self.pending is not None and self.pending_id in ids:
-            task = self.pending
+            if self.pending not in tasks:
+                tasks.append(self.pending)
+        for task in tasks:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.pending in tasks:
             self.pending = None
             self.pending_id = None
 
@@ -772,24 +776,27 @@ async def main():
             raise BridgeError("invalid_ring_budget")
         calls = PyTgCalls(client)
         async with httpx.AsyncClient() as http:
-            gemini = genai.Client(api_key=values["GEMINI_API_KEY"])
-            listener = Listener(values, runtime, client, calls, Shepherd(runtime, http), gemini, types,
-                                config.call_ring_timeout_ms)
-            client.add_event_handler(listener.raw, events.Raw())
-            calls.on_update()(listener.frames)
-            await calls.start()
-            stop = asyncio.Event()
-            for signum in (signal.SIGTERM, signal.SIGINT):
-                asyncio.get_running_loop().add_signal_handler(signum, stop.set)
-            event("listener_ready")
-            await stop.wait()
+            try:
+                gemini = genai.Client(api_key=values["GEMINI_API_KEY"])
+                listener = Listener(values, runtime, client, calls, Shepherd(runtime, http), gemini, types,
+                                    config.call_ring_timeout_ms)
+                client.add_event_handler(listener.raw, events.Raw())
+                calls.on_update()(listener.frames)
+                await calls.start()
+                stop = asyncio.Event()
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    asyncio.get_running_loop().add_signal_handler(signum, stop.set)
+                event("listener_ready")
+                await stop.wait()
+            finally:
+                if listener:
+                    await listener.close()
     finally:
         try:
             if listener:
                 try:
-                    await listener.close()
-                finally:
                     client.remove_event_handler(listener.raw)
+                finally:
                     if calls:
                         calls.remove_handler(listener.frames)
         finally:

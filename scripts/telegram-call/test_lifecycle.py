@@ -1,17 +1,21 @@
 import asyncio
+import contextlib
+import os
+from pathlib import Path
 import re
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from google.genai import types
+import httpx
 from ntgcalls import Protocol
 from pytgcalls.mtproto.telethon_client import TelethonClient
 from pytgcalls.types import Device, Direction, StreamFrames
 from telethon import TelegramClient
 from telethon.tl.functions.phone import AcceptCallRequest
-from telethon.tl.types import InputPhoneCall
+from telethon.tl.types import InputPhoneCall, PhoneCallProtocol, PhoneCallRequested, UpdatePhoneCall
 
 import bridge
 
@@ -230,6 +234,121 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(f.call.task, 1)
                 self.assertTrue(f.live.closed)
                 self.assertIsNone(f.listener.current)
+
+    async def test_buffered_receive_cancellation_prevents_queued_dispatch(self):
+        for same_event in (False, True):
+            with self.subTest(same_event=same_event):
+                f = self.fixture()
+                f.shepherd.dispatch = AsyncMock(return_value=0)
+                f.shepherd.answer = AsyncMock(return_value="Withdrawn work must not speak.")
+                f.call.task = asyncio.create_task(f.listener.run_call(f.call))
+                await asyncio.wait_for(f.connected.wait(), 1)
+                fn = types.FunctionCall(id="withdrawn", name="ask_shepherd", args={"message": "launch"})
+                cancel = types.LiveServerToolCallCancellation(ids=["withdrawn"])
+                message = types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=[fn]))
+                if same_event:
+                    message.tool_call_cancellation = cancel
+                f.live.events.put_nowait(message)
+                if not same_event:
+                    f.live.events.put_nowait(types.LiveServerMessage(tool_call_cancellation=cancel))
+                # Observe later input to prove receive consumed both buffered events.
+                f.live.events.put_nowait(audio(b"N" * 480, complete=True))
+                for _ in range(100):
+                    if f.calls.send_frame.called:
+                        break
+                    await asyncio.sleep(.001)
+                f.calls.send_frame.assert_awaited_once()
+                f.shepherd.dispatch.assert_not_awaited()
+                f.live.send_tool_response.assert_not_awaited()
+                f.live.send_client_content.assert_not_awaited()
+                f.call.task.cancel()
+                await asyncio.wait_for(f.call.task, 1)
+        f = self.fixture()
+        f.shepherd.dispatch = AsyncMock(return_value=0)
+        async def blocked_answer(*args):
+            await asyncio.Event().wait()
+        f.shepherd.answer = AsyncMock(side_effect=blocked_answer)
+        f.call.task = asyncio.create_task(f.listener.run_call(f.call))
+        await asyncio.wait_for(f.connected.wait(), 1)
+        functions = [types.FunctionCall(id=name, name="ask_shepherd", args={"message": "launch"})
+                     for name in ("first", "second")]
+        f.live.events.put_nowait(types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=functions)))
+        for _ in range(100):
+            if f.live.send_tool_response.await_count == 2:
+                break
+            await asyncio.sleep(.001)
+        self.assertEqual(f.shepherd.dispatch.await_count, 1)
+        replies = [a.kwargs["function_responses"][0] for a in f.live.send_tool_response.await_args_list]
+        self.assertEqual([(r.id, r.response["status"]) for r in replies],
+                         [("first", "dispatched"), ("second", "busy")])
+        f.call.task.cancel()
+        await asyncio.wait_for(f.call.task, 1)
+
+    async def test_main_preparing_shutdown_kills_before_http_close(self):
+        order, spawned = [], asyncio.Event()
+        runtime = SimpleNamespace(url="http://127.0.0.1:49001", check=AsyncMock())
+        async def transport(request):
+            if request.url.path == "/shepherd/spawn":
+                spawned.set()
+                return httpx.Response(201, json={"disposition": "spawned", "session": {"id": "preparing"}})
+            if request.url.path.endswith("/kill"):
+                order.append("kill")
+                return httpx.Response(200, json={})
+            return httpx.Response(200, json={"entries": [], "state": "working", "startIndex": 0, "totalEntries": 0})
+        class HTTP(httpx.AsyncClient):
+            async def __aexit__(self, *args):
+                order.append("http_close")
+                await super().__aexit__(*args)
+        http = HTTP(transport=httpx.MockTransport(transport))
+        class Client:
+            connect, disconnect = AsyncMock(), AsyncMock()
+            is_user_authorized = AsyncMock(return_value=True)
+            add_event_handler, remove_event_handler = Mock(), Mock()
+            async def __call__(self, request):
+                return SimpleNamespace(call_ring_timeout_ms=60000)
+        client, lock = Client(), Mock()
+        owner = None
+        original_listener = bridge.Listener
+        def listener_factory(*args):
+            nonlocal owner
+            owner = original_listener(*args)
+            return owner
+        async def start():
+            phone = PhoneCallRequested(11, 22, None, 33, 44, b"key", PhoneCallProtocol(65, 92, []))
+            await owner.raw(UpdatePhoneCall(phone))
+            await asyncio.wait_for(spawned.wait(), 1)
+        calls = SimpleNamespace(start=start, on_update=Mock(return_value=Mock()), remove_handler=Mock(),
+                                play=AsyncMock(), record=AsyncMock())
+        class PendingLive:
+            async def __aenter__(self):
+                await asyncio.Event().wait()
+        gemini = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock(),
+                    live=SimpleNamespace(connect=lambda **args: PendingLive())))
+        with contextlib.ExitStack() as stack:
+            for target, value in (
+                ("bridge.check_dependencies", AsyncMock()),
+                ("bridge.read_inputs", Mock(return_value={"TG_API_ID": "1", "TG_API_HASH": "private",
+                    "GEMINI_API_KEY": "private", "GEMINI_LIVE_MODEL": "configured", "allowed": {33}})),
+                ("bridge.Runtime", Mock(return_value=runtime)),
+                ("bridge.private_session", Mock(return_value=(lock, Path("private.session")))),
+                ("bridge.guarded_client_class", Mock(return_value=lambda *args: client)),
+                ("bridge.Listener", listener_factory), ("pytgcalls.PyTgCalls", Mock(return_value=calls)),
+                ("google.genai.Client", Mock(return_value=gemini)), ("httpx.AsyncClient", Mock(return_value=http))):
+                stack.enter_context(patch(target, value))
+            stack.enter_context(patch("bridge.sys.argv", ["bridge.py"]))
+            stack.enter_context(patch.dict(os.environ, {"TELEGRAM_CALL_RUNTIME_FILE": "offline",
+                                "TELEGRAM_CALL_ENDPOINT_HELPER": "offline"}))
+            stack.enter_context(patch.object(asyncio.get_running_loop(), "add_signal_handler",
+                                side_effect=lambda signum, callback: callback()))
+            await asyncio.wait_for(bridge.main(), 2)
+        self.assertEqual(order, ["kill", "http_close"])
+        self.assertIsNone(owner.current)
+        client.disconnect.assert_awaited_once()
+        client.remove_event_handler.assert_called_once()
+        calls.remove_handler.assert_called_once()
+        gemini.aio.aclose.assert_awaited_once()
+        lock.close.assert_called_once()
+        calls.play.assert_not_awaited()
 
 
 live_enter = Live.__aenter__
