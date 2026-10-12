@@ -19453,6 +19453,65 @@ describe("SessionService", () => {
     );
   });
 
+  it("leaves a relaunching session running while its agent has not reached the prompt yet", async () => {
+    // Recovery writes `running` right after creating the pane, then waits for
+    // the agent prompt. An rc-file prompt (oh-my-zsh "update? [Y/n]") holds
+    // the agent off past the 30s warmup; the live pane with no agent process
+    // must not be reconciled to errored while the relaunch still owns it.
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    let agentStarted = false;
+    isProcessRunningInTmuxMock.mockImplementation(async () => agentStarted);
+    let releaseReady: (() => void) | undefined;
+    waitForTmuxReadyMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolveReady) => {
+          releaseReady = resolveReady;
+        }),
+    );
+
+    const service = await createDisposedSessionService();
+    try {
+      const sending = service.send("api-1", { message: "resume work" });
+      await vi.waitFor(() => {
+        expect(releaseReady).toBeDefined();
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      // The 30s restore warmup has expired while the agent is still held off.
+      (service as unknown as { restoreWarmupUntil: Map<string, number> }).restoreWarmupUntil.delete(
+        "api-1",
+      );
+
+      const midRelaunch = await service.get("api-1");
+
+      expect(midRelaunch.status).toBe("running");
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+      expect(writeSessionMock).not.toHaveBeenCalledWith(
+        TEST_DATA_DIR,
+        expect.objectContaining({ id: "api-1", status: "errored" }),
+      );
+
+      agentStarted = true;
+      releaseReady?.();
+      const result = await sending;
+
+      expect(result.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+
+      // Settled relaunch releases the guard: a later agent exit reconciles.
+      agentStarted = false;
+      const afterExit = service.get("api-1");
+      await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("errored"), {
+        timeout: 5_000,
+      });
+      await afterExit;
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("retains running status and the error when tmux is confirmed missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),

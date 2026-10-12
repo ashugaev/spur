@@ -3439,6 +3439,11 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  // Session ids this process is relaunching in place (dead-agent recovery).
+  // The relaunch writes `running` before the agent reaches its prompt and
+  // settles the record itself (running on ready, retainLaunchedError on
+  // failure), so a not-yet-started agent must not be reconciled to errored.
+  private readonly relaunchesInFlight = new Set<string>();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
@@ -17758,6 +17763,7 @@ export class SessionService {
     // state right after this returns and must not have that forced to
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    this.relaunchesInFlight.add(session.id);
     let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
@@ -17775,6 +17781,7 @@ export class SessionService {
       throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
+      this.relaunchesInFlight.delete(session.id);
     }
     writeSession(this.config.dataDir, recovered.session);
     // After the running record is on disk: a project sidecar can take tens of
@@ -21577,6 +21584,7 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
+    if (this.relaunchesInFlight.has(session.id)) return { session, runtime };
     if (runtime.probeUnresponsive) {
       return {
         session: this.retainDetectionError(
