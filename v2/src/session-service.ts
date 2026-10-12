@@ -18285,7 +18285,11 @@ export class SessionService {
         }
         return this.lifecycleStamp(current);
       });
-      return this.restoreLocked(sessionId, request, claim);
+      try {
+        return await this.restoreLocked(sessionId, request, claim);
+      } finally {
+        this.launchesInFlight.delete(sessionId);
+      }
     });
   }
 
@@ -18504,8 +18508,9 @@ export class SessionService {
     // MCP sidecar tmux pane this starts. The reaper additionally checks this
     // warmup window (see reapDeadSessionSidecars) for exactly this gap.
     this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
-    // Held until the commit below settles or the catch takes over: the
-    // provisional `running` write precedes a ready wait longer than the warmup.
+    // Released by restoreWithPaneLock once this frame settles, after the final
+    // status write on every exit: the provisional `running` write precedes a
+    // ready wait longer than the warmup.
     this.launchesInFlight.add(sessionId);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
@@ -18869,7 +18874,6 @@ export class SessionService {
       // (pane killed), and ambiguous (probe unresponsive: pane left alive,
       // status untouched, stale error cleared, throws).
       this.restoreWarmupUntil.delete(sessionId);
-      this.launchesInFlight.delete(sessionId);
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
         return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
           const latest = readSession(this.config.dataDir, sessionId);
@@ -19051,7 +19055,7 @@ export class SessionService {
         this.scheduleDeliveryRunner(restoredWithSidecars.id);
       }
       return this.enrich(restoredWithSidecars);
-    }).finally(() => this.launchesInFlight.delete(sessionId));
+    });
   }
 
   // Brings a `completed` session back to life on the same id: rebuild the

@@ -19468,14 +19468,21 @@ describe("SessionService", () => {
   // RESTORE_WARMUP_MS (30s) plus margin.
   const PAST_RESTORE_WARMUP_MS = 31_000;
 
-  function holdAgentReady(): { agent: { started: boolean }; release(): void; held(): boolean } {
+  function holdAgentReady(): {
+    agent: { started: boolean };
+    release(): void;
+    fail(error: Error): void;
+    held(): boolean;
+  } {
     const agent = { started: false };
     isProcessRunningInTmuxMock.mockImplementation(async () => agent.started);
     let releaseReady: (() => void) | undefined;
+    let failReady: ((error: Error) => void) | undefined;
     waitForTmuxReadyMock.mockImplementationOnce(
       () =>
-        new Promise<void>((resolveReady) => {
+        new Promise<void>((resolveReady, rejectReady) => {
           releaseReady = resolveReady;
+          failReady = rejectReady;
         }),
     );
     return {
@@ -19483,6 +19490,9 @@ describe("SessionService", () => {
       release() {
         agent.started = true;
         releaseReady?.();
+      },
+      fail(error: Error) {
+        failReady?.(error);
       },
       held: () => releaseReady !== undefined,
     };
@@ -19576,6 +19586,40 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.error).toBeUndefined();
 
       // restore() re-arms the post-launch warmup on success; let it lapse.
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("releases the launch guard when a restore fails its ready wait", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped", stopReason: "manual_pause" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+    const { PromptReadyTimeoutError } = await import("../../src/runtime-tmux.js");
+
+    const service = await createDisposedSessionService();
+    try {
+      const restoring = service.restore("api-1");
+      const rejected = expect(restoring).rejects.toThrow("Failed to restore api-1");
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      ready.fail(
+        new PromptReadyTimeoutError({ sessionName: "api-1", elapsedMs: 120_000, detail: "" }),
+      );
+      await rejected;
+      expect(sessions.get("api-1")?.status).toBe("errored");
+
+      // A later running record with a dead agent must reconcile again.
+      const failed = sessions.get("api-1");
+      if (!failed) throw new Error("missing api-1 record");
+      const { error: _launchError, ...runningBase } = failed;
+      sessions.set("api-1", { ...runningBase, status: "running" });
       clock.advance(PAST_RESTORE_WARMUP_MS);
       await expectReconciledAfterExit(service, sessions, ready.agent);
     } finally {
