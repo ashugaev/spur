@@ -24125,6 +24125,7 @@ describe("SessionService", () => {
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
     expect(sessions.get("api-1")?.error).toContain("Session status detection failed:");
+    expect(sessions.get("api-1")?.errorSource).toBe("runtime_probe");
     expect((await service.get("api-1")).state).toBe("error");
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
@@ -24137,6 +24138,8 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockResolvedValue(true);
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sessions.get("api-1")?.error).toBeUndefined();
+    expect(sessions.get("api-1")?.errorSource).toBeUndefined();
 
     mockClaudeJsonlState("waiting");
     await advanceSeconds(5);
@@ -24207,6 +24210,7 @@ describe("SessionService", () => {
     await advanceSeconds(5);
 
     expect(sendTelegramReplyMock).toHaveBeenCalledTimes(1);
+    expect(codexSessions.get("api-1")?.error).toBeUndefined();
     expect(sendTelegramReplyMock.mock.calls[0]?.[2]).not.toContain("error");
     service.dispose();
   });
@@ -25266,6 +25270,71 @@ describe("SessionService", () => {
     );
     service.dispose();
   });
+
+  it("heals a rejected fresh runtime confirmation after a live probe", async () => {
+    const record = runningSession();
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+    const snapshot = vi
+      .spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+      .mockResolvedValueOnce({
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        probeUnresponsive: false,
+      })
+      .mockRejectedValueOnce(new Error("transient fresh probe failure"));
+
+    const pending = sessionServiceInternals(service).classifySessionRecord(record);
+    await advanceSeconds(2);
+    const failed = await pending;
+    expect(failed.session.status).toBe("running");
+    expect(failed.session.errorSource).toBe("runtime_probe");
+    expect(sessions.get(record.id)?.error).toContain("transient fresh probe failure");
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+
+    snapshot.mockResolvedValue({
+      runtimeAlive: true,
+      paneUsable: true,
+      processAlive: true,
+      probeUnresponsive: false,
+    });
+    const recovered = await service.get(record.id);
+    expect(recovered.status).toBe("running");
+    expect(sessions.get(record.id)?.error).toBeUndefined();
+    expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+  });
+
+  it.each(["initial", "fresh"] as const)(
+    "does not write a vanished session after a rejected %s runtime read",
+    async (phase) => {
+      const record = runningSession();
+      const sessions = createSessionStore(record);
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const snapshot = vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot");
+      if (phase === "fresh") {
+        snapshot.mockResolvedValueOnce({
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          probeUnresponsive: false,
+        });
+      }
+      snapshot.mockImplementationOnce(async () => {
+        sessions.delete(record.id);
+        throw new Error("probe failed after deletion");
+      });
+
+      const pending = sessionServiceInternals(service).classifySessionRecord(record);
+      const rejected = expect(pending).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+      if (phase === "fresh") await advanceSeconds(2);
+      await rejected;
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    },
+  );
 
   // DELTA3: confirmAgentExited is a third consumer that would otherwise read
   // a timeout-killed probe as "the agent exited" and error a live pipeline
@@ -26608,6 +26677,8 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     expect(writeSessionMock).toHaveBeenCalledTimes(1);
+    expect(result.error).toBeUndefined();
+    expect(sessions.get("api-1")?.errorSource).toBeUndefined();
 
     service.dispose();
   });
@@ -52332,7 +52403,7 @@ describe("SessionService", () => {
             ...fixture.original,
             error:
               phase === "runtime"
-                ? "Session status detection failed: previous probe"
+                ? "Session status detection failed: tmux list-windows failed: previous probe"
                 : "Session status detection failed: Resource readout api-1--dev: previous probe",
           };
           fixture.sessions.set(original.id, original);

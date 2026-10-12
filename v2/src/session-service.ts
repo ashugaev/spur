@@ -21671,7 +21671,23 @@ export class SessionService {
         // ~2s-TTL cached snapshot the first check above just read. Otherwise a
         // single transient tmux/list-windows blip would agree with itself on
         // both reads and mark a genuinely live session stopped.
-        confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+        try {
+          confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+        } catch (error) {
+          const diagnostic = error instanceof Error ? error.message : String(error);
+          const retained = this.retainDetectionError(session, diagnostic, "runtime_probe");
+          return {
+            session: retained,
+            runtime: {
+              runtimeAlive: false,
+              paneUsable: false,
+              processAlive: false,
+              tmuxActivityAt: null,
+              probeUnresponsive: true,
+              diagnostic,
+            },
+          };
+        }
         if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
       if (
@@ -21961,25 +21977,33 @@ export class SessionService {
       ) {
         throw error;
       }
-      const diagnostic = error instanceof Error ? error.message : String(error);
-      const retained = this.retainDetectionError(session, diagnostic, "other");
-      return {
-        session: retained,
-        runtime: {
-          runtimeAlive: false,
-          paneUsable: false,
-          processAlive: false,
-          tmuxActivityAt: null,
-          probeUnresponsive: true,
-          diagnostic,
-        },
-        state: "error",
-        source: "status",
-        workspacePresent: false,
-        serverError: false,
-        agentActivityAt: null,
-      };
+      return this.classificationErrorResult(session, error, "other");
     }
+  }
+
+  private classificationErrorResult(
+    session: SessionRecord,
+    error: unknown,
+    errorSource: "runtime_probe" | "other",
+  ): SessionStateResult {
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const retained = this.retainDetectionError(session, diagnostic, errorSource);
+    return {
+      session: retained,
+      runtime: {
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        tmuxActivityAt: null,
+        probeUnresponsive: true,
+        diagnostic,
+      },
+      state: "error",
+      source: "status",
+      workspacePresent: false,
+      serverError: false,
+      agentActivityAt: null,
+    };
   }
 
   private retainDetectionError(
@@ -22083,15 +22107,20 @@ export class SessionService {
         agentActivityAt: null,
       };
     }
-    let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
-      ? {
-          runtimeAlive: false,
-          paneUsable: false,
-          processAlive: false,
-          tmuxActivityAt: null,
-          probeUnresponsive: false,
-        }
-      : await this.readRuntimeSnapshot(session);
+    let runtime: SessionRuntimeSnapshot = {
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      tmuxActivityAt: null,
+      probeUnresponsive: false,
+    };
+    if (!isTerminalSessionStatus(session.status)) {
+      try {
+        runtime = await this.readRuntimeSnapshot(session);
+      } catch (error) {
+        return this.classificationErrorResult(session, error, "runtime_probe");
+      }
+    }
     if (this.isDeliveryStopped())
       return {
         session,
@@ -22117,6 +22146,7 @@ export class SessionService {
           : "other",
       );
     } else if (
+      session.status !== "errored" &&
       workspace.exists &&
       runtime.runtimeAlive &&
       runtime.paneUsable &&
