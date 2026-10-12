@@ -26226,6 +26226,33 @@ describe("SessionService", () => {
     },
   );
 
+  it("keeps a workspace diagnostic after an unresponsive runtime probe recovers", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1" });
+    sessions.set(record.id, record);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: permission denied",
+    });
+    const service = await createDisposedSessionService();
+
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(
+      "Session status detection failed: workspace stat failed: permission denied",
+    );
+    expect(sessions.get(record.id)?.errorSource).toBe("other");
+
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(
+      "Session status detection failed: workspace stat failed: permission denied",
+    );
+    expect(sessions.get(record.id)?.errorSource).toBe("other");
+  });
+
   it.each([
     { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
     { error: "Session status detection failed: ps failed: classifier", errorSource: "other" as const },
@@ -51967,6 +51994,22 @@ describe("SessionService", () => {
         expect(kill).not.toHaveBeenCalled();
         expect(teardown).not.toHaveBeenCalled();
         expect(release).not.toHaveBeenCalled();
+      });
+
+      it("attributes a budget-check workspace diagnostic despite an unresponsive runtime", async () => {
+        const { sessions, internals } = await setup();
+        getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+        probeWorkspaceMock.mockReturnValue({
+          exists: false,
+          missing: false,
+          diagnostic: "workspace stat failed: permission denied",
+        });
+
+        expect(await internals.stopForTokenBudget({ id: "api-1" })).toBe(false);
+        expect(sessions.get("api-1")?.error).toBe(
+          "Session status detection failed: workspace stat failed: permission denied",
+        );
+        expect(sessions.get("api-1")?.errorSource).toBe("other");
       });
 
       const mutations = [

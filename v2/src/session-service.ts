@@ -6496,7 +6496,9 @@ export class SessionService {
             this.retainDetectionError(
               latest,
               runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
-              runtime.probeUnresponsive || runtime.diagnostic ? "runtime_probe" : "other",
+              runtime.diagnostic !== undefined || workspace.diagnostic === undefined
+                ? "runtime_probe"
+                : "other",
             );
             return undefined;
           }
@@ -21968,6 +21970,8 @@ export class SessionService {
     if (isTerminalSessionStatus(latest.status)) return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
     if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
+    if (latest.errorSource === "other" && latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
+      return latest;
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
     if (latest.error === message) return latest;
@@ -22085,7 +22089,9 @@ export class SessionService {
         runtime.diagnostic ??
           workspace.diagnostic ??
           "runtime probe (tmux or ps) timed out; runtime state unknown",
-        runtime.probeUnresponsive || runtime.diagnostic ? "runtime_probe" : "other",
+        runtime.diagnostic !== undefined || workspace.diagnostic === undefined
+          ? "runtime_probe"
+          : "other",
       );
     } else if (
       workspace.exists &&
