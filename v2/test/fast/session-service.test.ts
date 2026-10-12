@@ -26159,6 +26159,28 @@ describe("SessionService", () => {
     );
   });
 
+  it("promotes a stale errored record while keeping an independent failure", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({
+      id: "api-1",
+      status: "errored",
+      error: "Provider request failed",
+      errorSource: "other",
+    });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+
+    const service = await createDisposedSessionService();
+    const result = await service.get(record.id);
+
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe("Provider request failed");
+    expect(sessions.get(record.id)?.errorSource).toBe("other");
+  });
+
   it.each([undefined, "inferred_runtime_exit"] as const)(
     "heals an already-running inferred exit without relaunch (source=%s)",
     async (errorSource) => {
