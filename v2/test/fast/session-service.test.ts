@@ -36171,6 +36171,63 @@ describe("SessionService", () => {
     },
   );
 
+  it.each(["restore", "reopen"] as const)(
+    "promotes an errored session with unrelated error while %s is pending",
+    async (action) => {
+      const record = runningSession({
+        status: "errored",
+        error: "Agent server returned HTTP 500",
+        errorSource: "other",
+      });
+      const sessions = createSessionStore(record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      lifecycle.begin(action, [record.id]);
+
+      const view = await service.get(record.id);
+      expect(view.status).toBe("running");
+      expect(sessions.get(record.id)).toMatchObject({
+        status: "running",
+        error: record.error,
+        errorSource: "other",
+      });
+      expect(writeSessionMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("defers a running runtime-probe diagnostic while reopen is pending", async () => {
+    const record = runningSession({
+      error: "Session status detection failed: ps failed: transient",
+      errorSource: "runtime_probe",
+    });
+    const sessions = createSessionStore(record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const service = await createDisposedSessionService();
+    const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+    const owner = lifecycle.begin("reopen", [record.id]);
+
+    await service.get(record.id);
+    expect(sessions.get(record.id)).toMatchObject({
+      error: record.error,
+      errorSource: "runtime_probe",
+    });
+    expect(writeSessionMock).not.toHaveBeenCalled();
+
+    lifecycle.settle(
+      owner,
+      false,
+      () => "failed",
+      () => true,
+    );
+    await service.get(record.id);
+    expect(sessions.get(record.id)?.error).toBeUndefined();
+    expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+    expect(writeSessionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("releases runtime healing ownership after restore readiness fails", async () => {
     const record = runningSession({
       status: "errored",
