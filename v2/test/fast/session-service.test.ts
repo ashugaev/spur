@@ -36059,6 +36059,140 @@ describe("SessionService", () => {
     expect(restored.runtimeAlive).toBe(true);
   });
 
+  it("defers inferred runtime error healing during pending restore", async () => {
+    const sessions = createSessionStore(
+      runningSession({
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      }),
+    );
+    mockClaudeJsonlState("waiting");
+    mockExitedThenRestoredProcess();
+    let releaseReady: (() => void) | undefined;
+    waitForTmuxReadyMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolveReady) => {
+          releaseReady = resolveReady;
+        }),
+    );
+    const service = await createDisposedSessionService();
+    const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+    const restore = service.restore("api-1").then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    let before: SessionRecord | undefined;
+    let after: SessionRecord | undefined;
+    let writesBefore: number;
+    let writesAfter: number;
+    let pendingOperation: ReturnType<typeof lifecycle.snapshot>["operation"];
+    try {
+      await vi.waitFor(() => {
+        expect(releaseReady).toBeDefined();
+        expect(sessions.get("api-1")).toMatchObject({
+          status: "running",
+          error: "Agent runtime exited unexpectedly.",
+        });
+        expect(lifecycle.snapshot("api-1").operation).toMatchObject({
+          action: "restore",
+          phase: "pending",
+        });
+      });
+      before = sessions.get("api-1");
+      writesBefore = writeSessionMock.mock.calls.length;
+      pendingOperation = lifecycle.snapshot("api-1").operation;
+      // The pending lifecycle owner outlives the 30-second restore warmup.
+      await vi.advanceTimersByTimeAsync(31_001);
+      await service.get("api-1");
+      after = sessions.get("api-1");
+      writesAfter = writeSessionMock.mock.calls.length;
+    } finally {
+      releaseReady?.();
+    }
+    const outcome = await restore;
+    expect({
+      pendingOperation,
+      before: { status: before?.status, error: before?.error, updatedAt: before?.updatedAt },
+      after: { status: after?.status, error: after?.error, updatedAt: after?.updatedAt },
+      writesBefore,
+      writesAfter,
+      restored: outcome.ok,
+      refusal: outcome.ok ? undefined : String(outcome.error),
+      promptSent: sendMessageToTmuxMock.mock.calls.length > 0,
+    }).toEqual({
+      pendingOperation: expect.objectContaining({ action: "restore", phase: "pending" }),
+      before: {
+        status: "running",
+        error: "Agent runtime exited unexpectedly.",
+        updatedAt: before?.updatedAt,
+      },
+      after: {
+        status: "running",
+        error: "Agent runtime exited unexpectedly.",
+        updatedAt: before?.updatedAt,
+      },
+      writesBefore,
+      writesAfter: writesBefore,
+      restored: true,
+      refusal: undefined,
+      promptSent: true,
+    });
+  });
+
+  it.each(["restore", "reopen"] as const)(
+    "defers pre-provisional inferred runtime healing while %s owns the record",
+    async (action) => {
+      const record = runningSession({
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+      });
+      const sessions = createSessionStore(record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      const owner = lifecycle.begin(action, [record.id]);
+
+      const pending = await service.get(record.id);
+      expect(pending.status).toBe("errored");
+      expect(sessions.get(record.id)?.error).toBe("Agent runtime exited unexpectedly.");
+      expect(writeSessionMock).not.toHaveBeenCalled();
+
+      lifecycle.settle(
+        owner,
+        false,
+        () => "failed",
+        () => true,
+      );
+      const healed = await service.get(record.id);
+      expect(healed.status).toBe("running");
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(writeSessionMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("releases runtime healing ownership after restore readiness fails", async () => {
+    const record = runningSession({
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+    });
+    const sessions = createSessionStore(record);
+    mockClaudeJsonlState("waiting");
+    mockExitedThenRestoredProcess();
+    waitForTmuxReadyMock.mockRejectedValueOnce(new Error("readiness failed"));
+    const service = await createDisposedSessionService();
+    const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+
+    await expect(service.restore(record.id)).rejects.toThrow("readiness failed");
+    expect(lifecycle.snapshot(record.id).operation).toMatchObject({
+      action: "restore",
+      phase: "failed",
+    });
+    expect(sessions.get(record.id)?.error).toContain("readiness failed");
+    await service.get(record.id);
+    expect(sessions.get(record.id)?.error).toContain("readiness failed");
+  });
+
   it("fails restore before sending the prompt when the resumed agent exits back to the shell", async () => {
     findAgentSessionIdMock.mockResolvedValue(null);
     createSessionStore({

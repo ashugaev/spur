@@ -21896,6 +21896,7 @@ export class SessionService {
       return latest;
 
     const shouldClear = !latest.serverErrorAt && recoverableRuntimeError(latest);
+    if (shouldClear && this.restoreOwnsRuntimeRecovery(session.id)) return latest;
     const updated: SessionRecord = {
       ...latest,
       status: "running",
@@ -21924,6 +21925,14 @@ export class SessionService {
     });
     this.scheduleHealedSidecarRestart(updated);
     return updated;
+  }
+
+  private restoreOwnsRuntimeRecovery(sessionId: string): boolean {
+    const operation = this.lifecycle.snapshot(sessionId).operation;
+    return (
+      operation?.phase === "pending" &&
+      (operation.action === "restore" || operation.action === "reopen")
+    );
   }
 
   private async readFinalTokenUsage(
@@ -22165,7 +22174,8 @@ export class SessionService {
         latest.error === session.error &&
         latest.errorSource === session.errorSource &&
         !latest.serverErrorAt &&
-        recoverableRuntimeError(latest)
+        recoverableRuntimeError(latest) &&
+        !this.restoreOwnsRuntimeRecovery(session.id)
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
