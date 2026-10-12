@@ -32,6 +32,17 @@ projects:
       - 'service_tier="default"'
     preflight: {}
     sidecars:
+      voice-daemon:
+        command: ./scripts/telegram-call/run-daemon.sh
+        ports:
+          daemon:
+            env: SPUR_RESERVED_PORT_DAEMON
+            start: 4320
+            end: 4399
+      voice-call:
+        command: ./scripts/telegram-call/run-call.sh
+        dependsOn:
+          - voice-daemon
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
         ports:

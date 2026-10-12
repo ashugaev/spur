@@ -1,0 +1,6 @@
+py-tgcalls==3.0.0
+ntgcalls==3.0.3
+Telethon==1.43.2
+google-genai==2.29.0
+python-dotenv==1.2.4
+PyYAML==6.0.3
