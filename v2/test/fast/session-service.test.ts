@@ -26163,6 +26163,8 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     const record = runningSession({
       id: "api-1",
+      agent: "cursor",
+      launchCommand: "agent --force",
       status: "errored",
       error: "Provider request failed",
       errorSource: "other",
@@ -26170,7 +26172,7 @@ describe("SessionService", () => {
     sessions.set(record.id, record);
     tmuxSessionExistsMock.mockResolvedValue(true);
     isProcessRunningInTmuxMock.mockResolvedValue(true);
-    mockClaudeJsonlState("waiting");
+    mockCursorJsonlState("waiting");
 
     const service = await createDisposedSessionService();
     const result = await service.get(record.id);
@@ -26179,6 +26181,105 @@ describe("SessionService", () => {
     expect(result.state).toBe("error");
     expect(sessions.get(record.id)?.error).toBe("Provider request failed");
     expect(sessions.get(record.id)?.errorSource).toBe("other");
+  });
+
+  it("keeps inferred exit errored when workspace presence is unconfirmed", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    const record = runningSession({
+      id: "api-1",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+    });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    probeWorkspaceMock.mockReturnValue({ exists: false, missing: false, diagnostic: "stat denied" });
+    const service = await createDisposedSessionService();
+
+    expect((await service.get(record.id)).status).toBe("errored");
+    await expect(service.startSidecar(record.id, "dev")).rejects.toThrow(
+      'Cannot start sidecar "dev" for api-1: session status is errored',
+    );
+    expect(sessions.get(record.id)?.error).toBe(record.error);
+    expect(sessions.get(record.id)?.errorSource).toBe(record.errorSource);
+    expect(writeSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("drains a queued send after an inferred runtime exit heals", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({
+      id: "api-1",
+      agent: "cursor",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+      queuedMessages: { messages: ["resume queued delivery"], awaitingPrompt: true },
+    });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("waiting");
+    const service = await createDisposedSessionService();
+
+    expect((await service.get(record.id)).status).toBe("running");
+    expect(await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)).toBe(true);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      record.tmuxSession,
+      "resume queued delivery",
+      expect.anything(),
+    );
+    expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+    expect(sessions.get(record.id)?.error).toBeUndefined();
+    expect(sessions.get(record.id)?.status).toBe("running");
+  });
+
+  it.each([
+    { status: "errored" as const, change: "agentLaunchId" as const },
+    { status: "errored" as const, change: "agentSessionId" as const },
+    { status: "running" as const, change: "agentLaunchId" as const },
+    { status: "running" as const, change: "agentSessionId" as const },
+  ])("does not heal $status after $change changes during the probe", async ({ status, change }) => {
+    const sessions = createSessionStore();
+    const record = runningSession({
+      id: "api-1",
+      status,
+      agentLaunchId: "generation-1",
+      agentSessionId: "owner-1",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+    });
+    sessions.set(record.id, record);
+    const replacement = {
+      ...record,
+      [change]: change === "agentLaunchId" ? "generation-2" : "owner-2",
+    };
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockImplementationOnce(
+      async () => {
+        sessions.set(record.id, replacement);
+        return {
+          runtimeAlive: true,
+          paneUsable: true,
+          processAlive: true,
+          probeUnresponsive: false,
+        };
+      },
+    );
+
+    await sessionServiceInternals(service).classifySessionRecord(record);
+    expect(sessions.get(record.id)).toEqual(replacement);
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it.each([undefined, "inferred_runtime_exit"] as const)(
@@ -26253,6 +26354,26 @@ describe("SessionService", () => {
     expect(sessions.get(record.id)?.errorSource).toBe("other");
   });
 
+  it("keeps a legacy non-runtime diagnostic across timeout and recovery", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({
+      id: "api-1",
+      error: "Session status detection failed: classifier unavailable",
+    });
+    sessions.set(record.id, record);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: true });
+    const service = await createDisposedSessionService();
+
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(record.error);
+    expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(record.error);
+    expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+  });
+
   it.each([
     { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
     { error: "Session status detection failed: ps failed: classifier", errorSource: "other" as const },
@@ -26273,6 +26394,7 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("error");
     expect(result.error).toBe(patch.error);
+    expect("errorSource" in result).toBe(false);
     expect(sessions.get(record.id)?.error).toBe(patch.error);
     expect(sessions.get(record.id)?.errorSource).toBe(patch.errorSource);
   });
@@ -59380,6 +59502,8 @@ describe("SessionService", () => {
         const detail = await service.get(record.id);
         expect(detail).toMatchObject({ state: "error", status: "running" });
         expect(detail.error).toContain(diagnostic);
+        expect(sessions.get(record.id)?.errorSource).toBe("other");
+        expect("errorSource" in detail).toBe(false);
         expect(detail.sidecars[0]).toMatchObject({ name: "dev" });
         expect(detail.sidecars[0]?.deadPane).toBeUndefined();
         const views = await service.list();
@@ -59457,6 +59581,8 @@ describe("SessionService", () => {
         tmuxSessionExistsMock.mockResolvedValue(true);
         await service.get(record.id);
         expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+        expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("errorSource");
         const healedDashboard = (await sessionServiceInternals(service).enrichDashboard(
           sessions.get(record.id) ?? record,
         )) as DashboardSessionView;

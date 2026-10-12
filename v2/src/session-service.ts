@@ -16485,7 +16485,7 @@ export class SessionService {
         session = this.reconcileStaleErroredSession(
           session,
           runtime,
-          probeWorkspace(session.worktreePath).missing,
+          probeWorkspace(session.worktreePath).exists,
         );
       } catch {
         // Fail closed, same as memoryShedCandidates: the heal is opportunistic
@@ -21833,14 +21833,14 @@ export class SessionService {
   private reconcileStaleErroredSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
-    workspaceMissing: boolean,
+    workspacePresent: boolean,
   ): SessionRecord {
     // Shepherd included, for the reason spelled out in
     // reconcileStaleStoppedSession above.
     if (
       session.status !== "errored" ||
       runtime.probeUnresponsive ||
-      workspaceMissing ||
+      !workspacePresent ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -21970,7 +21970,8 @@ export class SessionService {
     if (isTerminalSessionStatus(latest.status)) return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
     if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
-    if (latest.errorSource === "other" && latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
+    if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
+        !recoverableRuntimeError(latest))
       return latest;
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
@@ -22083,6 +22084,7 @@ export class SessionService {
       };
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
+    let runtimeOwnerChanged = false;
     if (runtime.probeUnresponsive || workspace.diagnostic) {
       effectiveSession = this.retainDetectionError(
         session,
@@ -22104,10 +22106,11 @@ export class SessionService {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       effectiveSession = latest;
+      runtimeOwnerChanged =
+        !sameSessionRuntimeOwner(latest, session) || latest.agentLaunchId !== session.agentLaunchId;
       if (
         !isTerminalSessionStatus(latest.status) &&
-        sameSessionRuntimeOwner(latest, session) &&
-        latest.agentLaunchId === session.agentLaunchId &&
+        !runtimeOwnerChanged &&
         latest.error === session.error &&
         latest.errorSource === session.errorSource &&
         !latest.serverErrorAt &&
@@ -22159,11 +22162,13 @@ export class SessionService {
       runtime,
       workspace.missing,
     );
-    effectiveSession = this.reconcileStaleErroredSession(
-      effectiveSession,
-      runtime,
-      workspace.missing,
-    );
+    if (!runtimeOwnerChanged) {
+      effectiveSession = this.reconcileStaleErroredSession(
+        effectiveSession,
+        runtime,
+        workspace.exists,
+      );
+    }
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
