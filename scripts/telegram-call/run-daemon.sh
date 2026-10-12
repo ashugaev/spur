@@ -15,13 +15,30 @@ FIXTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-voice-sandbox.XXXXXX")
 DAEMON_PID=""
 
 cleanup() {
-  trap - EXIT INT TERM HUP
+  trap - EXIT
+  trap '' INT TERM HUP
   local children_stopped=1
   local teardown_failed=0
-  local pane_pid child_pid
-  local -a child_pids=()
+  local pane_pid child_pid identity i
+  local -A child_identities=()
+  process_identity() {
+    local stat suffix
+    local -a fields
+    [[ -e "/proc/$1/stat" ]] || return 1
+    IFS= read -r stat < "/proc/$1/stat" || return 2
+    suffix="${stat##*) }"
+    read -r -a fields <<< "$suffix"
+    [[ "${fields[0]:-}" != Z && "${fields[0]:-}" != X ]] || return 1
+    [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 2
+    printf '%s\n' "${fields[19]}"
+  }
   collect_children() {
-    child_pids+=("$1")
+    local identity
+    if identity="$(process_identity "$1")"; then
+      child_identities["$1"]="$identity"
+    elif [[ "$?" == 2 ]]; then
+      teardown_failed=1
+    fi
     while IFS= read -r child_pid; do
       [[ -n "$child_pid" ]] && collect_children "$child_pid"
     done < <(pgrep -P "$1" || true)
@@ -41,19 +58,32 @@ cleanup() {
     fi
   fi
   if [[ -n "$DAEMON_PID" ]]; then
-    kill -TERM "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    collect_children "$DAEMON_PID"
+    if identity="$(process_identity "$DAEMON_PID")" && \
+       [[ "$identity" == "${child_identities[$DAEMON_PID]:-}" ]]; then
+      kill -TERM "$DAEMON_PID" 2>/dev/null || true
+    fi
   fi
-  for _ in {1..5}; do
+  # Finish inside Sidecar's grace; signal only the captured process generation.
+  for i in {1..20}; do
     children_stopped=1
-    for child_pid in "${child_pids[@]}"; do
-      if kill -0 "$child_pid" 2>/dev/null; then
+    for child_pid in "${!child_identities[@]}"; do
+      if identity="$(process_identity "$child_pid")"; then
+        [[ "$identity" == "${child_identities[$child_pid]}" ]] || continue
         children_stopped=0
+        if [[ "$i" == 10 ]]; then
+          kill -KILL "$child_pid" 2>/dev/null || true
+        fi
+      elif [[ "$?" == 2 ]]; then
+        teardown_failed=1
       fi
     done
     [[ "$children_stopped" == 1 ]] && break
-    sleep 1
+    sleep 0.025
   done
+  if [[ -n "$DAEMON_PID" && "$children_stopped" == 1 ]]; then
+    wait "$DAEMON_PID" 2>/dev/null || true
+  fi
   if [[ "$children_stopped" == 1 && "$teardown_failed" == 0 ]]; then
     rm -rf "$FIXTURE_DIR"
     rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
