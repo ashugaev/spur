@@ -21924,6 +21924,7 @@ export class SessionService {
       },
     });
     this.scheduleHealedSidecarRestart(updated);
+    if (shouldClear && this.shouldRunDelivery(updated)) this.scheduleDeliveryRunner(updated.id);
     return updated;
   }
 
@@ -22181,6 +22182,7 @@ export class SessionService {
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
         this.stateCache.delete(session.id);
+        if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
       }
     }
     let state: SessionState;

@@ -26317,6 +26317,114 @@ describe("SessionService", () => {
     expect(sessions.get(record.id)?.status).toBe("running");
   });
 
+  it("automatically drains queued delivery after inferred runtime exit heals", async () => {
+    const record = runningSession({
+      agent: "cursor",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+      queuedMessages: { messages: ["resume queued delivery"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("waiting");
+    const service = await createDisposedSessionService();
+    try {
+      expect((await service.get(record.id)).status).toBe("running");
+      await vi.waitFor(() => {
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        record.tmuxSession,
+        "resume queued delivery",
+        expect.anything(),
+      );
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("automatically drains queued delivery after already-running runtime probe heals", async () => {
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const record = runningSession({
+      error: "Session status detection failed: ps failed: controlled",
+      errorSource: "runtime_probe",
+      queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
+    });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+    try {
+      expect((await service.get(record.id)).status).toBe("running");
+      await vi.waitFor(() => {
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+      await service.get(record.id);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("does not arm queued delivery for a promoted unrelated error", async () => {
+    const record = runningSession({
+      status: "errored",
+      error: "Provider request failed",
+      errorSource: "other",
+      queuedMessages: { messages: ["keep queued"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    const service = await createDisposedSessionService();
+    try {
+      expect((await service.get(record.id)).status).toBe("running");
+      expect(sessions.get(record.id)).toMatchObject({
+        error: record.error,
+        errorSource: "other",
+        queuedMessages: record.queuedMessages,
+      });
+      expect(sessionServiceInternals(service).deliveryRuns.has(record.id)).toBe(false);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["errored", "running"] as const)(
+    "does not arm delivery after healing a $status record without queued work",
+    async (status) => {
+      const record = runningSession({
+        status,
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "inferred_runtime_exit",
+      });
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      sessions.set(record.id, record);
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      try {
+        expect((await service.get(record.id)).status).toBe("running");
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessionServiceInternals(service).deliveryRuns.has(record.id)).toBe(false);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
   it.each([
     { status: "errored" as const, change: "agentLaunchId" as const },
     { status: "errored" as const, change: "agentSessionId" as const },
@@ -26635,6 +26743,74 @@ describe("SessionService", () => {
       );
     });
 
+    service.dispose();
+  });
+
+  it("schedules a healed sidecar before queued delivery without waiting for sidecar startup", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: { dev: { command: "pnpm dev", autoStart: true } },
+        },
+      },
+    });
+    const record = runningSession({
+      agent: "cursor",
+      launchCommand: "agent --force",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      queuedMessages: { messages: ["queued with sidecar"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockCursorJsonlState("waiting");
+    let releaseSidecar: (() => void) | undefined;
+    createTmuxSidecarSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSidecar = resolve;
+        }),
+    );
+    const service = await createDisposedSessionService();
+    const internals = service as unknown as {
+      scheduleHealedSidecarRestart(session: SessionRecord): void;
+      scheduleDeliveryRunner(sessionId: string): void;
+    };
+    const sidecarSchedule = vi.spyOn(internals, "scheduleHealedSidecarRestart");
+    const deliverySchedule = vi.spyOn(internals, "scheduleDeliveryRunner");
+    let getSettled = false;
+    const getting = service.get(record.id).then(
+      (view) => {
+        getSettled = true;
+        return { ok: true as const, view };
+      },
+      (error: unknown) => {
+        getSettled = true;
+        return { ok: false as const, error };
+      },
+    );
+    try {
+      await vi.waitFor(() => {
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+        expect(getSettled).toBe(true);
+      });
+      expect(sidecarSchedule).toHaveBeenCalledTimes(1);
+      expect(deliverySchedule).toHaveBeenCalled();
+      expect(sidecarSchedule.mock.invocationCallOrder[0]).toBeLessThan(
+        deliverySchedule.mock.invocationCallOrder[0] ?? Infinity,
+      );
+    } finally {
+      releaseSidecar?.();
+    }
+    const outcome = await getting;
+    expect(outcome.ok).toBe(true);
+    await vi.waitFor(() => {
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+    });
     service.dispose();
   });
 
