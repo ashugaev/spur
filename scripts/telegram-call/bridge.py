@@ -42,6 +42,8 @@ class Call:
     ready: bool = False
     gemini: bool = False
     accept_permission: bool = False
+    accept_request: object | None = None
+    accept_inflight: bool = False
     accepted: bool = False
     session: str | None = None
     spawned: bool = False
@@ -80,15 +82,24 @@ def guarded_client_class():
                         accepts += 1
                         if (captured is not self.current_call or not captured.alive
                                 or not captured.ready or not captured.gemini
-                                or not captured.accept_permission or captured.accepted):
+                                or captured.accepted or captured.accept_inflight
+                                or (not captured.accept_permission and captured.accept_request is not rpc)):
                             raise BridgeError("call_not_ready")
             if accepts:
                 if accepts != 1:
                     raise BridgeError("duplicate_call_accept")
                 captured.accept_permission = False
-                captured.accepted = True
+                captured.accept_request = next(rpc for rpc in requests if isinstance(rpc, AcceptCallRequest))
+                captured.accept_inflight = True
                 event("accept", correlation=captured.correlation)
-            return await super()._call(sender, request, *args, **kwargs)
+            try:
+                result = await super()._call(sender, request, *args, **kwargs)
+                if accepts:
+                    captured.accepted = True
+                return result
+            finally:
+                if accepts:
+                    captured.accept_inflight = False
 
     return GuardedClient
 
@@ -329,6 +340,7 @@ class Tools:
     def __init__(self, call, shepherd, live, types):
         self.call, self.shepherd, self.live, self.types = call, shepherd, live, types
         self.pending = None
+        self.pending_id = None
         self.dispatch_tasks = set()
 
     def schedule(self, function):
@@ -360,12 +372,14 @@ class Tools:
         deadline = time.monotonic() + 90
         # Reserve before await; simultaneous server functions cannot both dispatch.
         self.pending = asyncio.current_task()
+        self.pending_id = function.id
         try:
             cursor = await self.shepherd.dispatch(self.call, args["message"], nonce)
             await self.receipt(function, {"status": "dispatched", "request_id": function.id})
             self.pending = asyncio.create_task(self.wait_answer(cursor, nonce, deadline))
         except Exception:
             self.pending = None
+            self.pending_id = None
             await self.receipt(function, {"status": "dispatch_failed"})
 
     async def wait_answer(self, cursor, nonce, deadline):
@@ -381,6 +395,16 @@ class Tools:
                     role="user", parts=[self.types.Part(text=text)]), turn_complete=True)
         finally:
             self.pending = None
+            self.pending_id = None
+
+    async def cancel(self, ids):
+        # Gemini withdrew its function request; delegated jobs remain owned by Shepherd.
+        if self.pending is not None and self.pending_id in ids:
+            task = self.pending
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self.pending = None
+            self.pending_id = None
 
     async def close(self):
         for task in list(self.dispatch_tasks):
@@ -663,6 +687,8 @@ class Listener:
                         if response.tool_call:
                             for function in response.tool_call.function_calls or []:
                                 tools.schedule(function)
+                        if response.tool_call_cancellation:
+                            await tools.cancel(response.tool_call_cancellation.ids or [])
                     if not received:
                         raise BridgeError("gemini_closed")
 
@@ -731,10 +757,13 @@ async def main():
     from google import genai
     from google.genai import types
     import httpx
-    client = guarded_client_class()(str(session), int(values["TG_API_ID"]), values["TG_API_HASH"])
-    client.voice_runtime = runtime
+    client = None
+    calls = None
+    gemini = None
     listener = None
     try:
+        client = guarded_client_class()(str(session), int(values["TG_API_ID"]), values["TG_API_HASH"])
+        client.voice_runtime = runtime
         await client.connect()
         if not await client.is_user_authorized():
             raise BridgeError("telegram_session_unauthorized")
@@ -754,14 +783,25 @@ async def main():
                 asyncio.get_running_loop().add_signal_handler(signum, stop.set)
             event("listener_ready")
             await stop.wait()
-            await listener.close()
-            client.remove_event_handler(listener.raw)
-            await gemini.aio.aclose()
     finally:
-        if listener:
-            await listener.close()
-        await client.disconnect()
-        lock.close()
+        try:
+            if listener:
+                try:
+                    await listener.close()
+                finally:
+                    client.remove_event_handler(listener.raw)
+                    if calls:
+                        calls.remove_handler(listener.frames)
+        finally:
+            try:
+                if gemini:
+                    await gemini.aio.aclose()
+            finally:
+                try:
+                    if client:
+                        await client.disconnect()
+                finally:
+                    lock.close()
 
 
 if __name__ == "__main__":
