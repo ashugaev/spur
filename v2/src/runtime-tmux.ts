@@ -780,11 +780,7 @@ export type TmuxSessionPanesLookup =
 // `panePids: []` means tmux replied and the session has no panes.
 export async function lookupTmuxSessionPanePids(
   sessionName: string,
-  options?: { fresh?: boolean },
 ): Promise<TmuxSessionPanesLookup> {
-  if (options?.fresh) {
-    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
-  }
   const { readable, panes } = await getFleetPaneSnapshot();
   if (!readable) {
     return { status: "unavailable" };

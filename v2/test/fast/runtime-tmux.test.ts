@@ -1759,21 +1759,24 @@ describe("runtime-tmux", () => {
 
     const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
 
-    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
+    expect(await lookupTmuxSessionPanePids("api-1")).toEqual({
       status: "ok",
       panePids: [4242, 4343],
     });
     expect(await lookupTmuxSessionPanePids("absent-1")).toEqual({ status: "ok", panePids: [] });
+  });
 
+  it("lookupTmuxSessionPanePids reports unavailable when the tmux probe fails", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "list-panes") {
         throw new Error("no server running on /tmp/tmux-1000/spur");
       }
       return { stdout: "", stderr: "" };
     });
-    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
-      status: "unavailable",
-    });
+
+    const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxSessionPanePids("api-1")).toEqual({ status: "unavailable" });
   });
 
   it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {

@@ -11510,7 +11510,10 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1");
+        if (!record) {
+          throw new Error("unreachable");
+        }
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
@@ -51699,7 +51702,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("restore captures and excludes an agent in a non-active pane: neither foreign nor capture_blind", async () => {
+    it("restore captures and excludes an agent in a non-active pane without a foreign refusal", async () => {
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       createSessionStore(runningSession({ id: "api-1" }));
