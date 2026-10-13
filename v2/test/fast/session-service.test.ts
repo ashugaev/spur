@@ -5019,6 +5019,21 @@ describe("SessionService", () => {
       },
     );
 
+    it("rejects a foreground codex spawn and releases the admission reservation", async () => {
+      validateCodexModelMock.mockRejectedValueOnce(rejection);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", agent: "codex", model: "auto", prompt: "hello" }),
+      ).rejects.toThrow('Codex model "auto" is not available');
+
+      expect(validateCodexModelMock).toHaveBeenCalledWith("auto", "/tmp/codex", []);
+      expectNothingPrepared();
+      expect(sessionServiceInternals(service).admissionReservations.size).toBe(0);
+      service.dispose();
+    });
+
     it("passes project codexArgs to the validator", async () => {
       const base = baseConfig();
       loadConfigMock.mockReturnValue({
