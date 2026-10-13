@@ -6631,7 +6631,11 @@ describe("SessionDetail load state", () => {
     });
     expect(calls.session).toBe(2);
     expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
-    // Only the 4s poll may fetch now; the card timer must be gone.
+    // Only the poll may fetch now (4s after the settled retry); the card timer must be gone.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
