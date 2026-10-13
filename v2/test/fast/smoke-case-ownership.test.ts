@@ -191,4 +191,24 @@ describe("SmokeCaseRegistry.drain", () => {
     await sleep(5);
     await expect(registry.run(async () => "next")).resolves.toBe("next");
   });
+
+  it("keeps a case unsettled until its late service stop finishes", async () => {
+    const registry = new SmokeCaseRegistry();
+    let finishStop: () => void = () => {};
+    const stopGate = new Promise<void>((resolve) => {
+      finishStop = resolve;
+    });
+    void registry
+      .run(async (smokeCase) => {
+        await sleep(10);
+        smokeCase.ownService({ stop: () => stopGate });
+      })
+      .catch(() => {});
+    // Body rejects immediately; the late stop is still running when the budget ends.
+    await expect(registry.drain(async () => {}, { budgetMs: 60 })).rejects.toThrow(/outlived/);
+    await expect(registry.run(async () => {})).rejects.toThrow(/still running after teardown/);
+    finishStop();
+    await sleep(5);
+    await expect(registry.run(async () => "next")).resolves.toBe("next");
+  });
 });

@@ -26,7 +26,8 @@ interface OwnedCase extends SmokeCase {
   service: StoppableService | undefined;
   /** Stop of a service registered after the case was aborted. */
   lateStop: Promise<unknown> | undefined;
-  body: Promise<unknown> | undefined;
+  /** Settles once the body and any late stop have both settled. */
+  done: Promise<void> | undefined;
   settled: boolean;
 }
 
@@ -55,7 +56,7 @@ export class SmokeCaseRegistry {
       signal: controller.signal,
       service: undefined,
       lateStop: undefined,
-      body: undefined,
+      done: undefined,
       settled: false,
       ownService(service) {
         if (controller.signal.aborted) {
@@ -67,11 +68,14 @@ export class SmokeCaseRegistry {
     };
     this.cases.push(owned);
     const promise = body(owned);
-    owned.body = promise;
-    const markSettled = (): void => {
-      owned.settled = true;
-    };
-    promise.then(markSettled, markSettled);
+    const ignore = (): void => {};
+    owned.done = promise
+      .then(ignore, ignore)
+      // lateStop is assigned before the body observes the abort, so it is visible here.
+      .then(() => owned.lateStop?.then(ignore, ignore))
+      .then(() => {
+        owned.settled = true;
+      });
     return promise;
   }
 
@@ -88,8 +92,7 @@ export class SmokeCaseRegistry {
       for (const owned of this.cases.splice(0).reverse()) {
         owned.controller.abort(new Error("smoke case aborted by teardown"));
         if (owned.service) await settleWithin(owned.service.stop(), remaining());
-        if (owned.body) await settleWithin(owned.body, remaining());
-        if (owned.lateStop) await settleWithin(owned.lateStop, remaining());
+        if (owned.done) await settleWithin(owned.done, remaining());
         if (!owned.settled) stuck.push(owned);
       }
     } finally {
