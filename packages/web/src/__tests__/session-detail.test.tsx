@@ -7594,7 +7594,8 @@ describe("SessionDetail lifecycle operation", () => {
       expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
       current = sessionFixture();
-      await advance(4_000);
+      // The rejected read is a failed poll: the next one backs off to 2x the 4s base.
+      await advance(8_000);
       expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
     },
   );
