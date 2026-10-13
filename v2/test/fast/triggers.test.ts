@@ -3794,6 +3794,67 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it("defers an event whose in-flight write is lost without moving memory ahead of disk", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        const claimId = record()?.claim?.claimId;
+
+        updatePendingSendBatchConditionalMock.mockReturnValueOnce(false);
+        bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toEqual(["comment:1"]);
+        expect(record()?.claim?.claimId).toBe(claimId);
+
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toEqual(["comment:2"]);
+
+        // The deferred merge built a fresh batch: it waits out the send window.
+        await vi.advanceTimersByTimeAsync(35_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
+        expect(deliver.mock.calls[1]?.[1]).not.toContain(textOf("comment:1"));
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("re-interrupts once for an event merged into an in-flight interrupt delivery", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue({ ...waitingSession(), state: "working" }),
+        deliver,
+        interrupt: true,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
+        expect(deliver.mock.calls[1]?.[2]).toMatchObject({ interrupt: true });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(record()).toBeUndefined();
+      } finally {
+        await controller.stop();
+      }
+    });
+
     describe("stale batch guards", () => {
       // Drops the first batch's record, then emits a second event: the
       // synchronous merge clears the cached first batch and builds a new one.
@@ -4116,7 +4177,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("clears delivery-failure backoff at handleSendEvent when interrupt session restarted, delivering immediately", async () => {
+  it("clears delivery-failure backoff at dispatchSendEvent when interrupt session restarted, delivering immediately", async () => {
     const session = {
       id: "api-1",
       status: "running" as const,
@@ -4142,7 +4203,7 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      // First event: handleSendEvent fires interrupt delivery immediately (working).
+      // First event: dispatchSendEvent fires interrupt delivery immediately (working).
       // Delivery throws → recordedAt≈0, nextAttemptAt≈10000.
       bus.emit(mergeConflictEvent());
       await vi.advanceTimersByTimeAsync(1);
@@ -4168,7 +4229,7 @@ describe("startConfiguredTriggers", () => {
       });
 
       // Second event before natural backoff expiry (t<10000).
-      // handleSendEvent: clearBackoffIfRestarted detects stopped → clears →
+      // dispatchSendEvent: clearBackoffIfRestarted detects stopped → clears →
       // proceeds past isInDeliveryBackoff → delivers with interrupt:true.
       bus.emit(mergeConflictEvent());
       await vi.advanceTimersByTimeAsync(1);
@@ -6932,9 +6993,9 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
-    it("holds handleSendEvent's own immediate stale-parked delivery while the memory hold is engaged", async () => {
+    it("holds dispatchSendEvent's own immediate stale-parked delivery while the memory hold is engaged", async () => {
       // isStaleParked delivery bypasses the flush loop entirely (triggers.ts
-      // :1133-1136), so handleSendEvent needs its own hold check distinct
+      // :1133-1136), so dispatchSendEvent needs its own hold check distinct
       // from flushPending's — a "waiting"-state session's ordinary flush-loop
       // delivery never exercises this branch.
       const getMock = vi.fn().mockResolvedValue({
@@ -7263,8 +7324,10 @@ describe("startConfiguredTriggers", () => {
       };
     }
 
-    async function startTelegram(getMock: ReturnType<typeof vi.fn>) {
-      const deliverMock = vi.fn().mockResolvedValue(undefined);
+    async function startTelegram(
+      getMock: ReturnType<typeof vi.fn>,
+      deliverMock: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(undefined),
+    ) {
       const { startConfiguredTriggers } = await loadTriggersModule();
       const bus = new EventBus();
       const controller = startConfiguredTriggers({
@@ -7327,6 +7390,35 @@ describe("startConfiguredTriggers", () => {
         expect(text).toContain("second part");
         await vi.advanceTimersByTimeAsync(5_000);
         expect(deliverMock).toHaveBeenCalledTimes(1);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("flushes a telegram message merged into an in-flight delivery at the 2s window", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const held = vi
+        .fn()
+        .mockImplementationOnce(() => gate)
+        .mockResolvedValue(undefined);
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock, held);
+      try {
+        bus.emit(telegramEvent(1, "first part"));
+        await vi.advanceTimersByTimeAsync(2_050);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        bus.emit(telegramEvent(2, "second part"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        release();
+        // Before the 5s tick (due at 5_000; now ~2_050).
+        await vi.advanceTimersByTimeAsync(200);
+        expect(deliverMock).toHaveBeenCalledTimes(2);
+        expect(deliverMock.mock.calls[1]?.[1]).toContain("second part");
+        expect(deliverMock.mock.calls[1]?.[1]).not.toContain("first part");
       } finally {
         await controller.stop();
       }

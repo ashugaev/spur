@@ -678,6 +678,16 @@ function mergeIntoBatch(
   };
 }
 
+function cloneForMerge(pending: PendingBatch): PendingBatch | null {
+  const batch = restoreSendBatch(structuredClone(pending.batch.serialize()));
+  if (!batch) return null;
+  return {
+    ...pending,
+    batch,
+    retryAccounting: pending.retryAccounting.map((entry) => ({ ...entry })),
+  };
+}
+
 function reconcileRetryAccounting(
   batch: SendBatch,
   prior: readonly SendBatchRetryEntry[],
@@ -1441,9 +1451,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    // Pending interrupt batch whose previous delivery failed: retry while the
-    // session is still working. `clearBatch` only runs on success, so reaching
-    // here means the prior deliverBatch threw.
+    // Pending interrupt batch left behind by a delivery: retry while the
+    // session is still working. Either the prior deliverBatch threw, or it
+    // delivered and kept items merged mid-flight (the interrupt key stays set,
+    // so those items go out as one further interrupt).
     if (session.state === "working" && interruptedKeys.has(queueKey)) {
       await deliverBatch(queueKey, batch, true, session);
     }
@@ -1461,7 +1472,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     trigger: SendTriggerConfig,
     sendBatch: SendBatch,
     persisted: PersistedPendingBatch | undefined,
-  ): { batch: PendingBatch; created: boolean } | null => {
+  ): { batch: PendingBatch; startsFlushTimer: boolean } | "deferred" | null => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
     const destination = { kind: "session" as const, sessionId: sendBatch.sessionId };
     const route = buildAutoPingRoute(deps.config, projectId, triggerId, trigger, destination);
@@ -1513,8 +1524,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       autoPing.isSuppressed(routeFingerprint, destination, itemOccurrenceId, threadTarget),
     );
     if (sendBatch.isEmpty()) return null;
+    // An in-flight merge works on a copy: memory and revision advance only once
+    // the conditional write lands, so a lost write cannot leave memory ahead of
+    // disk and fail the delivering controller's post-await revision check.
+    const target = inFlightClaim && cached ? cloneForMerge(cached) : pendingBatches.get(queueKey);
+    if (target === null) return "deferred";
     const batch = mergeIntoBatch(
-      pendingBatches.get(queueKey),
+      target,
       projectId,
       triggerId,
       trigger.source,
@@ -1525,8 +1541,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     );
     const expectedRevision = batch.revision;
     batch.revision += merged ? 1 : 0;
-    pendingBatches.set(queueKey, batch);
-    syncBatchOccurrenceReferences(queueKey, batch);
     const record = {
       queueKey,
       workId: batch.workId,
@@ -1545,15 +1559,28 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         ? { suppressedHoldAt: persisted.suppressedHoldAt }
         : {}),
     };
-    if (inFlightClaim) {
-      updatePendingSendBatchConditional(
-        deps.config.dataDir,
-        { workId: batch.workId, revision: expectedRevision, claimId: inFlightClaim.claimId },
-        { ...record, claim: inFlightClaim },
-      );
+    let live = batch;
+    if (inFlightClaim && cached) {
+      if (
+        !updatePendingSendBatchConditional(
+          deps.config.dataDir,
+          { workId: batch.workId, revision: expectedRevision, claimId: inFlightClaim.claimId },
+          { ...record, claim: inFlightClaim },
+        )
+      ) {
+        return "deferred";
+      }
+      cached.batch = batch.batch;
+      cached.retryAccounting = batch.retryAccounting;
+      cached.admissionCapRetryAt = batch.admissionCapRetryAt;
+      cached.admissionCapDenials = batch.admissionCapDenials;
+      cached.revision = batch.revision;
+      live = cached;
     } else {
+      pendingBatches.set(queueKey, batch);
       recordPendingSendBatch(deps.config.dataDir, record);
     }
+    syncBatchOccurrenceReferences(queueKey, live);
     logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
       level: "info",
       sessionId: sendBatch.sessionId,
@@ -1568,7 +1595,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       },
     });
     scheduleFlushLoop();
-    return { batch, created: !merged };
+    // A merge into a delivering batch gets its own timer: its dispatch runs after
+    // the delivery, when the batch is left holding only the merged items.
+    return { batch: live, startsFlushTimer: !merged || inFlightClaim !== undefined };
   };
 
   // Delivery tail of a send event, enqueued behind its merge. It can run long
@@ -1579,14 +1608,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     trigger: SendTriggerConfig,
     sendBatch: SendBatch,
     batch: PendingBatch,
-    created: boolean,
+    startsFlushTimer: boolean,
   ): Promise<void> => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
     if (pendingBatches.get(queueKey) !== batch) return;
-    // A new batch gets one timer; a merge into an existing batch adds none.
-    if (created && sendBatch.interactive) {
+    // A new batch gets one timer; a merge into an idle batch adds none.
+    if (startsFlushTimer && sendBatch.interactive) {
       scheduleInteractiveFlush(queueKey, batch, session);
     }
 
@@ -1855,28 +1884,20 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               persisted,
             );
           const dispatch = async (queued: ReturnType<typeof merge>): Promise<void> => {
-            if (!queued) return;
+            if (!queued || queued === "deferred") return;
             await dispatchSendEvent(
               projectId,
               triggerId,
               trigger,
               sendBatch,
               queued.batch,
-              queued.created,
+              queued.startsFlushTimer,
             );
           };
-          const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
-          const cached = pendingBatches.get(queueKey);
-          const deferred = deferredMerges.get(queueKey);
-          const lockTarget =
-            deferred?.routeFingerprint ??
-            (cached && claimHeldByOther(persisted?.claim, cached.routeLeaseId)
-              ? cached.routeFingerprint
-              : undefined);
-          if (lockTarget !== undefined) {
-            // Another controller's delivery holds the route lock and the claim;
-            // merge once it releases, as a locked merge always did. Later events
-            // for this key queue behind it until it has merged.
+          // Merge once the route lock frees, as a locked merge always did. Later
+          // events for this key queue behind it until it has merged.
+          const deferMerge = (lockTarget: string): void => {
+            const deferred = deferredMerges.get(queueKey);
             deferredMerges.set(queueKey, {
               count: (deferred?.count ?? 0) + 1,
               routeFingerprint: lockTarget,
@@ -1899,10 +1920,26 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               // must not outlive the merge or every new event would wait on it.
               await dispatch(queued);
             });
+          };
+          const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
+          const cached = pendingBatches.get(queueKey);
+          const pendingDefer = deferredMerges.get(queueKey)?.routeFingerprint;
+          if (pendingDefer !== undefined) {
+            deferMerge(pendingDefer);
+            return;
+          }
+          if (cached && claimHeldByOther(persisted?.claim, cached.routeLeaseId)) {
+            deferMerge(cached.routeFingerprint);
             return;
           }
           const queued = merge(persisted);
-          if (!queued) return;
+          if (queued === "deferred" && cached) {
+            // The in-flight write was lost: nothing changed in memory, so merge
+            // after the delivery releases the lock.
+            deferMerge(cached.routeFingerprint);
+            return;
+          }
+          if (!queued || queued === "deferred") return;
           enqueue(queueKey, () => dispatch(queued));
           return;
         }
