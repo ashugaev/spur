@@ -20,6 +20,11 @@ function wrapper({ children }: { children: ReactNode }) {
   );
 }
 
+function setVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 function renderProvider() {
   return renderHook(() => useBackendConnection(), { wrapper });
 }
@@ -79,6 +84,7 @@ describe("BackendConnectionProvider", () => {
   });
 
   afterEach(() => {
+    setVisibility("visible");
     vi.useRealTimers();
   });
 
@@ -712,5 +718,52 @@ describe("BackendConnectionProvider", () => {
       await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3);
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends no probe while hidden and probes immediately on visible", async () => {
+    const fetchSpy = mockFetchResults(() => true);
+
+    vi.useFakeTimers();
+    setVisibility("hidden");
+    renderProvider();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+
+    await act(async () => {
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a probe that settles while hidden instead of counting a failure", async () => {
+    const pending: Array<(response: Response) => void> = [];
+    const fetchSpy = vi.spyOn(global, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    await flushMicrotasks();
+    for (let cycle = 0; cycle < FAILURE_THRESHOLD + 1; cycle++) {
+      expect(pending).toHaveLength(cycle + 1);
+      await act(async () => {
+        setVisibility("hidden");
+        pending[cycle]?.(new Response(null, { status: 500 }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.phase).toBe("connected");
+      await act(async () => {
+        setVisibility("visible");
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(FAILURE_THRESHOLD + 2);
+    expect(result.current.phase).toBe("connected");
   });
 });

@@ -47,6 +47,7 @@ import {
 } from "@/lib/file-attachments";
 import { JiraIcon, isReviewLinkLabel, usePrReadyUrls } from "@/lib/link-icons";
 import { matchesSessionSearch } from "@/lib/session-search";
+import { nextPollDelayMs } from "@/lib/poller";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { normalizeBranchName } from "@/lib/branch-name";
 import { DEFAULT_SELF_DESTRUCT_CONDITION } from "@/lib/self-destruct";
@@ -1254,6 +1255,8 @@ export function Dashboard() {
   const queryClient = useQueryClient();
   const sessionsQueryKey = useMemo(() => ["sessions"] as const, []);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
+  const sessionsReadMsRef = useRef(0);
+  const sessionsErrorBaselineRef = useRef(0);
   const [lifecycleVersion, setLifecycleVersion] = useState(0);
   const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
@@ -1263,27 +1266,44 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const read = lifecycleRef.current.beginRead();
-      const response = await fetch("/api/sessions", { signal });
-      if (signal.aborted) throw new Error("Session read aborted");
-      if (!response.ok) throw new Error(`sessions ${response.status}`);
-      const result = (await response.json()) as SpurSessionsResponse;
-      if (signal.aborted) throw new Error("Session read aborted");
-      const accepted = lifecycleRef.current.accept(
-        result.lifecycleInstanceId ?? "",
-        result.sessions,
-        read,
-      );
-      if (!accepted) {
-        const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
-        if (current) return current;
-        throw new Error("Session read superseded");
+      const startedAt = Date.now();
+      try {
+        const read = lifecycleRef.current.beginRead();
+        const response = await fetch("/api/sessions", { signal });
+        if (signal.aborted) throw new Error("Session read aborted");
+        if (!response.ok) throw new Error(`sessions ${response.status}`);
+        const result = (await response.json()) as SpurSessionsResponse;
+        if (signal.aborted) throw new Error("Session read aborted");
+        const accepted = lifecycleRef.current.accept(
+          result.lifecycleInstanceId ?? "",
+          result.sessions,
+          read,
+        );
+        if (!accepted) {
+          const current = queryClient.getQueryData<SpurSessionsResponse>(sessionsQueryKey);
+          if (current) return current;
+          throw new Error("Session read superseded");
+        }
+        publishTransitions();
+        return { ...result, sessions: accepted };
+      } finally {
+        sessionsReadMsRef.current = Date.now() - startedAt;
       }
-      publishTransitions();
-      return { ...result, sessions: accepted };
     },
-    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
-    refetchIntervalInBackground: true,
+    // Consecutive final failures = errorUpdateCount since the last success
+    // (it bumps once per failed fetch, retries included). Backoff and
+    // slow-read spacing share nextPollDelayMs with the other pollers.
+    refetchInterval: (query) => {
+      const { dataUpdatedAt, errorUpdatedAt, errorUpdateCount } = query.state;
+      if (dataUpdatedAt >= errorUpdatedAt) sessionsErrorBaselineRef.current = errorUpdateCount;
+      return nextPollDelayMs(
+        SESSIONS_POLL_INTERVAL_MS,
+        errorUpdateCount - sessionsErrorBaselineRef.current,
+        sessionsReadMsRef.current,
+      );
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];

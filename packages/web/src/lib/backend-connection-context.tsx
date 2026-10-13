@@ -147,12 +147,14 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
           : HEARTBEAT_INTERVAL_MS;
 
     const runProbe = () => {
-      if (probeInFlight) return;
+      if (probeInFlight || document.visibilityState === "hidden") return;
       probeInFlight = true;
       void (async () => {
         try {
           const version = await probeBackend();
-          if (cancelled) return;
+          // A probe that straddles a hide is discarded: neither a success nor
+          // a failure, so hidden time never counts toward FAILURE_THRESHOLD.
+          if (cancelled || document.visibilityState === "hidden") return;
 
           // An out-of-band upgrade moves the daemon version with no other
           // signal to a page that never reloads. Truthy, not `!== null`:
@@ -193,10 +195,13 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
       runProbe();
     }
     const timer = window.setInterval(runProbe, intervalMs);
+    const onVisibilityChange = () => runProbe();
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [dormant, state.phase, consecutiveFailures]);
 

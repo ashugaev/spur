@@ -72,7 +72,7 @@ function useResourceMetrics(): ResourceSnapshot {
       return { available: false };
     },
     refetchInterval: RESOURCE_POLL_MS,
-    refetchIntervalInBackground: true,
+    refetchIntervalInBackground: false,
     staleTime: RESOURCE_POLL_MS,
   });
 
