@@ -89,3 +89,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir v2 build
       - run: pnpm --dir v2 test:smoke
+      - name: Upload failed smoke state
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-agent-smoke-state
+          path: v2/test-results/real-agent-smoke
+          retention-days: 3
+          if-no-files-found: ignore
