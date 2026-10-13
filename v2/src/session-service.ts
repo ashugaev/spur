@@ -7712,6 +7712,7 @@ export class SessionService {
           // everything else.
           continue;
         }
+        if (!session.sidecarNames?.length) continue;
         // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
         const latest = readSession(this.config.dataDir, session.id);
         if (!latest || !isTerminalSessionStatus(latest.status)) continue;

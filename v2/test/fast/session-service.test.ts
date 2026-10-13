@@ -48678,6 +48678,27 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("makes no per-record status read for an absent terminal record without sidecars", async () => {
+      seedReaperSession({ status: "completed" });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        reapOrphanedTmux(): Promise<void>;
+        dispose(): void;
+      };
+      // Drain the constructor's unawaited ticks so only the pass's reads count.
+      await vi.advanceTimersByTimeAsync(0);
+      readSessionMock.mockClear();
+
+      await service.reapOrphanedTmux();
+
+      expect(readSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
     it("leaves a sidecar alone when a reopen lands after the pass listed the record as terminal", async () => {
       const sessions = seedReaperSession({
         status: "completed",
