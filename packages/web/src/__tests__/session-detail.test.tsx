@@ -7600,6 +7600,31 @@ describe("SessionDetail lifecycle operation", () => {
     },
   );
 
+  it("backs the conversation poll off to 2x after a non-ok read", async () => {
+    let conversationCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") return new Response(JSON.stringify(sessionFixture()));
+      if (url === "/api/sessions/api-a1/conversation") {
+        conversationCalls += 1;
+        return new Response("{}", { status: 500 });
+      }
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "" }));
+      if (url === "/api/tags") return new Response(JSON.stringify({ tags: [] }));
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    await advance();
+    const afterFirst = conversationCalls;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    await advance(7_999);
+    expect(conversationCalls).toBe(afterFirst);
+    await advance(1);
+    expect(conversationCalls).toBe(afterFirst + 1);
+  });
+
   it("hands a settled receipt to current Waiting before the restore POST resolves", async () => {
     const delivery = deferred<Response>();
     let current = sessionFixture({ status: "stopped", state: "stopped", runtimeAlive: false });
