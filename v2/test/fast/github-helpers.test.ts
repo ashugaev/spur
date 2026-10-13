@@ -368,6 +368,32 @@ describe("summarizeFailingCi", () => {
     }
   });
 
+  it("ignores a cancelled run superseded by a later success of the same name", () => {
+    const checks: GitHubCheck[] = [
+      { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:00:00Z" },
+      { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
+    ];
+    expect(summarizeFailingCi(checks)).toBeNull();
+  });
+
+  it("flags a cancelled run later than a success of the same name", () => {
+    const checks: GitHubCheck[] = [
+      { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" },
+      { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:05:00Z" },
+    ];
+    expect(summarizeFailingCi(checks)).toBe("CI is failing: Labeler.");
+  });
+
+  it("keeps distinct names and untimestamped checks independent", () => {
+    const checks: GitHubCheck[] = [
+      { name: "a", state: "FAILURE", startedAt: "2026-01-01T00:00:00Z" },
+      { name: "b", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
+      { name: "c", state: "CANCELLED" },
+      { name: "c", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
+    ];
+    expect(summarizeFailingCi(checks)).toBe("CI is failing: a, c.");
+  });
+
   it("ignores skipped, neutral, and stale GitHub checks", () => {
     const checks: GitHubCheck[] = [
       { name: "skipped", state: "SKIPPED" },

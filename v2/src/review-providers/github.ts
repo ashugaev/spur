@@ -380,8 +380,26 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
   };
 }
 
+// A re-run (e.g. draft->ready) leaves the superseded run on the same head commit.
+// Only the latest run per check name counts; a missing/unparseable timestamp is kept.
+function latestChecksByName(checks: GitHubCheck[]): GitHubCheck[] {
+  const latest = new Map<string, number>();
+  const time = (check: GitHubCheck): number =>
+    check.startedAt ? Date.parse(check.startedAt) : Number.NaN;
+  for (const check of checks) {
+    const at = time(check);
+    if (!Number.isNaN(at) && at > (latest.get(check.name) ?? Number.NEGATIVE_INFINITY)) {
+      latest.set(check.name, at);
+    }
+  }
+  return checks.filter((check) => {
+    const at = time(check);
+    return Number.isNaN(at) || at >= (latest.get(check.name) ?? at);
+  });
+}
+
 export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
-  const failing = checks.filter((check) => {
+  const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
     return FAILING_GITHUB_CI_STATES.has(state);
   });
@@ -441,8 +459,8 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
-    ... on CheckRun{name conclusion status}
-    ... on StatusContext{context state}
+    ... on CheckRun{name conclusion status startedAt}
+    ... on StatusContext{context state createdAt}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
@@ -493,7 +511,8 @@ function checksFromPrNode(value: Record<string, unknown>): GitHubCheck[] {
     if (!isRecord(raw)) return [];
     const name = readString(raw.name) ?? readString(raw.context);
     const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
-    return name && state ? [{ name, state }] : [];
+    const startedAt = readString(raw.startedAt) ?? readString(raw.createdAt);
+    return name && state ? [{ name, state, ...(startedAt ? { startedAt } : {}) }] : [];
   });
 }
 
@@ -1521,7 +1540,7 @@ function signalPageToFetch(
 function signalPageField(index: number, page: PullRequestSignalPage): string {
   const connection =
     page.kind === "checks"
-      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status startedAt} ... on StatusContext{context state createdAt}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
         : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;

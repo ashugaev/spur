@@ -636,6 +636,7 @@ export interface ReviewCheck {
   name: string;
   state: string;
   conclusion?: string | null;
+  startedAt?: string;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
