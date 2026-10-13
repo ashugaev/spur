@@ -154,7 +154,7 @@ async function scanFileForDeliveredText(
   return false;
 }
 
-export interface ClaudeSubmitAckScanResult {
+export interface SubmitAckFileScanResult {
   found: boolean;
   scannedFile: string;
 }
@@ -164,7 +164,7 @@ export async function scanClaudeJsonlForMessage(
   text: string,
   worktreePath: string,
   agentSessionId?: string,
-): Promise<ClaudeSubmitAckScanResult> {
+): Promise<SubmitAckFileScanResult> {
   const normalizedTarget = normalize(text);
 
   if (await scanFileForDeliveredText(baseline.file, baseline.size, normalizedTarget)) {

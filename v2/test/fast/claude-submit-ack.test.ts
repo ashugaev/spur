@@ -279,6 +279,29 @@ describe("scanClaudeJsonlForMessage", () => {
     expect(miss).toEqual({ found: false, scannedFile: rotatedFile });
   });
 
+  it("reports the baseline file on a baseline hit and when no other file resolves", async () => {
+    const baselineFile = await makeJsonl("baseline.jsonl", [
+      { type: "user", message: { role: "user", content: "here" } },
+    ]);
+    const baseline = { file: baselineFile, size: 0 };
+
+    findLatestSessionFileMock.mockResolvedValue(null);
+    expect(await scanClaudeJsonlForResult(baseline, "here", "/tmp/worktree")).toEqual({
+      found: true,
+      scannedFile: baselineFile,
+    });
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
+
+    findLatestSessionFileMock.mockResolvedValue(baselineFile);
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
+  });
+
   it("resolves the pinned id when the constructed baseline file never appears", async () => {
     const realFile = await makeJsonl("pinned.jsonl", [
       { type: "user", message: { role: "user", content: "step one" } },
