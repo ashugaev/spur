@@ -1,4 +1,12 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -324,6 +332,46 @@ describe("session slots", () => {
     const todoWrapper = readFileSync(join(toolDir, TODO_TOOL_NAME), "utf8");
     expect(todoWrapper).toContain('exec "$SCRIPT_DIR/spur" todo "$@" --session \'api-1\'');
     expect(todoWrapper).not.toContain("delete");
+  });
+
+  it("rewrites tool wrappers atomically via rename", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const args = {
+      dataDir,
+      sessionId: "api-atomic",
+      configPath: "/tmp/spur-old.yaml",
+      projectId: "api",
+      branchNamingRegex: "^feature/[a-z]+$",
+    };
+    const toolDir = ensureSessionSlotTool(args);
+    const names = readdirSync(toolDir).sort();
+    const before = names.map((name) => {
+      const path = join(toolDir, name);
+      return {
+        name,
+        ino: statSync(path).ino,
+        content: readFileSync(path, "utf8"),
+        fd: openSync(path, "r"),
+      };
+    });
+
+    try {
+      ensureSessionSlotTool({ ...args, configPath: "/tmp/spur-new.yaml" });
+
+      for (const { name, ino, content, fd } of before) {
+        const path = join(toolDir, name);
+        expect(statSync(path).ino).not.toBe(ino);
+        expect(statSync(path).mode & 0o777).toBe(0o755);
+        expect(readFileSync(fd, "utf8")).toBe(content);
+      }
+      expect(readFileSync(join(toolDir, "spur"), "utf8")).toContain("/tmp/spur-new.yaml");
+      expect(readdirSync(toolDir).sort()).toEqual(names);
+    } finally {
+      for (const { fd } of before) {
+        closeSync(fd);
+      }
+    }
   });
 
   it("writes branch helpers when branch naming is configured", async () => {
