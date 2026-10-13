@@ -871,7 +871,12 @@ type MemoryGuardConfig = AppConfig["admission"]["memoryGuard"];
 // `enforceFloors` nor `admission.enabled` has been applied — every caller
 // (assertAdmissible, updateMemoryHold) applies its own gates so a condition
 // never counts toward a denial or a hold unless its own flag says it can.
-type MemoryDenialCause = "legacy_available" | "legacy_swap" | "context_floor" | "pressure";
+type MemoryDenialCause =
+  | "legacy_available"
+  | "legacy_swap"
+  | "context_floor"
+  | "pressure"
+  | "cgroup_max_headroom";
 
 interface MemoryDenialSample {
   legacyDetail?: string | undefined;
@@ -912,6 +917,16 @@ function createMemoryShedEpisode(): MemoryShedEpisode {
 
 function memoryShedEmergencyBytes(guard: MemoryGuardConfig): number {
   return Math.min(MEMORY_SHED_EMERGENCY_CAP_BYTES, Math.floor(guard.shedCriticalFloorBytes / 2));
+}
+
+// One latch truth table for the shed and the admission gate: set at
+// headroom <= E, clear above 2E, keep the prior value in between.
+function nextCgroupMaxLatched(
+  headroomBytes: number,
+  emergencyBytes: number,
+  latched: boolean,
+): boolean {
+  return headroomBytes <= emergencyBytes || (latched && headroomBytes <= 2 * emergencyBytes);
 }
 const DEFAULT_DAILY_WAKE_MESSAGE = "Scheduled daily wake-up. Review current state.";
 
@@ -4039,12 +4054,12 @@ export class SessionService {
         episode.exhaustedEdges.delete("cgroup-max:emergency");
       } else {
         cgroupMaxHeadroomBytes = Math.max(0, cgroup.maxBytes - cgroup.currentBytes);
-        if (cgroupMaxHeadroomBytes <= emergencyBytes) {
-          episode.cgroupMaxLatched = true;
-        } else if (cgroupMaxHeadroomBytes > 2 * emergencyBytes) {
-          episode.cgroupMaxLatched = false;
-          episode.exhaustedEdges.delete("cgroup-max:emergency");
-        }
+        episode.cgroupMaxLatched = nextCgroupMaxLatched(
+          cgroupMaxHeadroomBytes,
+          emergencyBytes,
+          episode.cgroupMaxLatched,
+        );
+        if (!episode.cgroupMaxLatched) episode.exhaustedEdges.delete("cgroup-max:emergency");
       }
     }
 
@@ -21165,7 +21180,24 @@ export class SessionService {
         (1024 * 1024)
       ).toFixed(0)}MB ${context} floor`;
       floorCause = "context_floor";
-    } else {
+    }
+    if (floorDetail === undefined) {
+      const cgroup = readCgroupMemorySnapshot();
+      if (cgroup !== null && cgroup.maxBytes !== null) {
+        const emergencyBytes = memoryShedEmergencyBytes(admission.memoryGuard);
+        const headroomBytes = Math.max(0, cgroup.maxBytes - cgroup.currentBytes);
+        const latched = this.memoryShedEpisode.cgroupMaxLatched;
+        if (nextCgroupMaxLatched(headroomBytes, emergencyBytes, latched)) {
+          const bandBytes = latched ? 2 * emergencyBytes : emergencyBytes;
+          floorDetail = `cgroup ${cgroup.path} memory.max headroom ${(
+            headroomBytes /
+            (1024 * 1024)
+          ).toFixed(0)}MB is within the ${(bandBytes / (1024 * 1024)).toFixed(0)}MB shed band`;
+          floorCause = "cgroup_max_headroom";
+        }
+      }
+    }
+    if (floorDetail === undefined) {
       const pressure = readCgroupPressure();
       if (pressure !== null) {
         someAvg10 = pressure.someAvg10;
