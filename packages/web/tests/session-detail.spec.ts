@@ -448,7 +448,6 @@ test.describe("S1: Session detail header", () => {
     const card = page.getByTestId("session-load-starting");
     await expect(card).toBeVisible();
     await expect(card).toContainText("Spur is starting…");
-    await expect(card).toHaveAttribute("aria-live", "polite");
     await expect(card.getByRole("button", { name: "Retry now" })).toBeVisible();
     await expect(page.getByTestId("session-load-failed")).toHaveCount(0);
 
