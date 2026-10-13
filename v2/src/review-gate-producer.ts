@@ -122,20 +122,38 @@ export async function produceGates(
       active();
       phase = "snapshot-before";
       progress();
-      const before = await readGateSnapshot(api, policy, number);
+      const reviews = await api.pages(`/repos/${policy.repository}/pulls/${number}/reviews`);
       active();
-      const result = evaluateSnapshot(policy, number, before);
-      phase = "snapshot-after";
-      progress();
-      const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
-      active();
-      const fresh =
-        result.fingerprint === after.fingerprint &&
-        result.H === H &&
-        result.B === B &&
-        result.H === after.H &&
-        result.B === after.B;
-      const approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
+      const mayApprove = [policy.codeActor, policy.browserActor].every((actor) =>
+        reviews.some(
+          (row) =>
+            row.user !== null &&
+            typeof row.user === "object" &&
+            !Array.isArray(row.user) &&
+            object(row.user).id === actor &&
+            row.state === "APPROVED" &&
+            row.commit_id === H,
+        ),
+      );
+      let approved = false;
+      let summary = "native-approval-missing";
+      if (mayApprove) {
+        const before = await readGateSnapshot(api, policy, number);
+        active();
+        const result = evaluateSnapshot(policy, number, before);
+        phase = "snapshot-after";
+        progress();
+        const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
+        active();
+        const fresh =
+          result.fingerprint === after.fingerprint &&
+          result.H === H &&
+          result.B === B &&
+          result.H === after.H &&
+          result.B === after.B;
+        approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
+        summary = fresh ? after.reason : "Evidence changed during evaluation";
+      }
       phase = "completion-write";
       progress();
       active();
@@ -144,7 +162,7 @@ export async function produceGates(
         conclusion: approved ? "success" : "failure",
         output: {
           title: approved ? "All approval gates pass" : "Approval blocked",
-          summary: fresh ? after.reason : "Evidence changed during evaluation",
+          summary,
         },
       });
       active();

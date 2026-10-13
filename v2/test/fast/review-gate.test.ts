@@ -863,8 +863,29 @@ test("same-head CI from an older base cannot pass fresh lane attestations", () =
   };
   expect(evaluateSnapshot(policy, 5, snapshot).reason).toBe("ci-not-success");
 });
+const nativeNegativeModes = [
+  "missing-code",
+  "missing-browser",
+  "missing-both",
+  "stale-native",
+  "negative-outsider",
+  "negative-threads",
+  "all-native-negative",
+] as const;
 test.each([
   "clean",
+  ...nativeNegativeModes,
+  "native-page-two",
+  "native-page-fault",
+  "native-revoked",
+  "native-malformed",
+  "native-type",
+  "lane-blocked",
+  "positive-outsider",
+  "positive-threads",
+  "merge-head",
+  "abort-after-precheck",
+  "abort-negative-completion",
   ...equivalentChanges,
   "new-successful-attempt",
   "new-successful-run",
@@ -879,6 +900,57 @@ test.each([
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
     const snapshot = fixture();
+    const negative = nativeNegativeModes.some((value) => value === mode);
+    if (["missing-code", "negative-outsider", "negative-threads"].includes(mode))
+      snapshot.reviews = snapshot.reviews.filter((row) => row.id !== policy.codeActor);
+    if (mode === "missing-browser")
+      snapshot.reviews = snapshot.reviews.filter((row) => row.id !== policy.browserActor);
+    if (["missing-both", "all-native-negative", "abort-negative-completion"].includes(mode))
+      snapshot.reviews = [];
+    if (mode === "stale-native")
+      snapshot.reviews[0] = { ...snapshot.reviews[0], commit_id: "f".repeat(40) };
+    if (mode === "native-revoked")
+      snapshot.reviews.push({
+        ...snapshot.reviews[0],
+        id: 30,
+        state: "DISMISSED",
+        submitted_at: "2026-10-05T13:00:00Z",
+      });
+    if (mode === "native-malformed")
+      snapshot.reviews[0] = { ...snapshot.reviews[0], body: { invalid: true } };
+    if (mode === "native-type")
+      snapshot.reviews[0] = {
+        ...snapshot.reviews[0],
+        user: { id: policy.codeActor, type: "User" },
+      };
+    if (mode === "lane-blocked")
+      snapshot.comments[0] = {
+        ...snapshot.comments[0],
+        body: stateBody({
+          ...readStateBody(String(snapshot.comments[0]?.body)),
+          status: "BLOCKED",
+        }),
+      };
+    if (mode === "negative-outsider" || mode === "positive-outsider")
+      snapshot.reviews.push({
+        id: 50,
+        user: { id: 50, type: "User" },
+        state: "CHANGES_REQUESTED",
+        commit_id: H,
+        body: "Outside blocker",
+        submitted_at: "2026-10-05T13:00:00Z",
+      });
+    if (mode === "negative-threads" || mode === "positive-threads") snapshot.unresolved = 1;
+    if (mode === "merge-head") snapshot.runs[0] = { ...snapshot.runs[0], head_sha: M };
+    if (mode === "native-page-two" || mode === "native-page-fault")
+      snapshot.reviews = [
+        ...Array.from({ length: 100 }, (_, index) => ({
+          id: 100 + index,
+          user: { id: 100 + index, type: "User" },
+          state: "COMMENTED",
+        })),
+        ...snapshot.reviews,
+      ];
     if (mode === "unlisted-churn" || mode === "corrupt-unlisted") snapshot.jobs.push(unlistedJob());
     if (
       mode === "noncandidate-delete" ||
@@ -886,21 +958,29 @@ test.each([
       mode === "noncandidate-updated-at"
     )
       addOtherPr(snapshot);
-    const writes: { status: string; conclusion?: string }[] = [];
+    const writes: { status: string; conclusion?: string; output?: { summary: string } }[] = [];
     const controller = new AbortController();
     const trace = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     let reads = 0;
     let jobReads = 0;
     let requestsAfterAbort = 0;
+    const requestPaths: string[] = [];
+    const prNumbers: number[] = [];
+    let reviewRequests = 0;
+    let checkCreates = 0;
     const transport: typeof fetch = async (url, options) => {
       if (controller.signal.aborted) requestsAfterAbort++;
       const path = new URL(String(url)).pathname;
+      requestPaths.push(path);
       if (path === "/graphql")
         return Response.json({
           data: {
             repository: {
               pullRequest: {
-                reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+                reviewThreads: {
+                  nodes: snapshot.unresolved ? [{ isResolved: false }] : [],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
               },
             },
           },
@@ -908,17 +988,25 @@ test.each([
       if (path.endsWith("/check-runs") && options?.method === "POST") {
         writes.push(JSON.parse(String(options.body)) as { status: string });
         return Response.json({
-          id: 91,
+          id: 90 + ++checkCreates,
           name: "Spur Approval Gate",
           head_sha: H,
           app: { slug: "github-actions" },
         });
       }
-      if (path.endsWith("/check-runs/91")) {
-        writes.push(JSON.parse(String(options?.body)) as { status: string; conclusion: string });
-        if (mode === "abort-during-success") {
-          // The server committed success; losing the response does not undo it.
-          expect(writes.at(-1)?.conclusion).toBe("success");
+      if (/\/check-runs\/\d+$/.test(path)) {
+        writes.push(
+          JSON.parse(String(options?.body)) as {
+            status: string;
+            conclusion: string;
+            output: { summary: string };
+          },
+        );
+        if (mode === "abort-during-success" || mode === "abort-negative-completion") {
+          // Losing the response does not undo the server's completed check.
+          expect(writes.at(-1)?.conclusion).toBe(
+            mode === "abort-during-success" ? "success" : "failure",
+          );
           return new Promise<Response>((_resolve, reject) => {
             options?.signal?.addEventListener(
               "abort",
@@ -930,8 +1018,12 @@ test.each([
         }
         return Response.json({ id: 91 });
       }
-      if (path.endsWith("/pulls")) return Response.json([{ number: 5 }]);
-      if (path.endsWith("/pulls/5")) {
+      if (path.endsWith("/pulls"))
+        return Response.json(
+          mode === "all-native-negative" ? [{ number: 6 }, { number: 5 }] : [{ number: 5 }],
+        );
+      if (/\/pulls\/(5|6)$/.test(path)) {
+        prNumbers.push(Number(path.split("/").at(-1)));
         reads++;
         if (reads === 3) {
           changeEquivalent(snapshot, mode);
@@ -961,9 +1053,12 @@ test.each([
         );
       }
       if (path.endsWith("/reviews")) {
+        reviewRequests++;
         if (mode === "abort-read") controller.abort();
         if (mode === "read-denied") return new Response("denied", { status: 403 });
-        return Response.json(snapshot.reviews);
+        const page = Number(new URL(String(url)).searchParams.get("page"));
+        if (mode === "native-page-fault" && page === 2) return Response.json({ malformed: true });
+        return Response.json(snapshot.reviews.slice((page - 1) * 100, page * 100));
       }
       if (path.endsWith("/comments")) return Response.json(snapshot.comments);
       if (path.endsWith("/files")) return Response.json(snapshot.files);
@@ -984,33 +1079,78 @@ test.each([
       throw new Error("unexpected API path");
     };
     const api = new GateGitHub("fixture", transport, controller.signal);
+    if (mode === "abort-after-precheck") {
+      const pages = api.pages.bind(api);
+      vi.spyOn(api, "pages").mockImplementation(async (path, key) => {
+        const rows = await pages(path, key);
+        if (path.endsWith("/reviews")) controller.abort();
+        return rows;
+      });
+    }
     try {
       if (mode.startsWith("abort-")) {
         await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-timeout");
         expect(requestsAfterAbort).toBe(0);
-        expect(writes).toHaveLength(mode === "abort-during-success" ? 2 : 1);
+        expect(writes).toHaveLength(
+          mode === "abort-during-success" || mode === "abort-negative-completion" ? 2 : 1,
+        );
         expect(trace.mock.calls.map(([line]) => String(line)).join("")).not.toContain(
           "completion-confirmed",
         );
-        if (mode === "abort-during-success") {
-          expect(writes.at(-1)?.conclusion).toBe("success");
+        if (mode === "abort-during-success" || mode === "abort-negative-completion") {
+          expect(writes.at(-1)?.conclusion).toBe(
+            mode === "abort-during-success" ? "success" : "failure",
+          );
           expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain('"checkId":91');
           expect(trace.mock.calls.map(([line]) => String(line)).join("")).toContain(
             '"outcome":"UNKNOWN"',
           );
         }
       } else {
-        if (mode === "read-denied")
+        if (mode === "read-denied" || mode === "native-page-fault")
           await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
-        else await produceGates(api, policy);
+        else await produceGates(api, policy, mode === "all-native-negative" ? { number: 5 } : {});
         expect(writes[0]?.status).toBe("in_progress");
         expect(writes.at(-1)?.conclusion).toBe(
           mode === "clean" ||
+            mode === "native-page-two" ||
+            mode === "merge-head" ||
             mode === "unlisted-churn" ||
             equivalentChanges.some((change) => change === mode)
             ? "success"
             : "failure",
         );
+        if (negative) {
+          expect(requestPaths.some((path) => /\/actions\/|\/commits\//.test(path))).toBe(false);
+          expect(requestPaths).not.toContain("/graphql");
+          expect(writes.at(-1)?.output?.summary).toBe("native-approval-missing");
+          expect(prNumbers).toEqual(mode === "all-native-negative" ? [5, 6] : [5]);
+          expect(writes).toHaveLength(mode === "all-native-negative" ? 4 : 2);
+          expect(requestPaths).toHaveLength(mode === "all-native-negative" ? 9 : 5);
+        }
+        if (mode === "native-page-two") expect(reviewRequests).toBe(6);
+        if (
+          [
+            "native-revoked",
+            "native-malformed",
+            "native-type",
+            "lane-blocked",
+            "positive-outsider",
+            "positive-threads",
+            "merge-head",
+          ].includes(mode)
+        ) {
+          expect(jobReads).toBe(2);
+          expect(reviewRequests).toBe(3);
+        }
+        if (mode === "native-malformed")
+          expect(writes.at(-1)?.output?.summary).toBe("malformed-evidence");
+        if (mode === "positive-outsider")
+          expect(writes.at(-1)?.output?.summary).toBe("changes-requested");
+        if (mode === "positive-threads")
+          expect(writes.at(-1)?.output?.summary).toBe("unresolved-threads");
+        if (mode === "lane-blocked")
+          expect(writes.at(-1)?.output?.summary).toBe("lane-state-not-approved");
       }
     } finally {
       trace.mockRestore();
