@@ -18,6 +18,7 @@ import { PendingLaunchBanner } from "@/components/PendingLaunchBanner";
 import { SubmitFailedBanner } from "@/components/SubmitFailedBanner";
 import { CenteredLoader } from "@/components/CenteredLoader";
 import { TokenCount } from "@/components/TokenCount";
+import { SessionLoadState, type SessionLoadFailure } from "@/components/SessionLoadState";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { GithubRateLimitDialog } from "@/components/GithubRateLimitDialog";
@@ -378,6 +379,18 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+
+// Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
+const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
+
+class SessionLoadHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 // Page size for a scroll-back fetch. Must match the daemon's
 // CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
 const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
@@ -1586,7 +1599,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<SessionLoadFailure | null>(null);
   const [busyRequestAction, setBusyAction] = useState<string | null>(null);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
   const rawSessionRef = useRef<SpurSessionView | null>(null);
@@ -1756,7 +1769,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             }
           }
-          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+          throw new SessionLoadHttpError(
+            await readApiErrorMessage(response, "Failed to load session"),
+            response.status,
+          );
         }
         const payload = (await response.json()) as SpurSessionView;
         if (
@@ -1788,7 +1804,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         const message = errorMessage(loadError, "Failed to load session");
         if (sessionRef.current?.id !== requestedSessionId) {
           setSession(null);
-          setError(message);
+          setError({
+            message,
+            transient:
+              loadError instanceof SessionLoadHttpError &&
+              TRANSIENT_LOAD_STATUSES.has(loadError.status),
+          });
           return;
         }
         if (lastLoadErrorToastRef.current?.message === message) return;
@@ -3881,50 +3902,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           />
         </>
       ) : error ? (
-        <div className="flex flex-1 items-center justify-center py-5">
-          <section
-            aria-labelledby="session-load-error-heading"
-            className={`w-full max-w-sm ${STATUS_CARD_CLASS}`}
-          >
-            <div className="flex items-start gap-3">
-              <svg
-                aria-hidden="true"
-                className="h-5 w-5 shrink-0 text-[var(--color-status-attention)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="9" />
-                <path d="M12 7v6M12 17h.01" />
-              </svg>
-              <div className="min-w-0">
-                <h2
-                  className="font-bold text-[var(--color-text-primary)]"
-                  id="session-load-error-heading"
-                >
-                  Unable to load this session.
-                </h2>
-                <p
-                  className={`mt-1 normal-case tracking-normal text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
-                >
-                  {error}
-                </p>
-              </div>
-            </div>
-            <div className="mt-3 flex justify-end">
-              <button
-                type="button"
-                onClick={() => void loadSession()}
-                className="border border-[var(--color-status-attention)] px-3 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
-              >
-                Retry
-              </button>
-            </div>
-          </section>
-        </div>
+        <SessionLoadState failure={error} onRetry={loadSession} />
       ) : (
         <CenteredLoader className="flex-1" label="Loading session" />
       )}

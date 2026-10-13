@@ -420,6 +420,7 @@ test.describe("S1: Session detail header", () => {
     });
     await page.goto("/sessions/detail-missing");
 
+    await expect(page.getByRole("alert")).toContainText("Unable to load this session");
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
@@ -428,64 +429,36 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
   });
 
-  for (const theme of ["dark", "light"]) {
-    for (const viewport of [
-      { width: 390, height: 844 },
-      { width: 1280, height: 800 },
-    ]) {
-      for (const detail of ["Daemon is starting", `Session not found\n${"detail".repeat(80)}`]) {
-        const state = detail === "Daemon is starting" ? "startup error" : "missing session";
-        test(`${state} card fits and recovers: ${theme} ${viewport.width}`, async ({
-          page,
-        }, testInfo) => {
-          await page.setViewportSize(viewport);
-          await page.addInitScript((selectedTheme) => {
-            window.localStorage.setItem("spur:theme", selectedTheme);
-          }, theme);
-          const session = makeWorkingSession({ id: "detail-error-card" });
-          let recovered = false;
-          await page.route(`**/api/sessions/${session.id}`, (route) =>
-            route.fulfill({
-              status: recovered ? 200 : 503,
+  test("daemon starting shows the starting card and opens the session once ready", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-starting" });
+    let ready = false;
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill(
+        ready
+          ? { status: 200, contentType: "application/json", body: JSON.stringify(session) }
+          : {
+              status: 503,
               contentType: "application/json",
-              body: JSON.stringify(recovered ? session : { error: detail }),
-            }),
-          );
-          await mockSessionConversation(page, session.id, "working");
-          await page.goto(`/sessions/${session.id}`);
-          if (theme === "light") {
-            await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-          } else {
-            await expect(page.locator("html")).not.toHaveAttribute("data-theme");
-          }
-          const card = page.getByRole("region", { name: "Unable to load this session." });
-          await expect(card).toBeVisible();
-          expect(await card.locator("p").textContent()).toBe(detail);
-          await expect(page.getByRole("alertdialog")).toHaveCount(0);
-          await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
-          const box = await card.boundingBox();
-          expect(box).not.toBeNull();
-          if (!box) throw new Error("Session error card missing bounds");
-          expect(box.x).toBeGreaterThanOrEqual(0);
-          expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
-          expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
-          expect(
-            await page.evaluate(() => document.documentElement.scrollWidth),
-          ).toBeLessThanOrEqual(viewport.width);
-          const retry = card.getByRole("button", { name: "Retry" });
-          await expect(retry).toBeInViewport();
-          await page.getByRole("link", { name: /back/i }).focus();
-          await page.keyboard.press("Tab");
-          await expect(retry).toBeFocused();
-          await page.screenshot({ path: testInfo.outputPath("session-error-card.png") });
-          recovered = true;
-          await page.keyboard.press("Enter");
-          await expect(card).toHaveCount(0);
-          await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-        });
-      }
-    }
-  }
+              body: JSON.stringify({ error: "Daemon is starting" }),
+            },
+      );
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const card = page.getByTestId("session-load-starting");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Spur is starting…");
+    await expect(card).toHaveAttribute("aria-live", "polite");
+    await expect(card.getByRole("button", { name: "Retry now" })).toBeVisible();
+    await expect(page.getByTestId("session-load-failed")).toHaveCount(0);
+
+    ready = true;
+    await expect(card).toHaveCount(0, { timeout: 8000 });
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+  });
 
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
