@@ -161,6 +161,10 @@ describe("missing session and project ids answer 404 at warn level", () => {
     expect(errorLevelRequestFailures(dataDir)).toEqual([]);
   });
 
+  // Rows named "route regression" already answer 404 from an earlier entry
+  // check, so they do not pin the later *Locked conversions. Those sites only
+  // run when the session is deleted mid-operation; session-service.test.ts
+  // "missing session lookups" pins them.
   const sessionRoutes: { name: string; method: "GET" | "POST"; path: string; body?: unknown }[] = [
     { name: "slash-commands", method: "GET", path: "/sessions/nope-1/slash-commands" },
     { name: "services list", method: "GET", path: "/sessions/nope-1/services" },
@@ -169,7 +173,12 @@ describe("missing session and project ids answer 404 at warn level", () => {
     { name: "send", method: "POST", path: "/sessions/nope-1/send", body: { message: "hi" } },
     { name: "answer", method: "POST", path: "/sessions/nope-1/answer", body: { optionIndex: 0 } },
     { name: "pause", method: "POST", path: "/sessions/nope-1/pause" },
-    { name: "complete", method: "POST", path: "/sessions/nope-1/complete", body: {} },
+    {
+      name: "complete, route regression",
+      method: "POST",
+      path: "/sessions/nope-1/complete",
+      body: {},
+    },
     {
       name: "complete (desk scope)",
       method: "POST",
@@ -177,11 +186,21 @@ describe("missing session and project ids answer 404 at warn level", () => {
       body: { scope: "desk" },
     },
     { name: "kill", method: "POST", path: "/sessions/nope-1/kill", body: {} },
-    { name: "restore", method: "POST", path: "/sessions/nope-1/restore", body: {} },
-    { name: "handoff", method: "POST", path: "/sessions/nope-1/handoff", body: {} },
+    {
+      name: "restore, route regression",
+      method: "POST",
+      path: "/sessions/nope-1/restore",
+      body: {},
+    },
+    {
+      name: "handoff, route regression",
+      method: "POST",
+      path: "/sessions/nope-1/handoff",
+      body: {},
+    },
     { name: "respawn", method: "POST", path: "/sessions/nope-1/respawn", body: {} },
     {
-      name: "switch-auth",
+      name: "switch-auth, route regression",
       method: "POST",
       path: "/sessions/nope-1/switch-auth",
       body: { accountId: "acct" },
