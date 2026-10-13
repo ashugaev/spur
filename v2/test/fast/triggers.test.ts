@@ -3677,6 +3677,9 @@ describe("startConfiguredTriggers", () => {
         stateHistory = [
           { state: "stopped", at: new Date(Date.now()).toISOString(), source: "status" },
         ];
+        // The restart precedes the failure, so only the attempt-start check
+        // sees it.
+        await vi.advanceTimersByTimeAsync(1_000);
         gate.reject(new Error("submit-ack timeout"));
         await vi.advanceTimersByTimeAsync(5_000);
         expect(deliver).toHaveBeenCalledTimes(2);
