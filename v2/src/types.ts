@@ -1213,6 +1213,8 @@ export interface SessionRecord {
   todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+  /** Internal provenance for a retained session error; absent on legacy records. */
+  errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
 }
@@ -1322,6 +1324,7 @@ export interface SessionView extends Omit<
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
@@ -1371,7 +1374,8 @@ export type DashboardOmittedField =
   | "agentLaunchId"
   | "branchSource"
   | "tokenUsage"
-  | "preflightTokenUsage";
+  | "preflightTokenUsage"
+  | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   lifecycle: SessionLifecycleSnapshot;
