@@ -51509,8 +51509,9 @@ describe("SessionService", () => {
       createSessionStore(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
-      // Restore's own fresh pane lookup keeps the unavailable default; the
-      // kill path's fresh lookup (second call) reads an ok pane without a pid.
+      // The first fresh lookup (restore's own) resolves unavailable; every
+      // later lookup, including the kill path's fresh one, resolves an ok pane
+      // without a pid.
       let freshLookups = 0;
       lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
         if (options?.fresh) {
