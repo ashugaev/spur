@@ -9,8 +9,9 @@ import {
 import { findCursorSessionId } from "./cursor.js";
 
 export interface CursorSubmitBaseline {
-  // null: pending baseline, no chat transcript existed at send time. The scan
-  // resolves the chat from the session-private config dir on each poll.
+  // null: pending baseline, no chat transcript existed at send time. Each scan
+  // poll resolves the chat from the pinned id when set, else from the
+  // session-private config dir.
   file: string | null;
   size: number;
   // Mutated in place across polls of the same binding (session-service.ts
@@ -68,6 +69,17 @@ async function findRotatedCursorTranscript(
   return findCursorAckTranscriptFile(worktreePath, resolvedId);
 }
 
+// The pinned id wins; otherwise the newest chat in the session-private config
+// dir. Never the shared project transcripts dir (#889).
+async function resolveCursorChatId(
+  worktreePath: string,
+  agentSessionId: string | undefined,
+  cursorConfigDir: string | undefined,
+): Promise<string | null> {
+  if (agentSessionId) return agentSessionId;
+  return cursorConfigDir ? findCursorSessionId(worktreePath, { configDir: cursorConfigDir }) : null;
+}
+
 export interface CursorSubmitAckScanResult {
   found: boolean;
   scannedFile: string | null;
@@ -78,15 +90,10 @@ export async function captureCursorSubmitBaseline(
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitBaseline | null> {
-  const chatId =
-    agentSessionId ??
-    (options?.cursorConfigDir
-      ? await findCursorSessionId(worktreePath, { configDir: options.cursorConfigDir })
-      : null);
+  const chatId = await resolveCursorChatId(worktreePath, agentSessionId, options?.cursorConfigDir);
   if (!chatId) {
     // No chat yet in the session-private dir: a WAITING baseline, never null
-    // (null is an un-waited "submitted"). Never fall back to the shared
-    // project transcripts dir, which holds peer sessions' chats (#889).
+    // (null is an un-waited "submitted").
     return options?.cursorConfigDir ? { file: null, size: 0 } : null;
   }
   const baseline = await capturePinnedCursorBaseline(worktreePath, chatId);
@@ -218,11 +225,11 @@ export async function scanCursorJsonlForMessage(
     // before the first transcript record), so the own chat holds only
     // post-send records and is scanned from 0. Resolved in place so later
     // polls and the rotation floor below treat it as the pinned file.
-    const chatId =
-      agentSessionId ??
-      (options?.cursorConfigDir
-        ? await findCursorSessionId(worktreePath, { configDir: options.cursorConfigDir })
-        : null);
+    const chatId = await resolveCursorChatId(
+      worktreePath,
+      agentSessionId,
+      options?.cursorConfigDir,
+    );
     const resolved = chatId ? await findCursorAckTranscriptFile(worktreePath, chatId) : null;
     if (!resolved) {
       return { found: false, scannedFile: null };
