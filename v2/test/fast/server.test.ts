@@ -1417,6 +1417,52 @@ describe("startServer", () => {
     }
   });
 
+  it("answers 503 when the services run route refuses on an unresponsive tmux probe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalRunService = SessionService.prototype.runService;
+    SessionService.prototype.runService = async function mockRunService() {
+      throw new SidecarProbeUnresponsiveError("Service web tmux state is unreadable");
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/demo-1/services/web/run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(503);
+    } finally {
+      SessionService.prototype.runService = originalRunService;
+      await server.stop();
+    }
+  });
+
   // 503, not the 500 catch-all: the refusal is "could not determine, retry".
   it("answers 503 when the sidecar start refuses on an unresponsive tmux probe", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
