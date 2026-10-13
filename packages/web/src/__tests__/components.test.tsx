@@ -3975,7 +3975,7 @@ describe("StatusBar", () => {
     expect(resourceFetches).toBe(1);
   });
 
-  it("sends no resources poll while the tab is hidden", async () => {
+  it("sends no resources poll while the tab is hidden and refetches on return", async () => {
     vi.useFakeTimers();
     try {
       let resourceFetches = 0;
@@ -4001,6 +4001,17 @@ describe("StatusBar", () => {
         await vi.advanceTimersByTimeAsync(60_000);
       });
       expect(resourceFetches).toBe(1);
+
+      // Returning to the tab refetches the stale snapshot at once.
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(resourceFetches).toBe(2);
     } finally {
       Object.defineProperty(document, "visibilityState", {
         configurable: true,
