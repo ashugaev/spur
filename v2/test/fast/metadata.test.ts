@@ -340,6 +340,25 @@ describe("work-item lifecycle registry", () => {
     });
   });
 
+  it("round-trips the pre-takeover trigger id of a spawning member", async () => {
+    const dataDir = await newDataDir();
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
+      {
+        triggerId: "new-name",
+        previousTriggerId: "old-name",
+        blockIndex: 0,
+        state: "spawning",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        attempts: 1,
+        deferrals: 0,
+      },
+    ]);
+
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")?.members[0],
+    ).toMatchObject({ triggerId: "new-name", previousTriggerId: "old-name" });
+  });
+
   it("derives the anchor session from the lowest running block", async () => {
     const dataDir = await newDataDir();
     const member = (blockIndex: number, sessionId: string) => ({

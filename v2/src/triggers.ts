@@ -292,6 +292,7 @@ function settledMember(
     nextRetryAt: _nextRetryAt,
     error: _error,
     replacesSessionId: _replaces,
+    previousTriggerId: _previousTriggerId,
     ...rest
   } = member;
   return { ...rest, state, sessionId, startedAt: new Date().toISOString() };
@@ -319,6 +320,16 @@ function claimWorkItemBlocks(
   // next, like a pre-upgrade member.
   const adoptsOrphans = ownMembers.length === 0 && members.some(isOrphan);
   const own = adoptsOrphans ? members.filter(isOrphan) : ownMembers;
+  // The trigger id a replaced member held before a takeover, kept on the new
+  // member so a restart before adoption still finds the sessions it launched.
+  const previousTriggerIdOf = (entry: PlannedSpawnBlock): { previousTriggerId?: string } => {
+    const replaced = entry.previous[0];
+    const previousTriggerId =
+      adoptsOrphans && replaced !== undefined && isOrphan(replaced)
+        ? replaced.triggerId
+        : replaced?.previousTriggerId;
+    return previousTriggerId !== undefined ? { previousTriggerId } : {};
+  };
   const legacy = members.find((member) => member.triggerId === undefined);
   if (record && own.length === 0 && !legacy) {
     return { planned: [], claimedAt, suppressed: { reason: "not_claimed_by_trigger" } };
@@ -411,6 +422,7 @@ function claimWorkItemBlocks(
           ...(entry.replacesSessionId !== undefined
             ? { replacesSessionId: entry.replacesSessionId }
             : {}),
+          ...previousTriggerIdOf(entry),
         }),
       ),
     ],
@@ -672,13 +684,12 @@ async function adoptExistingWorkItemSessions(
     // launched still carries the orphaned trigger id.
     const triggerIds = [
       ctx.triggerId,
-      ...entry.previous.flatMap((member) =>
-        member.triggerId !== undefined &&
-        member.triggerId !== ctx.triggerId &&
-        !ctx.sourceSpawnTriggerIds.has(member.triggerId)
-          ? [member.triggerId]
-          : [],
-      ),
+      ...entry.previous
+        .flatMap((member) => [member.triggerId, member.previousTriggerId])
+        .filter(
+          (id): id is string =>
+            id !== undefined && id !== ctx.triggerId && !ctx.sourceSpawnTriggerIds.has(id),
+        ),
     ];
     const tagged = await findTaggedWorkItemSession(
       ctx,

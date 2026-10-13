@@ -5901,8 +5901,44 @@ describe("startConfiguredTriggers", () => {
         }
       });
 
+      it("keeps the old trigger id across a restart between takeover claim and adoption", async () => {
+        // The store holds a takeover claim from a controller that died before
+        // adopting: the member already carries the new trigger id.
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              triggerId: "pick-up",
+              previousTriggerId: "old-name",
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            }),
+          ]),
+        ]);
+        listSessionsMock.mockReturnValue([taggedBy("old-name", "api-old")]);
+        const spawnMock = vi.fn().mockResolvedValue({ id: "api-new" });
+        const getMock = vi.fn().mockResolvedValue({ id: "api-old", ...WORKING });
+        const second = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+          get: getMock,
+        });
+
+        try {
+          second.bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+          });
+          expect(spawnMock).not.toHaveBeenCalled();
+          const member = memberOf(records);
+          expect(member).toMatchObject({ state: "running", sessionId: "api-old" });
+          expect(member).not.toHaveProperty("previousTriggerId");
+        } finally {
+          await second.controller.stop();
+        }
+      });
+
       it("does not adopt a session tagged by another configured trigger", async () => {
-        lostOldNameRecords();
+        const records = lostOldNameRecords();
         listSessionsMock.mockReturnValue([taggedBy("someone-else", "api-other")]);
         const base = workItemSpawnConfig();
         const config = {
@@ -5917,7 +5953,12 @@ describe("startConfiguredTriggers", () => {
             },
           },
         };
-        const spawnMock = vi.fn().mockResolvedValue({ id: "api-new" });
+        // The takeover claim persists the old trigger id until adoption.
+        const claimed: Array<string | undefined> = [];
+        const spawnMock = vi.fn().mockImplementation(async () => {
+          claimed.push(memberOf(records)?.previousTriggerId);
+          return { id: "api-new" };
+        });
         const getMock = vi.fn().mockResolvedValue({ id: "api-other", ...WORKING });
         const { bus, controller } = await startTriggers(config, { spawn: spawnMock, get: getMock });
 
@@ -5928,6 +5969,8 @@ describe("startConfiguredTriggers", () => {
           });
           expect(getMock).not.toHaveBeenCalledWith("api-other");
           expect(eventsOf("trigger.spawn.adopted")).toHaveLength(0);
+          expect(claimed).toEqual(["old-name"]);
+          expect(memberOf(records)).not.toHaveProperty("previousTriggerId");
         } finally {
           await controller.stop();
         }

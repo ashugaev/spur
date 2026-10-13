@@ -243,6 +243,8 @@ export interface WorkItemMember {
   error?: string;
   /** Running owner a claimed member would replace; restored when the owner is still live. */
   replacesSessionId?: string;
+  /** Trigger id this member held before a rename takeover; sessions it launched carry it. Cleared once the member settles. */
+  previousTriggerId?: string;
   /** Set once the member reached running or completed; auto-complete ages from it. */
   startedAt?: string;
   /** Terminal stop: the member is never retried again. */
