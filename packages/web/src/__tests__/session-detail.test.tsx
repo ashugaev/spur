@@ -6057,14 +6057,81 @@ describe("SessionDetail load state", () => {
     rerender(<SessionDetail sessionId="api-b2" />);
 
     await waitFor(() => {
-      expect(screen.getByText("Unable to load this session.")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("Unable to load this session");
     });
     expect(screen.getByText("missing current session")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/runtime/info",
       expect.objectContaining({ cache: "no-store" }),
     );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Fix auth" })).not.toBeInTheDocument();
+  });
+
+  it("shows the starting card on 503 and opens the session once the daemon is ready", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionCalls += 1;
+        if (sessionCalls <= 2) {
+          return new Response(JSON.stringify({ error: "Daemon is starting" }), {
+            headers: { "content-type": "application/json" },
+            status: 503,
+          });
+        }
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const card = await screen.findByRole("status", { name: "" });
+    expect(card).toHaveTextContent("Spur is starting…");
+    expect(card).toHaveTextContent("Retrying · attempt 1");
+    expect(screen.queryByText("Unable to load this session")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.getByText("Retrying · attempt 2")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Spur is starting…")).not.toBeInTheDocument();
+  });
+
+  it("retries immediately from the starting card", async () => {
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        sessionCalls += 1;
+        return new Response(JSON.stringify({ error: "Daemon is starting" }), {
+          headers: { "content-type": "application/json" },
+          status: 502,
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await screen.findByText("Retrying · attempt 1");
+    const before = sessionCalls;
+    fireEvent.click(screen.getByRole("button", { name: "Retry now" }));
+    await waitFor(() => {
+      expect(screen.getByText("Retrying · attempt 2")).toBeInTheDocument();
+    });
+    expect(sessionCalls).toBe(before + 1);
   });
 
   it("ignores stale session responses after navigation", async () => {

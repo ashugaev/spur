@@ -420,9 +420,41 @@ test.describe("S1: Session detail header", () => {
     });
     await page.goto("/sessions/detail-missing");
 
+    await expect(page.getByRole("alert")).toContainText("Unable to load this session");
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
+  });
+
+  test("daemon starting shows the starting card and opens the session once ready", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-starting" });
+    let ready = false;
+    await mockSessionConversation(page, session.id, "working");
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill(
+        ready
+          ? { status: 200, contentType: "application/json", body: JSON.stringify(session) }
+          : {
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "Daemon is starting" }),
+            },
+      );
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const card = page.getByTestId("session-load-starting");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Spur is starting…");
+    await expect(card).toHaveAttribute("aria-live", "polite");
+    await expect(card.getByRole("button", { name: "Retry now" })).toBeVisible();
+    await expect(page.getByTestId("session-load-failed")).toHaveCount(0);
+
+    ready = true;
+    await expect(card).toHaveCount(0, { timeout: 8000 });
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
   });
 
   test("back link visible", async ({ page }) => {
