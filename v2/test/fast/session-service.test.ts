@@ -9391,6 +9391,76 @@ describe("SessionService", () => {
 
       expect(windowsOf(waitForAckMock)).toEqual([300_000]);
     });
+
+    describe("interactive send", () => {
+      const notFound = { found: false, lastScannedFile: null };
+
+      it("sends no Enter and re-checks the gate every window while claude is gated", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+        const service = await claudeService();
+        const waitForAckMock = vi
+          .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValue(notFound);
+
+        await expect(
+          sessionServiceInternals(service).sendAgentMessage(claudeSession, "follow up", {
+            interactive: true,
+          }),
+        ).rejects.toThrow();
+
+        expect(windowsOf(waitForAckMock)).toEqual([5_000, 5_000, 5_000, 5_000]);
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(3);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("sends Enter once the gate opens", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
+
+        await sessionServiceInternals(service).sendAgentMessage(claudeSession, "follow up", {
+          interactive: true,
+        });
+
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledTimes(2);
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes slashCommand to the gate", async () => {
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+          .mockResolvedValueOnce(notFound)
+          .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
+
+        await sessionServiceInternals(service).sendAgentMessage(claudeSession, " /model", {
+          interactive: true,
+        });
+
+        expect(agentEarlySubmitResendAllowedMock).toHaveBeenCalledWith(
+          "claude",
+          expect.objectContaining({ slashCommand: true }),
+        );
+      });
+
+      it("never consults the gate on a launch send", async () => {
+        agentEarlySubmitResendAllowedMock.mockResolvedValue(false);
+        const service = await claudeService();
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue(notFound);
+
+        await expect(
+          sessionServiceInternals(service).sendAgentMessage(claudeSession, "launch text", {
+            freshLaunch: true,
+            interactive: true,
+          }),
+        ).resolves.toBe("submit_unconfirmed");
+
+        expect(agentEarlySubmitResendAllowedMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   it("retries codex submit with a bare Enter when the first rollout ack does not arrive", async () => {
