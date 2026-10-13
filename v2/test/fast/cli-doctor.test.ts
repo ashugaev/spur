@@ -2,19 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
 import type * as WorkspaceModule from "../../src/workspace.js";
 
-const { loadInstanceConfigReadOnlyMock, collectHostInstallChecksMock, writeStdoutMock } =
-  vi.hoisted(() => ({
-    loadInstanceConfigReadOnlyMock: vi.fn(),
-    collectHostInstallChecksMock: vi.fn(),
-    writeStdoutMock: vi.fn(),
-  }));
+const {
+  loadInstanceConfigReadOnlyMock,
+  collectHostInstallChecksMock,
+  writeStdoutMock,
+  findProjectConfigPathInDirectoryMock,
+} = vi.hoisted(() => ({
+  loadInstanceConfigReadOnlyMock: vi.fn(),
+  collectHostInstallChecksMock: vi.fn(),
+  writeStdoutMock: vi.fn(),
+  findProjectConfigPathInDirectoryMock: vi.fn(),
+}));
 
 vi.mock("../../src/config.js", async () => {
   const actual = await vi.importActual<typeof ConfigModule>("../../src/config.js");
   return {
     ...actual,
     loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
-    findProjectConfigPathInDirectory: vi.fn(() => undefined),
+    findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
     createProjectConfigScaffold: vi.fn(),
     writeProjectConfigScaffold: vi.fn(),
   };
@@ -54,6 +59,8 @@ describe("spur doctor CLI --config forwarding", () => {
     loadInstanceConfigReadOnlyMock.mockReset();
     collectHostInstallChecksMock.mockReset();
     writeStdoutMock.mockReset();
+    findProjectConfigPathInDirectoryMock.mockReset();
+    findProjectConfigPathInDirectoryMock.mockReturnValue(undefined);
     collectHostInstallChecksMock.mockResolvedValue([]);
     loadInstanceConfigReadOnlyMock.mockReturnValue({ status: "absent" });
   });
@@ -90,5 +97,13 @@ describe("spur doctor CLI --config forwarding", () => {
     await parseDoctor([], ["--config", selectedPath]);
     expect(loadInstanceConfigReadOnlyMock).toHaveBeenCalledWith(selectedPath);
     expect(loadInstanceConfigReadOnlyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hints connect with the positional spur.yaml path when a project config exists", async () => {
+    findProjectConfigPathInDirectoryMock.mockReturnValue(`${process.cwd()}/spur.yaml`);
+    await parseDoctor([]);
+    const output = writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(output).toContain("`spur connect spur.yaml`");
+    expect(output).not.toContain("connect --config");
   });
 });
