@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
 import type * as WorkspaceModule from "../../src/workspace.js";
@@ -103,7 +104,15 @@ describe("spur doctor CLI --config forwarding", () => {
     findProjectConfigPathInDirectoryMock.mockReturnValue(`${process.cwd()}/spur.yaml`);
     await parseDoctor([]);
     const output = writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(output).toContain("`spur connect spur.yaml`");
+    expect(output).toContain("`spur connect ./spur.yaml`");
     expect(output).not.toContain("connect --config");
+  });
+
+  it("hints connect with the exact found config path for spur.yml in a parent dir", async () => {
+    findProjectConfigPathInDirectoryMock.mockReturnValue(resolve(process.cwd(), "../spur.yml"));
+    await parseDoctor([]);
+    const output = writeStdoutMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(output).toContain("`spur connect ../spur.yml`");
+    expect(output).not.toContain("spur.yaml");
   });
 });
