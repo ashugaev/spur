@@ -3794,7 +3794,7 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
-    it("defers an event whose in-flight write is lost without moving memory ahead of disk", async () => {
+    it("leaves memory and revision untouched when the in-flight merge write throws", async () => {
       const { gate, deliver } = gatedDeliver();
       readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
       const { bus, controller } = await start({
@@ -3807,21 +3807,23 @@ describe("startConfiguredTriggers", () => {
         expect(deliver).toHaveBeenCalledTimes(1);
         const claimId = record()?.claim?.claimId;
 
-        updatePendingSendBatchConditionalMock.mockReturnValueOnce(false);
+        updatePendingSendBatchConditionalMock.mockImplementationOnce(() => {
+          throw new Error("disk full");
+        });
         bus.emit(commentEvent("comment:2"));
         await vi.advanceTimersByTimeAsync(0);
+        const revision = record()?.revision;
         expect(keysOf(record())).toEqual(["comment:1"]);
         expect(record()?.claim?.claimId).toBe(claimId);
 
+        // Memory stayed in step with disk, so the delivery's own post-await
+        // write lands: the delivered item is cleared and never sent twice.
         gate.resolve();
         await vi.advanceTimersByTimeAsync(0);
-        expect(keysOf(record())).toEqual(["comment:2"]);
-
-        // The deferred merge built a fresh batch: it waits out the send window.
-        await vi.advanceTimersByTimeAsync(35_000);
-        expect(deliver).toHaveBeenCalledTimes(2);
-        expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
-        expect(deliver.mock.calls[1]?.[1]).not.toContain(textOf("comment:1"));
+        expect(revision).toBeDefined();
+        expect(record()).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(deliver).toHaveBeenCalledTimes(1);
       } finally {
         await controller.stop();
       }

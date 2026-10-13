@@ -1472,7 +1472,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     trigger: SendTriggerConfig,
     sendBatch: SendBatch,
     persisted: PersistedPendingBatch | undefined,
-  ): { batch: PendingBatch; startsFlushTimer: boolean } | "deferred" | null => {
+  ): { batch: PendingBatch; startsFlushTimer: boolean } | null => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
     const destination = { kind: "session" as const, sessionId: sendBatch.sessionId };
     const route = buildAutoPingRoute(deps.config, projectId, triggerId, trigger, destination);
@@ -1528,7 +1528,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     // the conditional write lands, so a lost write cannot leave memory ahead of
     // disk and fail the delivering controller's post-await revision check.
     const target = inFlightClaim && cached ? cloneForMerge(cached) : pendingBatches.get(queueKey);
-    if (target === null) return "deferred";
+    if (target === null) throw new Error(`Cannot copy pending batch ${queueKey} for merge`);
     const batch = mergeIntoBatch(
       target,
       projectId,
@@ -1568,7 +1568,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           { ...record, claim: inFlightClaim },
         )
       ) {
-        return "deferred";
+        // This controller holds the claim and every write bumps the revision
+        // in step, so a lost write is a broken invariant, not a race.
+        throw new Error(`In-flight merge write lost for ${queueKey}`);
       }
       cached.batch = batch.batch;
       cached.retryAccounting = batch.retryAccounting;
@@ -1884,7 +1886,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               persisted,
             );
           const dispatch = async (queued: ReturnType<typeof merge>): Promise<void> => {
-            if (!queued || queued === "deferred") return;
+            if (!queued) return;
             await dispatchSendEvent(
               projectId,
               triggerId,
@@ -1933,13 +1935,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             return;
           }
           const queued = merge(persisted);
-          if (queued === "deferred" && cached) {
-            // The in-flight write was lost: nothing changed in memory, so merge
-            // after the delivery releases the lock.
-            deferMerge(cached.routeFingerprint);
-            return;
-          }
-          if (!queued || queued === "deferred") return;
+          if (!queued) return;
           enqueue(queueKey, () => dispatch(queued));
           return;
         }
