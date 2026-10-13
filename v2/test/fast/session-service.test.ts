@@ -71188,6 +71188,71 @@ describe("SessionService", () => {
       },
     );
 
+    it("a recovered trigger deliver() re-pastes its digest at most once, then releases", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agent: "claude",
+          launchCommand: agentLaunchCommands.claude,
+          agentSessionId: "ses_1",
+        }),
+      );
+      mockTimerPromisesSleepWithFakeTimers();
+      mockClaudeJsonlState("waiting");
+      createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+        agent === "claude"
+          ? {
+              baseline: holdBaselines.claude,
+              scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: "/t/claude.jsonl" }),
+            }
+          : null,
+      );
+      mockHoldAckScan(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+      const service = await deferredService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/t/claude.jsonl",
+      });
+      const controls = `unsubscribe ${"ap1_" + "a".repeat(43)}`;
+
+      await expect(
+        service.deliver("api-1", "DIGEST", { sensitivePromptSuffix: controls }),
+      ).resolves.toBeDefined();
+      const held = sessions.get("api-1");
+      expect(held?.submitUnconfirmedAt).toBeDefined();
+      expect(held?.queuedMessageTyped?.ackBaseline).toEqual(holdBaselines.claude);
+
+      const holdAt1 = Date.parse(held?.submitUnconfirmedAt ?? "");
+      mockAgentActivity("claude", holdAt1 + 1, "waiting");
+      vi.setSystemTime(holdAt1 + 1 + 15_000);
+      await service.get("api-1");
+      await service.get("api-1");
+      // The drain runner pastes the requeued digest, then waits on the new
+      // hold; flush microtasks only, never await the runner itself.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tmuxTexts().filter((text) => text === "DIGEST")).toHaveLength(2);
+
+      const redelivered = sessions.get("api-1");
+      const holdAt2 = Date.parse(redelivered?.submitUnconfirmedAt ?? "");
+      expect(holdAt2).toBeGreaterThan(holdAt1);
+      mockAgentActivity("claude", holdAt2 + 1, "waiting");
+      vi.setSystemTime(holdAt2 + 1 + 15_000);
+      await service.get("api-1");
+      await service.get("api-1");
+
+      const record = sessions.get("api-1");
+      expect(tmuxTexts().filter((text) => text === "DIGEST")).toHaveLength(2);
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(eventsNamed("session.message.requeued")).toHaveLength(1);
+      expect(eventsNamed("session.submit.released")).toHaveLength(1);
+      expect(record?.submitFailedMessage?.message).toBe("DIGEST");
+      expect(record?.queuedMessages?.messages ?? []).not.toContain("DIGEST");
+      expect(record?.submitUnconfirmedAt).toBeUndefined();
+      service.dispose();
+    });
+
     it("retries a failed prompt at the queue head with a fresh budget, once per click", async () => {
       const sessions = createSessionStore();
       seedFailedPrompt(sessions, { submitRequeuedMessage: "typed" });

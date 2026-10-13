@@ -17131,10 +17131,9 @@ export class SessionService {
       wakeClaim?: ScheduledWakeClaim;
     },
   ): Promise<SessionView> {
-    // send and flush are user-driven: short ack pacing, and a live-process ack
-    // timeout means the pane write landed, so it is recovered, not failed.
-    // deliver() (triggers) keeps the agent's long pacing and throws, which
-    // drives its own retry.
+    // send and flush are user-driven: short ack pacing. deliver() (triggers)
+    // keeps the agent's long pacing. Every entry point treats a live-process
+    // ack timeout as recovered (the pane write landed); a dead process throws.
     const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
     const probeRevision = this.lifecycle.snapshot(sessionId).revision;
@@ -17162,7 +17161,7 @@ export class SessionService {
         { kind: "direct" },
         {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
-          recoverOnLiveAckTimeout: interactive,
+          recoverOnLiveAckTimeout: true,
           interactive,
           ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           ...(options.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),

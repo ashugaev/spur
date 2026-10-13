@@ -58,8 +58,7 @@ describe("SessionService", () => {
     // The controls text (containing ap1_) never acks, so the deferred scan
     // times out; any other text (an ordinary body send) acks immediately, so
     // AC2's real deliver() call does not also time out on its unrelated body
-    // leg, which deliver() never recovers (invariant: deliver()'s body leg
-    // keeps its current non-recovering semantics).
+    // leg (a live-agent body timeout recovers too, see the body-leg tests).
     function primeLiveNonAckingBinding(
       lastScannedFile: string | null = "/some/claude.jsonl",
     ): void {
@@ -116,6 +115,92 @@ describe("SessionService", () => {
         service.deliver("api-1", "the task body", { sensitivePromptSuffix: controlsMessage() }),
       ).resolves.toBeDefined();
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    function eventsOf(name: string) {
+      return logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === name);
+    }
+
+    it("a real deliver() whose body ack times out on a live agent resolves, logs delivery_recovered, and still sends the controls", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService, LaunchPromptPendingError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/x.jsonl",
+      });
+      sendMessageToTmuxMock.mockClear();
+
+      await expect(
+        service.deliver("api-1", "the task body", { sensitivePromptSuffix: controlsMessage() }),
+      ).resolves.toBeDefined();
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock.mock.calls[0]).toContain("the task body");
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock.mock.calls[0]).toContain(controlsMessage());
+      const recovered = eventsOf("session.message.delivery_recovered");
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]?.details).toMatchObject({ entryPoint: "deliver" });
+      expect(eventsOf("session.message.failed")).toHaveLength(0);
+      const holdAt = sessions.get("api-1")?.submitUnconfirmedAt;
+      expect(holdAt).toBeDefined();
+
+      // I9: a second deliver during the hold rejects and pastes nothing.
+      await expect(
+        service.deliver("api-1", "next digest", { sensitivePromptSuffix: controlsMessage() }),
+      ).rejects.toBeInstanceOf(LaunchPromptPendingError);
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(holdAt);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("a real deliver() whose body ack times out on a dead agent rejects and sends no controls", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const waitSpy = vi
+        .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+        .mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" });
+      sendMessageToTmuxMock.mockClear();
+      isProcessRunningInTmuxMock
+        .mockReset()
+        .mockImplementation(async () => sendMessageToTmuxMock.mock.calls.length === 0);
+
+      await expect(
+        service.deliver("api-1", "the task body", { sensitivePromptSuffix: controlsMessage() }),
+      ).rejects.toMatchObject({
+        name: "SubmitAckTimeoutError",
+        processAlive: false,
+        probeUnresponsive: false,
+      });
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock.mock.calls[0]).toContain("the task body");
+      expect(waitSpy).toHaveBeenCalled();
+      expect(sendSensitiveMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(eventsOf("session.message.failed").length).toBeGreaterThan(0);
+      expect(eventsOf("session.message.delivery_recovered")).toHaveLength(0);
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
       service.dispose();
     });
 
