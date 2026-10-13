@@ -1,11 +1,19 @@
 ---
 name: telegram
-description: Send messages and read updates from Telegram via Bot API.
+description: Send a Telegram message via Bot API sendMessage.
 ---
 
 TELEGRAM BOT SKILL: env TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 
   - Send, MarkdownV2 supported:
     bash ./.agents/skills/telegram/scripts/send_message.sh "<text>"
-  - Read last N messages, default 5, format [timestamp] from_user: message_text:
-    bash ./.agents/skills/telegram/scripts/get_updates.sh [limit]
+
+
+NEVER
+
+  - Bot API getUpdates. A Spur telegram source long-polls its bot token; a second poller gets 409 and an offset drops updates the daemon has not fetched.
+
+
+INBOUND
+
+  Bound chat messages arrive as telegram:message sends; reply with `spur source reply`. Binding and routing: docs/configuration.md Telegram binding.
