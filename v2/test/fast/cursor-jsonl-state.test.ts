@@ -10,7 +10,7 @@ import {
   configureCursorTurnEndedStore,
   CURSOR_JSONL_TOOL_USE_GRACE_MS,
   findCursorAckTranscriptFile,
-  findLatestCursorTranscriptFile,
+  findPinnedCursorTranscriptFile,
   parseCursorJsonlRecord,
   readCursorJsonlState,
   readCursorTranscriptEntries,
@@ -453,7 +453,7 @@ describe("Cursor JSONL live stale-working regression (real sp-project sessions)"
   });
 });
 
-describe("findLatestCursorTranscriptFile", () => {
+describe("findPinnedCursorTranscriptFile", () => {
   const tempRoots: string[] = [];
 
   afterEach(async () => {
@@ -484,10 +484,13 @@ describe("findLatestCursorTranscriptFile", () => {
       '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n',
     );
 
-    const filePath = await findLatestCursorTranscriptFile(worktreePath);
+    const filePath = await findPinnedCursorTranscriptFile(worktreePath, "newer-chat");
     expect(filePath).toBe(join(transcriptsDir, "newer-chat", "newer-chat.jsonl"));
+    expect(await findPinnedCursorTranscriptFile(worktreePath, "older-chat")).toBe(
+      join(transcriptsDir, "older-chat", "older-chat.jsonl"),
+    );
 
-    const state = await readCursorJsonlState(worktreePath);
+    const state = await readCursorJsonlState(worktreePath, undefined, "newer-chat");
     expect(state?.state).toBe("working");
     expect(state?.reader.filePath).toBe(filePath);
   });
@@ -515,7 +518,7 @@ describe("findLatestCursorTranscriptFile", () => {
 
     // First-ever read (no reader passed) must classify against the file's real
     // last-write time, not "now" — otherwise a long-stale backlog always looks fresh.
-    const state = await readCursorJsonlState(worktreePath);
+    const state = await readCursorJsonlState(worktreePath, undefined, "old-chat");
     expect(state?.state).toBe("waiting");
   });
 
@@ -537,19 +540,19 @@ describe("findLatestCursorTranscriptFile", () => {
       transcriptPath,
       '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}\n',
     );
-    const oldReader = (await readCursorJsonlState(worktreePath))?.reader;
-    const boundary = await captureCursorRestoreBoundary(worktreePath);
+    const oldReader = (await readCursorJsonlState(worktreePath, undefined, "chat"))?.reader;
+    const boundary = await captureCursorRestoreBoundary(worktreePath, "chat");
     expect(boundary).toEqual({
       filePath: transcriptPath,
       offset: (await readFile(transcriptPath)).length,
     });
 
-    const restored = await readCursorJsonlState(worktreePath, oldReader, undefined, {
+    const restored = await readCursorJsonlState(worktreePath, oldReader, "chat", {
       after: boundary ?? undefined,
     });
     expect(restored?.state).toBe("waiting");
     expect(restored?.reader.tailRecords).toEqual([]);
-    const coldRestored = await readCursorJsonlState(worktreePath, undefined, undefined, {
+    const coldRestored = await readCursorJsonlState(worktreePath, undefined, "chat", {
       after: boundary ?? undefined,
     });
     expect(coldRestored?.state).toBe("waiting");
@@ -560,7 +563,7 @@ describe("findLatestCursorTranscriptFile", () => {
       (await readFile(transcriptPath, "utf8")) +
         '{"role":"user","message":{"content":[{"type":"text","text":"follow-up"}]}}\n',
     );
-    const resumed = await readCursorJsonlState(worktreePath, restored?.reader, undefined, {
+    const resumed = await readCursorJsonlState(worktreePath, restored?.reader, "chat", {
       after: boundary ?? undefined,
     });
     expect(resumed?.state).toBe("working");
@@ -818,7 +821,7 @@ describe("findLatestCursorTranscriptFile", () => {
       '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
     );
 
-    const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
+    const filePath = await findPinnedCursorTranscriptFile(alias, agentSessionId);
     expect(filePath).toBe(join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
 
     const state = await readCursorJsonlState(alias, undefined, agentSessionId);
@@ -854,7 +857,7 @@ describe("findLatestCursorTranscriptFile", () => {
       })}\n`,
     );
 
-    const state = await readCursorJsonlState(worktreePath);
+    const state = await readCursorJsonlState(worktreePath, undefined, "rate-limit-chat");
     expect(state?.state).toBe("error");
     expect(state?.rateLimit).toEqual({ limited: true, reason: "cursor out of usage" });
   });
@@ -884,51 +887,9 @@ describe("findLatestCursorTranscriptFile", () => {
       })}\n`,
     );
 
-    const state = await readCursorJsonlState(worktreePath);
+    const state = await readCursorJsonlState(worktreePath, undefined, "chat-session");
     expect(state?.state).toBe("working");
     expect(state?.rateLimit).toBeNull();
-  });
-
-  it("findLatestCursorTranscriptFile with minMtimeMs ignores transcripts modified before minMtimeMs", async () => {
-    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-min-mtime-"));
-    tempRoots.push(worktreePath);
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
-
-    const transcriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(worktreePath),
-      "agent-transcripts",
-    );
-    await mkdir(join(transcriptsDir, "old-session"), { recursive: true });
-    const oldPath = join(transcriptsDir, "old-session", "old-session.jsonl");
-    await writeFile(
-      oldPath,
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n',
-    );
-    const oldTime = new Date(1_000_000);
-    await utimes(oldPath, oldTime, oldTime);
-
-    const threshold = 2_000_000;
-    const ignored = await findLatestCursorTranscriptFile(worktreePath, undefined, {
-      minMtimeMs: threshold,
-    });
-    expect(ignored).toBeNull();
-
-    await mkdir(join(transcriptsDir, "new-session"), { recursive: true });
-    const newPath = join(transcriptsDir, "new-session", "new-session.jsonl");
-    await writeFile(
-      newPath,
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"new"}]}}\n',
-    );
-    const newTime = new Date(3_000_000);
-    await utimes(newPath, newTime, newTime);
-
-    const found = await findLatestCursorTranscriptFile(worktreePath, undefined, {
-      minMtimeMs: threshold,
-    });
-    expect(found).toBe(newPath);
   });
 
   it("isolates transcript lookup in shared directory when agentSessionId is pinned", async () => {
@@ -964,48 +925,9 @@ describe("findLatestCursorTranscriptFile", () => {
     const time2 = new Date(20_000_000);
     await utimes(file2, time2, time2);
 
-    // Default lookup without pinned id picks newest (file2)
-    const latestUnpinned = await findLatestCursorTranscriptFile(worktreePath);
-    expect(latestUnpinned).toBe(file2);
-
     // Pinned lookup for id1 returns file1 despite file2 being newer
-    const pinned1 = await findLatestCursorTranscriptFile(worktreePath, id1);
+    const pinned1 = await findPinnedCursorTranscriptFile(worktreePath, id1);
     expect(pinned1).toBe(file1);
-  });
-
-  it("findLatestCursorTranscriptFile and readCursorJsonlState ignore minMtimeMs when agentSessionId is pinned", async () => {
-    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-jsonl-pinned-mtime-"));
-    tempRoots.push(worktreePath);
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
-
-    const transcriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(worktreePath),
-      "agent-transcripts",
-    );
-    const pinnedId = "33333333-3333-3333-3333-333333333333";
-    await mkdir(join(transcriptsDir, pinnedId), { recursive: true });
-    const pinnedPath = join(transcriptsDir, pinnedId, `${pinnedId}.jsonl`);
-    await writeFile(
-      pinnedPath,
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"pinned session"}]}}\n',
-    );
-    const oldTime = new Date(1_000_000);
-    await utimes(pinnedPath, oldTime, oldTime);
-
-    const threshold = 2_000_000;
-    const found = await findLatestCursorTranscriptFile(worktreePath, pinnedId, {
-      minMtimeMs: threshold,
-    });
-    expect(found).toBe(pinnedPath);
-
-    const state = await readCursorJsonlState(worktreePath, undefined, pinnedId, {
-      minMtimeMs: threshold,
-    });
-    expect(state).not.toBeNull();
-    expect(state?.reader.filePath).toBe(pinnedPath);
   });
 });
 
@@ -1018,7 +940,7 @@ describe("findCursorAckTranscriptFile", () => {
 
   // AC1: a symlinked worktree whose stale raw-slug dir is NON-EMPTY resolves,
   // with no id, to the newer file under the realpath slug. This is the
-  // 177-event bucket: findLatestCursorTranscriptFile's first-dir-wins would
+  // 177-event bucket: first-dir-wins would
   // return the stale alias file forever; the ack-only global-newest rule
   // self-corrects once the live agent writes under the canonical slug.
   it("resolves to the newer file under the realpath slug when the alias dir is stale but non-empty", async () => {
@@ -1099,7 +1021,7 @@ describe("findCursorAckTranscriptFile", () => {
   // Review thread (cursor-jsonl-state.ts:149): resolveCursorPinnedTranscriptPath
   // guesses the LAST worktree-path candidate (realpath, i.e. canonical) for the
   // pending-pin baseline, while findCursorAckTranscriptFile's id branch
-  // (delegated to findLatestCursorTranscriptFile) iterates ALL candidates,
+  // (delegated to findPinnedCursorTranscriptFile) iterates ALL candidates,
   // stat-then-continue. When cursor lands the pinned transcript only under the
   // RAW alias slug (measured fact in the spec: cursor wrote real records under
   // a stale raw slug on 2026-09-04), the guessed path never exists, but the
@@ -1147,55 +1069,104 @@ describe("findCursorAckTranscriptFile", () => {
     expect(filePath).toBe(join(aliasTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
     expect(filePath).not.toBe(pendingPinGuess);
   });
+});
 
-  // AC2b, I8 pin: findLatestCursorTranscriptFile's no-id behavior is
-  // untouched by the new ack-only resolver, so live-state classification and
-  // the dialog viewer keep resolving to the stale alias file exactly as
-  // today. This is the test that catches an executor who "helpfully" shares
-  // the global-newest rule between the two resolvers.
-  it("findLatestCursorTranscriptFile still returns the stale alias file (I8, no shared behavior)", async () => {
-    const root = await mkdtemp(join(homedir(), "spur-cursor-ack-i8-"));
+// #890: state, rate-limit, restore boundary and viewer resolve only the
+// pinned chat id; a missing pinned file never falls back to a foreign file.
+describe("pinned-only cursor transcript resolution", () => {
+  const tempRoots: string[] = [];
+  const USAGE_LIMIT_STUB = `${JSON.stringify({
+    type: "turn_ended",
+    status: "error",
+    error:
+      "Increase limits for faster responses You're out of usage. Switch to auto, Auto, or Composer 2.5, or ask your admin to increase your limit to continue.",
+  })}\n`;
+
+  afterEach(async () => {
+    await Promise.all(tempRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  function transcriptsDirOf(worktreePath: string): string {
+    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
+    return join(
+      homedir(),
+      ".cursor",
+      "projects",
+      toCursorProjectPath(worktreePath),
+      "agent-transcripts",
+    );
+  }
+
+  async function writeChat(dir: string, id: string, content: string): Promise<string> {
+    await mkdir(join(dir, id), { recursive: true });
+    const filePath = join(dir, id, `${id}.jsonl`);
+    await writeFile(filePath, content);
+    return filePath;
+  }
+
+  it("T1 returns null for a missing pinned id even with a newer peer and a usage-limit stub", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-pinned-only-t1-"));
+    tempRoots.push(worktreePath);
+    const dir = transcriptsDirOf(worktreePath);
+    await writeChat(
+      dir,
+      "peer",
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"peer"}]}}\n',
+    );
+    await writeChat(dir, "stub", USAGE_LIMIT_STUB);
+
+    expect(await findPinnedCursorTranscriptFile(worktreePath, "missing")).toBeNull();
+    expect(await readCursorJsonlState(worktreePath, undefined, "missing")).toBeNull();
+  });
+
+  it("T2 ignores a stale reader whose file is a foreign stub when the pinned id is missing", async () => {
+    const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-pinned-only-t2-"));
+    tempRoots.push(worktreePath);
+    const dir = transcriptsDirOf(worktreePath);
+    await writeChat(dir, "stub", USAGE_LIMIT_STUB);
+
+    const staleReader = (await readCursorJsonlState(worktreePath, undefined, "stub"))?.reader;
+    expect(staleReader?.filePath).toBe(join(dir, "stub", "stub.jsonl"));
+    expect(await readCursorJsonlState(worktreePath, staleReader, "missing")).toBeNull();
+  });
+
+  it("T3 reads the canonical pinned file, never the alias-slug stub", async () => {
+    const root = await mkdtemp(join(homedir(), "spur-cursor-pinned-only-t3-"));
     tempRoots.push(root);
     const canonical = join(root, "canonical");
     const alias = join(root, "alias");
     await mkdir(canonical);
     await symlink(canonical, alias);
+    const aliasDir = transcriptsDirOf(alias);
+    const canonicalDir = transcriptsDirOf(canonical);
 
-    const aliasTranscriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(alias),
-      "agent-transcripts",
-    );
-    const canonicalTranscriptsDir = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      toCursorProjectPath(canonical),
-      "agent-transcripts",
-    );
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(alias)));
-    tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(canonical)));
-
-    await mkdir(join(aliasTranscriptsDir, "stale-chat"), { recursive: true });
-    await writeFile(
-      join(aliasTranscriptsDir, "stale-chat", "stale-chat.jsonl"),
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"stale"}]}}\n',
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await mkdir(join(canonicalTranscriptsDir, "live-chat"), { recursive: true });
-    await writeFile(
-      join(canonicalTranscriptsDir, "live-chat", "live-chat.jsonl"),
-      '{"role":"assistant","message":{"content":[{"type":"text","text":"live"}]}}\n',
+    const stubPath = await writeChat(aliasDir, "stub", USAGE_LIMIT_STUB);
+    const id = "bbbbbbbb-1111-2222-3333-444444444444";
+    const chatPath = await writeChat(
+      canonicalDir,
+      id,
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
     );
 
-    const staleFilePath = join(aliasTranscriptsDir, "stale-chat", "stale-chat.jsonl");
-    const filePath = await findLatestCursorTranscriptFile(alias);
-    expect(filePath).toBe(staleFilePath);
+    const state = await readCursorJsonlState(alias, undefined, id);
+    expect(state?.reader.filePath).toBe(chatPath);
+    expect(state?.reader.filePath).not.toBe(stubPath);
+    expect(state?.rateLimit).toBeNull();
+  });
 
-    const state = await readCursorJsonlState(alias);
-    expect(state?.reader.filePath).toBe(staleFilePath);
+  it("T4 opens nothing when the pinned id is absent everywhere and an alias stub exists", async () => {
+    const root = await mkdtemp(join(homedir(), "spur-cursor-pinned-only-t4-"));
+    tempRoots.push(root);
+    const canonical = join(root, "canonical");
+    const alias = join(root, "alias");
+    await mkdir(canonical);
+    await symlink(canonical, alias);
+    await writeChat(transcriptsDirOf(alias), "stub", USAGE_LIMIT_STUB);
+    transcriptsDirOf(canonical);
+
+    expect(await readCursorJsonlState(alias, undefined, "missing")).toBeNull();
+    expect(await readCursorTranscriptEntries(alias, "missing")).toBeNull();
+    expect(await captureCursorRestoreBoundary(alias, "missing")).toBeNull();
   });
 });
 
@@ -1253,7 +1224,7 @@ describe("readCursorTranscriptEntries", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     await seedTranscript(worktreePath, "working-tool-use.jsonl");
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "chat");
     expect(entries).not.toBeNull();
     if (!entries) throw new Error("expected entries");
 
@@ -1268,7 +1239,7 @@ describe("readCursorTranscriptEntries", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     await seedTranscript(worktreePath, "needs-input-ask-user.jsonl");
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "chat");
     expect(entries).not.toBeNull();
     if (!entries) throw new Error("expected entries");
 
@@ -1281,7 +1252,7 @@ describe("readCursorTranscriptEntries", () => {
     const worktreePath = await mkdtemp(join(homedir(), "spur-cursor-transcript-missing-"));
     tempRoots.push(worktreePath);
 
-    const entries = await readCursorTranscriptEntries(worktreePath);
+    const entries = await readCursorTranscriptEntries(worktreePath, "chat");
     expect(entries).toBeNull();
   });
 });
