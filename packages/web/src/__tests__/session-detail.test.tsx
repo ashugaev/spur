@@ -6576,6 +6576,116 @@ describe("SessionDetail load state", () => {
     expect(sessionCalls).toBe(before + 1);
   });
 
+  function mockSessionStatus(status: () => number) {
+    const calls = { session: 0 };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        calls.session += 1;
+        const code = status();
+        return code === 200
+          ? new Response(JSON.stringify(sessionFixture()), { status: 200 })
+          : new Response(JSON.stringify({ error: "nope" }), {
+              headers: { "content-type": "application/json" },
+              status: code,
+            });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    return calls;
+  }
+
+  it("lets the card timer own retries while 503 and skips the 4s poll", async () => {
+    vi.useFakeTimers();
+    const calls = mockSessionStatus(() => 503);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(calls.session).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    // Card timer fires at 4s; the poll tick at 4s must not add a second call.
+    expect(calls.session).toBe(3);
+  });
+
+  it("stops the card timer when 503 turns into a non-transient error", async () => {
+    vi.useFakeTimers();
+    let code = 503;
+    const calls = mockSessionStatus(() => code);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    code = 404;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(2);
+    expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
+    // Only the 4s poll may fetch now; the card timer must be gone.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(calls.session).toBe(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(calls.session).toBe(4);
+  });
+
+  it("stops the card timer on unmount", async () => {
+    vi.useFakeTimers();
+    const calls = mockSessionStatus(() => 503);
+    const { unmount } = render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    unmount();
+    const before = calls.session;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(calls.session).toBe(before);
+  });
+
+  it("disables the retry button while the retry is in flight", async () => {
+    let release: (() => void) | null = null;
+    let sessionCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url !== "/api/sessions/api-a1") throw new Error(`Unexpected fetch: ${url}`);
+      sessionCalls += 1;
+      if (sessionCalls > 1) await new Promise<void>((resolve) => (release = resolve));
+      return new Response(JSON.stringify({ error: "nope" }), {
+        headers: { "content-type": "application/json" },
+        status: 404,
+      });
+    });
+    render(<SessionDetail sessionId="api-a1" />);
+    const button = await screen.findByRole("button", { name: "Retry" });
+    fireEvent.click(button);
+    const busy = await screen.findByRole("button", { name: "Retrying…" });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(busy);
+    expect(sessionCalls).toBe(2);
+    await act(async () => {
+      release?.();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    });
+  });
+
   it("ignores stale session responses after navigation", async () => {
     let resolveFirstSession: ((response: Response) => void) | null = null;
     const firstSessionResponse = new Promise<Response>((resolve) => {

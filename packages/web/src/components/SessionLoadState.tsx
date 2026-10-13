@@ -21,6 +21,7 @@ interface SessionLoadStateProps {
 // blocking overlay: it sits in the page area and never covers the shell.
 export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
   const [attempt, setAttempt] = useState(1);
+  const [retrying, setRetrying] = useState(false);
   const inFlightRef = useRef(false);
   const onRetryRef = useRef(onRetry);
   onRetryRef.current = onRetry;
@@ -29,16 +30,19 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     setAttempt((current) => current + 1);
+    setRetrying(true);
     try {
       await onRetryRef.current();
     } finally {
       inFlightRef.current = false;
+      setRetrying(false);
     }
   }, []);
 
   const { transient } = failure;
   useEffect(() => {
     if (!transient) return;
+    setAttempt(1);
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
@@ -57,26 +61,31 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
   return (
     <div className="flex flex-1 items-center justify-center px-4">
       {transient ? (
-        <StatusCard ariaLive="polite" role="status" testId="session-load-starting">
+        <StatusCard role="status" testId="session-load-starting">
           <div className="flex items-center gap-3">
-            <Spinner className="h-5 w-5 text-[var(--color-status-attention)]" />
+            <Spinner className="h-5 shrink-0 w-5 text-[var(--color-status-attention)]" />
             <div>
               <p className="font-bold text-[var(--color-text-primary)]">Spur is starting…</p>
               <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
                 The daemon is still starting. This session opens automatically once it&apos;s ready.
               </p>
-              <p className="mt-1 normal-case tracking-normal text-[var(--color-text-tertiary)]">
+              <p
+                aria-hidden="true"
+                className="mt-1 normal-case tracking-normal text-[var(--color-text-tertiary)]"
+              >
                 Retrying · attempt {attempt}
               </p>
             </div>
           </div>
           <div className="mt-3 flex items-center justify-end">
             <button
-              className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
+              className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+              aria-busy={retrying}
+              disabled={retrying}
               type="button"
               onClick={() => void retry()}
             >
-              Retry now
+              {retrying ? "Retrying…" : "Retry now"}
             </button>
           </div>
         </StatusCard>
@@ -103,11 +112,13 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
           </p>
           <div className="mt-3 flex items-center justify-end">
             <button
-              className="border border-[var(--color-status-error)] px-3 py-1 font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)]"
+              className="border border-[var(--color-status-error)] px-3 py-1 font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+              aria-busy={retrying}
+              disabled={retrying}
               type="button"
               onClick={() => void retry()}
             >
-              Retry
+              {retrying ? "Retrying…" : "Retry"}
             </button>
           </div>
         </StatusCard>
