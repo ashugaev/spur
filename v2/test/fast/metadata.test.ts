@@ -2357,6 +2357,21 @@ describe("listSessions record cache", () => {
     expect(dataDir2Second).toBe(dataDir2First);
   });
 
+  it("shares the cached record between readSession and listSessions", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+
+    const listed = listSessions(dataDir).find((s) => s.id === "api-1");
+    const read = readSession(dataDir, "api-1");
+    expect(read).toBe(listed);
+    expect(readSession(dataDir, "api-1")).toBe(read);
+
+    writeSession(dataDir, { ...fixtureSession("api-1"), status: "completed" });
+    const reread = readSession(dataDir, "api-1");
+    expect(reread).not.toBe(read);
+    expect(reread?.status).toBe("completed");
+  });
+
   it("lists a session file that has no index entry", async () => {
     const dataDir = await newDataDir();
     const sessionDir = join(dataDir, "sessions", "api");
