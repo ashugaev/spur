@@ -3717,6 +3717,57 @@ describe("Spur web API routes", () => {
       }
     });
 
+    it("arms the rate-limit window from a 200 body with a path-less RATE_LIMITED error", async () => {
+      const firstUrl = nextPrUrl();
+      fetchMock.mockResolvedValueOnce(
+        ghOk({
+          data: null,
+          errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+        }),
+      );
+
+      const first = await postBatch([firstUrl]);
+      const firstPayload = (await first.json()) as {
+        results: Record<string, { state: string | null; error?: string }>;
+      };
+      expect(firstPayload.results[firstUrl]?.state).toBeNull();
+      expect(firstPayload.results[firstUrl]?.error).toContain("API rate limit exceeded");
+
+      fetchMock.mockClear();
+      const secondUrl = nextPrUrl();
+      const second = await postBatch([secondUrl]);
+      const secondPayload = (await second.json()) as {
+        results: Record<string, { error?: string }>;
+      };
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(secondPayload.results[secondUrl]?.error).toContain("GitHub rate limit");
+    });
+
+    it("keeps the last-good snapshot, marked stale, when a 200 body carries a path-less error", async () => {
+      vi.useFakeTimers();
+      try {
+        const url = nextPrUrl();
+        fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+        await postBatch([url]); // warms last-good + the short-lived response cache
+        vi.advanceTimersByTime(130_000); // expire the short-lived cache; last-good persists
+
+        fetchMock.mockResolvedValueOnce(
+          ghOk({ data: null, errors: [{ message: "Something went wrong while executing" }] }),
+        );
+        const response = await postBatch([url]);
+        const payload = (await response.json()) as {
+          results: Record<string, { state: string | null; stale?: boolean; error?: string }>;
+        };
+
+        expect(payload.results[url]?.state).toBe("open");
+        expect(payload.results[url]?.stale).toBe(true);
+        expect(payload.results[url]?.error).toContain("Something went wrong");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("resolves the successful alias and records the GraphQL error for the failed one on a partial error", async () => {
       const okUrl = nextPrUrl();
       const failUrl = nextPrUrl();
