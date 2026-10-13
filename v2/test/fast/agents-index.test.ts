@@ -14,6 +14,7 @@ const {
   scanCodexRolloutForMessageMock,
   captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessageMock,
+  mkdirMock,
   writeFileMock,
   readFileMock,
   captureCursorSubmitBaselineMock,
@@ -27,6 +28,7 @@ const {
   scanCodexRolloutForMessageMock: vi.fn(),
   captureClaudeSubmitBaselineMock: vi.fn(),
   scanClaudeJsonlForMessageMock: vi.fn(),
+  mkdirMock: vi.fn(),
   writeFileMock: vi.fn(),
   readFileMock: vi.fn(),
   captureCursorSubmitBaselineMock: vi.fn(),
@@ -34,6 +36,7 @@ const {
 }));
 
 vi.mock("node:fs/promises", () => ({
+  mkdir: mkdirMock,
   writeFile: writeFileMock,
   readFile: readFileMock,
 }));
@@ -95,6 +98,7 @@ beforeEach(() => {
   scanCodexRolloutForMessageMock.mockReset();
   captureClaudeSubmitBaselineMock.mockReset();
   scanClaudeJsonlForMessageMock.mockReset();
+  mkdirMock.mockReset().mockResolvedValue(undefined);
   writeFileMock.mockReset().mockResolvedValue(undefined);
   readFileMock
     .mockReset()
@@ -116,6 +120,7 @@ describe("setupAgentHooks", () => {
       mcpBindings: [{ server: "tools", url: "http://localhost/mcp" }],
     });
     expect(JSON.parse(result.opencodeConfigContent ?? "{}")).toMatchObject({
+      plugin: ["file:///tmp/tools/opencode-heartbeat.mjs"],
       agent: {
         build: { model: "provider/model", variant: "high" },
         plan: { model: "provider/model", variant: "high" },
@@ -128,6 +133,11 @@ describe("setupAgentHooks", () => {
       permission: { edit: "deny" },
       mcp: { tools: { enabled: true } },
     });
+    expect(mkdirMock).toHaveBeenCalledWith("/tmp/tools", { recursive: true });
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/tmp/tools/opencode-heartbeat.mjs",
+      expect.any(String),
+    );
   });
   it("does not configure hooks for claude", async () => {
     const result = await setupAgentHooks({
