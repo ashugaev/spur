@@ -4,6 +4,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -357,7 +358,12 @@ describe("session slots", () => {
     });
 
     try {
-      ensureSessionSlotTool({ ...args, configPath: "/tmp/spur-new.yaml" });
+      const previousUmask = process.umask(0o077);
+      try {
+        ensureSessionSlotTool({ ...args, configPath: "/tmp/spur-new.yaml" });
+      } finally {
+        process.umask(previousUmask);
+      }
 
       for (const { name, ino, content, fd } of before) {
         const path = join(toolDir, name);
@@ -372,6 +378,18 @@ describe("session slots", () => {
         closeSync(fd);
       }
     }
+  });
+
+  it("removes the temp file and rethrows when the rename fails", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+    const args = { dataDir, sessionId: "api-rename-fail", configPath: "/tmp/spur.yaml" };
+    const toolDir = ensureSessionSlotTool(args);
+    rmSync(join(toolDir, TODO_TOOL_NAME));
+    mkdirSync(join(toolDir, TODO_TOOL_NAME));
+
+    expect(() => ensureSessionSlotTool(args)).toThrow();
+    expect(readdirSync(toolDir).filter((name) => name.includes(".tmp."))).toEqual([]);
   });
 
   it("writes branch helpers when branch naming is configured", async () => {
