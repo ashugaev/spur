@@ -62,7 +62,7 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
     <div className="flex flex-1 items-center justify-center px-4">
       {transient ? (
         <StatusCard role="status" testId="session-load-starting">
-          <div className="flex items-center gap-3">
+          <div className="flex items-start gap-3">
             <Spinner className="h-5 shrink-0 w-5 text-[var(--color-status-attention)]" />
             <div>
               <p className="font-bold text-[var(--color-text-primary)]">Spur is starting…</p>
@@ -79,7 +79,7 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
           </div>
           <div className="mt-3 flex items-center justify-end">
             <button
-              className="border border-[var(--color-status-attention)] px-3 py-1 font-bold text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="border border-[var(--color-status-attention)] px-3 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors enabled:hover:bg-[var(--color-status-attention)] enabled:hover:text-[var(--color-bg-elevated)] enabled:focus-visible:bg-[var(--color-status-attention)] enabled:focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
               aria-busy={retrying}
               disabled={retrying}
               type="button"
@@ -91,7 +91,7 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
         </StatusCard>
       ) : (
         <StatusCard role="alert" testId="session-load-failed" tone="error">
-          <div className="flex items-center gap-3">
+          <div className="flex items-start gap-3">
             <svg
               aria-hidden="true"
               className="h-5 w-5 shrink-0 text-[var(--color-status-error)]"
@@ -103,16 +103,21 @@ export function SessionLoadState({ failure, onRetry }: SessionLoadStateProps) {
               <circle cx="12" cy="12" r="9" />
               <path d="M12 7.5v5.5M12 16.5h.01" strokeLinecap="round" />
             </svg>
-            <p className="font-bold text-[var(--color-status-error)]">
-              Unable to load this session
-            </p>
+            <div>
+              <p className="font-bold text-[var(--color-status-error)]">
+                Unable to load this session
+              </p>
+              <p className="mt-1 normal-case tracking-normal text-[var(--color-text-secondary)]">
+                Spur returned an error for this session.
+              </p>
+            </div>
           </div>
           <p className="mt-3 whitespace-pre-wrap break-words border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 normal-case tracking-normal text-[var(--color-text-secondary)]">
             {failure.message}
           </p>
           <div className="mt-3 flex items-center justify-end">
             <button
-              className="border border-[var(--color-status-error)] px-3 py-1 font-bold text-[var(--color-status-error)] outline-none transition-colors hover:bg-[var(--color-status-error)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-error)] focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="border border-[var(--color-status-error)] px-3 py-1 font-bold uppercase text-[var(--color-status-error)] outline-none transition-colors enabled:hover:bg-[var(--color-status-error)] enabled:hover:text-[var(--color-bg-elevated)] enabled:focus-visible:bg-[var(--color-status-error)] enabled:focus-visible:text-[var(--color-bg-elevated)] disabled:cursor-not-allowed disabled:opacity-50"
               aria-busy={retrying}
               disabled={retrying}
               type="button"
