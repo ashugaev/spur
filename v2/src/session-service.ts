@@ -20913,7 +20913,6 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
-    staleSinceMs?: number;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
@@ -20953,10 +20952,11 @@ export class SessionService {
     // in-content rollout timestamp (rollout mtime is unusable — `codex resume`'s
     // poison-id heal rewrites every file at once) and the hook state. 0 means
     // neither source exists yet. The single derivation for both the hung-turn
-    // check below and the caller's activity/idle-gate signal.
+    // check below and the caller's activity/idle-gate signal. Hookless, rollout
+    // progress after task_started also counts.
     const activityMs = Math.max(
       rolloutState?.timestampMs ?? 0,
-      hookState ? new Date(hookState.updatedAt).getTime() : 0,
+      hookState ? new Date(hookState.updatedAt).getTime() : (rolloutRead.lastProgressMs ?? 0),
     );
 
     // Without hooks, a quiet rollout cannot rule out a tool still running.
@@ -20969,17 +20969,15 @@ export class SessionService {
 
     // Hookless: a bare task_started (no open tool call) with a silent rollout
     // for the hookless threshold is a hung turn.
-    let staleSinceMs: number | undefined;
     if (
       !hookState &&
       state === "working" &&
       rolloutState?.reason === "task_started" &&
       rolloutRead.lastProgressMs !== undefined &&
-      Date.now() - rolloutRead.lastProgressMs >= CODEX_HOOKLESS_HUNG_MS
+      Date.now() - activityMs >= CODEX_HOOKLESS_HUNG_MS
     ) {
       state = "waiting";
       source = "codex_stale";
-      staleSinceMs = rolloutRead.lastProgressMs;
     }
 
     return {
@@ -20989,7 +20987,6 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
-      ...(staleSinceMs !== undefined ? { staleSinceMs } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -22355,7 +22352,7 @@ export class SessionService {
         tokenUsages = codexState.tokenUsages;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - (codexState.staleSinceMs ?? codexState.activityMs)}ms)`;
+          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`;

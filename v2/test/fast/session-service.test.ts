@@ -18379,6 +18379,39 @@ describe("SessionService", () => {
     },
   );
 
+  it("anchors hookless codex activity on rollout progress newer than task_started", async () => {
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const timestampMs = now.getTime() - 20 * 60_000;
+    const lastProgressMs = now.getTime() - 4 * 60_000;
+    readSessionMock.mockReturnValue(
+      runningSession({ agent: "codex", updatedAt: "2026-04-14T10:00:00.000Z" }),
+    );
+    readAgentHookStateMock.mockReturnValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(timestampMs).toISOString(),
+        timestampMs,
+        filePath: "/tmp/api-1/rollout.jsonl",
+        reason: "task_started",
+      },
+      rateLimit: null,
+      lastProgressMs,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      const view = await service.get("api-1");
+      expect(view.state).toBe("working");
+      expect(view.lastActivityAt).toBe(new Date(lastProgressMs).toISOString());
+    } finally {
+      service.dispose();
+    }
+  });
+
   describe("session.state.classified dedupe", () => {
     function classifiedCalls(sessionId = "api-1") {
       return logSpurEventMock.mock.calls.filter(
@@ -54441,6 +54474,46 @@ describe("SessionService", () => {
         await drainTicks(internals);
 
         expect(stalePolledEvents()).toHaveLength(0);
+        expect(sessions.get("api-1")?.status).toBe("running");
+        service.dispose();
+      });
+
+      it("keeps a hookless codex session flipped by a hung turn out of the stale park sweep when progress is recent", async () => {
+        // task_started is 125 minutes old (past the 60-minute threshold) but
+        // rollout progress was 11 minutes ago: the park clock must follow the
+        // progress, not the old task_started.
+        loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+        const nowMs = Date.parse("2026-03-18T10:05:00.000Z");
+        const taskStartedMs = nowMs - 125 * 60_000;
+        readAgentHookStateMock.mockReturnValue(null);
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: {
+            state: "working",
+            timestamp: new Date(taskStartedMs).toISOString(),
+            timestampMs: taskStartedMs,
+            filePath: "/tmp/api-1/rollout.jsonl",
+            reason: "task_started",
+          },
+          rateLimit: null,
+          lastProgressMs: nowMs - 11 * 60_000,
+        });
+        const sessions = createSessionStore();
+        sessions.set("api-1", staleParkableSession({ agent: "codex" }));
+        let agentPaneKilled = false;
+        killTmuxSessionMock.mockImplementation(async (name: string) => {
+          if (name === "api-1") {
+            agentPaneKilled = true;
+          }
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => !agentPaneKilled);
+
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = staleInternals(service);
+        await drainTicks(internals);
+
+        expect(stalePolledEvents()).toHaveLength(0);
+        expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1");
         expect(sessions.get("api-1")?.status).toBe("running");
         service.dispose();
       });
