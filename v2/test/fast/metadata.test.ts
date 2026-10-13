@@ -2321,6 +2321,13 @@ describe("session metadata PR migration", () => {
       queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
     });
     expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // Only cursor may carry a pending (null) file.
+    const claudeNullFile = { agent: "claude", file: null, size: 0 } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: claudeNullFile },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
     // A malformed rotation entry drops alone; the pinned offset survives.
     const badRotation = {
       agent: "cursor",

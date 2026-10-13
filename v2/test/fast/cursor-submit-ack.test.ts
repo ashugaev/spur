@@ -634,9 +634,48 @@ describe("no-id cursor submit ack (#889)", () => {
       options,
     );
     expect(result).toEqual({ found: true, scannedFile: ownFile });
-    expect(findCursorSessionIdMock).not.toHaveBeenCalledWith("/tmp/worktree", {
-      configDir: options.cursorConfigDir,
-    });
+    expect(findCursorSessionIdMock).not.toHaveBeenCalled();
+  });
+
+  it("scans the private-dir chat, not a newer peer transcript that holds the text", async () => {
+    const ownFile = await makeJsonl("own-id.jsonl", [userTurn("earlier turn")]);
+    const peerFile = await makeJsonl("peer-id.jsonl", [userTurn("ship the task")]);
+    findCursorSessionIdMock.mockResolvedValue("own-id");
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "peer-id" ? peerFile : ownFile,
+    );
+
+    const baseline = await captureCursorSubmitBaseline("/tmp/worktree", undefined, options);
+    expect(baseline?.file).toBe(ownFile);
+    if (!baseline) return;
+    const result = await scanCursorJsonlForMessage(
+      baseline,
+      "ship the task",
+      "/tmp/worktree",
+      undefined,
+      options,
+    );
+    expect(result).toEqual({ found: false, scannedFile: ownFile });
+    for (const call of findCursorAckTranscriptFileMock.mock.calls) {
+      expect(call[1]).toBe("own-id");
+    }
+  });
+
+  it("keeps a pending baseline untouched over repeated empty polls", async () => {
+    findCursorSessionIdMock.mockResolvedValue(null);
+    const baseline = { file: null as string | null, size: 0 };
+    for (let poll = 0; poll < 3; poll++) {
+      const result = await scanCursorJsonlForMessage(
+        baseline,
+        "ship the task",
+        "/tmp/worktree",
+        undefined,
+        options,
+      );
+      expect(result).toEqual({ found: false, scannedFile: null });
+    }
+    expect(baseline).toEqual({ file: null, size: 0 });
+    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
   });
 
   // AC5
