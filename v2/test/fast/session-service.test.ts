@@ -11498,7 +11498,8 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1");
+        if (!record) throw new Error("api-1 missing from the session store");
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
@@ -51510,9 +51511,14 @@ describe("SessionService", () => {
       agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
       // Restore's own fresh pane lookup keeps the unavailable default; the
       // kill path's fresh lookup (second call) reads an ok pane without a pid.
-      lookupTmuxPanePidMock
-        .mockResolvedValueOnce({ status: "unavailable" })
-        .mockResolvedValue({ status: "ok", panePid: null });
+      let freshLookups = 0;
+      lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
+        if (options?.fresh) {
+          freshLookups += 1;
+          if (freshLookups === 1) return { status: "unavailable" };
+        }
+        return { status: "ok", panePid: null, paneDead: false };
+      });
       let freshProbes = 0;
       isProcessRunningInTmuxMock.mockImplementation(
         async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
