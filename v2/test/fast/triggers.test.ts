@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3357,6 +3358,406 @@ describe("startConfiguredTriggers", () => {
     } finally {
       await controller.stop();
     }
+  });
+
+  describe("in-flight delivery merge (#990)", () => {
+    const QUEUE_KEY = "api:send:api-1";
+    const record = (): PersistedPendingBatch | undefined =>
+      readPendingSendBatchesMock().get(QUEUE_KEY);
+    const signalsOf = (
+      pending: PersistedPendingBatch | undefined,
+    ): Array<{ key: string; kind: string; text: string }> =>
+      (pending?.batch as unknown as { signals: Array<{ key: string; kind: string; text: string }> })
+        .signals;
+    const keysOf = (pending: PersistedPendingBatch | undefined): string[] =>
+      signalsOf(pending)
+        .map((signal) => signal.key)
+        .sort();
+    const entryOf = (key: string) =>
+      record()?.retryAccounting?.find((entry) => entry.itemKey.includes(key));
+    const loggedEntries = (event: string) =>
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry)
+        .filter((entry) => entry.event === event);
+    const waitingSession = () => ({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const textOf = (key: string) => `text of ${key}`;
+    const commentEvent = (key: string, text = textOf(key)) => ({
+      ...githubEvent(key),
+      occurrenceId: `github-${key}-${text}`,
+      data: {
+        ...githubEvent(key).data,
+        signals: [{ key, kind: "comment" as const, text }],
+      },
+    });
+    const snapshotOf = (...keys: string[]): ReviewSnapshot =>
+      storedSnapshot(keys.map((key) => ({ key, kind: "comment", text: textOf(key) })));
+    const deferred = <T = void>() => {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+    // The first deliver() stays pending until the test settles it.
+    const gatedDeliver = () => {
+      const gate = deferred();
+      const deliver = vi
+        .fn()
+        .mockImplementationOnce(() => gate.promise)
+        .mockResolvedValue(undefined);
+      return { gate, deliver };
+    };
+    const start = async (options: {
+      get: ReturnType<typeof vi.fn>;
+      deliver: ReturnType<typeof vi.fn>;
+      interrupt?: boolean;
+      autoPing?: AutoPingService;
+      dataDir?: string;
+    }) => {
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: {
+          ...config({ interrupt: options.interrupt ?? false }),
+          ...(options.dataDir ? { dataDir: options.dataDir } : {}),
+        },
+        bus,
+        ...(options.autoPing ? { autoPing: options.autoPing } : {}),
+        sessionService: { get: options.get, deliver: options.deliver },
+        logger: { warn: vi.fn() },
+      } as never);
+      return { bus, controller };
+    };
+
+    it("persists an event into the pending batch while delivery is in flight and delivers it on the next flush", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        const claimId = record()?.claim?.claimId;
+        expect(claimId).toBeDefined();
+
+        bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toEqual(["comment:1", "comment:2"]);
+        expect(record()?.claim?.claimId).toBe(claimId);
+        expect(
+          loggedEntries("trigger.send.queued").filter((entry) => entry.details.merged === true),
+        ).toHaveLength(1);
+
+        gate.reject(new Error("submit-ack timeout"));
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        const text = deliver.mock.calls[1]?.[1] as string;
+        expect(text).toContain(textOf("comment:2"));
+        expect(text).not.toContain(textOf("comment:1"));
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("schedules the next attempt from the attempt end, not its start", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+
+        // A 15 minute ack wait outlasts every backoff step.
+        await vi.advanceTimersByTimeAsync(15 * 60_000);
+        const failedAt = Date.now();
+        gate.reject(new Error("submit-ack timeout"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(entryOf("comment:1")?.nextAttemptAt).toBeGreaterThanOrEqual(failedAt + 10_000);
+
+        // Stacked flush ticks that run now must not deliver inside the window.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("keeps an event merged during delivery after the earlier snapshot succeeds", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toEqual(["comment:2"]);
+        expect(entryOf("comment:2")?.deliveryAttempts).toBe(0);
+        expect(entryOf("comment:1")).toBeUndefined();
+        expect(record()?.claim).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
+        expect(loggedEntries("trigger.send.dropped")).toHaveLength(0);
+        expect(record()).toBeUndefined();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("keeps a same-key edit merged during delivery with a fresh entry", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1", "text A"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        bus.emit(commentEvent("comment:1", "text B"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(signalsOf(record())).toMatchObject([{ key: "comment:1", text: "text B" }]);
+        expect(entryOf("comment:1")?.deliveryAttempts).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain("text B");
+        expect(deliver.mock.calls[1]?.[1]).not.toContain("text A");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("keeps a merge-conflict edit merged during the refresh when the old one is rejected", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-inflight-conflict-"));
+      const autoPing = new AutoPingService(dataDir);
+      const claim = vi.spyOn(autoPing, "claimMergeConflict").mockReturnValueOnce(false);
+      const refreshGate = deferred();
+      refreshSignalsMock.mockImplementationOnce(async (input) => {
+        await refreshGate.promise;
+        return input.signals.map((signal) => ({ status: "live", key: signal.key, signal }));
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      const conflictEvent = (text: string) => ({
+        ...githubEvent("comment:1"),
+        occurrenceId: `github-conflict-${text}`,
+        data: {
+          ...githubEvent("comment:1").data,
+          signals: [
+            { key: "comment:1", kind: "comment" as const, text: textOf("comment:1") },
+            { key: "merge_conflict", kind: "merge_conflict" as const, text },
+          ],
+        },
+      });
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        storedSnapshot([
+          { key: "comment:1", kind: "comment", text: textOf("comment:1") },
+          { key: "merge_conflict", kind: "merge_conflict", text: "conflict B" },
+        ]),
+      );
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+        autoPing,
+        dataDir,
+      });
+      try {
+        bus.emit(conflictEvent("conflict A"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(refreshSignalsMock).toHaveBeenCalledTimes(1);
+        bus.emit(conflictEvent("conflict B"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        refreshGate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(deliver.mock.calls[0]?.[1]).not.toContain("conflict");
+        expect(signalsOf(record()).find((signal) => signal.key === "merge_conflict")).toMatchObject(
+          { text: "conflict B" },
+        );
+        expect(entryOf("merge_conflict")?.deliveryAttempts).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain("conflict B");
+        const fingerprint = (text: string): string =>
+          `["github",42,"merge_conflict"]:${createHash("sha256")
+            .update(JSON.stringify(["merge_conflict", text]))
+            .digest("hex")}`;
+        expect(claim).toHaveBeenCalledTimes(2);
+        expect(claim.mock.calls[0]?.[2]).toBe(fingerprint("conflict A"));
+        expect(claim.mock.calls[1]?.[2]).toBe(fingerprint("conflict B"));
+        expect(claim).toHaveNthReturnedWith(2, true);
+      } finally {
+        await controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+
+    it("delivers an event merged into the batch of an exhausting attempt without dropping it", async () => {
+      const { gate, deliver } = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+      const { bus, controller } = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver,
+      });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(0);
+        const seeded = entryOf("comment:1");
+        if (!seeded) throw new Error("Missing seeded entry");
+        seeded.deliveryAttempts = 7;
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        gate.reject(new Error("submit-ack timeout"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(loggedEntries("trigger.send.dropped")).toHaveLength(0);
+        expect(keysOf(record())).toEqual(["comment:1", "comment:2"]);
+        expect(entryOf("comment:1")?.deliveryAttempts).toBe(8);
+        expect(entryOf("comment:2")?.deliveryAttempts).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+        expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
+        const dropped = loggedEntries("trigger.send.dropped");
+        expect(dropped).toHaveLength(1);
+        expect(dropped[0]?.details).toMatchObject({ reason: "retry_exhausted", attempts: 8 });
+        expect(record()).toBeUndefined();
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("clears the backoff when the session restarted during the failed attempt", async () => {
+      const { gate, deliver } = gatedDeliver();
+      let stateHistory: Array<{ state: string; at: string; source: "status" }> = [];
+      const get = vi.fn().mockImplementation(async () => ({ ...waitingSession(), stateHistory }));
+      readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1"));
+      const { bus, controller } = await start({ get, deliver });
+      try {
+        bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(deliver).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        stateHistory = [
+          { state: "stopped", at: new Date(Date.now()).toISOString(), source: "status" },
+        ];
+        gate.reject(new Error("submit-ack timeout"));
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliver).toHaveBeenCalledTimes(2);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    describe("stale batch guards", () => {
+      // Drops the first batch's record, then emits a second event: the
+      // synchronous merge clears the cached first batch and builds a new one.
+      const replaceBatch = (bus: EventBus) => {
+        readPendingSendBatchesMock().delete(QUEUE_KEY);
+        bus.emit(commentEvent("comment:2"));
+      };
+
+      it("does not let the dispatch tail of a replaced batch interrupt or block its successor", async () => {
+        const lookup = deferred<ReturnType<typeof waitingSession>>();
+        const get = vi
+          .fn()
+          .mockImplementationOnce(() => lookup.promise)
+          .mockResolvedValue({ ...waitingSession(), state: "working" });
+        const deliver = vi.fn().mockResolvedValue(undefined);
+        readGitHubSourceSnapshotMock.mockReturnValue(snapshotOf("comment:1", "comment:2"));
+        const { bus, controller } = await start({ get, deliver, interrupt: true });
+        try {
+          bus.emit(commentEvent("comment:1"));
+          await vi.advanceTimersByTimeAsync(0);
+          replaceBatch(bus);
+          lookup.resolve({ ...waitingSession(), state: "working" });
+          await vi.advanceTimersByTimeAsync(1);
+
+          expect(deliver).toHaveBeenCalledTimes(1);
+          expect(deliver.mock.calls[0]?.[2]).toMatchObject({ interrupt: true });
+          expect(deliver.mock.calls[0]?.[1]).toContain(textOf("comment:2"));
+          expect(deliver.mock.calls[0]?.[1]).not.toContain(textOf("comment:1"));
+        } finally {
+          await controller.stop();
+        }
+      });
+
+      it("does not let a stale clear or stale delivery touch the batch that replaced it", async () => {
+        const dataDir = mkdtempSync(join(tmpdir(), "spur-inflight-stale-"));
+        const autoPing = new AutoPingService(dataDir);
+        const { gate, deliver } = gatedDeliver();
+        const get = vi.fn().mockResolvedValue(waitingSession());
+        readGitHubSourceSnapshotMock.mockReturnValue(
+          snapshotOf("comment:0", "comment:1", "comment:2"),
+        );
+        const { bus, controller } = await start({ get, deliver, autoPing, dataDir });
+        try {
+          bus.emit(commentEvent("comment:0"));
+          await vi.advanceTimersByTimeAsync(30_001);
+          expect(deliver).toHaveBeenCalledTimes(1);
+          bus.emit(commentEvent("comment:1"));
+          replaceBatch(bus);
+          const add = vi.spyOn(autoPing, "addOccurrenceReference");
+          const release = vi.spyOn(autoPing, "releaseOccurrenceReference");
+          get.mockRejectedValueOnce(new Error("lookup failed"));
+
+          gate.resolve();
+          await vi.advanceTimersByTimeAsync(0);
+          const added = add.mock.calls.map((call) => call[1]);
+          expect(added).not.toContain(commentEvent("comment:0").occurrenceId);
+          expect(added).not.toContain(commentEvent("comment:1").occurrenceId);
+          expect(release.mock.calls.map((call) => call[1])).not.toContain(
+            commentEvent("comment:2").occurrenceId,
+          );
+
+          expect(keysOf(record())).toEqual(["comment:2"]);
+
+          await vi.advanceTimersByTimeAsync(35_001);
+          expect(deliver).toHaveBeenCalledTimes(2);
+          expect(deliver.mock.calls[1]?.[1]).toContain(textOf("comment:2"));
+        } finally {
+          await controller.stop();
+          autoPing.dispose();
+          rmSync(dataDir, { recursive: true, force: true });
+        }
+      });
+    });
   });
 
   it("backs off and drops a delivery that keeps failing instead of retrying forever", async () => {
@@ -6799,6 +7200,24 @@ describe("startConfiguredTriggers", () => {
         const text = deliverMock.mock.calls[0]?.[1] as string;
         expect(text).toContain("first part");
         expect(text).toContain("second part");
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("flushes a telegram burst merged before the first dispatch runs at the 2s window", async () => {
+      const getMock = vi.fn().mockResolvedValue(waitingSession(staleActivity()));
+      const { bus, controller, deliverMock } = await startTelegram(getMock);
+      try {
+        bus.emit(telegramEvent(1, "first part"));
+        bus.emit(telegramEvent(2, "second part"));
+        await vi.advanceTimersByTimeAsync(2_050);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        const text = deliverMock.mock.calls[0]?.[1] as string;
+        expect(text).toContain("first part");
+        expect(text).toContain("second part");
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
       } finally {
         await controller.stop();
       }
