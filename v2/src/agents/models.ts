@@ -309,7 +309,11 @@ async function execOpenCodeModels(cacheKey: string): Promise<AgentModel[]> {
     timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
   });
   const models = parseOpenCodeVerboseModelsOutput(stdout);
-  openCodeCache.set(cacheKey, { models, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
+  // An empty catalog is not cached: a provider configured later must show up
+  // without waiting out the TTL.
+  if (models.length > 0) {
+    openCodeCache.set(cacheKey, { models, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
+  }
   return models;
 }
 

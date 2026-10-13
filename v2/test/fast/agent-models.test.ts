@@ -633,7 +633,7 @@ describe("parseOpenCodeModelsOutput", () => {
   });
 
   it("rejects an explicit model absent from the discovered catalog", async () => {
-    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-absent";
     readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/missing")).rejects.toThrow(
@@ -642,7 +642,7 @@ describe("parseOpenCodeModelsOutput", () => {
   });
 
   it("accepts an explicit model present in the discovered catalog", async () => {
-    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test";
+    process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-present";
     readOpenCodeJsonMock.mockResolvedValue('openai/gpt-5\n{"id":"gpt-5","providerID":"openai"}\n');
 
     await expect(validateOpenCodeModel("openai/gpt-5")).resolves.toBe("openai/gpt-5");
@@ -722,9 +722,19 @@ describe("parseOpenCodeModelsOutput", () => {
     });
 
     it("does not cache a failed launch", async () => {
-      process.env["SPUR_OPENCODE_BIN"] = process.execPath;
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-fail";
       readOpenCodeJsonMock.mockRejectedValueOnce(new Error("models failed"));
       await expect(listAgentModels("opencode")).rejects.toThrow();
+
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+      await expect(listAgentModels("opencode")).resolves.toHaveLength(1);
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not cache an empty catalog", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-empty";
+      readOpenCodeJsonMock.mockResolvedValueOnce("");
+      await expect(listAgentModels("opencode")).resolves.toEqual([]);
 
       readOpenCodeJsonMock.mockResolvedValue(stdout);
       await expect(listAgentModels("opencode")).resolves.toHaveLength(1);
