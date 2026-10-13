@@ -3768,6 +3768,28 @@ describe("Spur web API routes", () => {
       }
     });
 
+    it("keeps the last-good snapshot, marked stale, when a 200 body carries a message-less RATE_LIMITED error", async () => {
+      vi.useFakeTimers();
+      try {
+        const url = nextPrUrl();
+        fetchMock.mockResolvedValueOnce(ghOk(aliasedGql({ pr0: makePrNode() })));
+        await postBatch([url]);
+        vi.advanceTimersByTime(130_000);
+
+        fetchMock.mockResolvedValueOnce(ghOk({ data: null, errors: [{ type: "RATE_LIMITED" }] }));
+        const response = await postBatch([url]);
+        const payload = (await response.json()) as {
+          results: Record<string, { state: string | null; stale?: boolean; error?: string }>;
+        };
+
+        expect(payload.results[url]?.state).toBe("open");
+        expect(payload.results[url]?.stale).toBe(true);
+        expect(payload.results[url]?.error).toBe("GitHub GraphQL error");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("resolves the successful alias and records the GraphQL error for the failed one on a partial error", async () => {
       const okUrl = nextPrUrl();
       const failUrl = nextPrUrl();

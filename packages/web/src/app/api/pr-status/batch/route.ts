@@ -71,12 +71,13 @@ function splitGqlErrors(errorsRaw: unknown): {
   if (!Array.isArray(errorsRaw)) return { byAlias, queryWide: null, typed };
   for (const entry of errorsRaw) {
     if (!isRecord(entry)) continue;
-    const message = typeof entry["message"] === "string" ? entry["message"].trim() : "";
+    const rawMessage = typeof entry["message"] === "string" ? entry["message"].trim() : "";
     typed.push({
       ...(typeof entry["type"] === "string" ? { type: entry["type"] } : {}),
-      ...(message ? { message } : {}),
+      ...(rawMessage ? { message: rawMessage } : {}),
     });
-    if (!message) continue;
+    // Same fallback as the single route: a message-less error is still an error.
+    const message = rawMessage || "GitHub GraphQL error";
     const path = entry["path"];
     const alias = Array.isArray(path) && typeof path[0] === "string" ? path[0] : null;
     if (!alias) {
