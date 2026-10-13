@@ -181,9 +181,10 @@ export type PaneAgentCapture =
 
 const CAPTURE_RETRY_DELAY_MS = 100;
 
-// P1, pane-rooted and exact: descendants of `panePid` whose args match this
-// session's own agent matchers. `panePid: null` (pane already gone, or the
-// caller never resolved one) reads as an empty capture — never throws.
+// P1, pane-rooted and exact: descendants of every pane pid of the session
+// whose args match this session's own agent matchers. Empty `panePids` (panes
+// already gone, or the caller never resolved any) reads as an empty capture —
+// never throws.
 //
 // "unavailable" when the process table could not be read. That must NOT
 // collapse into an empty capture: an empty capture makes
@@ -193,10 +194,10 @@ const CAPTURE_RETRY_DELAY_MS = 100;
 // snapshotProcessLiveness. One retry first, since a `ps` failure here is
 // usually transient fork pressure.
 export async function capturePaneAgentProcesses(input: {
-  panePid: number | null;
+  panePids: readonly number[];
   processMatchers: readonly string[];
 }): Promise<PaneAgentCapture> {
-  if (input.panePid === null) {
+  if (input.panePids.length === 0) {
     return { status: "ok", processes: [] };
   }
   const matchers = compileMatchers(input.processMatchers);
@@ -213,7 +214,7 @@ export async function capturePaneAgentProcesses(input: {
   }
   const processes = snapshot.processes;
   const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
-  const orderedPids = collectDescendants(input.panePid, processes);
+  const orderedPids = input.panePids.flatMap((panePid) => collectDescendants(panePid, processes));
   const refs: AgentProcessRef[] = [];
   for (const pid of orderedPids) {
     const proc = byPid.get(pid);
@@ -322,14 +323,14 @@ export async function terminateAgentProcesses(
 export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; pids: number[] };
 
 // P2, env-rooted and heuristic launch guard: processes carrying
-// SPUR_SESSION === sessionId that are not this pane's own children
-// (excludePanePid's descendants), collapsed to their shallowest ancestor.
+// SPUR_SESSION === sessionId that are not this session's own pane children
+// (descendants of every excludePanePids entry), collapsed to their shallowest ancestor.
 // "unavailable" when this platform cannot read process environments — the
 // caller MUST treat that as "no finding", never as "duplicate".
 export async function findForeignAgentProcessesForSession(input: {
   sessionId: string;
   processMatchers: readonly string[];
-  excludePanePid: number | null;
+  excludePanePids: readonly number[];
 }): Promise<SessionAgentScan> {
   if (!(await canReadProcessEnv())) {
     return { status: "unavailable" };
@@ -340,7 +341,7 @@ export async function findForeignAgentProcessesForSession(input: {
   }
   const processes = await listProcesses();
   const excluded = new Set(
-    input.excludePanePid !== null ? collectDescendants(input.excludePanePid, processes) : [],
+    input.excludePanePids.flatMap((panePid) => collectDescendants(panePid, processes)),
   );
   const candidates = processes.filter(
     (proc) => !excluded.has(proc.pid) && matchers.some((matcher) => matcher.test(proc.args)),

@@ -158,13 +158,11 @@ afterEach(() => {
 });
 
 describe("capturePaneAgentProcesses", () => {
-  it("returns an empty capture when panePid is null", async () => {
-    expect(await capturePaneAgentProcesses({ panePid: null, processMatchers: ["claude"] })).toEqual(
-      {
-        status: "ok",
-        processes: [],
-      },
-    );
+  it("returns an empty capture when the session has no panes", async () => {
+    expect(await capturePaneAgentProcesses({ panePids: [], processMatchers: ["claude"] })).toEqual({
+      status: "ok",
+      processes: [],
+    });
   });
 
   it("reports unavailable when the process table cannot be read, never an empty capture", async () => {
@@ -173,9 +171,11 @@ describe("capturePaneAgentProcesses", () => {
     // agent — the duplicate this module exists to prevent. The capture must
     // stay distinguishable from "the pane had no agent processes".
     processSnapshotUnavailable = true;
-    expect(await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] })).toEqual({
-      status: "unavailable",
-    });
+    expect(await capturePaneAgentProcesses({ panePids: [1], processMatchers: ["claude"] })).toEqual(
+      {
+        status: "unavailable",
+      },
+    );
   });
 
   it("retries once before giving up on an unavailable process table", async () => {
@@ -188,7 +188,7 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({ panePids: [1], processMatchers: ["claude"] });
     expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
     expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: null }] });
   });
@@ -199,8 +199,25 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({ panePids: [1], processMatchers: ["claude"] });
     expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: "starttime-2" }] });
+  });
+
+  it("captures agents under every pane pid of the session", async () => {
+    fakeTable = [
+      { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
+      { pid: 10, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      { pid: 11, ppid: 10, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
+      { pid: 20, ppid: 999, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
+    ];
+    const capture = await capturePaneAgentProcesses({
+      panePids: [1, 10],
+      processMatchers: ["claude"],
+    });
+    expect(capture.status).toBe("ok");
+    if (capture.status !== "ok") throw new Error("unreachable");
+    expect(capture.processes.map((ref) => ref.pid)).toEqual([2, 11]);
   });
 
   it("captures only pane descendants whose args match", async () => {
@@ -215,7 +232,7 @@ describe("capturePaneAgentProcesses", () => {
       },
       { pid: 3, ppid: 0, rssKb: 300, elapsedSeconds: 1, args: "/usr/bin/claude --other" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({ panePids: [1], processMatchers: ["claude"] });
     expect(capture.status).toBe("ok");
     if (capture.status !== "ok") throw new Error("unreachable");
     expect(capture.processes.map((ref) => ref.pid)).toEqual([2]);
@@ -366,7 +383,7 @@ describe("findForeignAgentProcessesForSession", () => {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: "api-1",
       processMatchers: ["claude"],
-      excludePanePid: null,
+      excludePanePids: [],
     });
     expect(scan).toEqual({ status: "unavailable" });
   });
@@ -393,9 +410,33 @@ describe("findForeignAgentProcessesForSession", () => {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: "api-1",
       processMatchers: ["claude"],
-      excludePanePid: 1,
+      excludePanePids: [1],
     });
     expect(scan).toEqual({ status: "ok", pids: [2] });
+  });
+
+  it("excludes descendants of every pane of the session", async () => {
+    const row = (pid: number, ppid: number) => ({
+      pid,
+      ppid,
+      rssKb: 1,
+      elapsedSeconds: 1,
+      args: "claude",
+      env: { SPUR_SESSION: "api-1" },
+    });
+    fakeTable = [
+      { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      row(2, 1),
+      { pid: 10, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
+      row(11, 10),
+      row(20, 999),
+    ];
+    const scan = await findForeignAgentProcessesForSession({
+      sessionId: "api-1",
+      processMatchers: ["claude"],
+      excludePanePids: [1, 10],
+    });
+    expect(scan).toEqual({ status: "ok", pids: [20] });
   });
 
   it("resolves a ppid cycle between two candidates to exactly one survivor, never zero", async () => {
@@ -425,7 +466,7 @@ describe("findForeignAgentProcessesForSession", () => {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: "api-1",
       processMatchers: ["claude"],
-      excludePanePid: null,
+      excludePanePids: [],
     });
     expect(scan.status).toBe("ok");
     if (scan.status !== "ok") throw new Error("unreachable");

@@ -287,6 +287,7 @@ import {
   getTmuxPanePresence,
   getTmuxSessionPresence,
   lookupTmuxPanePid,
+  lookupTmuxSessionPanePids,
   probeTmuxProcessMatch,
   killTmuxSession,
   killTmuxSessionTree,
@@ -304,6 +305,7 @@ import {
   PromptReadyTimeoutError,
   TmuxProbeUnknownError,
   type TmuxPanePidLookup,
+  type TmuxSessionPanesLookup,
 } from "./runtime-tmux.js";
 import {
   isSystemdOomdPresent,
@@ -17025,24 +17027,35 @@ export class SessionService {
   // probe failure must not replace the error that actually matters (a spawn
   // failure, for one). A thrown lookup reads as "unavailable", the same
   // fail-safe answer a failed `list-panes` produces.
-  private async lookupPanePidQuietly(
-    tmuxSession: string,
-    options?: { fresh?: boolean },
-  ): Promise<TmuxPanePidLookup> {
+  private async readPaneLookupQuietly<T>(
+    read: () => Promise<T>,
+  ): Promise<T | { status: "unavailable" }> {
     try {
-      return options
-        ? await lookupTmuxPanePid(tmuxSession, options)
-        : await lookupTmuxPanePid(tmuxSession);
+      return await read();
     } catch {
       return { status: "unavailable" };
     }
+  }
+
+  private lookupPanePidQuietly(
+    tmuxSession: string,
+    options?: { fresh?: boolean },
+  ): Promise<TmuxPanePidLookup> {
+    return this.readPaneLookupQuietly(() =>
+      options ? lookupTmuxPanePid(tmuxSession, options) : lookupTmuxPanePid(tmuxSession),
+    );
+  }
+
+  // Every pane of the session, the set P1 captures from and P2 excludes.
+  private lookupSessionPanePidsQuietly(tmuxSession: string): Promise<TmuxSessionPanesLookup> {
+    return this.readPaneLookupQuietly(() => lookupTmuxSessionPanePids(tmuxSession));
   }
 
   private async killAgentPaneAndConfirmExit(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    const paneLookup = await this.lookupSessionPanePidsQuietly(session.tmuxSession);
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17054,7 +17067,7 @@ export class SessionService {
       });
     }
     const capture = await capturePaneAgentProcesses({
-      panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      panePids: paneLookup.status === "ok" ? paneLookup.panePids : [],
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {
@@ -17134,7 +17147,7 @@ export class SessionService {
   // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
-    paneLookup: TmuxPanePidLookup,
+    paneLookup: TmuxSessionPanesLookup,
     force: boolean,
   ): Promise<void> {
     if (force) {
@@ -17143,7 +17156,7 @@ export class SessionService {
     // An unreadable tmux would leave the exclusion set empty, so the session's
     // OWN live agent would read as foreign. That joins the "unavailable"
     // branch: this guard must never block on a scan it could not perform.
-    // "ok" with a null pane pid is a real answer (no pane, nothing to
+    // "ok" with no pane pids is a real answer (no pane, nothing to
     // exclude) and is safe to scan on.
     if (paneLookup.status === "unavailable") {
       this.logEvent("session.agent_process.scan_skipped", {
@@ -17156,7 +17169,7 @@ export class SessionService {
     const scan = await findForeignAgentProcessesForSession({
       sessionId: session.id,
       processMatchers: sessionProcessMatchers(session),
-      excludePanePid: paneLookup.panePid,
+      excludePanePids: paneLookup.panePids,
     });
     if (scan.status !== "ok") {
       return;
@@ -17869,7 +17882,7 @@ export class SessionService {
     }
     await this.assertNoForeignAgentForSession(
       session,
-      await this.lookupPanePidQuietly(session.tmuxSession),
+      await this.lookupSessionPanePidsQuietly(session.tmuxSession),
       false,
     );
     await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
@@ -18507,7 +18520,7 @@ export class SessionService {
     });
     await this.assertNoForeignAgentForSession(
       current,
-      await this.lookupPanePidQuietly(current.tmuxSession),
+      await this.lookupSessionPanePidsQuietly(current.tmuxSession),
       request.force === true,
     );
     // Past both gates above (restorability, foreign-process): this restore is

@@ -770,6 +770,28 @@ export async function lookupTmuxPanePid(
   return { status: "ok", panePid: panes.get(sessionName)?.activePanePid ?? null };
 }
 
+export type TmuxSessionPanesLookup =
+  | { status: "ok"; panePids: readonly number[] }
+  | { status: "unavailable" };
+
+// Every pane pid of the session (all windows), the same set liveness reads.
+// Ownership capture and the foreign-agent guard use this instead of the
+// active pane so an agent left in a non-active pane stays owned. "ok" with
+// `panePids: []` means tmux replied and the session has no panes.
+export async function lookupTmuxSessionPanePids(
+  sessionName: string,
+  options?: { fresh?: boolean },
+): Promise<TmuxSessionPanesLookup> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
+  const { readable, panes } = await getFleetPaneSnapshot();
+  if (!readable) {
+    return { status: "unavailable" };
+  }
+  return { status: "ok", panePids: panes.get(sessionName)?.allPanePids ?? [] };
+}
+
 interface PsRow {
   pid: number;
   ppid: number;

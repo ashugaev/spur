@@ -1742,6 +1742,40 @@ describe("runtime-tmux", () => {
     });
   });
 
+  it("lookupTmuxSessionPanePids returns every pane pid of the session, not only the active pane", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return {
+          stdout: [
+            "api-1 0 0 0 4242 /dev/pts/1",
+            "api-1 1 1 0 4343 /dev/pts/2",
+            "other-1 1 1 0 5000 /dev/pts/3",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePids: [4242, 4343],
+    });
+    expect(await lookupTmuxSessionPanePids("absent-1")).toEqual({ status: "ok", panePids: [] });
+
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        throw new Error("no server running on /tmp/tmux-1000/spur");
+      }
+      return { stdout: "", stderr: "" };
+    });
+    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
+      status: "unavailable",
+    });
+  });
+
   it("passes an explicit maxBuffer above the 1 MiB execFile default to the ps snapshot", async () => {
     execFileAsyncMock.mockImplementation(async (file, args) => {
       if (file === "tmux" && args.includes("list-windows")) {

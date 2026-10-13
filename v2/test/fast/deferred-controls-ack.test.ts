@@ -153,6 +153,12 @@ const lookupTmuxPanePidMock = vi.fn(() =>
     panePid: null,
   }),
 );
+const lookupTmuxSessionPanePidsMock = vi.fn(() =>
+  Promise.resolve<{ status: "ok"; panePids: readonly number[] } | { status: "unavailable" }>({
+    status: "ok",
+    panePids: [],
+  }),
+);
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
@@ -696,6 +702,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getTmuxSessionPresence: getTmuxSessionPresenceMock,
     getTmuxPanePresence: getTmuxPanePresenceMock,
     lookupTmuxPanePid: lookupTmuxPanePidMock,
+    lookupTmuxSessionPanePids: lookupTmuxSessionPanePidsMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
@@ -1356,6 +1363,7 @@ describe("SessionService", () => {
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
+    lookupTmuxSessionPanePidsMock.mockReset().mockResolvedValue({ status: "ok", panePids: [] });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);

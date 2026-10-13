@@ -695,7 +695,7 @@ After the file and the session metadata are set, wait for more instructions.${ag
             findForeignAgentProcessesForSession({
               sessionId: session.id,
               processMatchers: ["claude"],
-              excludePanePid: null,
+              excludePanePids: [],
             }),
           {
             timeoutMs: 30_000,

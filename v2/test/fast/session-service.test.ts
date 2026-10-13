@@ -220,6 +220,12 @@ const lookupTmuxPanePidMock = vi.fn((_sessionName?: string, _options?: { fresh?:
     panePid: null,
   }),
 );
+const lookupTmuxSessionPanePidsMock = vi.fn((_sessionName?: string) =>
+  Promise.resolve<{ status: "ok"; panePids: readonly number[] } | { status: "unavailable" }>({
+    status: "ok",
+    panePids: [],
+  }),
+);
 const getFleetSessionRssBytesMock = vi
   .fn<(liveSessionByWorkspaceId?: ReadonlyMap<string, string>) => Promise<Map<string, number>>>()
   .mockResolvedValue(new Map());
@@ -274,8 +280,9 @@ const terminateAgentProcessesMock = vi.fn<
 // returns, and matches the P2 guard's own never-blocks-on-what-it-cannot-see
 // contract, so no unrelated restore/relaunch/switchAuth test below has to
 // know this guard exists.
-const findForeignAgentProcessesForSessionMock = vi.fn(() =>
-  Promise.resolve<SessionAgentScan>({ status: "unavailable" }),
+const findForeignAgentProcessesForSessionMock = vi.fn(
+  (_input?: { excludePanePids: readonly number[] }) =>
+    Promise.resolve<SessionAgentScan>({ status: "unavailable" }),
 );
 const killTmuxSessionTreeMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
@@ -835,6 +842,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
     getTmuxSessionPresence: getTmuxSessionPresenceMock,
     getTmuxPanePresence: getTmuxPanePresenceMock,
     lookupTmuxPanePid: lookupTmuxPanePidMock,
+    lookupTmuxSessionPanePids: lookupTmuxSessionPanePidsMock,
     getFleetSessionRssBytes: getFleetSessionRssBytesMock,
     isProcessRunningInTmux: isProcessRunningInTmuxMock,
     probeTmuxProcessMatch: probeTmuxProcessMatchMock,
@@ -2387,6 +2395,12 @@ describe("SessionService", () => {
       .mockImplementation(async (_name, options) =>
         options?.fresh ? { status: "unavailable" } : { status: "ok", panePid: null },
       );
+    lookupTmuxSessionPanePidsMock.mockReset().mockImplementation(async (name) => {
+      const lookup = await lookupTmuxPanePidMock(name);
+      return lookup.status === "ok"
+        ? { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] }
+        : { status: "unavailable" };
+    });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);
@@ -51681,7 +51695,33 @@ describe("SessionService", () => {
 
       await expect(service.restore("api-1")).rejects.toThrow(/777/);
       expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledWith(
-        expect.objectContaining({ excludePanePid: null }),
+        expect.objectContaining({ excludePanePids: [] }),
+      );
+    });
+
+    it("restore captures and excludes an agent in a non-active pane: neither foreign nor capture_blind", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      // Pane 4242 holds the agent; the active pane is a user-split shell.
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4343 });
+      lookupTmuxSessionPanePidsMock.mockResolvedValue({ status: "ok", panePids: [4242, 4343] });
+      findForeignAgentProcessesForSessionMock.mockImplementation(async (input) => ({
+        status: "ok" as const,
+        pids: input?.excludePanePids.includes(4242) ? [] : [777],
+      }));
+
+      const service = await createDisposedSessionService();
+
+      const restored = await service.restore("api-1");
+
+      expect(restored.status).toBe("running");
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+        expect.objectContaining({ panePids: [4242, 4343] }),
+      );
+      expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ excludePanePids: [4242, 4343] }),
       );
     });
 
