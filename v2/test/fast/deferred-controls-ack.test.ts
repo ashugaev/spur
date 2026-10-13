@@ -632,6 +632,7 @@ vi.mock("../../src/agents/codex.js", async (importOriginal) => {
 
 vi.mock("../../src/agents/models.js", () => ({
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
+  validateCodexModel: async (model: string) => model,
   validateOpenCodeModel: validateOpenCodeModelMock,
 }));
 
