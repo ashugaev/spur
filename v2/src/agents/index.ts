@@ -534,13 +534,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "claude", ...baseline },
         async scan(text) {
-          const found = await scanClaudeJsonlForMessage(
+          const result = await scanClaudeJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
           );
-          return { found, lastScannedFile: baseline.file };
+          return { found: result.found, lastScannedFile: result.scannedFile };
         },
       };
     },

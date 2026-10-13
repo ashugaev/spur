@@ -154,16 +154,21 @@ async function scanFileForDeliveredText(
   return false;
 }
 
+export interface ClaudeSubmitAckScanResult {
+  found: boolean;
+  scannedFile: string;
+}
+
 export async function scanClaudeJsonlForMessage(
   baseline: ClaudeSubmitBaseline,
   text: string,
   worktreePath: string,
   agentSessionId?: string,
-): Promise<boolean> {
+): Promise<ClaudeSubmitAckScanResult> {
   const normalizedTarget = normalize(text);
 
   if (await scanFileForDeliveredText(baseline.file, baseline.size, normalizedTarget)) {
-    return true;
+    return { found: true, scannedFile: baseline.file };
   }
 
   // When a pinned id exists, stay bound to its transcript; otherwise fall back
@@ -172,7 +177,10 @@ export async function scanClaudeJsonlForMessage(
     ? await sessionFileForId(worktreePath, agentSessionId)
     : await findLatestSessionFile(worktreePath);
   if (!latest || latest === baseline.file) {
-    return false;
+    return { found: false, scannedFile: baseline.file };
   }
-  return scanFileForDeliveredText(latest, 0, normalizedTarget);
+  return {
+    found: await scanFileForDeliveredText(latest, 0, normalizedTarget),
+    scannedFile: latest,
+  };
 }
