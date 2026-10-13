@@ -683,11 +683,11 @@ describe("agentSubmitAckPacing", () => {
     });
   });
 
-  it("scans a codex launch send in 10s windows, bounded to 30s", () => {
+  it("scans a codex launch send in 10s windows, bounded to 100s past the startup composer", () => {
     expect(agentSubmitAckPacing("codex")).toEqual({ windowMs: 300_000, maxResends: 2 });
     expect(agentSubmitAckPacing("codex", { freshLaunch: true })).toEqual({
       windowMs: 10_000,
-      maxResends: 2,
+      maxResends: 9,
     });
     expect(agentSubmitAckPacing("cursor")).toEqual({ windowMs: 5_000, maxResends: 12 });
   });
