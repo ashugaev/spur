@@ -31,7 +31,8 @@ command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
 command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
 mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 
-spur init                           # installs + starts the systemd user units, links host skills
+spur init                           # installs + starts the systemd user units, links host skills, installs Tailscale
+                                    # never add --no-tailscale unless the user asked for it — no auth key is fine
 ```
 
 Four non-obvious points:
@@ -63,12 +64,12 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 ### init flags
 
-| Flag                | Effect                                      |
-| ------------------- | ------------------------------------------- |
-| `--no-start`        | install units + linger, don't start         |
-| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`) |
-| `--web-port <port>` | web port (default `5555`)                   |
-| `--no-tailscale`    | skip Tailscale (on by default)              |
+| Flag                | Effect                                            |
+| ------------------- | ------------------------------------------------- |
+| `--no-start`        | install units + linger, don't start               |
+| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`)       |
+| `--web-port <port>` | web port (default `5555`)                         |
+| `--no-tailscale`    | skip Tailscale (on by default); user request only |
 
 ## Private access (Tailscale, default on)
 
@@ -95,6 +96,7 @@ A few steps use your own accounts and each needs one interactive action — they
 
 - Log in an agent — `claude` (sign in) or `codex login` — then run it once interactively to completion. A logged-in-but-never-run-interactively `claude` still breaks the first spawn: Spur's injected prompt lands in the unfinished first-run onboarding screen instead of the agent, surfacing as `OAuth error: Invalid code`. At least one agent, fully onboarded, is required before Spur can spawn sessions.
 - Bring up private web access — `sudo tailscale up` (browser login), then re-run `spur init`. Skip only if you used `--authkey` (above) or `--expose-web`.
+- Trust each connected repo for Claude — [Connect a project](#connect-a-project).
 - Voice input only: enable MagicDNS and HTTPS Certificates for the tailnet — admin console → DNS, owner/admin only. Nothing else needs them.
 
 Spur installs and its services start without these; until the first two are done it stays loopback-only and can't spawn sessions. Where a non-interactive credential exists (Tailscale `--authkey`, an agent API key via `codex login --with-api-key`), an unattended install uses it instead of deferring.
@@ -116,14 +118,25 @@ After a start/restart the units can take up to ~2 min to answer on a ~1 GB host 
 cd <repo>
 spur doctor --scaffold
 spur connect spur.yaml
+```
+
+Claude only, operator action: `cd <repo> && claude`, answer "Yes, I trust this folder" — covers every Spur worktree of that repo; once per connected repo. A setup agent never answers it: list it in the operator TODO, skip the smoke spawn until done.
+
+```bash
+# after agent login + trust only; a setup agent puts this line in the operator TODO, never runs it —
+# before trust it times out on submit acknowledgment and leaves an errored session
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
-`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
+`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file — no git identity on the host: `git -c user.name=spur -c user.email=spur@localhost commit ...`. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
 
 `<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
 
 `<new-branch>`: a branch not checked out in any worktree. The default branch fails.
+
+Before enabling review automation, check [Codex reviewer permissions](../TROUBLESHOOTING.md#codex-reviewer-cannot-run-commands-or-write-qa-output).
+Installer and project scaffold do not enable write restrictions.
+For reviews requiring QA output, verify a command runs and a disposable artifact can be written, read, and deleted.
 
 ## Upgrade
 
@@ -149,16 +162,17 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 ## Troubleshooting
 
-| Symptom                                  | Fix                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `status=203/EXEC`                        | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
-| `EACCES .../usr/lib/node_modules`        | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
-| units die after SSH logout               | linger off: `loginctl enable-linger $USER`                                                                    |
-| web terminal `/ws` won't connect         | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
-| `/ws` closes immediately                 | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
-| web unreachable over Tailscale           | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
-| mic button dead on the tailnet URL       | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
-| first spawn: `OAuth error: Invalid code` | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| Symptom                                             | Fix                                                                                                           |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `status=203/EXEC`                                   | no node at `/usr/bin/node` — install nodesource, or link an nvm runtime in (see setup)                        |
+| `EACCES .../usr/lib/node_modules`                   | npm prefix isn't `~/.local` — run `spur init` (re-writes `~/.spur/npmrc`), or reset it manually and reinstall |
+| units die after SSH logout                          | linger off: `loginctl enable-linger $USER`                                                                    |
+| web terminal `/ws` won't connect                    | `spur-web` not running: `spur init` or `systemctl --user restart spur-web`                                    |
+| `/ws` closes immediately                            | no `pty.node` prebuild for this arch/libc — terminal disabled, UI fine; file an issue                         |
+| web unreachable over Tailscale                      | tailnet not up: `sudo tailscale up`, then re-run `spur init`                                                  |
+| mic button dead on the tailnet URL                  | page served over plain HTTP — [https-tailscale.md](https-tailscale.md)                                        |
+| first spawn: `OAuth error: Invalid code`            | `claude` logged in but never run interactively to completion — run it once to finish onboarding               |
+| `Timed out waiting for agent submit acknowledgment` | pane shows "Yes, I trust this folder": `cd <project repo> && claude`, accept trust, exit, re-spawn            |
 
 ## System-wide units (advanced)
 

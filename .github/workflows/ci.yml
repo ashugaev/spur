@@ -1,4 +1,5 @@
 name: CI
+run-name: "Spur CI v1 REF=${{ github.ref }} M=${{ github.sha }}"
 
 on:
   workflow_dispatch:

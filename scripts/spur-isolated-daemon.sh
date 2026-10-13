@@ -14,6 +14,9 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 # guards in scripts/spur-sidecar-common.sh.
 ensure_node_ready
 
+TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
+: "${SPUR_PROJECT:?SPUR_PROJECT not set}"
+
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
 AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
@@ -23,6 +26,17 @@ CURRENT_WORKTREE="$REPO_ROOT"
 V2_DIR="$REPO_ROOT/v2"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
+SHARED_CLEANUP_OWNED=0
+RUNTIME_FILE=""
+RUNTIME_TMP_FILE=""
+ISOLATED_WRAPPER=""
+cleanup() {
+  if [[ "$SHARED_CLEANUP_OWNED" -eq 1 ]]; then
+    rm -f "$RUNTIME_FILE" "$RUNTIME_TMP_FILE" "$ISOLATED_WRAPPER"
+  fi
+  rm -rf "$CONFIG_DIR"
+}
+trap cleanup EXIT
 
 # Reclaims stale spur-isolated-daemon.* dirs this same script leaks on every
 # successful start (the trailing `exec` at the bottom of this file replaces
@@ -147,11 +161,12 @@ prune_stale_config_dirs() {
 }
 prune_stale_config_dirs
 
-TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 ISOLATED_WRAPPER="$TOOL_DIR/spur-isolated"
 RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 RUNTIME_TMP_FILE="$RUNTIME_FILE.tmp.$$"
 PROJECT_CONFIG_RUNTIME_PATH="$CONFIG_DIR/project.yaml"
+export SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+export SPUR_ISOLATED_UI_ENDPOINT_FILE="$CONFIG_DIR/ui-endpoint.json"
 CLI_PATH="$V2_DIR/dist/cli.js"
 WRITE_CONFIG_PATH="$V2_DIR/bin/write-isolated-project-config.mjs"
 WRITE_INSTANCE_CONFIG_PATH="$V2_DIR/bin/write-isolated-instance-config.mjs"
@@ -161,6 +176,8 @@ REQUIRED_BUILD_OUTPUTS=(
   "$CLI_PATH"
   "$V2_DIR/dist/isolated-instance-config.js"
   "$V2_DIR/dist/isolated-project-config.js"
+  "$V2_DIR/dist/isolated-telegram.js"
+  "$V2_DIR/dist/isolated-web-endpoint.js"
 )
 BUILD_INPUT_DIRS=(
   "$V2_DIR/src"
@@ -170,6 +187,7 @@ WRITE_CONFIG_ARGS=(
   --input "$PROJECT_CONFIG_PATH"
   --output "$PROJECT_CONFIG_RUNTIME_PATH"
   --worktree "$CURRENT_WORKTREE"
+  --project "${SPUR_PROJECT:?SPUR_PROJECT not set}"
 )
 if [[ -n "$CURRENT_BRANCH" ]]; then
   WRITE_CONFIG_ARGS+=(--branch "$CURRENT_BRANCH")
@@ -203,12 +221,9 @@ ensure_v2_build() {
   fi
 }
 
-cleanup() {
-  rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.* "$ISOLATED_WRAPPER"
-  rm -rf "$CONFIG_DIR"
-}
-trap cleanup EXIT
-rm -f "$RUNTIME_FILE" "$RUNTIME_FILE".tmp.*
+# Shared cleanup owns paths only after validated inputs reach this write boundary.
+SHARED_CLEANUP_OWNED=1
+rm -f "$RUNTIME_FILE" "$RUNTIME_TMP_FILE"
 
 cat > "$CONFIG_DIR/config.yaml" <<YAML
 server:
@@ -245,26 +260,39 @@ if ! "$NODE_BIN" "$CLI_PATH" --version >/dev/null; then
   exit 1
 fi
 
-# isolated-ui waits for this file before starting its own dev server.
-# Publish it only after tsc finishes, and atomically so readers never source a
-# partial environment.
-cat > "$RUNTIME_TMP_FILE" <<ENVFILE
-SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
-SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
-SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
-SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
-SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
-SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
-ENVFILE
-chmod 600 "$RUNTIME_TMP_FILE"
-mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
-
 "$NODE_BIN" "$WRITE_INSTANCE_CONFIG_PATH" \
   --user-config "$USER_CONFIG_PATH" \
   --base "$CONFIG_DIR/config.yaml" \
   --output "$CONFIG_DIR/config.yaml"
 
-"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}"
+# Hold the bot lock across both execs for the daemon's lifetime.
+"$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" \
+  --telegram-lock-output "$CONFIG_DIR/telegram-lock"
+TELEGRAM_LOCK_PATH="$(<"$CONFIG_DIR/telegram-lock")"
+if [[ -n "$TELEGRAM_LOCK_PATH" ]]; then
+  exec 9>"$TELEGRAM_LOCK_PATH"
+  if ! flock -n 9; then
+    echo "Telegram NOT_CONNECTED/owner-busy" >&2
+    exec 9>&-
+    "$NODE_BIN" "$WRITE_CONFIG_PATH" "${WRITE_CONFIG_ARGS[@]}" --without-telegram
+  fi
+fi
+
+# Advertise only final configs/lock outcome. This PID survives both execs.
+DAEMON_STARTTIME="$("$NODE_BIN" "$V2_DIR/bin/isolated-web-endpoint.mjs" --owner-starttime "$$")"
+cat > "$RUNTIME_TMP_FILE" <<ENVFILE
+SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_UI_ENDPOINT_FILE="$SPUR_ISOLATED_UI_ENDPOINT_FILE"
+SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
+SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_RUNTIME_PATH"
+SPUR_ISOLATED_SOURCE_WORKTREE="$CURRENT_WORKTREE"
+SPUR_ISOLATED_DAEMON_PID="$$"
+SPUR_ISOLATED_DAEMON_STARTTIME="$DAEMON_STARTTIME"
+ENVFILE
+chmod 600 "$RUNTIME_TMP_FILE"
+mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
 exec "$ISOLATED_WRAPPER" daemon start

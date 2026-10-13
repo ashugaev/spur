@@ -26,6 +26,7 @@ const clearGitHubPollDisabledSessionMock = vi.fn();
 const markGitHubPollDisabledCheckedMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
+const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
 
 vi.mock("../../src/gh.js", async (importOriginal) => ({
@@ -59,6 +60,7 @@ vi.mock("../../src/metadata.js", () => ({
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
+  readBranchPushUrl: readBranchPushUrlMock,
   readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
@@ -71,8 +73,13 @@ vi.mock("node:fs", () => ({
 
 const { githubSourceModule, tokenizeSearchQuery } =
   await import("../../src/event-sources/github.js");
-const { GH_POLL_MIN_GRAPHQL_REMAINING, _resetGhUsageForTests, recordGraphqlBudget } =
-  await import("../../src/gh.js");
+const {
+  GH_POLL_MIN_GRAPHQL_REMAINING,
+  _resetGhUsageForTests,
+  recordGraphqlBudget,
+  setGhEventSink,
+  flushGhPollCycles,
+} = await import("../../src/gh.js");
 
 function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -185,6 +192,15 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     const item = value as Record<string, unknown>;
     return { ...item, databaseId: item.id, author: graphqlAuthor(item.user) };
   };
+  const latestByAuthor = new Map<string, Record<string, unknown>>();
+  for (const [index, review] of (Array.isArray(reviews) ? reviews : []).entries()) {
+    const mapped = mapAuthor(review);
+    const login = graphqlAuthor((review as Record<string, unknown>).user)?.login;
+    latestByAuthor.set(
+      typeof login === "string" ? login.toLowerCase() : `unknown-${index}`,
+      mapped,
+    );
+  }
   const node = {
     ...record,
     commits: {
@@ -210,6 +226,10 @@ async function legacyGhAdapter(cwd: string, ...args: string[]): Promise<string> 
     },
     comments: { nodes: Array.isArray(issueComments) ? issueComments.map(mapAuthor) : [] },
     reviews: { nodes: Array.isArray(reviews) ? reviews.map(mapAuthor) : [] },
+    latestOpinionatedReviews: record.latestOpinionatedReviews ?? {
+      nodes: [...latestByAuthor.values()],
+      pageInfo: { hasPreviousPage: false },
+    },
   };
   const branchQuery = args.some((arg) => arg.includes("pullRequests(headRefName"));
   return JSON.stringify({
@@ -265,6 +285,233 @@ describe("github source", () => {
   afterEach(() => {
     _resetGhUsageForTests();
     vi.useRealTimers();
+  });
+  it.each(["deferred-error", "deferred-success", "runOnStart-error", "runOnStart-success"])(
+    "drains %s query, registry/log effects and accounting before stop",
+    async (mode) => {
+      setGhEventSink("/tmp/spur-data");
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+      listSessionsMock.mockReturnValue([]);
+      let enter!: () => void,
+        resolveQuery!: (value: string) => void,
+        rejectQuery!: (error: Error) => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const query = new Promise<string>((resolve, reject) => {
+        resolveQuery = resolve;
+        rejectQuery = reject;
+      });
+      ghTransportMock.mockImplementation(async () => {
+        enter();
+        return query;
+      });
+      const abort = new AbortController();
+      const manual = mode.startsWith("runOnStart");
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: 60_000,
+          runOnStart: manual,
+          emitExisting: false,
+          query: "repo:acme/api",
+        },
+        deferInitialSync: true,
+        signal: abort.signal,
+        emit: vi.fn(),
+        logger: { warn: vi.fn() },
+        resolveWebBaseUrl: async () => null,
+      });
+      if (manual) handle.runOnStart?.();
+      await entered;
+      if (manual) handle.runOnStart?.();
+      let stopped = false;
+      let effectsAtStop: { accounting: number; errors: number; registry: number } | null = null;
+      abort.abort();
+      const stop = Promise.resolve(handle.stop()).then(() => {
+        effectsAtStop = {
+          accounting: logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "gh.poll_cycle",
+          ).length,
+          errors: logSpurEventMock.mock.calls.filter(
+            ([, entry]) => entry.event === "source.work_item_poll.error",
+          ).length,
+          registry: recordWorkItemMock.mock.calls.length,
+        };
+        stopped = true;
+      });
+      try {
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        expect(
+          logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle"),
+        ).toBe(false);
+      } finally {
+        if (mode.endsWith("error")) rejectQuery(new Error("controlled query failure"));
+        else
+          resolveQuery(
+            JSON.stringify([
+              {
+                number: 7,
+                title: "fixture",
+                url: "https://github.com/acme/api/pull/7",
+                repository: { nameWithOwner: "acme/api" },
+              },
+            ]),
+          );
+        await stop;
+        await flushPollCycle();
+      }
+      expect(stopped).toBe(true);
+      expect(effectsAtStop).toMatchObject({
+        accounting: 1,
+        ...(mode.endsWith("error") ? { errors: 1 } : { registry: 1 }),
+      });
+      expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "gh.poll_cycle"),
+      ).toHaveLength(1);
+      if (mode.endsWith("error"))
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, entry]) => entry.event === "source.work_item_poll.error",
+          ),
+        ).toBe(true);
+      else expect(recordWorkItemMock).toHaveBeenCalled();
+      const calls = ghTransportMock.mock.calls.length,
+        events = logSpurEventMock.mock.calls.length;
+      flushGhPollCycles();
+      const flushedEvents = logSpurEventMock.mock.calls.length;
+      handle.runOnStart?.();
+      await handle.stop();
+      await flushPollCycle();
+      expect(ghTransportMock).toHaveBeenCalledTimes(calls);
+      expect(flushedEvents).toBeGreaterThanOrEqual(events);
+      expect(logSpurEventMock).toHaveBeenCalledTimes(flushedEvents);
+    },
+  );
+  it("idle source stop creates no zero-call accounting when runOnStart is requested later", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: true,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn: vi.fn() },
+      resolveWebBaseUrl: async () => null,
+    });
+    await handle.stop();
+    handle.runOnStart?.();
+    await handle.stop();
+    await flushPollCycle();
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle")).toBe(
+      false,
+    );
+  });
+  it("publishes poll ownership before a synchronous rebind warning reenters stop", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    readGitHubPollDisabledMock.mockReturnValue(
+      new Map([["api-a1b2", { prNumber: 41, disabledAtMs: 0, lastCheckedAtMs: 0 }]]),
+    );
+    clearGitHubPollDisabledSessionMock.mockImplementationOnce(() => {
+      throw new Error("controlled clear failure");
+    });
+    mockLifecyclePoll(prView());
+    let enterQuery!: () => void, releaseQuery!: () => void, enterStop!: () => void;
+    const enteredQuery = new Promise<void>((resolve) => {
+      enterQuery = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseQuery = resolve;
+    });
+    const enteredStop = new Promise<void>((resolve) => {
+      enterStop = resolve;
+    });
+    ghTransportMock.mockImplementation(async (cwd: string, ...args: string[]) => {
+      enterQuery();
+      await gate;
+      return legacyGhAdapter(cwd, ...args);
+    });
+    let stop: Promise<void> | undefined,
+      resolved = false,
+      accountingAtStop = -1;
+    const warn = vi.fn((message: string) => {
+      if (!message.includes("failed to clear poll-disabled") || stop) return;
+      stop = Promise.resolve(handle.stop()).then(() => {
+        resolved = true;
+        accountingAtStop = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "gh.poll_cycle",
+        ).length;
+      });
+      enterStop();
+    });
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: true, emitExisting: false },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn },
+      resolveWebBaseUrl: async () => null,
+    });
+    handle.runOnStart?.();
+    await enteredStop;
+    if (!stop) throw new Error("missing reentrant stop");
+    const first = await Promise.race([stop.then(() => "stop"), enteredQuery.then(() => "query")]);
+    try {
+      if (first === "stop") expect(accountingAtStop).toBe(1);
+      else expect(resolved).toBe(false);
+    } finally {
+      releaseQuery();
+      await handle.stop();
+      await stop;
+      await flushPollCycle();
+    }
+    expect(accountingAtStop).toBe(1);
+  });
+  it("stop before queued poll body dispatch starts no transport or accounting", async () => {
+    setGhEventSink("/tmp/spur-data");
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: true,
+        emitExisting: false,
+        query: "repo:acme/api",
+      },
+      signal: new AbortController().signal,
+      emit: vi.fn(),
+      logger: { warn: vi.fn() },
+      resolveWebBaseUrl: async () => null,
+    });
+    handle.runOnStart?.();
+    await handle.stop();
+    await flushPollCycle();
+    expect(ghTransportMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "gh.poll_cycle")).toBe(
+      false,
+    );
   });
 
   it("keeps the existing snapshot when gh pr view fails transiently", async () => {
@@ -545,6 +792,75 @@ describe("github source", () => {
     await flushPollCycle();
 
     expect(ghMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  // Pruning on poll eligibility wiped the snapshot and lifecycle baseline of any
+  // session that left eligibility for a single cycle, so its return re-baselined
+  // and re-emitted lifecycle events. Prune only on absence from disk.
+  it("keeps persisted snapshot and lifecycle baseline for an existing but ineligible session", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession({ status: "stopped" })]);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(removeLifecycleBaselinedSessionMock).not.toHaveBeenCalled();
+    expect(clearGitHubMergeConflictRestoreReplayMock).not.toHaveBeenCalled();
+    handle.stop();
+  });
+
+  it("prunes persisted snapshot and lifecycle baseline once the session is gone from disk", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([]);
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      emit: vi.fn(),
+      signal: new AbortController().signal,
+      logger,
+      resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+    });
+
+    handle.runOnStart?.();
+    await flushPollCycle();
+
+    expect(deleteReviewSourceSnapshotMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "github",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    expect(removeLifecycleBaselinedSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
+    expect(clearGitHubMergeConflictRestoreReplayMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "api-a1b2",
+    );
     handle.stop();
   });
 
@@ -984,6 +1300,9 @@ describe("github source", () => {
       number: 42,
       title: "Fix CI alert",
       url: "https://github.com/acme/api/pull/42",
+      headRefName: "feature/native-pr-binding",
+      headRepository: { nameWithOwner: "acme/api" },
+      author: { login: "someone-else" },
       reviewDecision: null,
       mergeable: "MERGEABLE",
       mergeStateStatus: "CLEAN",
@@ -1007,6 +1326,7 @@ describe("github source", () => {
 
   beforeEach(() => {
     ghMock.mockReset();
+    readBranchPushUrlMock.mockReset().mockResolvedValue("git@github.com:acme/api.git");
   });
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
@@ -1435,6 +1755,227 @@ describe("github source", () => {
         ],
       }),
     );
+    handle.stop();
+  });
+
+  it("does not echo the viewer's review body while delivering another review", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ headRefName: "feature/native-pr-binding" }),
+      JSON.stringify([
+        {
+          id: 610,
+          state: "CHANGES_REQUESTED",
+          body: "my own review",
+          user: { login: "review-bot" },
+        },
+        {
+          id: 611,
+          state: "CHANGES_REQUESTED",
+          body: "fix this",
+          user: { login: "other-reviewer" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review:611"]);
+    handle.stop();
+  });
+
+  it("does not echo the viewer's inline or issue comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 620, body: "my reply", user: { login: "REVIEW-BOT" } },
+          { id: 621, body: "please fix", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 622, body: "my note", user: { login: "review-bot" } },
+          { id: 623, body: "please check", user: { login: "other-reviewer" } },
+        ]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it.each([
+    { headRefName: "someone-elses-branch", author: "someone-else", ownsPr: false },
+    { headRefName: "feature/native-pr-binding", author: "someone-else", ownsPr: true },
+    { headRefName: "someone-elses-branch", author: "review-bot", ownsPr: true },
+  ])(
+    "scopes fix instructions to an owned PR ($headRefName, $author)",
+    async ({ headRefName, author, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({
+          headRefName,
+          author: { login: author },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
+
+  it.each([
+    { head: "other/api", pushUrl: "git@github.com:acme/api.git", ownsPr: false },
+    { head: "contributor/api", pushUrl: "git@github.com:contributor/api.git", ownsPr: true },
+  ])(
+    "checks same-name fork ownership in a source poll ($head)",
+    async ({ head, pushUrl, ownsPr }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      readBranchPushUrlMock.mockResolvedValue(pushUrl);
+      mockLifecyclePoll(
+        prView({
+          headRepository: { nameWithOwner: head },
+          reviewDecision: "CHANGES_REQUESTED",
+        }),
+      );
+
+      const handle = await startLifecycle(vi.fn());
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(ownsPr);
+      handle.stop();
+    },
+  );
+
+  it.each([
+    { reviewer: "review-bot", actionable: false },
+    { reviewer: "other-reviewer", actionable: true },
+  ])(
+    "does not turn the viewer's change request into a fix alert ($reviewer)",
+    async ({ reviewer, actionable }) => {
+      readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+      listSessionsMock.mockReturnValue([makeSession()]);
+      mockLifecyclePoll(
+        prView({ reviewDecision: "CHANGES_REQUESTED" }),
+        JSON.stringify([{ id: 630, state: "CHANGES_REQUESTED", user: { login: reviewer } }]),
+      );
+      const emit = vi.fn();
+
+      const handle = await startLifecycle(emit);
+
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.signals.has("changes_requested")).toBe(actionable);
+      handle.stop();
+    },
+  );
+
+  it("keeps another reviewer's change request when the viewer also reviewed", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({ reviewDecision: "CHANGES_REQUESTED" }),
+      JSON.stringify([
+        { id: 631, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+        { id: 632, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("ignores an external change request superseded by that reviewer's approval", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "APPROVED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([
+        { id: 640, state: "CHANGES_REQUESTED", user: { login: "other-reviewer" } },
+        { id: 641, state: "APPROVED", user: { login: "other-reviewer" } },
+        { id: 642, state: "CHANGES_REQUESTED", user: { login: "review-bot" } },
+      ]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(false);
+    handle.stop();
+  });
+
+  it("keeps an external current change request absent from historical page", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [
+            { state: "CHANGES_REQUESTED", author: { login: "other-reviewer" } },
+            { state: "CHANGES_REQUESTED", author: { login: "review-bot" } },
+          ],
+          pageInfo: { hasPreviousPage: false },
+        },
+      }),
+      JSON.stringify([{ id: 650, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
+    handle.stop();
+  });
+
+  it("keeps the aggregate change request when current reviewer list is incomplete", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    mockLifecyclePoll(
+      prView({
+        reviewDecision: "CHANGES_REQUESTED",
+        latestOpinionatedReviews: {
+          nodes: [{ state: "CHANGES_REQUESTED", author: { login: "review-bot" } }],
+          pageInfo: { hasPreviousPage: true },
+        },
+      }),
+      JSON.stringify([{ id: 660, state: "CHANGES_REQUESTED", user: { login: "review-bot" } }]),
+    );
+    const handle = await startLifecycle(vi.fn());
+
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    expect(snapshot.signals.has("changes_requested")).toBe(true);
     handle.stop();
   });
 

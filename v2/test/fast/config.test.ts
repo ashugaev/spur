@@ -72,6 +72,376 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it("normalizes webhook sources and resolves their secret", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events/provider
+        secret: \${WEBHOOK_SECRET}
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        spawn:
+          prompt: "Handle {{body}} received at {{receivedAt}}"
+`);
+    await writeProjectEnv(configPath, "WEBHOOK_SECRET=test-webhook-key\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects.backend?.sources.incoming).toEqual({
+      type: "webhook",
+      host: "127.0.0.1",
+      port: 8456,
+      path: "/events/provider",
+      secret: "test-webhook-key",
+    });
+    expect(config.projects.backend?.triggers.receive).toMatchObject({
+      source: "incoming",
+      event: "webhook:received",
+    });
+  });
+
+  it.each([
+    ["127.0.0.1", "127.0.0.1"],
+    ["::1", "::1"],
+    ["0:0:0:0:0:0:0:1", "::1"],
+    ["2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+  ])("stores webhook host %s as %s", async (host, expected) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "${host}"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects.backend?.sources.incoming).toMatchObject({ host: expected });
+  });
+
+  it.each([
+    [
+      "host",
+      "host: localhost\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "zone-scoped host",
+      "host: fe80::1%lo\n        port: 8456\n        path: /events\n        secret: test-webhook-key",
+      "host must be an IPv4 or IPv6 literal without a zone id",
+    ],
+    [
+      "port",
+      "port: 0\n        path: /events\n        secret: test-webhook-key",
+      "port must be an integer between 1 and 65535",
+    ],
+    [
+      "path",
+      "port: 8456\n        path: //events\n        secret: test-webhook-key",
+      "path must be 1 through 2048 visible ASCII bytes",
+    ],
+    [
+      "secret",
+      "port: 8456\n        path: /events\n        secret: short",
+      "secret must be 16 through 512 visible ASCII bytes",
+    ],
+    [
+      "unknown key",
+      "port: 8456\n        path: /events\n        secret: test-webhook-key\n        extra: true",
+      "extra is not supported for webhook sources",
+    ],
+  ])("rejects invalid webhook %s", async (_name, fields, message) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        ${fields}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(message);
+  });
+
+  it("rejects duplicate webhook binds inside one config", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      first:
+        type: webhook
+        host: "::1"
+        port: 8456
+        path: /first
+        secret: test-webhook-key
+      second:
+        type: webhook
+        host: "0:0:0:0:0:0:0:1"
+        port: 8456
+        path: /second
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.second duplicates webhook bind [::1]:8456 owned by projects.backend.sources.first",
+    );
+  });
+
+  it.each([
+    ["0.0.0.0", "127.0.0.1"],
+    ["::", "::1"],
+    ["::", "127.0.0.1"],
+    ["::ffff:127.0.0.1", "127.0.0.1"],
+  ])("rejects overlapping webhook binds %s and %s", async (firstHost, secondHost) => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      first:
+        type: webhook
+        host: "${firstHost}"
+        port: 8456
+        path: /first
+        secret: test-webhook-key
+      second:
+        type: webhook
+        host: "${secondHost}"
+        port: 8456
+        path: /second
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.second duplicates webhook bind",
+    );
+  });
+
+  it("rejects overlapping webhook binds across projects", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::ffff:127.0.0.1"
+        port: 8456
+        path: /api
+        secret: test-webhook-key
+  web:
+    path: $REPO_PATH
+    sessionPrefix: web
+    sources:
+      incoming:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /web
+        secret: second-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.web.sources.incoming duplicates webhook bind 127.0.0.1:8456 owned by projects.api.sources.incoming",
+    );
+  });
+
+  it("allows distinct specific IPv4 and IPv6 webhook binds", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      ipv6:
+        type: webhook
+        host: "::1"
+        port: 8456
+        path: /ipv6
+        secret: test-webhook-key
+      ipv4:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /ipv4
+        secret: second-webhook-key
+`);
+
+    expect(loadConfig(configPath).projects.backend?.sources).toMatchObject({
+      ipv6: { host: "::1", port: 8456 },
+      ipv4: { host: "127.0.0.1", port: 8456 },
+    });
+  });
+
+  it("rejects a webhook bind on the daemon host and port", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it.each([
+    ["localhost", "127.0.0.1"],
+    ["localhost", "::1"],
+    ["daemon.internal", "192.0.2.1"],
+  ])("rejects daemon hostname %s overlap with webhook host %s", async (serverHost, webhookHost) => {
+    const configPath = await writeConfig(`
+server:
+  host: ${serverHost}
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "${webhookHost}"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      `projects.backend.sources.incoming webhook bind ${
+        webhookHost.includes(":") ? `[${webhookHost}]` : webhookHost
+      }:8456 overlaps server bind ${serverHost}:8456`,
+    );
+  });
+
+  it("rejects webhook wildcard overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  host: 0.0.0.0
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps server bind 0.0.0.0:8456",
+    );
+  });
+
+  it("rejects dual-stack webhook overlap with an IPv4 daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  host: 127.0.0.1
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind [::]:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects IPv4-mapped webhook overlap with the daemon bind", async () => {
+    const configPath = await writeConfig(`
+server:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        host: "::ffff:127.0.0.1"
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind [::ffff:7f00:1]:8456 overlaps server bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects webhook overlap with the configured UI port", async () => {
+    const configPath = await writeConfig(`
+ui:
+  port: 8456
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sources.incoming webhook bind 127.0.0.1:8456 overlaps ui bind 127.0.0.1:8456",
+    );
+  });
+
+  it("rejects webhook send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: test-webhook-key
+    triggers:
+      receive:
+        source: incoming
+        event: webhook:received
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.receive.send is not supported for webhook sources; use spawn",
+    );
+  });
+
   it("applies Spur defaults once at the config boundary", async () => {
     const configPath = await writeConfig(`
 projects:

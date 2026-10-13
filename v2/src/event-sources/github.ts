@@ -528,7 +528,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let stopped = false;
   let polling = false;
   let pollingWorkItems = false;
-  let pollingCycle = false;
+  let activePoll: Promise<void> | null = null;
   let cooldownUntilMs = 0;
   let rateLimitFailures = 0;
   let authDisabled = false;
@@ -546,17 +546,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
   };
 
-  const listPollableSessions = () =>
-    listSessions(deps.dataDir).filter((session) =>
-      isEligibleForSourcePoll(session, deps.projectId),
-    );
+  const listPollableSessions = (allSessions: ReturnType<typeof listSessions>) =>
+    allSessions.filter((session) => isEligibleForSourcePoll(session, deps.projectId));
 
   const shouldPollThisTick = (): boolean => {
     refreshPollDisabled();
     if (!adaptive) return true;
     if (Date.now() >= nextEligiblePollAtMs) return true;
     if (lastCycleCiActive) return true;
-    for (const session of listPollableSessions()) {
+    for (const session of listPollableSessions(listSessions(deps.dataDir))) {
       if (isSessionPollGated(session, Date.now())) continue;
       // A disabled session whose recheck window is due is no longer gated above, but
       // it was already attempted before being disabled, so the attemptedSessionIds
@@ -627,11 +625,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     try {
       refreshPollDisabled();
       const allSessions = listSessions(deps.dataDir);
-      const sessions = allSessions.filter((session) =>
-        isEligibleForSourcePoll(session, deps.projectId),
-      );
-      const existingSessionIds = new Set(allSessions.map((session) => session.id));
+      const sessions = listPollableSessions(allSessions);
       const currentSessionIds = new Set(sessions.map((session) => session.id));
+      // Persisted per-session state prunes on absence from disk, never on poll
+      // eligibility: a session that loses eligibility for one cycle (stopped into a
+      // non-parked status, worktree temporarily gone) must keep its snapshot and
+      // lifecycle baseline, or the source re-baselines and re-emits on its return.
+      const existingSessionIds = new Set(allSessions.map((session) => session.id));
       let cycleCiActive = false;
       let cycleHadPollError = false;
       // Cycle-scoped: a batch-level failure logs one source.poll.error for every
@@ -884,7 +884,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       lastCycleCiActive = cycleCiActive || (cycleHadPollError && lastCycleCiActive);
 
       for (const sessionId of [...snapshots.keys()]) {
-        if (!currentSessionIds.has(sessionId)) {
+        if (!existingSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
           deleteReviewSourceSnapshot(
             deps.dataDir,
@@ -984,36 +984,40 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
-  const pollCycle = async (emitInitial: boolean): Promise<void> => {
-    if (pollingCycle) return;
-    pollingCycle = true;
-    // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
-    // await in between) does its own refresh at its try-block entry, and the interval
-    // tick path already refreshed in shouldPollThisTick immediately before calling this.
-    // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
-    // already active going into this cycle, no real polling happened, so the
-    // adaptive deadline must not move — otherwise it silently consumes the
-    // slow window during an outage instead of resuming promptly once it lifts.
-    const skippedByCooldown = shouldSkipGitHubCalls();
-    const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
-    try {
-      await runGhPollCycle(
-        { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
-        async () => {
-          await pollSignals(emitInitial);
-          if (shouldSkipGitHubCalls()) return;
-          await syncWorkItems();
-          if (!shouldSkipGitHubCalls()) {
-            rateLimitFailures = 0;
-          }
-        },
-      );
-    } finally {
-      if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
-        nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+  const pollCycle = (emitInitial: boolean): Promise<void> => {
+    if (stopped || deps.signal.aborted) return Promise.resolve();
+    if (activePoll) return activePoll;
+    activePoll = Promise.resolve().then(async () => {
+      // No refreshPollDisabled() here: pollSignals (called synchronously below, with no
+      // await in between) does its own refresh at its try-block entry, and the interval
+      // tick path already refreshed in shouldPollThisTick immediately before calling this.
+      // Captured before pollSignals runs: if a cooldown/auth-disabled gate was
+      // already active going into this cycle, no real polling happened, so the
+      // adaptive deadline must not move — otherwise it silently consumes the
+      // slow window during an outage instead of resuming promptly once it lifts.
+      const skippedByCooldown = shouldSkipGitHubCalls();
+      const adaptiveDeadlineAtStart = nextEligiblePollAtMs;
+      try {
+        if (stopped || deps.signal.aborted) return;
+        await runGhPollCycle(
+          { kind: "github_source", projectId: deps.projectId, sourceId: deps.sourceId },
+          async () => {
+            await pollSignals(emitInitial);
+            if (shouldSkipGitHubCalls()) return;
+            await syncWorkItems();
+            if (!shouldSkipGitHubCalls()) {
+              rateLimitFailures = 0;
+            }
+          },
+        );
+      } finally {
+        if (adaptive && !skippedByCooldown && Date.now() >= adaptiveDeadlineAtStart) {
+          nextEligiblePollAtMs = Date.now() + adaptive.slowIntervalMs;
+        }
+        activePoll = null;
       }
-      pollingCycle = false;
-    }
+    });
+    return activePoll;
   };
 
   const timer = startInterval(() => {
@@ -1030,9 +1034,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   }
 
   return {
-    stop(): void {
+    async stop(): Promise<void> {
       stopped = true;
       clearInterval(timer);
+      await activePoll;
     },
     ...(deps.config.runOnStart
       ? {

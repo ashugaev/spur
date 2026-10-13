@@ -17,17 +17,21 @@ import {
 import type { SessionRecord, ReviewSignal } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
-const { ghMock, readCurrentBranchMock, isGitWorktreeMock } = vi.hoisted(() => ({
-  ghMock: vi.fn(),
-  readCurrentBranchMock: vi.fn(),
-  isGitWorktreeMock: vi.fn().mockResolvedValue(true),
-}));
+const { ghMock, readCurrentBranchMock, readBranchPushUrlMock, isGitWorktreeMock } = vi.hoisted(
+  () => ({
+    ghMock: vi.fn(),
+    readCurrentBranchMock: vi.fn(),
+    readBranchPushUrlMock: vi.fn().mockResolvedValue("git@github.com:acme/api.git"),
+    isGitWorktreeMock: vi.fn().mockResolvedValue(true),
+  }),
+);
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
   gh: ghMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: readCurrentBranchMock,
+  readBranchPushUrl: readBranchPushUrlMock,
   readRemoteUrls: vi.fn().mockResolvedValue(new Map([["origin", "git@github.com:acme/api.git"]])),
   isGitWorktree: isGitWorktreeMock,
 }));
@@ -710,6 +714,7 @@ describe("GitHub review batching", () => {
 
   beforeEach(() => {
     ghMock.mockReset();
+    readBranchPushUrlMock.mockReset().mockResolvedValue("git@github.com:acme/api.git");
     _resetGitHubReviewBatchForTests();
     _resetPrLookupsForTests();
     _resetPrLookupCacheForTests();
@@ -764,6 +769,177 @@ describe("GitHub review batching", () => {
       ...overrides,
     };
   }
+
+  it.each([
+    {
+      name: "same repository",
+      head: "acme/api",
+      pushUrl: "git@github.com:acme/api.git",
+      owns: true,
+    },
+    {
+      name: "owned fork",
+      head: "contributor/api",
+      pushUrl: "git@github.com:contributor/api.git",
+      owns: true,
+    },
+    {
+      name: "foreign same-name fork",
+      head: "other/api",
+      pushUrl: "git@github.com:acme/api.git",
+      owns: false,
+    },
+    {
+      name: "missing head repository",
+      head: null,
+      pushUrl: "git@github.com:acme/api.git",
+      owns: false,
+    },
+    { name: "descendant-only local ref", head: "acme/api", pushUrl: null, owns: false },
+    { name: "missing push destination", head: "acme/api", pushUrl: null, owns: false },
+    { name: "push targets another branch", head: "acme/api", pushUrl: null, owns: false },
+    { name: "custom fetch map", head: "acme/api", pushUrl: null, owns: false },
+    { name: "past explicit push without upstream", head: "acme/api", pushUrl: null, owns: false },
+    {
+      name: "case-insensitive repository",
+      head: "ACME/API",
+      pushUrl: "git@github.com:acme/api.git",
+      owns: true,
+    },
+    {
+      name: "malformed head repository",
+      head: "acme/api/other",
+      pushUrl: "git@github.com:acme/api.git",
+      owns: false,
+    },
+    {
+      name: "wrong host",
+      head: "acme/api",
+      pushUrl: "git@elsewhere.example:acme/api.git",
+      owns: false,
+    },
+    {
+      name: "different branch",
+      head: "acme/api",
+      pushUrl: "git@github.com:acme/api.git",
+      owns: false,
+      branch: "feature/other",
+    },
+    { name: "viewer author", head: null, pushUrl: null, owns: true, author: "review-bot" },
+  ])("scopes bound fix signals by independent PR head identity: $name", async (case_) => {
+    const dataDir = await makeDataDir();
+    readBranchPushUrlMock.mockResolvedValue(case_.pushUrl);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: "review-bot" },
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: {
+            a0: fullPrNode(42, {
+              headRefName: case_.branch ?? "feature/test",
+              headRepository: case_.head ? { nameWithOwner: case_.head } : null,
+              author: { login: case_.author ?? "someone-else" },
+              reviewDecision: "CHANGES_REQUESTED",
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        contexts: {
+                          nodes: [{ name: "test", conclusion: "FAILURE", status: "COMPLETED" }],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+              comments: {
+                nodes: [{ databaseId: 1, body: "Please inspect", author: { login: "reviewer" } }],
+              },
+            }),
+          },
+        },
+      }),
+    );
+
+    const result = await collectGitHubSignalsBatch(
+      [sourceSession("/tmp/api-1")],
+      dataDir,
+      "api",
+      "pr-watch",
+    );
+    const collected = result.get("api-1");
+    expect(collected?.status).toBe("ok");
+    if (collected?.status !== "ok" || !collected.collected) throw new Error("missing result");
+    for (const key of ["changes_requested", "ci_failed", "merge_conflict"]) {
+      expect(collected.collected.snapshot.has(key), key).toBe(case_.owns);
+    }
+    expect(collected.collected.snapshot.has("comment:1")).toBe(true);
+    expect(ghMock.mock.calls[0]?.join(" ")).toContain("headRepository{nameWithOwner}");
+  });
+
+  it("checks two sessions bound to one PR against their own push destinations", async () => {
+    const dataDir = await makeDataDir();
+    readBranchPushUrlMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === "/tmp/owned"
+          ? "git@github.com:contributor/api.git"
+          : "git@github.com:acme/api.git",
+      ),
+    );
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          rateLimit: { cost: 1, remaining: 4_900, resetAt: "2099-08-04T18:00:00.000Z" },
+          r: {
+            a0: fullPrNode(42, {
+              headRefName: "feature/test",
+              headRepository: { nameWithOwner: "contributor/api" },
+              reviewDecision: "CHANGES_REQUESTED",
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        contexts: {
+                          nodes: [{ name: "test", conclusion: "FAILURE", status: "COMPLETED" }],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            }),
+          },
+        },
+      }),
+    );
+
+    const sessions = [
+      { ...boundSession("owned", 42), worktreePath: "/tmp/owned" },
+      { ...boundSession("owned-copy", 42), worktreePath: "/tmp/owned" },
+      { ...boundSession("foreign", 42), worktreePath: "/tmp/foreign" },
+    ];
+    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "pr-watch");
+    for (const [id, owns] of [
+      ["owned", true],
+      ["owned-copy", true],
+      ["foreign", false],
+    ] as const) {
+      const entry = result.get(id);
+      expect(entry?.status).toBe("ok");
+      if (entry?.status !== "ok" || !entry.collected) throw new Error("missing result");
+      for (const key of ["changes_requested", "ci_failed", "merge_conflict"]) {
+        expect(entry.collected.snapshot.has(key), `${id}: ${key}`).toBe(owns);
+      }
+    }
+    expect(readBranchPushUrlMock).toHaveBeenCalledTimes(2);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+  });
 
   it("shares the persisted absent cache with branch attention lookups", async () => {
     const dataDir = await makeDataDir();
@@ -1152,6 +1328,8 @@ describe("GitHub review batching", () => {
                 number: 42,
                 title: "Older signals",
                 url: "https://github.com/acme/api/pull/42",
+                headRefName: "feature/test",
+                headRepository: { nameWithOwner: "acme/api" },
                 reviewDecision: null,
                 mergeable: "MERGEABLE",
                 mergeStateStatus: "CLEAN",
@@ -2413,6 +2591,8 @@ describe("github source rearm", () => {
         number: 42,
         title: "Keep branch mergeable",
         url: "https://github.com/acme/api/pull/42",
+        headRefName: "feature/test",
+        headRepository: { nameWithOwner: "acme/api" },
         reviewDecision: null,
         mergeable: "CONFLICTING",
         mergeStateStatus: "DIRTY",
@@ -2466,6 +2646,8 @@ describe("github source rearm", () => {
         number: 42,
         title: "Keep branch mergeable",
         url: "https://github.com/acme/api/pull/42",
+        headRefName: "feature/test",
+        headRepository: { nameWithOwner: "acme/api" },
         reviewDecision: null,
         mergeable: "MERGEABLE",
         mergeStateStatus: "CLEAN",

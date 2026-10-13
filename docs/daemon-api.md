@@ -50,7 +50,7 @@
 - `POST /sessions/:id/launch/submit` — presses submit over a pending `submitUnconfirmedAt` prompt
 - `POST /sessions/:id/submit-failed/retry` — re-queues `submitFailedMessage` at the head
 - `POST /sessions/:id/submit-failed/dismiss` — drops `submitFailedMessage`
-- `POST /sessions/:id/source-reply`
+- `POST /sessions/:id/source-reply`: `requestInterfaceApproval` semantic proposal; `v2/src/session-service.ts`.
 - `POST /sessions/:id/opened`
 - `POST /sessions/:id/pause`
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.

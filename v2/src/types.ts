@@ -147,6 +147,7 @@ export type SourceType =
   | "sentry"
   | "service"
   | "telegram"
+  | "webhook"
   | "jira"
   | "github-ci";
 
@@ -178,6 +179,7 @@ export type GitHubLifecycleKind = (typeof GITHUB_PR_LIFECYCLE_KINDS)[number];
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 export const SENTRY_ISSUE_NEW_EVENT = "sentry:issue.new" as const;
 export const TELEGRAM_MESSAGE_EVENT = "telegram:message" as const;
+export const WEBHOOK_RECEIVED_EVENT = "webhook:received" as const;
 /** Callback-data prefix for an agent-offered inline button. */
 export const TELEGRAM_CHOICE_CALLBACK_PREFIX = "spur_choice:" as const;
 export const GITHUB_CI_RUN_COMPLETED_EVENT = "github-ci:run.completed" as const;
@@ -375,6 +377,14 @@ export interface TelegramSourceConfig extends BaseSourceConfig {
   autoSpawn?: TelegramAutoSpawnConfig;
 }
 
+export interface WebhookSourceConfig {
+  type: "webhook";
+  host: string;
+  port: number;
+  path: string;
+  secret: string;
+}
+
 export interface TelegramAutoSpawnConfig {
   enabled: boolean;
   project: string;
@@ -400,6 +410,7 @@ export interface TelegramChoice {
   text: string;
   value: string;
   expiresAt: string;
+  interfaceConsent?: { challenge: string; decision: "approved" | "rejected" | "revoked" };
 }
 
 /** A bot message and the session that sent it, so a user reply routes back there. */
@@ -426,6 +437,7 @@ export type SourceConfig =
   | SentrySourceConfig
   | ServiceSourceConfig
   | TelegramSourceConfig
+  | WebhookSourceConfig
   | JiraSourceConfig
   | GitHubCiSourceConfig;
 
@@ -437,6 +449,11 @@ export interface TelegramMessageEventData {
   username?: string;
   messageId: number;
   text: string;
+}
+
+export interface WebhookReceivedEventData {
+  body: string;
+  receivedAt: string;
 }
 
 export interface SpawnOverrides {
@@ -1165,6 +1182,8 @@ export interface SessionRecord {
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
+  /** Opaque identity shared only by one agent launch and its process tree. */
+  agentLaunchId?: string;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
   stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
@@ -1228,6 +1247,8 @@ export interface SessionRecord {
   todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+  /** Internal provenance for a retained session error; absent on legacy records. */
+  errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
 }
@@ -1332,10 +1353,12 @@ export interface SessionSidecarView {
 export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
+  | "agentLaunchId"
   | "tokenUsage"
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
@@ -1382,9 +1405,11 @@ export type DashboardOmittedField =
   | "stateSubscriptions"
   | "allowedTriggers"
   | "agentSessionId"
+  | "agentLaunchId"
   | "branchSource"
   | "tokenUsage"
-  | "preflightTokenUsage";
+  | "preflightTokenUsage"
+  | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   lifecycle: SessionLifecycleSnapshot;
@@ -1524,6 +1549,7 @@ export interface SourceReplyButton {
 export interface SourceReplyRequest {
   message: string;
   buttons?: SourceReplyButton[];
+  requestInterfaceApproval?: unknown;
 }
 
 export interface SourceReplyResponse {
@@ -1788,6 +1814,14 @@ export interface SpawnDefaultsResponse {
   model: string | null;
   reasoningEffort: ProviderReasoningEffort | null;
   worktree: boolean;
+}
+
+export interface SessionLaunchOptions {
+  project: string;
+  agent: AgentName;
+  model: string | null;
+  mode: string | null;
+  modes: readonly string[];
 }
 
 export interface CreateProjectRequest {

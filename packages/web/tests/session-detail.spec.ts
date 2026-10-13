@@ -4895,6 +4895,7 @@ test.describe("S6: Terminal modal from detail page", () => {
   test("recording state shows edit, queue, and send buttons; edit opens modal", async ({
     page,
   }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => {
       class TestMediaRecorder {
         mimeType = "audio/webm";

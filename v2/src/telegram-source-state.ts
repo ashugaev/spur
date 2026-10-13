@@ -197,22 +197,25 @@ export async function closeTelegramTopic(
  * Splits at the last newline inside the limit, else at the limit, moved back
  * one unit when it would cut a surrogate pair.
  */
-function splitTelegramText(text: string): string[] {
-  const chunks: string[] = [];
+function splitTelegramText(text: string, firstBodyOffset = 0): { text: string; offset: number }[] {
+  const chunks: { text: string; offset: number }[] = [];
   let remaining = text;
+  let offset = 0;
   while (remaining.length > TELEGRAM_MESSAGE_LIMIT) {
     const newline = remaining.lastIndexOf("\n", TELEGRAM_MESSAGE_LIMIT - 1);
-    if (newline > 0) {
-      chunks.push(remaining.slice(0, newline));
+    if (newline > (chunks.length === 0 ? firstBodyOffset : 0)) {
+      chunks.push({ text: remaining.slice(0, newline), offset });
       remaining = remaining.slice(newline + 1);
+      offset += newline + 1;
       continue;
     }
     const highSurrogate = /[\uD800-\uDBFF]/.test(remaining.charAt(TELEGRAM_MESSAGE_LIMIT - 1));
     const cut = highSurrogate ? TELEGRAM_MESSAGE_LIMIT - 1 : TELEGRAM_MESSAGE_LIMIT;
-    chunks.push(remaining.slice(0, cut));
+    chunks.push({ text: remaining.slice(0, cut), offset });
     remaining = remaining.slice(cut);
+    offset += cut;
   }
-  chunks.push(remaining);
+  chunks.push({ text: remaining, offset });
   return chunks;
 }
 
@@ -306,14 +309,36 @@ export async function sendTelegramReply(
   config: Pick<TelegramSourceConfig, "token">,
   target: Pick<TelegramReplyTarget, "chatId" | "messageThreadId" | "statusMessageId">,
   text: string,
-  options: { topicName?: string; buttons?: TelegramInlineButton[]; preformatted?: string } = {},
+  options: {
+    topicName?: string;
+    buttons?: TelegramInlineButton[];
+    preformatted?: string;
+    sessionLabel?: string;
+  } = {},
 ): Promise<TelegramReplySendResult> {
-  const rawChunks = splitTelegramText(text);
-  const htmlChunks = renderTelegramHtml(rawChunks);
-  const chunks: OutgoingChunk[] = rawChunks.map((plain, index) => ({
-    plain,
-    html: htmlChunks[index] as string,
-  }));
+  const createdThreadId =
+    target.statusMessageId === undefined &&
+    target.messageThreadId === undefined &&
+    target.chatId < 0 &&
+    options.topicName
+      ? await createTelegramTopic(config, target.chatId, options.topicName)
+      : null;
+  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
+  const label =
+    target.chatId < 0 && messageThreadId !== undefined ? "" : (options.sessionLabel ?? "");
+  const prefix = label ? `${label}\n\n` : "";
+  const body = label ? text.replace(/^(?:\r?\n)+/u, "") : text;
+  const rawChunks = splitTelegramText(prefix + body, prefix.length);
+  const labelLength = (offset: number, plain: string): number =>
+    Math.max(0, Math.min(label.length - offset, plain.length));
+  const htmlChunks = renderTelegramHtml(
+    rawChunks.map(({ text: plain, offset }) => plain.slice(labelLength(offset, plain))),
+  );
+  const chunks: OutgoingChunk[] = rawChunks.map(({ text: plain, offset }, index) => {
+    const length = labelLength(offset, plain);
+    const signature = length ? `<b>${escapeTelegramHtml(plain.slice(0, length))}</b>` : "";
+    return { plain, html: signature + (htmlChunks[index] as string) };
+  });
   // A pane tail is shown verbatim in <pre>, never parsed as markdown.
   const tail = options.preformatted;
   if (tail) {
@@ -323,7 +348,7 @@ export async function sendTelegramReply(
       last.html += `\n<pre>${escapeTelegramHtml(tail)}</pre>`;
     } else {
       for (const part of splitTelegramText(tail)) {
-        chunks.push({ plain: part, html: `<pre>${escapeTelegramHtml(part)}</pre>` });
+        chunks.push({ plain: part.text, html: `<pre>${escapeTelegramHtml(part.text)}</pre>` });
       }
     }
   }
@@ -377,11 +402,6 @@ export async function sendTelegramReply(
     return { statusMessageIdConsumed: true, messageIds };
   }
 
-  const createdThreadId =
-    target.messageThreadId === undefined && target.chatId < 0 && options.topicName
-      ? await createTelegramTopic(config, target.chatId, options.topicName)
-      : null;
-  const messageThreadId = target.messageThreadId ?? createdThreadId ?? undefined;
   for (const [index, chunk] of chunks.entries()) {
     collect(
       await sendTelegramMessage(config, target.chatId, chunk, messageThreadId, chunkMarkup(index)),

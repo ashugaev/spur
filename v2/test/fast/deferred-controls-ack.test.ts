@@ -486,6 +486,7 @@ vi.mock("../../src/config.js", () => ({
       : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
+  validateWebhookSourceBindings: () => undefined,
   findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
   loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
   expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
@@ -899,13 +900,33 @@ function baseConfig() {
   };
 }
 
-async function loadSessionServiceModule() {
+async function loadSessionServiceModule(options?: { realPaneGeneration?: boolean }) {
   vi.resetModules();
   const module = await import("../../src/session-service.js");
   const BaseSessionService = module.SessionService;
   class TrackedSessionService extends BaseSessionService {
     constructor(...args: ConstructorParameters<typeof BaseSessionService>) {
       super(...args);
+      const internals = this as unknown as {
+        capturePaneGeneration?: (session: SessionRecord) => Promise<{
+          tmuxSession: string;
+          panePid: number;
+          processStarttime: number;
+        }>;
+        paneGenerationMatches?: () => Promise<boolean>;
+      };
+      if (
+        !options?.realPaneGeneration &&
+        internals.capturePaneGeneration &&
+        internals.paneGenerationMatches
+      ) {
+        vi.spyOn(internals, "capturePaneGeneration").mockImplementation(async (session) => ({
+          tmuxSession: session.tmuxSession,
+          panePid: 4242,
+          processStarttime: 1,
+        }));
+        vi.spyOn(internals, "paneGenerationMatches").mockResolvedValue(true);
+      }
       activeSessionServices.push(this);
     }
   }

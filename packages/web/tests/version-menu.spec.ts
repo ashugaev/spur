@@ -186,6 +186,7 @@ test.describe("Version menu Auto checkbox", () => {
   });
 
   test("off state: dimmed label, unchecked box", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
     await mockSessions(page, [], DEFAULT_PROJECTS);
     await mockVersionMenu(page, {
       current: "1.4.2",
@@ -202,6 +203,7 @@ test.describe("Version menu Auto checkbox", () => {
   });
 
   test("on state: bold primary label, checked box", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
     await mockSessions(page, [], DEFAULT_PROJECTS);
     await mockVersionMenu(page, {
       current: "1.4.2",
@@ -322,6 +324,7 @@ test.describe("Version menu Auto checkbox", () => {
   test("a rolled-back update shows the red rollback glyph, not the severity triangle", async ({
     page,
   }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
     await mockSessions(page, [], DEFAULT_PROJECTS);
     await mockVersionMenu(page, {
       current: "1.4.2",
