@@ -30190,9 +30190,13 @@ describe("SessionService", () => {
     const binding = (baseline: typeof originalBaseline) => ({
       baseline,
       async scan(message: string) {
-        const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+        const { found, scannedFile } = await scanClaudeJsonlForMessage(
+          baseline,
+          message,
+          record.worktreePath,
+        );
         scans.push(found);
-        return { found, lastScannedFile: file };
+        return { found, lastScannedFile: scannedFile ?? file };
       },
     });
     createAgentSubmitAckBindingMock.mockImplementation(async () =>
@@ -30381,9 +30385,13 @@ describe("SessionService", () => {
       const binding = (baseline: typeof originalBaseline) => ({
         baseline,
         async scan(message: string) {
-          const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+          const { found, scannedFile } = await scanClaudeJsonlForMessage(
+            baseline,
+            message,
+            record.worktreePath,
+          );
           scans.push({ message, found });
-          const result = { found, lastScannedFile: file };
+          const result = { found, lastScannedFile: scannedFile ?? file };
           if (message === later && found) {
             laterEntered = true;
             await laterGate;
@@ -30567,13 +30575,19 @@ describe("SessionService", () => {
       const acknowledgements: boolean[] = [];
       createAgentSubmitAckBindingMock.mockImplementation(async () => {
         const baseline = { agent: "claude" as const, file, size: statSync(file).size };
-        expect(await scanClaudeJsonlForMessage(baseline, text, record.worktreePath)).toBe(false);
+        expect((await scanClaudeJsonlForMessage(baseline, text, record.worktreePath)).found).toBe(
+          false,
+        );
         return {
           baseline,
           async scan(message: string) {
-            const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+            const { found, scannedFile } = await scanClaudeJsonlForMessage(
+              baseline,
+              message,
+              record.worktreePath,
+            );
             acknowledgements.push(found);
-            return { found, lastScannedFile: file };
+            return { found, lastScannedFile: scannedFile ?? file };
           },
         };
       });
