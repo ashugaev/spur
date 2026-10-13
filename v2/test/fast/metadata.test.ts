@@ -2077,6 +2077,7 @@ describe("session metadata PR migration", () => {
     const baselines: SubmitAckBaseline[] = [
       { agent: "claude", file: "/c.jsonl", size: 7 },
       { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: null, size: 0 },
       { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },

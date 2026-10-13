@@ -1901,7 +1901,8 @@ export type SubmitAckBaseline =
   | { agent: "codex"; offsets: Record<string, number> }
   | {
       agent: "cursor";
-      file: string;
+      /** null: no chat transcript existed at send time (pending baseline). */
+      file: string | null;
       size: number;
       /** Rotated chat transcript and its offset at send time. */
       rotated?: { file: string; size: number };

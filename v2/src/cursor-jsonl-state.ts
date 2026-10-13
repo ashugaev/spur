@@ -332,28 +332,18 @@ export async function findLatestCursorTranscriptFile(
   return null;
 }
 
-// Ack-path-only resolver. Unlike findLatestCursorTranscriptFile's first-dir-wins
-// selection (kept unchanged for state classification and the dialog viewer, I8),
-// the no-id case here searches ALL candidate dirs and takes the GLOBAL newest by
-// mtime. A stale shadow project dir (for example a symlinked worktree's raw-path
-// slug, still holding old or stub transcripts) loses on mtime the moment the live
-// agent writes under the realpath slug, so the ack self-corrects inside one wait
-// window instead of being permanently masked by first-dir-wins.
+// Ack-path resolver. The id is required: the shared transcripts dir holds every
+// session on the worktree, so the ack never picks a transcript by mtime (#889).
 export async function findCursorAckTranscriptFile(
   worktreePath: string,
-  agentSessionId?: string,
+  agentSessionId: string,
 ): Promise<string | null> {
-  if (agentSessionId) {
-    return findLatestCursorTranscriptFile(worktreePath, agentSessionId);
-  }
-  let newest: { path: string; mtimeMs: number } | null = null;
-  for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
-    const found = await findLatestCursorTranscriptInDir(transcriptsDirFor(candidate));
-    if (found && (!newest || found.mtimeMs > newest.mtimeMs)) {
-      newest = found;
-    }
-  }
-  return newest?.path ?? null;
+  return findLatestCursorTranscriptFile(worktreePath, agentSessionId);
+}
+
+// Inverse of the <id>/<id>.jsonl layout built above and below.
+export function cursorChatIdFromTranscriptPath(file: string): string {
+  return basename(file, ".jsonl");
 }
 
 // Path builder for the pending-pin baseline (change c). Cursor may not have

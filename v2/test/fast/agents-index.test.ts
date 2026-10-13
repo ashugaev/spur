@@ -618,6 +618,21 @@ describe("createAgentSubmitAckBinding", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
   });
+
+  it("binds a pending cursor baseline and reports no scanned file until a chat resolves", async () => {
+    captureCursorSubmitBaselineMock.mockResolvedValue({ file: null, size: 0 });
+    scanCursorJsonlForMessageMock.mockResolvedValue({ found: false, scannedFile: null });
+
+    const cursorCtx = { ...ctx, cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
+    const binding = await createAgentSubmitAckBinding("cursor", cursorCtx);
+    expect(binding).not.toBeNull();
+    const result = await binding?.scan("hello");
+
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledWith(ctx.worktreePath, undefined, {
+      cursorConfigDir: "/tmp/spur-data/cursor/session-1",
+    });
+    expect(result).toEqual({ found: false, lastScannedFile: null });
+  });
 });
 
 describe("agentSubmitAckPacing", () => {
