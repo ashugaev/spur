@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { pollUntil, sleep } from "../helpers/common.js";
 import { SmokeCaseRegistry } from "../helpers/smoke-case.js";
 
-const BOUNDS = { stopTimeoutMs: 1_000, settleTimeoutMs: 1_000 };
+const BOUNDS = { budgetMs: 1_000 };
 
 describe("pollUntil abort signal", () => {
   it("rejects with the reason before calling fn when already aborted", async () => {
@@ -35,6 +35,20 @@ describe("pollUntil abort signal", () => {
     await expect(polling).rejects.toBe(reason);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(calls).toBe(1);
+  });
+
+  it("rejects when aborted during an fn call whose result passes accept", async () => {
+    const controller = new AbortController();
+    const reason = new Error("aborted during fn");
+    await expect(
+      pollUntil(
+        async () => {
+          controller.abort(reason);
+          return "ok";
+        },
+        { timeoutMs: 1_000, signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
   });
 
   it("is unchanged without a signal", async () => {
@@ -117,9 +131,64 @@ describe("SmokeCaseRegistry.drain", () => {
         async () => {
           events.push("cleanup");
         },
-        { stopTimeoutMs: 50, settleTimeoutMs: 50 },
+        { budgetMs: 50 },
       ),
     ).rejects.toThrow(/outlived teardown.*contaminated/);
     expect(events).toEqual(["cleanup"]);
+  });
+
+  it("stops a service registered after drain started, before cleanup", async () => {
+    const events: string[] = [];
+    const registry = new SmokeCaseRegistry();
+    // Body mimics a case that timed out inside startServer.
+    const body = registry.run(async (smokeCase) => {
+      await sleep(30);
+      smokeCase.ownService({
+        stop: async () => {
+          await sleep(20);
+          events.push("late-service:stopped");
+        },
+      });
+      events.push("not-reached");
+    });
+    body.catch(() => events.push("body:rejected"));
+
+    await registry.drain(async () => {
+      events.push("cleanup");
+    }, BOUNDS);
+
+    expect(events).toEqual(["body:rejected", "late-service:stopped", "cleanup"]);
+  });
+
+  it("does not report a slow service stop when the body settles in budget", async () => {
+    const registry = new SmokeCaseRegistry();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    void registry
+      .run(async (smokeCase) => {
+        smokeCase.ownService({ stop: () => gate });
+        await gate;
+      })
+      .catch(() => {});
+    setTimeout(release, 60);
+    await expect(registry.drain(async () => {}, { budgetMs: 500 })).resolves.toBeUndefined();
+  });
+
+  it("refuses to start a case while an outlived body is still pending", async () => {
+    const registry = new SmokeCaseRegistry();
+    let finish: () => void = () => {};
+    void registry.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await expect(registry.drain(async () => {}, { budgetMs: 30 })).rejects.toThrow(/outlived/);
+    await expect(registry.run(async () => {})).rejects.toThrow(/still running after teardown/);
+    finish();
+    await sleep(5);
+    await expect(registry.run(async () => "next")).resolves.toBe("next");
   });
 });

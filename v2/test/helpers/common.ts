@@ -235,6 +235,7 @@ export async function pollUntil<T>(
     signal?.throwIfAborted();
     last = await fn();
   }
+  signal?.throwIfAborted();
   return last;
 }
 

@@ -997,7 +997,7 @@ async function runOpenCodeSmokeCase(
   }
 }
 
-// Stop + settle bounds leave room for cleanup inside the 90s hookTimeout.
+// Budget leaves 30s for cleanup inside the 90s hookTimeout.
 afterEach(async () => {
   try {
     await smokeCases.drain(
@@ -1013,7 +1013,7 @@ afterEach(async () => {
           }
         }
       },
-      { stopTimeoutMs: 30_000, settleTimeoutMs: 20_000 },
+      { budgetMs: 60_000 },
     );
   } finally {
     setActiveTmuxSocketName(null);
