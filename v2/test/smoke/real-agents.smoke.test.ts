@@ -367,7 +367,7 @@ async function withPinnedAgentBinaries<T>(configPath: string, fn: () => Promise<
   }
 }
 
-async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
+async function cleanupSmokeItem(item: CleanupItem, retainRootDir: boolean): Promise<void> {
   await killTmuxSessionsByPrefix(item.sessionPrefix, item.socketName);
   killTmuxServer(item.socketName);
   if (item.worktreePath) {
@@ -388,6 +388,11 @@ async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
     await git(SMOKE_REPO_DIR, "worktree", "prune", "--expire", "now");
   } catch {
     // Best effort only.
+  }
+  if (retainRootDir) {
+    // eslint-disable-next-line no-console
+    console.warn(`smoke test failed; retained session state at ${item.rootDir}`);
+    return;
   }
   await rm(item.rootDir, { recursive: true, force: true });
 }
@@ -959,11 +964,14 @@ async function runOpenCodeSmoke(explicitOverride: boolean): Promise<void> {
   }
 }
 
-afterEach(async () => {
+afterEach(async ({ task }) => {
+  // vitest sets task.result.state to "fail" before afterEach runs; keep the
+  // failed run's metadata and logs for diagnosis.
+  const retainRootDir = task.result?.state === "fail";
   while (cleanupItems.length > 0) {
     const item = popCleanupItem();
     try {
-      await cleanupSmokeItem(item);
+      await cleanupSmokeItem(item, retainRootDir);
     } catch (error) {
       // one item's cleanup failure must not abandon the rest of the drain.
       // eslint-disable-next-line no-console
