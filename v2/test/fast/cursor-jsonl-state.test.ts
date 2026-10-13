@@ -10,7 +10,6 @@ import {
   configureCursorTurnEndedStore,
   CURSOR_JSONL_TOOL_USE_GRACE_MS,
   cursorChatIdFromTranscriptPath,
-  findCursorAckTranscriptFile,
   findLatestCursorTranscriptFile,
   parseCursorJsonlRecord,
   readCursorJsonlState,
@@ -1010,7 +1009,7 @@ describe("findLatestCursorTranscriptFile", () => {
   });
 });
 
-describe("findCursorAckTranscriptFile", () => {
+describe("findLatestCursorTranscriptFile with a pinned id", () => {
   const tempRoots: string[] = [];
 
   afterEach(async () => {
@@ -1034,7 +1033,7 @@ describe("findCursorAckTranscriptFile", () => {
     tempRoots.push(join(homedir(), ".cursor", "projects", toCursorProjectPath(worktreePath)));
     await mkdir(join(transcriptsDir, agentSessionId), { recursive: true });
     await writeFile(join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`), "{}\n");
-    const found = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+    const found = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
     expect(found).not.toBeNull();
     expect(found && cursorChatIdFromTranscriptPath(found)).toBe(agentSessionId);
   });
@@ -1069,15 +1068,14 @@ describe("findCursorAckTranscriptFile", () => {
       '{"role":"assistant","message":{"content":[{"type":"text","text":"peer, newer"}]}}\n',
     );
 
-    const filePath = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+    const filePath = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
     expect(filePath).toBe(join(transcriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
   });
 
   // Review thread (cursor-jsonl-state.ts:149): resolveCursorPinnedTranscriptPath
   // guesses the LAST worktree-path candidate (realpath, i.e. canonical) for the
-  // pending-pin baseline, while findCursorAckTranscriptFile's id branch
-  // (delegated to findLatestCursorTranscriptFile) iterates ALL candidates,
-  // stat-then-continue. When cursor lands the pinned transcript only under the
+  // pending-pin baseline, while findLatestCursorTranscriptFile's id branch
+  // iterates ALL candidates, stat-then-continue. When cursor lands the pinned transcript only under the
   // RAW alias slug (measured fact in the spec: cursor wrote real records under
   // a stale raw slug on 2026-09-04), the guessed path never exists, but the
   // pinned lookup still finds the file because it does not stop at the guess.
@@ -1120,7 +1118,7 @@ describe("findCursorAckTranscriptFile", () => {
       join(canonicalTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`),
     );
 
-    const filePath = await findCursorAckTranscriptFile(alias, agentSessionId);
+    const filePath = await findLatestCursorTranscriptFile(alias, agentSessionId);
     expect(filePath).toBe(join(aliasTranscriptsDir, agentSessionId, `${agentSessionId}.jsonl`));
     expect(filePath).not.toBe(pendingPinGuess);
   });

@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 
 const {
-  findCursorAckTranscriptFileMock,
+  findLatestCursorTranscriptFileMock,
   resolveCursorPinnedTranscriptPathMock,
   findCursorSessionIdMock,
 } = vi.hoisted(() => ({
-  findCursorAckTranscriptFileMock:
+  findLatestCursorTranscriptFileMock:
     vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string | null>>(),
   resolveCursorPinnedTranscriptPathMock:
     vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
@@ -21,7 +21,7 @@ vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => {
   const actual = await importOriginal<typeof CursorJsonlStateModule>();
   return {
     cursorChatIdFromTranscriptPath: actual.cursorChatIdFromTranscriptPath,
-    findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
+    findLatestCursorTranscriptFile: findLatestCursorTranscriptFileMock,
     resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
     readCursorStableOffset: actual.readCursorStableOffset,
   };
@@ -41,14 +41,14 @@ import {
 const tempDirs: string[] = [];
 
 beforeEach(() => {
-  findCursorAckTranscriptFileMock.mockReset();
+  findLatestCursorTranscriptFileMock.mockReset();
   resolveCursorPinnedTranscriptPathMock.mockReset();
   findCursorSessionIdMock.mockReset();
 });
 
 afterEach(async () => {
   // N7: the ack never asks the shared transcripts dir for "the newest" chat.
-  for (const call of findCursorAckTranscriptFileMock.mock.calls) {
+  for (const call of findLatestCursorTranscriptFileMock.mock.calls) {
     expect(typeof call[1]).toBe("string");
   }
   while (tempDirs.length > 0) {
@@ -82,7 +82,7 @@ describe("captureCursorSubmitBaseline", () => {
   it("returns null with no id and no cursorConfigDir, without any transcript lookup", async () => {
     const result = await captureCursorSubmitBaseline("/tmp/worktree");
     expect(result).toBeNull();
-    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+    expect(findLatestCursorTranscriptFileMock).not.toHaveBeenCalled();
     expect(findCursorSessionIdMock).not.toHaveBeenCalled();
   });
 
@@ -90,7 +90,7 @@ describe("captureCursorSubmitBaseline", () => {
   it("no-id capture pins the private-dir chat id", async () => {
     const filePath = await makeJsonl("chat-x.jsonl", [userTurn("hi")]);
     findCursorSessionIdMock.mockResolvedValue("chat-x");
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const result = await captureCursorSubmitBaseline("/tmp/worktree", undefined, {
       cursorConfigDir: "/tmp/spur-data/cursor/session-1",
     });
@@ -99,7 +99,7 @@ describe("captureCursorSubmitBaseline", () => {
     expect(findCursorSessionIdMock).toHaveBeenCalledWith("/tmp/worktree", {
       configDir: "/tmp/spur-data/cursor/session-1",
     });
-    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "chat-x");
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "chat-x");
   });
 
   // AC2
@@ -109,16 +109,16 @@ describe("captureCursorSubmitBaseline", () => {
       cursorConfigDir: "/tmp/spur-data/cursor/session-1",
     });
     expect(result).toEqual({ file: null, size: 0 });
-    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+    expect(findLatestCursorTranscriptFileMock).not.toHaveBeenCalled();
   });
 
   it("returns the file path and current size when a transcript exists", async () => {
     const filePath = await makeJsonl("a.jsonl", [userTurn("hi")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const result = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
     expect(result?.file).toBe(filePath);
     expect(result?.size).toBeGreaterThan(0);
-    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
   });
 
   // AC4: a pinned path that does not yet exist yields a WAITING baseline, never
@@ -126,7 +126,7 @@ describe("captureCursorSubmitBaseline", () => {
   // unconditional un-waited "submitted", so a nonexistent-but-pinned baseline
   // must still make the caller wait.
   it("yields a waiting baseline for a pinned id whose transcript does not exist yet", async () => {
-    findCursorAckTranscriptFileMock.mockResolvedValue(null);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(null);
     const pendingPath = "/tmp/x/some-id/some-id.jsonl";
     resolveCursorPinnedTranscriptPathMock.mockResolvedValue(pendingPath);
     const result = await captureCursorSubmitBaseline("/tmp/worktree", "some-id");
@@ -136,10 +136,10 @@ describe("captureCursorSubmitBaseline", () => {
 });
 
 describe("scanCursorJsonlForMessage", () => {
-  it("forwards pinned agentSessionId to findCursorAckTranscriptFile on rotation check", async () => {
+  it("forwards pinned agentSessionId to findLatestCursorTranscriptFile on rotation check", async () => {
     const filePath = await makeJsonl("init.jsonl", [userTurn("hi")]);
     const rotatedPath = await makeJsonl("rotated.jsonl", [userTurn("target")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(rotatedPath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(rotatedPath);
     const result = await scanCursorJsonlForMessage(
       { file: filePath, size: (await stat(filePath)).size },
       "target",
@@ -148,11 +148,11 @@ describe("scanCursorJsonlForMessage", () => {
     );
     expect(result.found).toBe(true);
     expect(result.scannedFile).toBe(rotatedPath);
-    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
   });
   it("matches a user turn that wraps the sent text in cursor context tags", async () => {
     const filePath = await makeJsonl("wrap.jsonl", []);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     await appendJsonl(filePath, [
       userTurn("<timestamp>now</timestamp>\n<user_query>\nship the task\n</user_query>"),
     ]);
@@ -167,7 +167,7 @@ describe("scanCursorJsonlForMessage", () => {
 
   it("ignores assistant turns whose text matches", async () => {
     const filePath = await makeJsonl("assistant.jsonl", []);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     await appendJsonl(filePath, [
       { role: "assistant", message: { content: [{ type: "text", text: "ship the task" }] } },
     ]);
@@ -182,7 +182,7 @@ describe("scanCursorJsonlForMessage", () => {
 
   it("ignores prior matching turns before the byte-offset baseline", async () => {
     const filePath = await makeJsonl("offset.jsonl", [userTurn("hi there")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const baseline = { file: filePath, size: (await stat(filePath)).size };
     const result = await scanCursorJsonlForMessage(
       baseline,
@@ -195,7 +195,7 @@ describe("scanCursorJsonlForMessage", () => {
 
   it("finds a turn appended after the baseline", async () => {
     const filePath = await makeJsonl("append.jsonl", [userTurn("old turn")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const baseline = { file: filePath, size: (await stat(filePath)).size };
     await appendJsonl(filePath, [userTurn("new turn")]);
     const result = await scanCursorJsonlForMessage(
@@ -219,7 +219,7 @@ describe("scanCursorJsonlForMessage", () => {
       assistantOk,
       turnEnded,
     ]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
     if (!baseline) throw new Error("expected a baseline");
     await writeFile(
@@ -250,7 +250,7 @@ describe("scanCursorJsonlForMessage", () => {
     const baselineFile = await makeJsonl("baseline.jsonl", [userTurn("old")]);
     const baseline = { file: baselineFile, size: (await stat(baselineFile)).size };
     const rotatedFile = await makeJsonl("rotated.jsonl", [userTurn("new")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(rotatedFile);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(rotatedFile);
     const result = await scanCursorJsonlForMessage(baseline, "new", "/tmp/worktree", "pinned-id");
     expect(result.found).toBe(true);
     expect(result.scannedFile).toBe(rotatedFile);
@@ -258,7 +258,7 @@ describe("scanCursorJsonlForMessage", () => {
 
   it("returns false for an empty target", async () => {
     const filePath = await makeJsonl("empty.jsonl", [userTurn("anything")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const result = await scanCursorJsonlForMessage(
       { file: filePath, size: 0 },
       "   ",
@@ -285,7 +285,7 @@ describe("scanCursorJsonlForMessage", () => {
     const taskPrefix = "Review PR https://github.com/example/repo/pull/1 for bugs.";
     const sentMessage = `${taskPrefix}\n\nSession metadata:\n- Set the session title once at task start`;
     const filePath = await makeJsonl("long.jsonl", []);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     await appendJsonl(filePath, [
       userTurn(`<timestamp>now</timestamp>\n<user_query>\n${taskPrefix}\n</user_query>`),
     ]);
@@ -303,7 +303,7 @@ describe("scanCursorJsonlForMessage", () => {
   // is exactly what waitForSubmitAck does in session-service.ts).
   it("recognises an ack that lands only on a later poll of the same binding", async () => {
     const filePath = await makeJsonl("slow.jsonl", []);
-    findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(filePath);
     const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
     if (!baseline) throw new Error("expected a baseline");
 
@@ -333,7 +333,7 @@ describe("scanCursorJsonlForMessage", () => {
     tempDirs.push(root);
     const pendingPath = join(root, "pending-id.jsonl");
 
-    findCursorAckTranscriptFileMock.mockResolvedValue(null);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(null);
     resolveCursorPinnedTranscriptPathMock.mockResolvedValue(pendingPath);
     const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pending-id");
     expect(baseline).toEqual({ file: pendingPath, size: 0 });
@@ -371,7 +371,7 @@ describe("scanCursorJsonlForMessage", () => {
     const rotatedFile = await makeJsonl("rotated-chat.jsonl", [userTurn("unrelated prior turn")]);
     const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
 
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
@@ -411,7 +411,7 @@ describe("scanCursorJsonlForMessage", () => {
     const rotatedFile = await makeJsonl("rotated-preexisting.jsonl", [userTurn("continue")]);
     const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
 
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
@@ -435,11 +435,11 @@ describe("scanCursorJsonlForMessage", () => {
   // pinned-file re-resolve still runs (composed, not short-circuited) — it
   // covers a symlinked worktree's different candidate-path resolution, a
   // separate axis from chat-id rotation. Both compose to "no rescan" here
-  // because findCursorAckTranscriptFile also resolves back to baseline.file.
+  // because findLatestCursorTranscriptFile also resolves back to baseline.file.
   it("falls through to the pinned-file re-resolve, and finds no rescan when both agree with the pin", async () => {
     const pinnedFile = await makeJsonl("pinned-2.jsonl", [userTurn("earlier turn")]);
     const baseline = { file: pinnedFile, size: (await stat(pinnedFile)).size };
-    findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(pinnedFile);
 
     findCursorSessionIdMock.mockResolvedValue("pinned-id");
     const sameIdResult = await scanCursorJsonlForMessage(
@@ -450,9 +450,9 @@ describe("scanCursorJsonlForMessage", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
     expect(sameIdResult).toEqual({ found: false, scannedFile: pinnedFile });
-    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
 
-    findCursorAckTranscriptFileMock.mockClear();
+    findLatestCursorTranscriptFileMock.mockClear();
     findCursorSessionIdMock.mockResolvedValue(null);
     const noIdResult = await scanCursorJsonlForMessage(
       baseline,
@@ -462,7 +462,7 @@ describe("scanCursorJsonlForMessage", () => {
       { cursorConfigDir: "/tmp/spur-data/cursor/session-1" },
     );
     expect(noIdResult).toEqual({ found: false, scannedFile: pinnedFile });
-    expect(findCursorAckTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
+    expect(findLatestCursorTranscriptFileMock).toHaveBeenCalledWith("/tmp/worktree", "pinned-id");
   });
 
   // Regression: a symlinked worktree resolves to two candidates. The WAITING
@@ -479,7 +479,7 @@ describe("scanCursorJsonlForMessage", () => {
     const baseline = { file: staleWaitingPath, size: 0 };
 
     findCursorSessionIdMock.mockResolvedValue("pinned-id");
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "pinned-id" ? actualPinnedFile : null,
     );
 
@@ -499,7 +499,7 @@ describe("cursor submit baseline across a restart", () => {
   it("offsets an already-rotated chat at send time and keeps that offset through persist and restore", async () => {
     const pinnedFile = await makeJsonl("pinned-restart.jsonl", [userTurn("earlier turn")]);
     const rotatedFile = await makeJsonl("rotated-restart.jsonl", [userTurn("continue")]);
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
@@ -550,7 +550,7 @@ describe("cursor submit baseline across a restart", () => {
 
   it("persists no rotation when the chat id matches the pin", async () => {
     const pinnedFile = await makeJsonl("pinned-norotate.jsonl", [userTurn("earlier turn")]);
-    findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
+    findLatestCursorTranscriptFileMock.mockResolvedValue(pinnedFile);
     findCursorSessionIdMock.mockResolvedValue("pinned-id");
 
     const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", {
@@ -570,7 +570,7 @@ describe("no-id cursor submit ack (#889)", () => {
   it("no-id send never acks on a newer peer transcript", async () => {
     const peerFile = await makeJsonl("peer-id.jsonl", [userTurn("ship the task")]);
     findCursorSessionIdMock.mockResolvedValue(null);
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "peer-id" ? peerFile : null,
     );
 
@@ -592,7 +592,7 @@ describe("no-id cursor submit ack (#889)", () => {
   it("pending baseline acks the own chat's first record on a later poll", async () => {
     const ownFile = await makeJsonl("own-id.jsonl", [userTurn("ship the task")]);
     findCursorSessionIdMock.mockResolvedValue(null);
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "own-id" ? ownFile : null,
     );
     const baseline = { file: null as string | null, size: 0 };
@@ -621,7 +621,7 @@ describe("no-id cursor submit ack (#889)", () => {
   // AC9
   it("resumed pending baseline with a pinned ctx id acks the own chat from offset 0", async () => {
     const ownFile = await makeJsonl("own-id.jsonl", [userTurn("ship the task")]);
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "own-id" ? ownFile : null,
     );
     const restored = restoreCursorSubmitBaseline({ file: null, size: 0 });
@@ -641,7 +641,7 @@ describe("no-id cursor submit ack (#889)", () => {
     const ownFile = await makeJsonl("own-id.jsonl", [userTurn("earlier turn")]);
     const peerFile = await makeJsonl("peer-id.jsonl", [userTurn("ship the task")]);
     findCursorSessionIdMock.mockResolvedValue("own-id");
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "peer-id" ? peerFile : ownFile,
     );
 
@@ -656,7 +656,7 @@ describe("no-id cursor submit ack (#889)", () => {
       options,
     );
     expect(result).toEqual({ found: false, scannedFile: ownFile });
-    for (const call of findCursorAckTranscriptFileMock.mock.calls) {
+    for (const call of findLatestCursorTranscriptFileMock.mock.calls) {
       expect(call[1]).toBe("own-id");
     }
   });
@@ -675,14 +675,14 @@ describe("no-id cursor submit ack (#889)", () => {
       expect(result).toEqual({ found: false, scannedFile: null });
     }
     expect(baseline).toEqual({ file: null, size: 0 });
-    expect(findCursorAckTranscriptFileMock).not.toHaveBeenCalled();
+    expect(findLatestCursorTranscriptFileMock).not.toHaveBeenCalled();
   });
 
   // AC5
   it("pending baseline survives persist and restore", async () => {
     const ownFile = await makeJsonl("own-id.jsonl", [userTurn("ship the task")]);
     findCursorSessionIdMock.mockResolvedValue("own-id");
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "own-id" ? ownFile : null,
     );
     const persisted = persistCursorSubmitBaseline({ file: null, size: 0 });
@@ -705,7 +705,7 @@ describe("no-id cursor submit ack (#889)", () => {
   it("no-id baseline keeps the rotation floor after a chat rotation", async () => {
     const chatX = await makeJsonl("x-id.jsonl", [userTurn("earlier turn")]);
     const chatY = await makeJsonl("y-id.jsonl", [userTurn("continue")]);
-    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+    findLatestCursorTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "y-id" ? chatY : chatX,
     );
     findCursorSessionIdMock.mockResolvedValue("x-id");

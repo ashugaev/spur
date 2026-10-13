@@ -332,15 +332,6 @@ export async function findLatestCursorTranscriptFile(
   return null;
 }
 
-// Ack-path resolver. The id is required: the shared transcripts dir holds every
-// session on the worktree, so the ack never picks a transcript by mtime (#889).
-export async function findCursorAckTranscriptFile(
-  worktreePath: string,
-  agentSessionId: string,
-): Promise<string | null> {
-  return findLatestCursorTranscriptFile(worktreePath, agentSessionId);
-}
-
 // Inverse of the <id>/<id>.jsonl layout built above and below.
 export function cursorChatIdFromTranscriptPath(file: string): string {
   return basename(file, ".jsonl");
