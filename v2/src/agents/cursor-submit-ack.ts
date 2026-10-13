@@ -82,10 +82,11 @@ export async function captureCursorSubmitBaseline(
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitBaseline | null> {
+  const capturedAtMs = Date.now();
   const baseline = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
   if (!baseline) return baseline;
   if (!agentSessionId || !options?.cursorConfigDir) {
-    return { ...baseline, capturedAtMs: Date.now() };
+    return { ...baseline, capturedAtMs };
   }
   // An already-rotated chat: offset its file at send time, as the pinned one.
   const rotated = await findRotatedCursorTranscript(
@@ -93,9 +94,9 @@ export async function captureCursorSubmitBaseline(
     agentSessionId,
     options.cursorConfigDir,
   );
-  if (!rotated) return { ...baseline, capturedAtMs: Date.now() };
+  if (!rotated) return { ...baseline, capturedAtMs };
   const offset = await readCursorStableOffset(rotated).catch(() => 0);
-  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]), capturedAtMs: Date.now() };
+  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]), capturedAtMs };
 }
 
 // True when the file's birth postdates the send-time capture, i.e. the send
