@@ -1,14 +1,81 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import type * as FsPromises from "node:fs/promises";
 import {
+  appendFile,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CODEX_ROLLOUT_READ_MAX_CONCURRENCY,
   readCodexRolloutState,
   readCodexTranscriptEntries,
   type CodexRolloutReaderState,
+  type CodexRolloutReadResult,
 } from "../../src/agents/codex.js";
+import { PREFIX_VERIFY_BYTES } from "../../src/agent-history-delta.js";
+import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
+
+// Passthrough fs mock that records how rollout files are opened and read.
+const probe = vi.hoisted(() => ({
+  readFileCalls: [] as string[],
+  reads: [] as Array<{ path: string; length: number; position: number }>,
+  live: 0,
+  peak: 0,
+  delayReads: false,
+  statFail: new Set<string>(),
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      probe.readFileCalls.push(String(args[0]));
+      return actual.readFile(...args);
+    },
+    stat: (...args: Parameters<typeof actual.stat>) => {
+      if (probe.statFail.has(String(args[0]))) return Promise.reject(new Error("stat failed"));
+      return actual.stat(...args);
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const path = String(args[0]);
+      probe.live += 1;
+      probe.peak = Math.max(probe.peak, probe.live);
+      const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<unknown>;
+      const close = handle.close.bind(handle);
+      (handle as unknown as { read: unknown }).read = async (...a: unknown[]) => {
+        if (probe.delayReads) await new Promise((resolve) => setTimeout(resolve, 0));
+        probe.reads.push({ path, length: a[2] as number, position: a[3] as number });
+        return read(...a);
+      };
+      handle.close = async () => {
+        probe.live -= 1;
+        await close();
+      };
+      return handle;
+    },
+  };
+});
+
+beforeEach(() => {
+  probe.readFileCalls.length = 0;
+  probe.reads.length = 0;
+  probe.live = 0;
+  probe.peak = 0;
+  probe.delayReads = false;
+  probe.statFail.clear();
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STALE_WORKING_FIXTURE = join(
@@ -1038,6 +1105,291 @@ describe("readCodexRolloutState", () => {
       timestamp: sharedTimestamp,
       timestampMs: Date.parse(sharedTimestamp),
     });
+  });
+});
+
+const FIXTURE_DIR = join(__dirname, "../fixtures/agent-history/codex");
+
+function rolloutPath(sessionsDir: string, filename: string): string {
+  return join(sessionsDir, "2026", "04", "19", filename);
+}
+
+function normalizeResult(result: CodexRolloutReadResult): CodexRolloutReadResult {
+  return result.rollout
+    ? { ...result, rollout: { ...result.rollout, filePath: basename(result.rollout.filePath) } }
+    : result;
+}
+
+function eventLine(timestamp: string, type: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp, type: "event_msg", payload: { type, ...payload } });
+}
+
+function callLine(timestamp: string, callId: string): string {
+  return JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "function_call", name: "exec_command", call_id: callId },
+  });
+}
+
+function outputLine(timestamp: string, callId: string): string {
+  return JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "function_call_output", call_id: callId, output: "ok" },
+  });
+}
+
+function fillerLine(index: number, bytes: number): string {
+  return JSON.stringify({
+    timestamp: "2026-05-10T10:00:00.000Z",
+    type: "response_item",
+    payload: { type: "message", index, text: "f".repeat(bytes) },
+  });
+}
+
+async function coldRead(content: string, filename: string): Promise<CodexRolloutReadResult> {
+  const sessionsDir = await makeSessionsDir(content, filename);
+  return normalizeResult(await readCodexRolloutState(sessionsDir));
+}
+
+describe("readCodexRolloutState incremental chunked reads", () => {
+  it("T0 matches the pre-change golden for every fixture, cold and at every split point", async () => {
+    const golden = JSON.parse(
+      await readFile(join(FIXTURE_DIR, "rollout-state-golden.json"), "utf8"),
+    ) as Record<string, CodexRolloutReadResult>;
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    expect(names).toHaveLength(12);
+    expect(Object.keys(golden).sort()).toEqual(names);
+
+    for (const name of names) {
+      const content = await readFile(join(FIXTURE_DIR, name), "utf8");
+      expect(await coldRead(content, name), name).toEqual(golden[name]);
+
+      for (
+        let split = content.indexOf("\n") + 1;
+        split > 0;
+        split = content.indexOf("\n", split) + 1
+      ) {
+        const sessionsDir = await makeSessionsDir(content.slice(0, split), name);
+        const reader: CodexRolloutReaderState = { files: new Map() };
+        await readCodexRolloutState(sessionsDir, reader);
+        await appendFile(rolloutPath(sessionsDir, name), content.slice(split));
+        const incremental = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+        expect(incremental, `${name} split ${split}`).toEqual(golden[name]);
+      }
+    }
+  });
+
+  it("extracts cumulative structured components from a sanitized rollout fixture", async () => {
+    const result = await coldRead(
+      await readFile(join(FIXTURE_DIR, "token-components.jsonl"), "utf8"),
+      "token-components.jsonl",
+    );
+
+    expect(result.tokenUsage).toEqual({
+      provider: "codex",
+      generationId: "codex:thread-sanitized",
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      cacheReadInputTokens: 40,
+      cacheWriteInputTokens: 10,
+      reasoningOutputTokens: 20,
+      observedAtMs: Date.parse("2026-09-24T10:00:01.000Z"),
+    });
+  });
+
+  it("T1 reads a large rollout in bounded chunks without readFile", async () => {
+    const fixture = await readFile(WORKING_UNMATCHED_TOOL_CALL_FIXTURE, "utf8");
+    const filler = Array.from({ length: 3 * Math.ceil(SCAN_CHUNK_BYTES / 1000) + 5 }, (_, i) =>
+      fillerLine(i, 1000),
+    );
+    const content = `${fixture.trimEnd()}\n${filler.join("\n")}\n`;
+    const sessionsDir = await makeSessionsDir(content, "rollout-large.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-large.jsonl");
+    probe.readFileCalls.length = 0;
+
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir));
+
+    expect(probe.readFileCalls).not.toContain(filePath);
+    const reads = probe.reads.filter((read) => read.path === filePath);
+    expect(reads.length).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...reads.map((read) => read.length))).toBeLessThanOrEqual(SCAN_CHUNK_BYTES);
+    expect(result).toEqual(await coldRead(fixture, "rollout-large.jsonl"));
+  });
+
+  it("T2 reads only appended bytes after an append", async () => {
+    const base = [
+      eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
+      ...Array.from({ length: 30 }, (_, i) => fillerLine(i, 500)),
+    ].join("\n");
+    const sessionsDir = await makeSessionsDir(`${base}\n`, "rollout-append.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-append.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const previousSize = Buffer.byteLength(`${base}\n`);
+    expect(previousSize).toBeGreaterThan(PREFIX_VERIFY_BYTES);
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`;
+    probe.reads.length = 0;
+    await appendFile(filePath, appended);
+
+    const result = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(result.rollout?.state).toBe("waiting");
+    const reads = probe.reads.filter((read) => read.path === filePath);
+    expect(Math.min(...reads.map((read) => read.position))).toBeGreaterThanOrEqual(
+      previousSize - PREFIX_VERIFY_BYTES,
+    );
+    const totalBytes = reads.reduce((sum, read) => sum + read.length, 0);
+    expect(totalBytes).toBeLessThanOrEqual(Buffer.byteLength(appended) + 2 * PREFIX_VERIFY_BYTES);
+    expect(reader.files.get(filePath)?.offset).toBe(previousSize + Buffer.byteLength(appended));
+  });
+
+  it("T4 holds back a partial trailing line until it completes", async () => {
+    const started = eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" });
+    const complete = eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" });
+    const half = complete.slice(0, Math.floor(complete.length / 2));
+    const sessionsDir = await makeSessionsDir(`${started}\n${half}`, "rollout-partial.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-partial.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+
+    const first = await readCodexRolloutState(sessionsDir, reader);
+
+    expect(first.rollout?.state).toBe("working");
+    expect(reader.files.get(filePath)?.offset).toBe(Buffer.byteLength(`${started}\n`));
+
+    await appendFile(filePath, `${complete.slice(half.length)}\n`);
+    const second = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(second).toEqual(await coldRead(`${started}\n${complete}\n`, "rollout-partial.jsonl"));
+    expect(second.rollout?.state).toBe("waiting");
+  });
+
+  it("T5 refolds from scratch after an in-place rewrite", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(original, "rollout-rewrite.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-rewrite.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+    const rewritten = [
+      eventLine("2026-05-10T10:02:00.000Z", "task_complete", { turn_id: "t1" }),
+      fillerLine(0, 200),
+      fillerLine(1, 200),
+    ].join("\n");
+    expect(Buffer.byteLength(rewritten)).toBeGreaterThan(Buffer.byteLength(original));
+
+    await writeFile(filePath, `${rewritten}\n`, "utf8");
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(`${rewritten}\n`, "rollout-rewrite.jsonl"));
+    expect(result.rollout?.state).toBe("waiting");
+  });
+
+  it("T6 drops a call state once its output arrives in an append", async () => {
+    const prefix = [
+      eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
+      callLine("2026-05-10T10:00:01.000Z", "call-1"),
+    ].join("\n");
+    const output = outputLine("2026-05-10T10:00:02.000Z", "call-1");
+    const sessionsDir = await makeSessionsDir(`${prefix}\n`, "rollout-matched.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.reason).toBe(
+      "function_call",
+    );
+
+    await appendFile(rolloutPath(sessionsDir, "rollout-matched.jsonl"), `${output}\n`);
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(`${prefix}\n${output}\n`, "rollout-matched.jsonl"));
+    expect(result.rollout?.reason).toBe("task_started");
+  });
+
+  it("T7 does not double-fold on overlapping reads of one reader", async () => {
+    const content = await readFile(join(FIXTURE_DIR, "token-reset-aliases.jsonl"), "utf8");
+    const lines = content.split("\n").filter(Boolean);
+    const prefix = `${lines.slice(0, 2).join("\n")}\n`;
+    const rest = `${lines.slice(2).join("\n")}\n`;
+    const sessionsDir = await makeSessionsDir(prefix, "rollout-overlap.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    await appendFile(rolloutPath(sessionsDir, "rollout-overlap.jsonl"), rest);
+
+    const [left, right] = await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, reader),
+    ]);
+
+    const cold = await coldRead(content, "rollout-overlap.jsonl");
+    expect(cold.tokenUsage).toBeDefined();
+    expect(normalizeResult(left)).toEqual(cold);
+    expect(normalizeResult(right)).toEqual(cold);
+  });
+
+  it("T8 never scans more rollout files at once than the gate allows", async () => {
+    const names = (await readdir(FIXTURE_DIR)).filter((name) => name.endsWith(".jsonl")).sort();
+    const root = await mkdtemp(join(tmpdir(), "codex-rollout-gate-"));
+    tempDirs.push(root);
+    const dayDir = join(root, "sessions", "2026", "04", "19");
+    await mkdir(dayDir, { recursive: true });
+    for (const name of names) await copyFile(join(FIXTURE_DIR, name), join(dayDir, name));
+    probe.delayReads = true;
+
+    await readCodexRolloutState(join(root, "sessions"));
+
+    expect(names).toHaveLength(12);
+    expect(probe.peak).toBe(CODEX_ROLLOUT_READ_MAX_CONCURRENCY);
+    expect(probe.live).toBe(0);
+  });
+
+  it("T9 keeps only the state records since the newest anchor", async () => {
+    const lines: string[] = [];
+    let call = 0;
+    const stamp = (): string => new Date(Date.UTC(2026, 4, 10, 10, 0, call++)).toISOString();
+    for (let turn = 0; turn < 200; turn += 1) {
+      lines.push(eventLine(stamp(), "task_started", { turn_id: `turn-${turn}` }));
+      for (let i = 0; i < 5; i += 1) {
+        lines.push(
+          callLine(stamp(), `call-${turn}-${i}`),
+          outputLine(stamp(), `call-${turn}-${i}`),
+        );
+      }
+      lines.push(eventLine(stamp(), "task_complete", { turn_id: `turn-${turn}` }));
+    }
+    lines.push(eventLine(stamp(), "task_started", { turn_id: "turn-200" }));
+    for (let i = 0; i < 5; i += 1) lines.push(callLine(stamp(), `open-${i}`));
+    for (let i = 0; i < 3; i += 1) lines.push(outputLine(stamp(), `open-${i}`));
+    const sessionsDir = await makeSessionsDir(`${lines.join("\n")}\n`, "rollout-turns.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+
+    const result = await readCodexRolloutState(sessionsDir, reader);
+
+    const fold = reader.files.get(rolloutPath(sessionsDir, "rollout-turns.jsonl"))?.fold;
+    expect(fold?.stateTail.map((record) => record.reason)).toEqual([
+      "task_started",
+      "function_call",
+      "function_call",
+      "function_call",
+      "function_call",
+      "function_call",
+    ]);
+    expect(fold?.matchedCallIds.size).toBe(200 * 5 + 3);
+    expect(result.rollout?.state).toBe("working");
+    expect(result.rollout?.callId).toBe("open-4");
+  });
+
+  it("T10 returns a result but caches nothing when stat fails", async () => {
+    const content = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(content, "rollout-nostat.jsonl");
+    const filePath = rolloutPath(sessionsDir, "rollout-nostat.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    probe.statFail.add(filePath);
+
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+
+    expect(result).toEqual(await coldRead(content, "rollout-nostat.jsonl"));
+    expect(result.rollout?.state).toBe("working");
+    expect(reader.files.has(filePath)).toBe(false);
   });
 });
 
