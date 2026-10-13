@@ -162,15 +162,32 @@ function parsePrInfoPayload(obj: Record<string, unknown>): PrInfo {
   };
 }
 
+// Bounds every PR request, body read included, so a hung request settles as a
+// failure instead of wedging the shared poller. Well under POLL_MS.
+const PR_REQUEST_TIMEOUT_MS = 30_000;
+
+async function fetchPrJson(
+  input: string,
+  init: RequestInit = {},
+): Promise<{ ok: boolean; data: unknown }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PR_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    return { ok: res.ok, data: res.ok ? ((await res.json()) as unknown) : null };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
   const existing = pendingPrRequests.get(url);
   if (existing) return existing;
 
   const request = (async () => {
     try {
-      const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-      if (!res.ok) return cachedOrEmpty(url);
-      const data: unknown = await res.json();
+      const { ok, data } = await fetchPrJson(`/api/pr-status?url=${encodeURIComponent(url)}`);
+      if (!ok) return cachedOrEmpty(url);
       if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
@@ -194,13 +211,12 @@ const BATCH_CHUNK_SIZE = 100;
 
 async function fetchPrInfoBatchChunk(urls: readonly string[]): Promise<boolean> {
   try {
-    const res = await fetch("/api/pr-status/batch", {
+    const { ok, data } = await fetchPrJson("/api/pr-status/batch", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ urls }),
     });
-    if (!res.ok) return false;
-    const data: unknown = await res.json();
+    if (!ok) return false;
     if (typeof data !== "object" || data === null) return false;
     const results = (data as Record<string, unknown>)["results"];
     if (typeof results !== "object" || results === null) return false;
@@ -384,14 +400,17 @@ export function usePrInfo(url: string | undefined): PrInfo {
   }, [url]);
 
   useEffect(() => {
-    if (!url) return;
-    const unsubscribe = subscribePrInfo(url, () => {
+    // The state initializer ran for the first url only: re-read the cache when
+    // the url changes, since a fresh entry produces no fetch and no notify.
+    const sync = () => {
       setInfo((current) => {
-        const next = cachedOrEmpty(url);
+        const next = url ? cachedOrEmpty(url) : EMPTY_PR_INFO;
         return prInfosEqual(current, next) ? current : next;
       });
-    });
-    return unsubscribe;
+    };
+    sync();
+    if (!url) return;
+    return subscribePrInfo(url, sync);
   }, [url]);
 
   return info;

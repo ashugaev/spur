@@ -1086,5 +1086,48 @@ describe("shared PR poller", () => {
     });
     expect(resolvers).toHaveLength(2);
     expect(batchBodies()[1]).toEqual([urlB]);
+
+    // Settle the second run so no in-flight state leaks into the next test.
+    await act(async () => {
+      resolvers[1]?.(jsonResponse({ results: { [urlB]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  });
+
+  it("re-reads the cache when a mounted hook's url changes to an already-fresh entry", async () => {
+    mockEchoBackend();
+    const urlX = "https://github.com/org/repo/pull/1900";
+    const urlY = "https://github.com/org/repo/pull/1901";
+    primePrInfo(urlY, { ...openPr, state: "merged", canMerge: false, ciStatus: null });
+    const { result, rerender } = renderHook(({ url }) => usePrInfo(url), {
+      initialProps: { url: urlX },
+    });
+    await advance(0);
+    expect(result.current.state).toBe("open");
+    expect(batchBodies()).toEqual([[urlX]]);
+
+    rerender({ url: urlY });
+    await advance(0);
+    expect(result.current.state).toBe("merged");
+    expect(batchBodies()).toEqual([[urlX]]);
+  });
+
+  it("settles a never-answering batch as failed after the timeout and runs again", async () => {
+    mockFetch.mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    renderHook(() => usePrInfo("https://github.com/org/repo/pull/2000"));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    await advance(29_999);
+    expect(batchBodies()).toHaveLength(1);
+    // Timeout aborts the request; the failed run backs off to 2x the 120s base.
+    await advance(1);
+    await advance(240_000);
+    expect(batchBodies()).toHaveLength(2);
   });
 });
