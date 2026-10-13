@@ -16,6 +16,7 @@ import {
 } from "../../src/metadata.js";
 import type { SessionRecord, ReviewSignal } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
+import type { GitHubRunCheck } from "../../src/review-providers/github.js";
 
 const { ghMock, readCurrentBranchMock, readBranchPushUrlMock, isGitWorktreeMock } = vi.hoisted(
   () => ({
@@ -52,6 +53,7 @@ const {
   collectGitHubSignalsBatch,
   resolveBoundPrSummary,
   hasActiveChecks,
+  checksFromPrNode,
   githubReviewProvider,
   GitHubReviewBatchError,
 } = await import("../../src/review-providers/github.js");
@@ -369,15 +371,35 @@ describe("summarizeFailingCi", () => {
   });
 
   it("ignores a cancelled run superseded by a later success of the same name", () => {
-    const checks: GitHubCheck[] = [
+    const checks: GitHubRunCheck[] = [
       { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:00:00Z" },
       { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
     ];
     expect(summarizeFailingCi(checks)).toBeNull();
   });
 
+  it("keeps an earlier failure when a later success of the same job name is in another workflow", () => {
+    const checks: GitHubRunCheck[] = [
+      {
+        name: "test",
+        state: "FAILURE",
+        kind: "check_run",
+        workflowId: 1,
+        startedAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        name: "test",
+        state: "SUCCESS",
+        kind: "check_run",
+        workflowId: 2,
+        startedAt: "2026-01-01T00:05:00Z",
+      },
+    ];
+    expect(summarizeFailingCi(checks)).toBe("CI is failing: test.");
+  });
+
   it("flags a cancelled run later than a success of the same name", () => {
-    const checks: GitHubCheck[] = [
+    const checks: GitHubRunCheck[] = [
       { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" },
       { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:05:00Z" },
     ];
@@ -385,13 +407,70 @@ describe("summarizeFailingCi", () => {
   });
 
   it("keeps distinct names and untimestamped checks independent", () => {
-    const checks: GitHubCheck[] = [
+    const checks: GitHubRunCheck[] = [
       { name: "a", state: "FAILURE", startedAt: "2026-01-01T00:00:00Z" },
       { name: "b", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
       { name: "c", state: "CANCELLED" },
       { name: "c", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
     ];
     expect(summarizeFailingCi(checks)).toBe("CI is failing: a, c.");
+  });
+
+  describe("through the GraphQL node", () => {
+    const prNode = (contexts: unknown[]): Record<string, unknown> => ({
+      commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: contexts } } } }] },
+    });
+    const run = (conclusion: string, startedAt: string, workflowId: number): unknown => ({
+      name: "Labeler",
+      conclusion,
+      status: "COMPLETED",
+      startedAt,
+      checkSuite: { workflowRun: { workflow: { databaseId: workflowId } } },
+    });
+
+    it("ignores a cancelled CheckRun superseded by a later success in the same workflow", () => {
+      const node = prNode([
+        run("CANCELLED", "2026-01-01T00:00:00Z", 7),
+        run("SUCCESS", "2026-01-01T00:05:00Z", 7),
+      ]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBeNull();
+    });
+
+    it("keeps a failure when the later success belongs to another workflow", () => {
+      const node = prNode([
+        run("FAILURE", "2026-01-01T00:00:00Z", 7),
+        run("SUCCESS", "2026-01-01T00:05:00Z", 8),
+      ]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBe("CI is failing: Labeler.");
+    });
+
+    it("dedupes StatusContext by createdAt and keys it apart from CheckRun", () => {
+      const status = (state: string, createdAt: string): unknown => ({
+        context: "Labeler",
+        state,
+        createdAt,
+      });
+      expect(
+        summarizeFailingCi(
+          checksFromPrNode(
+            prNode([
+              status("ERROR", "2026-01-01T00:00:00Z"),
+              status("SUCCESS", "2026-01-01T00:05:00Z"),
+            ]),
+          ),
+        ),
+      ).toBeNull();
+      expect(
+        summarizeFailingCi(
+          checksFromPrNode(
+            prNode([
+              status("ERROR", "2026-01-01T00:00:00Z"),
+              run("SUCCESS", "2026-01-01T00:05:00Z", 7),
+            ]),
+          ),
+        ),
+      ).toBe("CI is failing: Labeler.");
+    });
   });
 
   it("ignores skipped, neutral, and stale GitHub checks", () => {
