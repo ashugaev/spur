@@ -46,6 +46,7 @@ import {
   buildOpenCodeResumePlan,
   assertOpenCodeCompatibility,
   captureOpenCodeSubmitBaseline,
+  ensureOpenCodeHeartbeatPlugin,
   findOpenCodeSessionId,
   invalidateOpenCodeState,
   opencodeCommand,
@@ -683,6 +684,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
     readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
     setup: async ({
+      sessionToolDir,
       mcpBindings,
       restrictWrites,
       model,
@@ -696,6 +698,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         model && reasoningEffort && reasoningVariantNames
           ? { model, reasoningEffort, variantNames: reasoningVariantNames }
           : undefined,
+        await ensureOpenCodeHeartbeatPlugin(sessionToolDir),
       );
       return configContent ? { opencodeConfigContent: configContent } : {};
     },

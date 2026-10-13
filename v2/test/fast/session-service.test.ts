@@ -129,6 +129,7 @@ const waitForOpenCodeLaunchMessageMock = vi.fn();
 const withOpenCodeLaunchIdentityLockMock = vi.fn();
 const readOpenCodeStateMock = vi.fn();
 const readOpenCodeStructuredStateMock = vi.fn();
+const openCodeHeartbeatExpiredMock = vi.fn();
 const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
@@ -553,6 +554,7 @@ vi.mock("../../src/agents/opencode.js", async (importOriginal) => {
     withOpenCodeLaunchIdentityLock: withOpenCodeLaunchIdentityLockMock,
     readOpenCodeState: readOpenCodeStateMock,
     readOpenCodeStructuredState: readOpenCodeStructuredStateMock,
+    openCodeHeartbeatExpired: openCodeHeartbeatExpiredMock,
   };
 });
 
@@ -2187,6 +2189,7 @@ describe("SessionService", () => {
         action(),
       );
     readOpenCodeStateMock.mockReset().mockResolvedValue(null);
+    openCodeHeartbeatExpiredMock.mockReset().mockResolvedValue(false);
     readOpenCodeStructuredStateMock.mockReset().mockImplementation(async (...args: unknown[]) => ({
       state: await readOpenCodeStateMock(...args),
     }));
@@ -22756,6 +22759,57 @@ describe("SessionService", () => {
     expect(result.status).toBe("stopped");
     expect(result.state).toBe("stopped");
     expect(readClaudeJsonlStateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["working", "waiting", "needs_input", "error", "rate_limited"] as const)(
+    "classifies an expired OpenCode heartbeat without replacing native %s errors",
+    async (state) => {
+      agentStateStrategyMock.mockReturnValue("opencode");
+      createSessionStore(
+        runningSession({
+          agent: "opencode",
+          agentSessionId: "ses_heartbeat",
+          agentLaunchId: "launch",
+        }),
+      );
+      readOpenCodeStateMock.mockResolvedValue({
+        state,
+        reason: "native state",
+        activityMs: Date.now(),
+      });
+      openCodeHeartbeatExpiredMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const result = await service.get("api-1");
+      expect(result.state).toBe(state === "rate_limited" ? "rate_limited" : "error");
+      expect(result.status).toBe("running");
+      if (state !== "error" && state !== "rate_limited") {
+        expect(openCodeHeartbeatExpiredMock).toHaveBeenCalledWith(
+          join(TEST_DATA_DIR, "session-tools", "api-1"),
+          "launch",
+        );
+        openCodeHeartbeatExpiredMock.mockResolvedValue(false);
+        vi.setSystemTime(Date.now() + 5_000);
+        const recovered = await service.get("api-1");
+        expect(recovered.state).toBe(state);
+        expect(recovered.lastActivityAt).toBe(result.lastActivityAt);
+      }
+      service.dispose();
+    },
+  );
+
+  it("keeps OpenCode stopped when its old heartbeat expired", async () => {
+    agentStateStrategyMock.mockReturnValue("opencode");
+    createSessionStore(
+      runningSession({ agent: "opencode", status: "stopped", agentLaunchId: "launch" }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    openCodeHeartbeatExpiredMock.mockResolvedValue(true);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    expect((await service.get("api-1")).state).toBe("stopped");
+    expect(openCodeHeartbeatExpiredMock).not.toHaveBeenCalled();
+    service.dispose();
   });
 
   it.each(["claude", "codex", "opencode", "cursor"] as const)(

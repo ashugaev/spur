@@ -5,6 +5,7 @@
 Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, tmux socket, default agent, UI port, `voice:` — see [voice.md](voice.md)). Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only. Merge order and per-session resolution: `v2/src/config.ts`.
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+OpenCode worker heartbeat expiry reports session state `error`; no automatic restart or transcript-inactivity timeout; recovery commands: [pause/restore](commands.md#list), [queue flush](commands.md#send-queue); `v2/src/agents/opencode.ts`, `v2/src/session-service.ts`.
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
 `SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
 Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
