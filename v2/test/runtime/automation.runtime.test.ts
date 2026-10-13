@@ -690,6 +690,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           accept: (value) => value.status === "stopped" && value.state === "stale",
         });
         expect(parked.stopReason).toBe("stale_timeout");
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -843,6 +844,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.pr?.number === 42,
           },
         );
+        await waitForSourceBaseline(context, session.id);
 
         await execFileAsync("git", ["-C", session.worktreePath, "switch", "-c", "feature-drifted"]);
 
@@ -1418,6 +1420,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         try {
           const conflictMarker = 'GitHub updates on PR #42 "Restore merge conflict alerts":';
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict-restore": {
