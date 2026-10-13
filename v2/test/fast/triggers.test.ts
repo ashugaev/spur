@@ -3742,6 +3742,58 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it("does not hold new events behind a replacement's own in-flight delivery after its deferred merge", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-inflight-deferred-gate-"));
+      const autoPing = new AutoPingService(dataDir);
+      const working = { ...waitingSession(), state: "working" };
+      const oldHeld = gatedDeliver();
+      const newHeld = gatedDeliver();
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        snapshotOf("comment:1", "comment:2", "comment:3"),
+      );
+      const old = await start({
+        get: vi.fn().mockResolvedValue(working),
+        deliver: oldHeld.deliver,
+        interrupt: true,
+        autoPing,
+        dataDir,
+      });
+      let replacement: Awaited<ReturnType<typeof start>> | undefined;
+      try {
+        old.bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(oldHeld.deliver).toHaveBeenCalledTimes(1);
+
+        replacement = await start({
+          get: vi.fn().mockResolvedValue(working),
+          deliver: newHeld.deliver,
+          interrupt: true,
+          autoPing,
+          dataDir,
+        });
+        replacement.bus.emit(commentEvent("comment:3"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toEqual(["comment:1"]);
+
+        oldHeld.gate.reject(new Error("submit-ack timeout"));
+        await vi.advanceTimersByTimeAsync(0);
+        // The deferred merge ran and its dispatch started the replacement's delivery.
+        expect(newHeld.deliver).toHaveBeenCalledTimes(1);
+
+        replacement.bus.emit(commentEvent("comment:2"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(keysOf(record())).toContain("comment:2");
+        expect(newHeld.deliver).toHaveBeenCalledTimes(1);
+      } finally {
+        newHeld.gate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        await old.controller.stop();
+        await replacement?.controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+
     describe("stale batch guards", () => {
       // Drops the first batch's record, then emits a second event: the
       // synchronous merge clears the cached first batch and builds a new one.

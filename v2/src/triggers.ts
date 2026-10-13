@@ -1882,12 +1882,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               routeFingerprint: lockTarget,
             });
             enqueue(queueKey, async () => {
+              let queued: ReturnType<typeof merge> = null;
               try {
-                let queued: ReturnType<typeof merge> = null;
                 await autoPing.withRouteLock(lockTarget, async () => {
                   queued = merge(readPendingSendBatches(deps.config.dataDir).get(queueKey));
                 });
-                await dispatch(queued);
               } finally {
                 const remaining = (deferredMerges.get(queueKey)?.count ?? 1) - 1;
                 if (remaining > 0) {
@@ -1896,6 +1895,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
                   deferredMerges.delete(queueKey);
                 }
               }
+              // Dispatch can hold the route lock through a delivery; the gate
+              // must not outlive the merge or every new event would wait on it.
+              await dispatch(queued);
             });
             return;
           }
