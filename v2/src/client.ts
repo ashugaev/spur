@@ -24,6 +24,13 @@ const DAEMON_STOP_RETRY_DELAY_MS = 100;
 const DAEMON_START_ATTEMPTS = 160;
 const DAEMON_START_RETRY_DELAY_MS = 250;
 const EXTERNAL_DAEMON_RESTART_ATTEMPTS = 20;
+const PROBE_DEADLINE_MS = 10_000;
+// Shutting down daemon: slow /info is expected, so poll fast instead of waiting 10s.
+const STOP_PROBE_DEADLINE_MS = 1_000;
+const READ_DEADLINE_MS = 120_000;
+const MUTATION_DEADLINE_MS = 1_800_000;
+const LIVENESS_INTERVAL_MS = 60_000;
+const WATCHDOG_ABORT_REASON = "daemon-unresponsive";
 
 function parseJsonText(text: string): unknown {
   if (!text) {
@@ -55,9 +62,44 @@ async function fetchJson(
   return { response, payload };
 }
 
+function deadlineController(ms: number): { controller: AbortController; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  timer.unref();
+  return { controller, clear: () => clearTimeout(timer) };
+}
+
+function unresponsiveDaemonError(baseUrl: string): Error {
+  return new Error(
+    `Spur daemon at ${baseUrl} did not answer GET /info within ${PROBE_DEADLINE_MS / 1000}s; the process holds the port but is not responding.`,
+  );
+}
+
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method ?? "GET";
+  const mutation = method !== "GET";
+  const startedAt = Date.now();
+  const request = deadlineController(mutation ? MUTATION_DEADLINE_MS : READ_DEADLINE_MS);
+  const watchdogController = new AbortController();
+  let probing = false;
+  const watchdog = setInterval(() => {
+    if (probing) return;
+    probing = true;
+    void probeDaemonWithin(baseUrl, PROBE_DEADLINE_MS, watchdogController.signal).then((probe) => {
+      probing = false;
+      if (
+        probe !== "cancelled" &&
+        probe.state === "unresponsive" &&
+        !watchdogController.signal.aborted
+      ) {
+        request.controller.abort(WATCHDOG_ABORT_REASON);
+      }
+    });
+  }, LIVENESS_INTERVAL_MS);
+  watchdog.unref();
   const withOrigin: RequestInit = {
     ...init,
+    signal: request.controller.signal,
     headers: {
       ...(init?.headers ?? {}),
       "x-spur-origin": "cli",
@@ -66,7 +108,27 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
         : {}),
     },
   };
-  const { response, payload } = await fetchJson(baseUrl, path, withOrigin);
+  let result: { response: Response; payload: unknown };
+  try {
+    result = await fetchJson(baseUrl, path, withOrigin);
+  } catch (error) {
+    if (!request.controller.signal.aborted) throw error;
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const retryNote = mutation
+      ? " The daemon may still apply this request; check its state before retrying."
+      : "";
+    throw new Error(
+      request.controller.signal.reason === WATCHDOG_ABORT_REASON
+        ? `Spur daemon at ${baseUrl} stopped answering /info after ${elapsed}s waiting on ${method} ${path}.${retryNote}`
+        : `Spur daemon at ${baseUrl} did not answer ${method} ${path} within ${elapsed}s.${retryNote}`,
+      { cause: error },
+    );
+  } finally {
+    request.clear();
+    clearInterval(watchdog);
+    watchdogController.abort();
+  }
+  const { response, payload } = result;
   if (!response.ok) {
     const message = formatDaemonError(response.status, payload, path);
     throw new Error(message);
@@ -176,7 +238,8 @@ export type DaemonProbe =
   | { state: "ready"; info: RuntimeInfo }
   | { state: "incompatible"; pid?: number }
   | { state: "starting" }
-  | { state: "unreachable" };
+  | { state: "unreachable" }
+  | { state: "unresponsive" };
 
 // Deliberately loose: this pid is used to stop daemons of ANY older build, so
 // it must not require fields (e.g. version) that predate-this-build daemons
@@ -202,8 +265,26 @@ function incompatibleProbe(pid: number | undefined): DaemonProbe {
 }
 
 export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
+  return probeDaemonWithin(baseUrl, PROBE_DEADLINE_MS);
+}
+
+async function probeDaemonWithin(baseUrl: string, deadlineMs: number): Promise<DaemonProbe>;
+async function probeDaemonWithin(
+  baseUrl: string,
+  deadlineMs: number,
+  parent: AbortSignal,
+): Promise<DaemonProbe | "cancelled">;
+async function probeDaemonWithin(
+  baseUrl: string,
+  deadlineMs: number,
+  parent?: AbortSignal,
+): Promise<DaemonProbe | "cancelled"> {
+  const deadline = deadlineController(deadlineMs);
+  const signal = parent
+    ? AbortSignal.any([deadline.controller.signal, parent])
+    : deadline.controller.signal;
   try {
-    const response = await fetch(`${baseUrl}/info`);
+    const response = await fetch(`${baseUrl}/info`, { signal });
     const text = await response.text();
     let payload: unknown = {};
     try {
@@ -223,7 +304,12 @@ export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
 
     return { state: "ready", info: payload };
   } catch {
-    return { state: "unreachable" };
+    if (parent?.aborted) return "cancelled";
+    return deadline.controller.signal.aborted
+      ? { state: "unresponsive" }
+      : { state: "unreachable" };
+  } finally {
+    deadline.clear();
   }
 }
 
@@ -240,7 +326,7 @@ function daemonPidFromProbe(probe: DaemonProbe): number | undefined {
 async function waitUntilDaemonPidChanges(baseUrl: string, pid: number): Promise<boolean> {
   for (let attempt = 0; attempt < DAEMON_STOP_ATTEMPTS; attempt += 1) {
     await sleep(DAEMON_STOP_RETRY_DELAY_MS);
-    const probe = await probeDaemon(baseUrl);
+    const probe = await probeDaemonWithin(baseUrl, STOP_PROBE_DEADLINE_MS);
     if (probe.state === "unreachable") {
       return true;
     }
@@ -255,6 +341,7 @@ async function waitUntilDaemonPidChanges(baseUrl: string, pid: number): Promise<
 
 async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
   let probe = await probeDaemon(baseUrl);
+  if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
   if (probe.state !== "starting") {
     return probe;
   }
@@ -262,6 +349,7 @@ async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     probe = await probeDaemon(baseUrl);
+    if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
     if (probe.state !== "starting") {
       return probe;
     }
@@ -346,15 +434,21 @@ function spawnDaemon(
   child.unref();
 }
 
+// spawnedByUs: startup can block the daemon's event loop for a long time, so an
+// unresponsive probe keeps polling. Otherwise it is an old daemon we must not replace.
 async function waitForReadyDaemon(
   baseUrl: string,
-  attempts = DAEMON_START_ATTEMPTS,
+  attempts: number,
+  spawnedByUs: boolean,
 ): Promise<RuntimeInfo | undefined> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     const probe = await probeDaemon(baseUrl);
     if (probe.state === "ready") {
       return probe.info;
+    }
+    if (probe.state === "unresponsive" && !spawnedByUs) {
+      throw unresponsiveDaemonError(baseUrl);
     }
   }
 
@@ -401,10 +495,10 @@ export async function restartDaemonIfRunning(
 
   // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
-  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
+  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS, false);
   if (!runtime) {
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "restart");
-    runtime = await waitForReadyDaemon(baseUrl);
+    runtime = await waitForReadyDaemon(baseUrl, DAEMON_START_ATTEMPTS, true);
   }
   if (!runtime) {
     throw new Error(`Timed out waiting for daemon restart at ${baseUrl}`);
@@ -424,12 +518,16 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
   if (probe.state === "ready") {
     return baseUrl;
   }
+  if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
   if (probe.state === "incompatible") {
     await stopIncompatibleDaemon(baseUrl, probe.pid);
     probe = await probeDaemon(baseUrl);
+    if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
   }
+  let spawned = false;
   if (probe.state === "unreachable") {
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
+    spawned = true;
   }
 
   for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
@@ -438,11 +536,14 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     if (probe.state === "ready") {
       return baseUrl;
     }
+    if (probe.state === "unresponsive" && !spawned) throw unresponsiveDaemonError(baseUrl);
     if (probe.state === "incompatible") {
       await stopIncompatibleDaemon(baseUrl, probe.pid);
       probe = await probeDaemon(baseUrl);
+      if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
       if (probe.state === "unreachable") {
         spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
+        spawned = true;
       }
     }
   }
