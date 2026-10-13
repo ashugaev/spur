@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { startPoller, type PollOutcome, type Poller } from "@/lib/poller";
 import type { SpurSessionLink } from "@/lib/types";
 import {
   type CiStatus,
@@ -267,33 +268,93 @@ export function extractLinkId(link: SpurSessionLink): string {
   return link.label;
 }
 
+// One shared poller for every mounted PR consumer. A URL is polled while at
+// least one hook subscribes it; each run fetches only the URLs whose cache
+// entry is older than FRESH_TTL_MS: GitHub pull URLs in one batch request,
+// everything else (GitLab) one GET each. Subscription changes made in the same
+// tick coalesce into one run, and the poller stops once none remain.
+const prSubscriptions = new Map<string, number>();
+const prRunListeners = new Set<(seq: number, outcome: PollOutcome) => void>();
+let prPoller: Poller | null = null;
+let prRunSeq = 0;
+let prRunRequested = false;
+let prCoalesceTimer: ReturnType<typeof setTimeout> | undefined;
+
+function isPrFresh(url: string): boolean {
+  const cached = prCache.get(url);
+  return cached !== undefined && Date.now() - cached.fetchedAt < FRESH_TTL_MS;
+}
+
+async function fetchPrInfoSingle(url: string): Promise<void> {
+  const result = await fetchPrInfo(url);
+  const prev = prCache.get(url)?.data;
+  if (!prev || !prInfosEqual(prev, result)) setPrCache(url, result);
+}
+
+async function runPrPoll(): Promise<PollOutcome> {
+  const seq = ++prRunSeq;
+  const due = [...prSubscriptions.keys()].filter((url) => !isPrFresh(url));
+  const github = due.filter((url) => reviewProviderFromUrl(url) === "github");
+  const others = due.filter((url) => reviewProviderFromUrl(url) !== "github");
+  const [batchOk] = await Promise.all([fetchPrInfoBatch(github), ...others.map(fetchPrInfoSingle)]);
+  const outcome: PollOutcome = batchOk ? "ok" : "failed";
+  for (const listener of prRunListeners) listener(seq, outcome);
+  return outcome;
+}
+
+function flushPrSubscriptions(): void {
+  prCoalesceTimer = undefined;
+  const requested = prRunRequested;
+  prRunRequested = false;
+  if (prSubscriptions.size === 0) {
+    prPoller?.stop();
+    prPoller = null;
+    return;
+  }
+  if (!prPoller) {
+    prPoller = startPoller({ intervalMs: POLL_MS, run: runPrPoll });
+    return;
+  }
+  if (requested || [...prSubscriptions.keys()].some((url) => !isPrFresh(url))) prPoller.request();
+}
+
+// A consumer that waits on a run settling after it subscribed (usePrReadyUrls)
+// asks for one even when every entry is fresh; such a run sends no request.
+function requestPrRun(): void {
+  prRunRequested = true;
+  prCoalesceTimer ??= setTimeout(flushPrSubscriptions, 0);
+}
+
+function subscribePrPolling(url: string): () => void {
+  prSubscriptions.set(url, (prSubscriptions.get(url) ?? 0) + 1);
+  prCoalesceTimer ??= setTimeout(flushPrSubscriptions, 0);
+  return () => {
+    const count = (prSubscriptions.get(url) ?? 0) - 1;
+    if (count > 0) {
+      prSubscriptions.set(url, count);
+      return;
+    }
+    prSubscriptions.delete(url);
+    // Stop is deferred to the coalesced flush: a URL-set change unsubscribes
+    // and resubscribes in one commit and must keep the poller (and its
+    // in-flight run) alive.
+    if (prSubscriptions.size === 0) prCoalesceTimer ??= setTimeout(flushPrSubscriptions, 0);
+  };
+}
+
+function onPrRunSettled(listener: (seq: number, outcome: PollOutcome) => void): () => void {
+  prRunListeners.add(listener);
+  return () => {
+    prRunListeners.delete(listener);
+  };
+}
+
 export function usePrInfo(url: string | undefined): PrInfo {
   const [info, setInfo] = useState<PrInfo>(() => (url ? cachedOrEmpty(url) : EMPTY_PR_INFO));
 
   useEffect(() => {
     if (!url) return;
-    let cancelled = false;
-
-    const run = async () => {
-      const cached = prCache.get(url);
-      if (cached && Date.now() - cached.fetchedAt < FRESH_TTL_MS && !cached.data.stale) return;
-      const result = await fetchPrInfo(url);
-      if (cancelled) return;
-      const prev = prCache.get(url)?.data;
-      if (prev && prInfosEqual(prev, result)) {
-        setInfo(result);
-        return;
-      }
-      setPrCache(url, result);
-      setInfo(result);
-    };
-
-    void run();
-    const timer = setInterval(() => void run(), POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    return subscribePrPolling(url);
   }, [url]);
 
   useEffect(() => {
@@ -310,10 +371,10 @@ export function usePrInfo(url: string | undefined): PrInfo {
   return info;
 }
 
-// GitHub-only URLs from `urls` are batch-fetched while `enabled` is true (on
-// mount and every POLL_MS), and readiness is derived from the primed cache
-// via `isPrReady`. `loaded` stays false until the first batch for the
-// current URL set resolves, so a filter consumer can no-op instead of
+// GitHub-only URLs from `urls` join the shared PR poll while `enabled` is
+// true, and readiness is derived from the primed cache via `isPrReady`.
+// `loaded` stays false until a shared run started after the current URL set
+// subscribed settles successfully, so a filter consumer can no-op instead of
 // flashing an empty list while priming.
 export function usePrReadyUrls(
   urls: readonly string[],
@@ -344,30 +405,25 @@ export function usePrReadyUrls(
 
     // The URL set just changed (this effect re-runs on every `githubUrls`
     // identity change): the previous `ready` set belonged to a different set
-    // of URLs, so it must stop gating the filter as "loaded" until the new
-    // batch below resolves — otherwise a newly PR-ready session is filtered
-    // out for one round trip against stale readiness data.
+    // of URLs, so it must stop gating the filter as "loaded" until a shared
+    // run that started after this subscription settles successfully —
+    // otherwise a newly PR-ready session is filtered out for one round trip
+    // against stale readiness data. A failed run leaves the prior state: it
+    // must not commit an unprimed (empty) `ready` set, which would narrow a
+    // `prReadyOnly` filter to nothing instead of leaving it a no-op.
     setState((current) => ({ ready: current.ready, loaded: false }));
 
-    let cancelled = false;
-    const run = async () => {
-      const success = await fetchPrInfoBatch(githubUrls);
-      if (cancelled) return;
-      if (!success) {
-        // Leave the existing state as-is: a failed fetch must not commit an
-        // unprimed (empty) `ready` set, which would narrow a `prReadyOnly`
-        // filter to nothing instead of leaving it a no-op.
-        return;
-      }
+    const subscribedAtRun = prRunSeq;
+    const stopListening = onPrRunSettled((seq, outcome) => {
+      if (seq <= subscribedAtRun || outcome !== "ok") return;
       const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
       setState({ ready, loaded: true });
-    };
-
-    void run();
-    const timer = setInterval(() => void run(), POLL_MS);
+    });
+    const releases = githubUrls.map(subscribePrPolling);
+    requestPrRun();
     return () => {
-      cancelled = true;
-      clearInterval(timer);
+      stopListening();
+      for (const release of releases) release();
     };
   }, [enabled, githubUrls]);
 

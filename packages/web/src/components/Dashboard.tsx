@@ -1558,7 +1558,8 @@ export function Dashboard() {
   // Bounded by prReady.loaded (itself bounded by prReadyOnly) rather than
   // its own facet query: computing this independently of the toggle would
   // require fetching PR readiness for every session at all times, which
-  // violates "no /api/pr-status/batch request while prReadyOnly is false".
+  // violates "while prReadyOnly is false, /api/pr-status/batch bodies carry
+  // only URLs of mounted rows and badges, never unmounted sessions".
   const prReadyCount = useMemo(() => {
     if (!prReady.loaded) return 0;
     const counts = buildFacetCounts(allSessions, "prReady", facetFilters, (s) => {
