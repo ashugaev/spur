@@ -448,9 +448,7 @@ export function codexArgsSelectProvider(args: readonly string[]): boolean {
     const arg = args[i] ?? "";
     if (
       arg === "--oss" ||
-      arg === "--local-provider" ||
-      arg.startsWith("--local-provider=") ||
-      arg === "-p" ||
+      arg.startsWith("--local-provider") ||
       arg === "--profile" ||
       arg.startsWith("--profile=") ||
       arg.startsWith("-p")
