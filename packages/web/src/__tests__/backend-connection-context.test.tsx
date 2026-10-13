@@ -766,4 +766,37 @@ describe("BackendConnectionProvider", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(FAILURE_THRESHOLD + 2);
     expect(result.current.phase).toBe("connected");
   });
+
+  it("does not carry failures counted before a hide into the resumed session", async () => {
+    let ok = false;
+    mockFetchResults(() => ok);
+
+    vi.useFakeTimers();
+    const { result } = renderProvider();
+    const stepProbe = makeProbeStepper();
+    // FAILURE_THRESHOLD - 1 failures: one more visible failure would disconnect.
+    for (let i = 0; i < FAILURE_THRESHOLD - 1; i++) {
+      await stepProbe();
+    }
+    expect(result.current.phase).toBe("connected");
+
+    await act(async () => {
+      setVisibility("hidden");
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    // Resume: the immediate probe fails once, which is failure 1, not the threshold.
+    await act(async () => {
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.phase).toBe("connected");
+
+    ok = false;
+    for (let i = 1; i < FAILURE_THRESHOLD; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(retryIntervalMs(i));
+      });
+    }
+    expect(result.current.phase).toBe("disconnected");
+  });
 });

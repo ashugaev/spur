@@ -195,7 +195,12 @@ export function BackendConnectionProvider({ children }: { children: ReactNode })
       runProbe();
     }
     const timer = window.setInterval(runProbe, intervalMs);
-    const onVisibilityChange = () => runProbe();
+    const onVisibilityChange = () => {
+      // Failures counted before a hide say nothing about the daemon now: a
+      // single failure on resume must not complete a threshold started earlier.
+      if (state.phase !== "disconnected") setConsecutiveFailures(0);
+      runProbe();
+    };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
