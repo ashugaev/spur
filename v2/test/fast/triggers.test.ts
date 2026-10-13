@@ -2992,8 +2992,9 @@ describe("startConfiguredTriggers", () => {
         expect(deliverMock).toHaveBeenCalledTimes(1);
       });
 
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      // The flush tick lands up to one tick after the 10 minute retry gate.
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
 
       expect(deliverMock).toHaveBeenCalledTimes(3);
       expect(inputLogEntries("api-1")).toEqual([
@@ -3098,7 +3099,8 @@ describe("startConfiguredTriggers", () => {
         { interrupt: true },
       );
 
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      // The flush tick lands up to one tick after the 10 minute retry gate.
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
       expect(deliverMock).toHaveBeenCalledTimes(2);
       expect(deliverMock).toHaveBeenLastCalledWith(
         "api-1",
@@ -3106,10 +3108,10 @@ describe("startConfiguredTriggers", () => {
         { interrupt: true },
       );
 
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
       expect(deliverMock).toHaveBeenCalledTimes(3);
 
-      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 5_000);
       expect(deliverMock).toHaveBeenCalledTimes(3);
     } finally {
       await controller.stop();
