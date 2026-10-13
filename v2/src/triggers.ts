@@ -28,6 +28,7 @@ import {
   type AppConfig,
   type AutoPingDestination,
   type AutoPingRouteDescriptor,
+  type PersistedPendingBatch,
   type SendTriggerConfig,
   type SendBatchRetryEntry,
   type SessionView,
@@ -751,6 +752,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   // Queue keys whose claimed batch is mid-delivery. A merge for such a key keeps
   // the claim and trusts memory over disk.
   const deliveringKeys = new Set<string>();
+  // Merges deferred behind another controller's claim, per queue key. While any
+  // is pending, every later merge for the key defers too, so bus order holds.
+  const deferredMerges = new Map<string, { count: number; routeFingerprint: string }>();
+  // Another controller's active claim: its deliverBatch holds the route lock.
+  const claimHeldByOther = (claim: PersistedPendingBatch["claim"], routeLeaseId: string): boolean =>
+    !!claim &&
+    claim.routeLeaseId !== routeLeaseId &&
+    autoPing.isRouteLeaseActive(claim.routeLeaseId);
   const autoCompleteChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
   let autoCompleteTimer: NodeJS.Timeout | null = null;
@@ -843,11 +852,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     return autoPing.withRouteLock(batch.routeFingerprint, async () => {
       const persisted = readPendingSendBatch(deps.config.dataDir, batch.workId);
       if (!persisted) return { status: "suppressed" };
-      if (
-        persisted.claim &&
-        persisted.claim.routeLeaseId !== batch.routeLeaseId &&
-        autoPing.isRouteLeaseActive(persisted.claim.routeLeaseId)
-      ) {
+      if (claimHeldByOther(persisted.claim, batch.routeLeaseId)) {
         return { status: "suppressed" };
       }
       const authoritativeBatch = restoreSendBatch(persisted.batch);
@@ -1455,6 +1460,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     occurrenceId: string,
     trigger: SendTriggerConfig,
     sendBatch: SendBatch,
+    persisted: PersistedPendingBatch | undefined,
   ): { batch: PendingBatch; created: boolean } | null => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
     const destination = { kind: "session" as const, sessionId: sendBatch.sessionId };
@@ -1463,7 +1469,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const routeFingerprint = autoPingRouteFingerprint(route);
     const routeLeaseId = leaseForRoute(routeFingerprint, route);
     const cached = pendingBatches.get(queueKey);
-    const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
     // The claim an in-flight delivery holds on this batch; the merge keeps it.
     let inFlightClaim: NonNullable<typeof persisted>["claim"];
     if (cached && !persisted) {
@@ -1564,19 +1569,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     });
     scheduleFlushLoop();
     return { batch, created: !merged };
-  };
-
-  // The cached batch at `queueKey` when another controller holds an active claim
-  // on its persisted record (the same test deliverBatch uses to stand down).
-  const foreignClaimBatch = (queueKey: string): PendingBatch | undefined => {
-    const cached = pendingBatches.get(queueKey);
-    const claim = cached && readPendingSendBatches(deps.config.dataDir).get(queueKey)?.claim;
-    return cached &&
-      claim &&
-      claim.routeLeaseId !== cached.routeLeaseId &&
-      autoPing.isRouteLeaseActive(claim.routeLeaseId)
-      ? cached
-      : undefined;
   };
 
   // Delivery tail of a send event, enqueued behind its merge. It can run long
@@ -1852,7 +1844,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             return;
           }
           const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
-          const merge = () =>
+          const merge = (persisted: PersistedPendingBatch | undefined) =>
             mergeSendEvent(
               projectId,
               triggerId,
@@ -1860,6 +1852,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               event.occurrenceId,
               trigger,
               sendBatch,
+              persisted,
             );
           const dispatch = async (queued: ReturnType<typeof merge>): Promise<void> => {
             if (!queued) return;
@@ -1872,20 +1865,41 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
               queued.created,
             );
           };
-          const foreignClaimTarget = foreignClaimBatch(queueKey);
-          if (foreignClaimTarget) {
+          const persisted = readPendingSendBatches(deps.config.dataDir).get(queueKey);
+          const cached = pendingBatches.get(queueKey);
+          const deferred = deferredMerges.get(queueKey);
+          const lockTarget =
+            deferred?.routeFingerprint ??
+            (cached && claimHeldByOther(persisted?.claim, cached.routeLeaseId)
+              ? cached.routeFingerprint
+              : undefined);
+          if (lockTarget !== undefined) {
             // Another controller's delivery holds the route lock and the claim;
-            // merge once it releases, as a locked merge always did.
+            // merge once it releases, as a locked merge always did. Later events
+            // for this key queue behind it until it has merged.
+            deferredMerges.set(queueKey, {
+              count: (deferred?.count ?? 0) + 1,
+              routeFingerprint: lockTarget,
+            });
             enqueue(queueKey, async () => {
-              let queued: ReturnType<typeof merge> = null;
-              await autoPing.withRouteLock(foreignClaimTarget.routeFingerprint, async () => {
-                queued = merge();
-              });
-              await dispatch(queued);
+              try {
+                let queued: ReturnType<typeof merge> = null;
+                await autoPing.withRouteLock(lockTarget, async () => {
+                  queued = merge(readPendingSendBatches(deps.config.dataDir).get(queueKey));
+                });
+                await dispatch(queued);
+              } finally {
+                const remaining = (deferredMerges.get(queueKey)?.count ?? 1) - 1;
+                if (remaining > 0) {
+                  deferredMerges.set(queueKey, { count: remaining, routeFingerprint: lockTarget });
+                } else {
+                  deferredMerges.delete(queueKey);
+                }
+              }
             });
             return;
           }
-          const queued = merge();
+          const queued = merge(persisted);
           if (!queued) return;
           enqueue(queueKey, () => dispatch(queued));
           return;

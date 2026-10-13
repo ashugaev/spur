@@ -3688,6 +3688,60 @@ describe("startConfiguredTriggers", () => {
       }
     });
 
+    it("keeps bus order when a live event arrives between deferred merges behind a foreign claim", async () => {
+      const dataDir = mkdtempSync(join(tmpdir(), "spur-inflight-deferred-"));
+      const autoPing = new AutoPingService(dataDir);
+      const { gate, deliver: oldDeliver } = gatedDeliver();
+      const lookup = deferred<ReturnType<typeof waitingSession>>();
+      const newGet = vi
+        .fn()
+        .mockImplementationOnce(() => lookup.promise)
+        .mockResolvedValue(waitingSession());
+      const newDeliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(
+        snapshotOf("comment:1", "comment:2", "comment:3"),
+      );
+      const old = await start({
+        get: vi.fn().mockResolvedValue(waitingSession()),
+        deliver: oldDeliver,
+        autoPing,
+        dataDir,
+      });
+      let replacement: Awaited<ReturnType<typeof start>> | undefined;
+      try {
+        old.bus.emit(commentEvent("comment:1"));
+        await vi.advanceTimersByTimeAsync(30_001);
+        expect(oldDeliver).toHaveBeenCalledTimes(1);
+
+        replacement = await start({ get: newGet, deliver: newDeliver, autoPing, dataDir });
+        // The replacement restored the claimed batch; two events defer behind it.
+        replacement.bus.emit(commentEvent("comment:3"));
+        replacement.bus.emit(commentEvent("comment:2", "text A"));
+        await vi.advanceTimersByTimeAsync(0);
+
+        gate.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        // The first deferred merge ran and its dispatch waits on the lookup.
+        expect(newGet).toHaveBeenCalledTimes(1);
+        replacement.bus.emit(commentEvent("comment:2", "text B"));
+        lookup.resolve(waitingSession());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(signalsOf(record()).find((signal) => signal.key === "comment:2")).toMatchObject({
+          text: "text B",
+        });
+
+        await vi.advanceTimersByTimeAsync(35_001);
+        const texts = newDeliver.mock.calls.map((call) => call[1] as string);
+        expect(texts.join("\n")).toContain("text B");
+        expect(texts.join("\n")).not.toContain("text A");
+      } finally {
+        await old.controller.stop();
+        await replacement?.controller.stop();
+        autoPing.dispose();
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+
     describe("stale batch guards", () => {
       // Drops the first batch's record, then emits a second event: the
       // synchronous merge clears the cached first batch and builds a new one.
