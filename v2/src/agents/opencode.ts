@@ -528,9 +528,13 @@ export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSampl
 export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
 const openCodeExportGate = createConcurrencyGate(OPENCODE_EXPORT_MAX_CONCURRENCY);
 
-export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
+// `cwd` is the session's working directory: opencode bootstraps an instance
+// (config, project, plugins) for the directory it runs in, so an export run
+// from the daemon's own cwd would bootstrap against the wrong tree.
+export async function exportOpenCodeSession(sessionId: string, cwd: string): Promise<unknown> {
   return openCodeExportGate.run(async () => {
     const stdout = await readOpenCodeJson(["export", sessionId], {
+      cwd,
       timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
     });
     return JSON.parse(stdout) as unknown;
@@ -641,20 +645,22 @@ export async function readOpenCodeLatestUserMessageFromDatabase(
 
 async function readOpenCodeLatestUserMessage(
   sessionId: string,
+  cwd: string,
 ): Promise<OpenCodeUserMessageMark | null> {
   try {
     return await readOpenCodeLatestUserMessageFromDatabase(sessionId);
   } catch {
-    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId));
+    return parseOpenCodeLatestUserMessage(await exportOpenCodeSession(sessionId, cwd));
   }
 }
 
 export async function captureOpenCodeSubmitBaseline(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
 ): Promise<OpenCodeSubmitBaseline | null> {
   if (!sessionId) return null;
   try {
-    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId) };
+    return { sessionId, after: await readOpenCodeLatestUserMessage(sessionId, cwd) };
   } catch {
     return null;
   }
@@ -662,9 +668,10 @@ export async function captureOpenCodeSubmitBaseline(
 
 export async function scanOpenCodeForNewUserMessage(
   baseline: OpenCodeSubmitBaseline,
+  cwd: string,
 ): Promise<boolean> {
   try {
-    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId);
+    const latest = await readOpenCodeLatestUserMessage(baseline.sessionId, cwd);
     return hasOpenCodeUserMessageAfter(baseline, latest);
   } catch {
     return false;
@@ -731,9 +738,10 @@ export function parseOpenCodeUserTextsAfter(
 export async function scanOpenCodeForTypedMessage(
   baseline: OpenCodeSubmitBaseline,
   typed: string,
+  cwd: string,
 ): Promise<boolean> {
   if (typed.trimStart().startsWith("/")) {
-    return scanOpenCodeForNewUserMessage(baseline);
+    return scanOpenCodeForNewUserMessage(baseline, cwd);
   }
   const target = normalizeTypedText(typed);
   try {
@@ -742,7 +750,7 @@ export async function scanOpenCodeForTypedMessage(
       texts = await readOpenCodeUserTextsAfterFromDatabase(baseline);
     } catch {
       texts = parseOpenCodeUserTextsAfter(
-        await exportOpenCodeSession(baseline.sessionId),
+        await exportOpenCodeSession(baseline.sessionId, cwd),
         baseline.after,
       );
     }
@@ -759,12 +767,13 @@ const OPENCODE_LAUNCH_MESSAGE_WAIT_MS = 60_000;
 
 export async function waitForOpenCodeLaunchMessage(
   sessionId: string,
+  cwd: string,
   timeoutMs = OPENCODE_LAUNCH_MESSAGE_WAIT_MS,
 ): Promise<boolean> {
   const baseline: OpenCodeSubmitBaseline = { sessionId, after: null };
   const deadline = Date.now() + timeoutMs;
   do {
-    if (await scanOpenCodeForNewUserMessage(baseline)) return true;
+    if (await scanOpenCodeForNewUserMessage(baseline, cwd)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() <= deadline);
   return false;
@@ -910,7 +919,8 @@ async function readOpenCodeStructuredStateFromDatabase(
 }
 
 export async function readOpenCodeStructuredState(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
   activityAtMs?: number | null,
   force = false,
 ): Promise<OpenCodeStructuredRead> {
@@ -933,7 +943,7 @@ export async function readOpenCodeStructuredState(
       return await readOpenCodeStructuredStateFromDatabase(sessionId);
     } catch {
       try {
-        const exported = await exportOpenCodeSession(sessionId);
+        const exported = await exportOpenCodeSession(sessionId, cwd);
         const tokenUsage = parseOpenCodeTokenUsage(exported);
         return {
           state: parseOpenCodeState(exported),
@@ -1022,21 +1032,23 @@ export async function readOpenCodeConversationFromDatabase(
 }
 
 export async function readOpenCodeState(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
   activityAtMs?: number | null,
 ): Promise<OpenCodeStructuredState | null> {
-  return (await readOpenCodeStructuredState(sessionId, activityAtMs)).state;
+  return (await readOpenCodeStructuredState(sessionId, cwd, activityAtMs)).state;
 }
 
 export async function readOpenCodeConversation(
-  sessionId?: string,
+  sessionId: string | undefined,
+  cwd: string,
 ): Promise<TranscriptEntry[] | null> {
   if (!sessionId) return null;
   try {
     return await readOpenCodeConversationFromDatabase(sessionId);
   } catch {
     try {
-      return parseOpenCodeExport(await exportOpenCodeSession(sessionId));
+      return parseOpenCodeExport(await exportOpenCodeSession(sessionId, cwd));
     } catch {
       return null;
     }

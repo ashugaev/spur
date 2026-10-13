@@ -702,7 +702,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildOpenCodeResumePlan(agentSessionId, binary, openCodePlanOptions(options)),
     findSessionId: (worktreePath) => findOpenCodeSessionId(worktreePath),
-    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId),
+    readConversation: (ctx) => readOpenCodeConversation(ctx.agentSessionId, ctx.worktreePath),
     setup: async ({
       mcpBindings,
       restrictWrites,
@@ -736,7 +736,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const baseline =
         persisted?.agent === "opencode"
           ? { sessionId: persisted.sessionId, after: persisted.after }
-          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId);
+          : await captureOpenCodeSubmitBaseline(ctx.agentSessionId, ctx.worktreePath);
       if (!baseline) {
         throw new Error("OpenCode submit acknowledgment requires a pinned native session");
       }
@@ -748,7 +748,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         },
         async scan(text) {
           return {
-            found: await scanOpenCodeForTypedMessage(baseline, text),
+            found: await scanOpenCodeForTypedMessage(baseline, text, ctx.worktreePath),
             lastScannedFile: null,
           };
         },

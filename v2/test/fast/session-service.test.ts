@@ -27970,6 +27970,7 @@ describe("SessionService", () => {
       if (agent === "opencode") {
         expect(readOpenCodeStructuredStateMock).toHaveBeenCalledWith(
           "ses_final",
+          "/tmp/spur-worktrees/api/api-1",
           expect.any(Number),
           true,
         );
@@ -69156,7 +69157,10 @@ describe("SessionService", () => {
                 ],
           );
           expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain("the original task prompt");
-          expect(waitForOpenCodeLaunchMessageMock.mock.calls[0]).toEqual(["ses_new"]);
+          expect(waitForOpenCodeLaunchMessageMock.mock.calls[0]).toEqual([
+            "ses_new",
+            expect.any(String),
+          ]);
           expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
           expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
             "api-1",
