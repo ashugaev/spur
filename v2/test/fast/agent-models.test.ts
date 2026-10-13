@@ -41,7 +41,12 @@ import {
 } from "../../src/agents/models.js";
 import type { ProviderReasoningEffort } from "../../src/types.js";
 
+let openCodeBinSeq = 0;
+
 beforeEach(() => {
+  // OpenCode discovery is cached per command; a fresh command per test keeps
+  // tests that mock different catalogs from sharing a cache entry.
+  process.env["SPUR_OPENCODE_BIN"] = `opencode-model-test-${++openCodeBinSeq}`;
   execFileMock.mockReset();
   readOpenCodeJsonMock.mockReset();
   claudeCapabilitiesMock.mockReset().mockResolvedValue([
@@ -665,5 +670,65 @@ describe("parseOpenCodeModelsOutput", () => {
     await expect(resolveAgentReasoningEffort("opencode", "provider/plain", "high")).rejects.toThrow(
       "not available",
     );
+  });
+
+  describe("discovery cache", () => {
+    const stdout = 'provider/plain\n{"id":"plain","providerID":"provider"}\n';
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("serves sequential calls within the TTL from one launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-seq";
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+
+      await listAgentModels("opencode");
+      await listAgentModels("opencode");
+      await validateOpenCodeModel("provider/plain");
+
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("dedupes concurrent calls onto one launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-concurrent";
+      let resolveJson!: (value: string) => void;
+      readOpenCodeJsonMock.mockImplementation(
+        () => new Promise<string>((resolve) => (resolveJson = resolve)),
+      );
+
+      const first = listAgentModels("opencode");
+      const second = validateOpenCodeModel("provider/plain");
+      await Promise.resolve();
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+      resolveJson(stdout);
+      await expect(first).resolves.toHaveLength(1);
+      await expect(second).resolves.toBe("provider/plain");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("relaunches after the TTL expires", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = "opencode-model-test-cache-ttl";
+      vi.useFakeTimers({ toFake: ["Date"] });
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+
+      await listAgentModels("opencode");
+      vi.advanceTimersByTime(5 * 60 * 1000 - 1);
+      await listAgentModels("opencode");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(2);
+      await listAgentModels("opencode");
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not cache a failed launch", async () => {
+      process.env["SPUR_OPENCODE_BIN"] = process.execPath;
+      readOpenCodeJsonMock.mockRejectedValueOnce(new Error("models failed"));
+      await expect(listAgentModels("opencode")).rejects.toThrow();
+
+      readOpenCodeJsonMock.mockResolvedValue(stdout);
+      await expect(listAgentModels("opencode")).resolves.toHaveLength(1);
+      expect(readOpenCodeJsonMock).toHaveBeenCalledTimes(2);
+    });
   });
 });
