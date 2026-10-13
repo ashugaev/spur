@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,6 +21,7 @@ describe("OpenCode worker heartbeat", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -49,6 +50,33 @@ describe("OpenCode worker heartbeat", () => {
 
   it("leaves startup and older sessions without a heartbeat unchanged", async () => {
     expect(await openCodeHeartbeatExpired(directory, "launch", now)).toBe(false);
+  });
+
+  it("resumes an established heartbeat after transient storage failure", async () => {
+    const pluginPath = await ensureOpenCodeHeartbeatPlugin(directory);
+    vi.stubEnv("SPUR_AGENT_LAUNCH_ID", "launch");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const plugin = (await import(pathToFileURL(pluginPath).href)) as {
+      SpurHeartbeat(): Promise<object>;
+    };
+    await plugin.SpurHeartbeat();
+    const path = join(directory, "opencode-heartbeat.json");
+    const established = await readFile(path, "utf8");
+    const temporary = join(directory, `opencode-heartbeat.json.${process.pid}.tmp`);
+    await mkdir(temporary);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await readFile(path, "utf8")).toBe(established);
+    expect(log).toHaveBeenCalledTimes(1);
+    await rm(temporary, { recursive: true });
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      agentLaunchId: "launch",
+      updatedAt: now + 65_000,
+    });
+    expect(await openCodeHeartbeatExpired(directory, "launch")).toBe(false);
+    expect(log).toHaveBeenCalledTimes(1);
   });
 
   it("installs a native plugin that keeps beating during asynchronous work", async () => {

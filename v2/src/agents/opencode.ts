@@ -36,16 +36,19 @@ export const SpurHeartbeat = async () => {
   if (!agentLaunchId) return {};
   const path = new URL("./${OPENCODE_HEARTBEAT_FILE}", import.meta.url);
   const temporary = new URL("./${OPENCODE_HEARTBEAT_FILE}." + process.pid + ".tmp", import.meta.url);
-  let timer;
+  let reportedWriteError = false;
   const beat = () => {
     try {
       writeFileSync(temporary, JSON.stringify({ agentLaunchId, updatedAt: Date.now() }));
       renameSync(temporary, path);
-    } catch {
-      clearInterval(timer);
+    } catch (error) {
+      if (!reportedWriteError) {
+        console.error("Spur heartbeat storage unavailable; retrying", error);
+        reportedWriteError = true;
+      }
     }
   };
-  timer = setInterval(beat, ${OPENCODE_HEARTBEAT_INTERVAL_MS});
+  const timer = setInterval(beat, ${OPENCODE_HEARTBEAT_INTERVAL_MS});
   timer.unref();
   beat();
   return {};
