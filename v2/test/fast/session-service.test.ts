@@ -6516,7 +6516,10 @@ describe("SessionService", () => {
       '`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>` to stop one.',
     );
     expect(sent).toContain('`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`');
-    expect(sent).toContain("Do not start app, dev server, or test helper processes directly");
+    expect(sent).toContain(
+      "Do not start long-running app, dev server, or test helper processes directly",
+    );
+    expect(sent).toContain("One-shot test, lint, or type-check commands may run directly.");
     expect(sent).toContain(
       "Auto-start applies when the main session spawns, restores, or recovers.",
     );
@@ -25676,6 +25679,29 @@ describe("SessionService", () => {
       }),
     ).rejects.toThrow("service port must be an integer between 1 and 65535");
     expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("runService unknown id names the type: service source prerequisite", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.runService("api-1", "nope", { command: "pnpm dev", cwd: "/tmp/x" }),
+    ).rejects.toThrow(
+      /^Unknown service for api: nope\. .*type: service and service: nope.*docs\/configuration\.md/,
+    );
   });
 
   // Same launcher as a sidecar (createTmuxCommandSession), same leak shape —
