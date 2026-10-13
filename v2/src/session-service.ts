@@ -18692,7 +18692,7 @@ export class SessionService {
         if (
           !latest ||
           reopenInvalidated() ||
-          !this.lifecycleStampMatches(latest, claim) ||
+          !this.lifecycleStateMatches(latest, claim) ||
           !restoreGeneration ||
           !(await this.paneGenerationMatches(latest, restoreGeneration))
         ) {

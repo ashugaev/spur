@@ -31,7 +31,8 @@ command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
 command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
 mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 
-spur init                           # installs + starts the systemd user units, links host skills
+spur init                           # installs + starts the systemd user units, links host skills, installs Tailscale
+                                    # never add --no-tailscale unless the user asked for it — no auth key is fine
 ```
 
 Four non-obvious points:
@@ -63,12 +64,12 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 ### init flags
 
-| Flag                | Effect                                      |
-| ------------------- | ------------------------------------------- |
-| `--no-start`        | install units + linger, don't start         |
-| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`) |
-| `--web-port <port>` | web port (default `5555`)                   |
-| `--no-tailscale`    | skip Tailscale (on by default)              |
+| Flag                | Effect                                            |
+| ------------------- | ------------------------------------------------- |
+| `--no-start`        | install units + linger, don't start               |
+| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`)       |
+| `--web-port <port>` | web port (default `5555`)                         |
+| `--no-tailscale`    | skip Tailscale (on by default); user request only |
 
 ## Private access (Tailscale, default on)
 
@@ -122,10 +123,12 @@ spur connect spur.yaml
 Claude only, operator action: `cd <repo> && claude`, answer "Yes, I trust this folder" — covers every Spur worktree of that repo; once per connected repo. A setup agent never answers it: list it in the operator TODO, skip the smoke spawn until done.
 
 ```bash
+# after agent login + trust only; a setup agent puts this line in the operator TODO, never runs it —
+# before trust it times out on submit acknowledgment and leaves an errored session
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
-`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
+`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file — no git identity on the host: `git -c user.name=spur -c user.email=spur@localhost commit ...`. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
 
 `<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
 
