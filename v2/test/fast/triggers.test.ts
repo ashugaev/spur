@@ -860,6 +860,114 @@ describe("startConfiguredTriggers", () => {
     vi.restoreAllMocks();
   });
 
+  describe("stale teardown", () => {
+    it.each(
+      ["github", "service"].flatMap((source) =>
+        [false, true].flatMap((interrupt) =>
+          ["prior queued", "arrival during teardown"].map((arrival) => ({
+            source,
+            interrupt,
+            arrival,
+          })),
+        ),
+      ),
+    )(
+      "retains $source $arrival with interrupt=$interrupt until stale wake",
+      async ({ source, interrupt, arrival }) => {
+        const session = {
+          id: "api-1",
+          status: "running",
+          state: arrival === "prior queued" ? "waiting" : "stopped",
+          workspaceExists: true,
+          lastActivityAt: recentActivity(),
+        };
+        const get = vi.fn().mockImplementation(async () => ({ ...session }));
+        const deliver = vi.fn().mockResolvedValue(undefined);
+        readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+        const triggerConfig = source === "github" ? config({ interrupt }) : serviceConfig();
+        if ("notify" in triggerConfig.projects.api.triggers) {
+          triggerConfig.projects.api.triggers.notify.send.interrupt = interrupt;
+        }
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const bus = new EventBus();
+        const controller = startConfiguredTriggers({
+          config: triggerConfig as never,
+          bus,
+          sessionService: { get, deliver } as never,
+          logger: { warn: vi.fn() },
+        });
+        try {
+          bus.emit(source === "github" ? githubEvent() : serviceEvent());
+          await vi.advanceTimersByTimeAsync(1);
+          expect(readPendingSendBatchesMock().size).toBe(1);
+          session.state = "stopped";
+          await vi.advanceTimersByTimeAsync(35_000);
+          const pending = [...readPendingSendBatchesMock().values()][0] as PersistedPendingBatch;
+          expect(pending).toBeDefined();
+          expect(pending.claim).toBeUndefined();
+          expect(pending.retryAccounting?.every((entry) => entry.deliveryAttempts === 0)).toBe(
+            true,
+          );
+          expect(updatePendingSendBatchConditionalMock).not.toHaveBeenCalled();
+          expect(deliver).not.toHaveBeenCalled();
+          expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).not.toContain(
+            "trigger.send.dropped",
+          );
+
+          Object.assign(session, {
+            status: "stopped",
+            state: "stale",
+            stopReason: "stale_timeout",
+          });
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(deliver).toHaveBeenCalledTimes(1);
+          expect(deliver).toHaveBeenCalledWith("api-1", expect.any(String), { interrupt: false });
+          expect(readPendingSendBatchesMock().size).toBe(0);
+          await vi.advanceTimersByTimeAsync(35_000);
+          expect(deliver).toHaveBeenCalledTimes(1);
+        } finally {
+          await controller.stop();
+        }
+      },
+    );
+
+    it.each([
+      { status: "stopped", state: "stopped" },
+      { status: "stopped", state: "stopped", stopReason: "manual_pause" },
+      { status: "errored", state: "error" },
+      { status: "killed", state: "killed" },
+    ])("drops genuinely closed queued work after $status/$state", async (closed) => {
+      const get = vi.fn().mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+        lastActivityAt: recentActivity(),
+      });
+      const deliver = vi.fn().mockResolvedValue(undefined);
+      readGitHubSourceSnapshotMock.mockReturnValue(commentSnapshot());
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: config() as never,
+        bus,
+        sessionService: { get, deliver } as never,
+        logger: { warn: vi.fn() },
+      });
+      try {
+        bus.emit(githubEvent());
+        await vi.advanceTimersByTimeAsync(1);
+        expect(readPendingSendBatchesMock().size).toBe(1);
+        get.mockResolvedValue({ id: "api-1", workspaceExists: true, ...closed });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(readPendingSendBatchesMock().size).toBe(0);
+        expect(deliver).not.toHaveBeenCalled();
+      } finally {
+        await controller.stop();
+      }
+    });
+  });
+
   describe("persisted live feedback", () => {
     const pending = (): PersistedPendingBatch | undefined =>
       readPendingSendBatchesMock().get("api:send:api-1");
@@ -6932,6 +7040,7 @@ describe("dropsQueuedSend", () => {
     const { dropsQueuedSend } = await loadTriggersModule();
 
     expect(dropsQueuedSend({ state: "stopped", status: "stopped" })).toBe(true);
+    expect(dropsQueuedSend({ state: "stopped", status: "running" })).toBe(false);
     expect(dropsQueuedSend({ state: "killed", status: "killed" })).toBe(true);
     expect(dropsQueuedSend({ state: "error", status: "errored" })).toBe(true);
     expect(dropsQueuedSend({ state: "error", status: "running" })).toBe(false);

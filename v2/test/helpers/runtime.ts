@@ -914,6 +914,19 @@ if (args[0] === "api" && args.includes("graphql")) {
 }
 
 if (args[0] === "api" && typeof args[1] === "string") {
+  const issueCommentMatch = args[1].match(/issues\\/comments\\/(\\d+)$/);
+  if (issueCommentMatch) {
+    const comment = Object.values(state.commentsByPr || {}).flat().find(
+      (value) => String(value.id) === issueCommentMatch[1],
+    );
+    if (!comment) {
+      process.stderr.write("HTTP 404: comment not found\\n");
+      process.exit(1);
+    }
+    print(comment);
+    process.exit(0);
+  }
+
   const reviewCommentMatch = args[1].match(/pulls\\/(\\d+)\\/comments/);
   if (reviewCommentMatch) {
     print(state.reviewCommentsByPr?.[reviewCommentMatch[1]] || []);
