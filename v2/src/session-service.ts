@@ -248,7 +248,9 @@ import {
   readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
+  listProjectSessions,
   listSessions,
+  readListedSession,
   readTelegramBindings,
   readServiceInstance,
   readSession,
@@ -4674,9 +4676,7 @@ export class SessionService {
       const currentOwner = readSession(this.config.dataDir, entry.ownerId);
       if (
         currentOwner &&
-        this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
-          hasRetainedSessionError(member),
-        )
+        this.listDeskSessions(currentOwner).some((member) => hasRetainedSessionError(member))
       ) {
         this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
         continue;
@@ -6020,7 +6020,7 @@ export class SessionService {
 
   private lifecycleSource(record: SessionRecord): SessionRecord {
     if (this.lifecycle.snapshot(record.id).revision === 0) return record;
-    const current = listSessions(this.config.dataDir).find((session) => session.id === record.id);
+    const current = readListedSession(this.config.dataDir, record.id);
     return current && isDeepStrictEqual(current, record) ? current : record;
   }
 
@@ -6062,12 +6062,9 @@ export class SessionService {
     }
     const changed = (row: (typeof rows)[number]) => {
       const receipt = this.lifecycle.snapshot(row.view.id);
-      if (!readSession(this.config.dataDir, row.view.id)) return true;
-      if (receipt.revision === 0 && row.revision === 0) return false;
-      const current = listSessions(this.config.dataDir).find(
-        (session) => session.id === row.view.id,
-      );
+      const current = readListedSession(this.config.dataDir, row.view.id);
       if (!current) return true;
+      if (receipt.revision === 0 && row.revision === 0) return false;
       return (
         current !== row.source ||
         receipt.revision !== row.revision ||
@@ -7332,7 +7329,10 @@ export class SessionService {
     }
     this.reaperRunning = true;
     try {
-      const sessions = listSessions(this.config.dataDir).filter(
+      // One listing for the whole pass: the sibling precheck below reads it
+      // instead of re-listing per terminal session. The pre-kill check re-reads.
+      const passBatch = listSessions(this.config.dataDir);
+      const sessions = passBatch.filter(
         (session) =>
           REAPABLE_SESSION_STATUSES.has(session.status) &&
           !hasRetainedSessionError(session) &&
@@ -7399,7 +7399,8 @@ export class SessionService {
         // policy pass (collectSidecarReapCandidates): any non-terminal member
         // holds the shared pane.
         const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
+          (session.sidecarNames?.length ?? 0) > 0 &&
+          this.hasActiveWorkspaceMembers(session, passBatch);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's
@@ -7418,6 +7419,8 @@ export class SessionService {
           const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
           const owner = readSession(this.config.dataDir, ownerId);
           const paneAlive = await sidecarTmuxAlive(ownerId, sidecarName);
+          // No live pane and no recorded identity: nothing below acts.
+          if (!paneAlive && !owner?.sidecarProcs?.[sidecarName]) continue;
           // The established-connection veto, applied here too — this loop
           // reaches a desk-shared sidecar by owner id the same as the
           // reaper-tick candidate pass, and is not exempt from the same hard
@@ -7438,11 +7441,18 @@ export class SessionService {
           const currentOwner = readSession(this.config.dataDir, ownerId);
           if (
             currentOwner &&
-            this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
-              hasRetainedSessionError(member),
-            )
+            this.listDeskSessions(currentOwner).some((member) => hasRetainedSessionError(member))
           )
             continue;
+          // passBatch can be minutes old by now: a sibling restored since the
+          // precheck must still hold a desk-shared pane, so re-read before the kill.
+          if (
+            reapSidecar !== undefined &&
+            !reapSidecar.mcp &&
+            this.hasActiveWorkspaceMembers(session)
+          ) {
+            continue;
+          }
           if (paneAlive) {
             await this.reapSidecarByName(ownerId, sidecarName);
             this.clearSidecarProcEntry(ownerId, sidecarName);
@@ -12671,7 +12681,10 @@ export class SessionService {
 
   private listDeskSessions(
     session: SessionRecord,
-    sessionBatch: readonly SessionRecord[] = listSessions(this.config.dataDir),
+    sessionBatch: readonly SessionRecord[] = listProjectSessions(
+      this.config.dataDir,
+      session.project,
+    ),
   ): SessionRecord[] {
     const anchor = workspaceIdOf(session);
     return sessionBatch
@@ -12737,9 +12750,13 @@ export class SessionService {
   private someDeskSibling(
     session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
     match: (sibling: SessionRecord) => boolean,
+    sessionBatch: readonly SessionRecord[] = listProjectSessions(
+      this.config.dataDir,
+      session.project,
+    ),
   ): boolean {
     const anchor = workspaceIdOf(session);
-    return listSessions(this.config.dataDir).some(
+    return sessionBatch.some(
       (s) =>
         s.id !== session.id &&
         s.project === session.project &&
@@ -12753,8 +12770,9 @@ export class SessionService {
   // errored member counts — restore brings it back into the same workspace.
   private hasActiveWorkspaceMembers(
     session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
+    sessionBatch?: readonly SessionRecord[],
   ): boolean {
-    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status));
+    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status), sessionBatch);
   }
 
   // Running or error-bearing siblings retain shared sidecars and ports.
@@ -12791,7 +12809,7 @@ export class SessionService {
     session: SessionRecord,
     excludeId?: string,
   ): Promise<boolean> {
-    for (const member of this.listDeskSessions(session, listSessions(this.config.dataDir))) {
+    for (const member of this.listDeskSessions(session)) {
       if (member.id === excludeId) continue;
       if (await this.memberRetainsResources(member)) return true;
     }
