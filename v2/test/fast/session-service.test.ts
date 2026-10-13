@@ -11514,7 +11514,7 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1") as SessionRecord;
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
@@ -27317,7 +27317,10 @@ describe("SessionService", () => {
     readSessionMock.mockReturnValue(closing);
     listSessionsMock.mockReturnValue([closing, sibling]);
     listProjectSessionsMock.mockReturnValue([closing, sibling]);
-    readListedSessionMock.mockReturnValue(closing);
+    readListedSessionMock.mockImplementation(
+      (_dataDir: string, sessionId: string) =>
+        [closing, sibling].find((session) => session.id === sessionId) ?? null,
+    );
     tmuxSessionExistsMock.mockResolvedValue(false);
     workspaceExistsMock.mockReturnValue(true);
 
@@ -27921,7 +27924,10 @@ describe("SessionService", () => {
     readSessionMock.mockReturnValue(closing);
     listSessionsMock.mockReturnValue([closing, sibling]);
     listProjectSessionsMock.mockReturnValue([closing, sibling]);
-    readListedSessionMock.mockReturnValue(closing);
+    readListedSessionMock.mockImplementation(
+      (_dataDir: string, sessionId: string) =>
+        [closing, sibling].find((session) => session.id === sessionId) ?? null,
+    );
     tmuxSessionExistsMock.mockResolvedValue(false);
     workspaceExistsMock.mockReturnValue(true);
 
@@ -34239,7 +34245,10 @@ describe("SessionService", () => {
     createSessionStore(closing);
     listSessionsMock.mockReturnValue([closing, sibling]);
     listProjectSessionsMock.mockReturnValue([closing, sibling]);
-    readListedSessionMock.mockReturnValue(closing);
+    readListedSessionMock.mockImplementation(
+      (_dataDir: string, sessionId: string) =>
+        [closing, sibling].find((session) => session.id === sessionId) ?? null,
+    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -34272,7 +34281,7 @@ describe("SessionService", () => {
       tmuxSession: "api-2",
       status: "completed" as const,
     };
-    createSessionStore(closing);
+    createSessionStore(closing, completedSibling);
     listSessionsMock.mockReturnValue([closing, completedSibling]);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -47197,6 +47206,155 @@ describe("SessionService", () => {
 
       expect(sidecarTmuxAliveMock).toHaveBeenCalledWith("api-1", "daemon");
       expect(killTmuxSessionMock).not.toHaveBeenCalledWith("api-1--daemon");
+    });
+
+    // A pane kill costs the pass listing plus one full listing inside
+    // invalidateSidecarEndpoint (observeSidecars, F5, out of scope). The
+    // desk-membership reads around the kill must add none.
+    const FULL_LISTINGS_PER_REAP = 2;
+
+    // Reaps api-1's "daemon" sidecar. api-2, a running desk sibling, is written
+    // into the store inside the pane probe: after the pass listing and its
+    // precheck, before the pre-kill decision.
+    async function reapWithLateSibling(
+      config: ReturnType<typeof baseConfig>,
+      options: { paneAlive: boolean; sidecarProcs?: SessionRecord["sidecarProcs"] },
+    ): Promise<Map<string, SessionRecord>> {
+      loadConfigMock.mockReturnValue(config);
+      const sessions = seedReaperSession({
+        status: "completed",
+        sidecarNames: ["daemon"],
+        ...(options.sidecarProcs ? { sidecarProcs: options.sidecarProcs } : {}),
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockImplementation(async () => {
+        sessions.set("api-2", {
+          ...(sessions.get("api-1") as SessionRecord),
+          id: "api-2",
+          tmuxSession: "api-2",
+          deskId: "api-1",
+          status: "running",
+        });
+        return options.paneAlive;
+      });
+      const service = await createDisposedSessionService();
+      listSessionsMock.mockClear();
+      await (service as unknown as { reapOrphanedTmux(): Promise<void> }).reapOrphanedTmux();
+      return sessions;
+    }
+
+    it("keeps a recorded sidecar identity when a sibling turns active after the pass listing", async () => {
+      const sessions = await reapWithLateSibling(daemonSidecarConfig(), {
+        paneAlive: false,
+        sidecarProcs: { daemon: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+      });
+
+      expect(sessions.get("api-1")?.sidecarProcs?.["daemon"]).toBeDefined();
+    });
+
+    it("still reaps an mcp sidecar when a sibling is active, with no second full listing", async () => {
+      const config = daemonSidecarConfig();
+      const sessions = await reapWithLateSibling(
+        {
+          ...config,
+          projects: {
+            api: {
+              ...config.projects.api,
+              sidecars: { daemon: { command: "pnpm daemon", autoStart: false, mcp: true } },
+            },
+          },
+        } as ReturnType<typeof baseConfig>,
+        { paneAlive: true },
+      );
+
+      expect(sessions.has("api-2")).toBe(true);
+      expect(killTmuxSessionMock).toHaveBeenCalledWith(expect.stringContaining("daemon"));
+      expect(listSessionsMock).toHaveBeenCalledTimes(FULL_LISTINGS_PER_REAP);
+    });
+
+    it("still reaps a sidecar missing from the config when a sibling is active", async () => {
+      await reapWithLateSibling(baseConfig(), { paneAlive: true });
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith(expect.stringContaining("daemon"));
+      expect(listSessionsMock).toHaveBeenCalledTimes(FULL_LISTINGS_PER_REAP);
+    });
+
+    describe("desk sibling reads", () => {
+      async function seedDesk() {
+        const sessions = createSessionStore();
+        const anchor = sessionRecord({ id: "api-1", status: "completed" });
+        sessions.set("api-1", anchor);
+        sessions.set("api-2", sessionRecord({ id: "api-2", deskId: "api-1", status: "running" }));
+        sessions.set("web-1", sessionRecord({ id: "web-1", project: "web" }));
+        const service = await createDisposedSessionService();
+        listSessionsMock.mockClear();
+        listProjectSessionsMock.mockClear();
+        return { anchor, service };
+      }
+
+      it("someDeskSibling reads the project listing, never the full one", async () => {
+        const { anchor, service } = await seedDesk();
+
+        const found = (
+          service as unknown as {
+            someDeskSibling(
+              session: SessionRecord,
+              match: (sibling: SessionRecord) => boolean,
+            ): boolean;
+          }
+        ).someDeskSibling(anchor, (sibling) => sibling.status === "running");
+
+        expect(found).toBe(true);
+        expect(listSessionsMock).not.toHaveBeenCalled();
+        expect(listProjectSessionsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api");
+      });
+
+      it("workspaceRetainsResources reads the project listing, never the full one", async () => {
+        const { anchor, service } = await seedDesk();
+        tmuxSessionExistsMock.mockResolvedValue(true);
+
+        await (
+          service as unknown as {
+            workspaceRetainsResources(session: SessionRecord): Promise<boolean>;
+          }
+        ).workspaceRetainsResources(anchor);
+
+        expect(listSessionsMock).not.toHaveBeenCalled();
+        expect(listProjectSessionsMock).toHaveBeenCalledWith(TEST_DATA_DIR, "api");
+      });
+    });
+
+    it("sidecar reap plan execution adds no full listing for the retained-error check", async () => {
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = sessionRecord({
+        id: "api-1",
+        sidecarNames: ["dev"],
+        sidecarPorts: { dev: { http: 12345 } },
+      });
+      sessions.set(record.id, record);
+      listSessionsMock.mockClear();
+      listProjectSessionsMock.mockClear();
+
+      await (
+        service as unknown as {
+          executeSidecarReapPlan(plan: {
+            reap: { ownerId: string; sidecarName: string; tmuxName: string; reason: "idle_ttl" }[];
+            keep: [];
+            warn: [];
+          }): Promise<void>;
+        }
+      ).executeSidecarReapPlan({
+        reap: [
+          { ownerId: record.id, sidecarName: "dev", tmuxName: "api-1--dev", reason: "idle_ttl" },
+        ],
+        keep: [],
+        warn: [],
+      });
+
+      // killSidecar's own endpoint invalidation and port-release scan keep two full
+      // listings (F5, out of scope); the retained-error check before it adds none.
+      expect(listSessionsMock).toHaveBeenCalledTimes(2);
     });
 
     it("AC12: falls back to the recorded identity when the desk owner's pane is already gone", async () => {
