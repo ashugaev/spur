@@ -285,21 +285,47 @@ function isPrFresh(url: string): boolean {
   return cached !== undefined && Date.now() - cached.fetchedAt < FRESH_TTL_MS;
 }
 
+// Marks a URL as fetched now without touching its data or notifying
+// consumers. An unchanged, errored or skipped result writes nothing through
+// setPrCache, so without this the entry would stay non-fresh and every
+// subscription change would request it again.
+function stampPrFresh(url: string): void {
+  prCache.set(url, { data: cachedOrEmpty(url), fetchedAt: Date.now() });
+  persistPrCache();
+}
+
 async function fetchPrInfoSingle(url: string): Promise<void> {
   const result = await fetchPrInfo(url);
   const prev = prCache.get(url)?.data;
   if (!prev || !prInfosEqual(prev, result)) setPrCache(url, result);
+  stampPrFresh(url);
 }
 
-async function runPrPoll(): Promise<PollOutcome> {
+async function executePrPoll(): Promise<PollOutcome> {
   const seq = ++prRunSeq;
   const due = [...prSubscriptions.keys()].filter((url) => !isPrFresh(url));
   const github = due.filter((url) => reviewProviderFromUrl(url) === "github");
   const others = due.filter((url) => reviewProviderFromUrl(url) !== "github");
   const [batchOk] = await Promise.all([fetchPrInfoBatch(github), ...others.map(fetchPrInfoSingle)]);
+  if (batchOk) for (const url of github) stampPrFresh(url);
   const outcome: PollOutcome = batchOk ? "ok" : "failed";
   for (const listener of prRunListeners) listener(seq, outcome);
   return outcome;
+}
+
+// Stopping a poller cannot cancel a batch already on the wire, so a poller
+// created after an unmount-all/remount waits here instead of overlapping it.
+let prRunInFlight: Promise<PollOutcome> | null = null;
+
+async function runPrPoll(): Promise<PollOutcome> {
+  while (prRunInFlight) await prRunInFlight;
+  const run = executePrPoll();
+  prRunInFlight = run;
+  try {
+    return await run;
+  } finally {
+    prRunInFlight = null;
+  }
 }
 
 function flushPrSubscriptions(): void {
@@ -435,7 +461,9 @@ export function usePrReadyUrls(
     if (!enabled || githubUrls.length === 0) return;
     const recompute = () => {
       const ready = new Set(githubUrls.filter((url) => isPrReady(cachedOrEmpty(url))));
-      setState({ ready, loaded: true });
+      // `loaded` belongs to the run sequencing above: a cache write for a URL
+      // shared with the previous set must not flip it early.
+      setState((current) => ({ ready, loaded: current.loaded }));
     };
     const unsubscribes = githubUrls.map((url) => subscribePrInfo(url, recompute));
     return () => {

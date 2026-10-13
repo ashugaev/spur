@@ -992,4 +992,99 @@ describe("shared PR poller", () => {
     expect(result.current.loaded).toBe(true);
     expect(result.current.ready.has(urlB)).toBe(true);
   });
+
+  it("sends nothing on remount after a poll returned an unchanged result", async () => {
+    mockEchoBackend();
+    const url = "https://gitlab.com/org/repo/-/merge_requests/8";
+    const first = renderHook(() => usePrInfo(url));
+    await advance(0);
+    await advance(120_000);
+    // Second poll returned data equal to the cache, which writes nothing.
+    expect(singleGets()).toHaveLength(2);
+
+    first.unmount();
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(singleGets()).toHaveLength(2);
+  });
+
+  it("sends nothing on remount after a batch skipped an errored result", async () => {
+    const url = "https://github.com/org/repo/pull/1800";
+    mockFetch.mockImplementation(async () =>
+      jsonResponse({
+        results: { [url]: { ...openPr, state: null, error: "GitHub API 503" } },
+      }),
+    );
+    const first = renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+
+    first.unmount();
+    renderHook(() => usePrInfo(url));
+    await advance(0);
+    expect(batchBodies()).toHaveLength(1);
+  });
+
+  it("keeps loaded false for an overlapping URL set until the follow-up run settles", async () => {
+    const urlA = "https://github.com/org/repo/pull/1600";
+    const urlShared = "https://github.com/org/repo/pull/1601";
+    const urlB = "https://github.com/org/repo/pull/1602";
+    const resolvers: Array<(response: Response) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const { result, rerender } = renderHook(({ urls }) => usePrReadyUrls(urls, true), {
+      initialProps: { urls: [urlA, urlShared] },
+    });
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    rerender({ urls: [urlShared, urlB] });
+    await advance(0);
+
+    // A's batch primes the shared URL; the new set must stay not loaded.
+    await act(async () => {
+      resolvers[0]?.(jsonResponse({ results: { [urlA]: openPr, [urlShared]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(false);
+
+    expect(resolvers).toHaveLength(2);
+    await act(async () => {
+      resolvers[1]?.(jsonResponse({ results: { [urlB]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it("never overlaps two batch runs across an unmount-all and remount", async () => {
+    const resolvers: Array<(response: Response) => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const urlA = "https://github.com/org/repo/pull/1700";
+    const urlB = "https://github.com/org/repo/pull/1701";
+    const first = renderHook(() => usePrInfo(urlA));
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    first.unmount();
+    await advance(0);
+    renderHook(() => usePrInfo(urlB));
+    await advance(0);
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => {
+      resolvers[0]?.(jsonResponse({ results: { [urlA]: openPr } }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(resolvers).toHaveLength(2);
+    expect(batchBodies()[1]).toEqual([urlB]);
+  });
 });
