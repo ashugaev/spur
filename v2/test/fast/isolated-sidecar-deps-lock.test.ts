@@ -216,17 +216,58 @@ function testEnv(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv): NodeJS.P
   };
 }
 
+// setsid makes the script a process-group leader (pid == pgid), so teardown
+// can signal the script and every fake child it spawned in one kill(-pid).
 function runIsolatedUi(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv) {
-  return execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-ui.sh")], {
-    cwd: worktree.repoDir,
-    env: testEnv(worktree, extraEnv),
-  });
+  return execFileAsync(
+    "setsid",
+    ["bash", join(worktree.repoDir, "scripts", "spur-isolated-ui.sh")],
+    { cwd: worktree.repoDir, env: testEnv(worktree, extraEnv) },
+  );
 }
 
 function runIsolatedDaemon(worktree: FakeWorktree, extraEnv?: NodeJS.ProcessEnv) {
-  return execFileAsync("bash", [join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")], {
-    env: testEnv(worktree, extraEnv),
-  });
+  return execFileAsync(
+    "setsid",
+    ["bash", join(worktree.repoDir, "scripts", "spur-isolated-daemon.sh")],
+    { env: testEnv(worktree, extraEnv) },
+  );
+}
+
+type ScriptRun = ReturnType<typeof runIsolatedDaemon>;
+
+// Readiness is the observed marker, not a fixed poll: fail fast when the
+// script exits without producing it, otherwise wait out a generous budget
+// (startup scans host process cwds, which stalls under full-suite load).
+async function waitForScriptMarker(
+  run: ScriptRun,
+  isReady: () => boolean,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!isReady()) {
+    if (run.child.exitCode !== null || run.child.signalCode !== null) {
+      throw new Error(`Script exited before ${description}`);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${description}`);
+    }
+    await sleep(10);
+  }
+}
+
+// Teardown must not delete the fixture under a live script: kill the script's
+// whole process group (fake pnpm/node children included), then await exit.
+async function stopScriptRun(run: ScriptRun): Promise<void> {
+  const pid = run.child.pid;
+  if (pid !== undefined && run.child.exitCode === null && run.child.signalCode === null) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // Group already gone.
+    }
+  }
+  await run.catch(() => undefined);
 }
 
 function readLog(worktree: FakeWorktree): string[] {
@@ -350,80 +391,87 @@ describe("isolated sidecar workspace dependency lock (#823)", () => {
     const fifoPath = join(worktree.repoDir, "install.fifo");
     await execFileAsync("mkfifo", [fifoPath]);
 
-    const uiPromise = runIsolatedUi(worktree, { SPUR_TEST_INSTALL_FIFO: fifoPath }).catch(
-      (error) => error,
-    );
+    const uiRun = runIsolatedUi(worktree, { SPUR_TEST_INSTALL_FIFO: fifoPath });
+    const uiPromise = uiRun.catch((error) => error);
+    let daemonRun: ScriptRun | undefined;
+    try {
+      // Wait for the UI to be inside the install (holding the lock).
+      await waitForScriptMarker(
+        uiRun,
+        () => readLog(worktree).includes("install-start"),
+        "isolated-ui install-start",
+      );
+      expect(readLog(worktree)).not.toContain("install-end");
 
-    // Wait for the UI to be inside the install (holding the lock).
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (readLog(worktree).includes("install-start")) {
-        break;
+      const daemonPromise = runIsolatedDaemon(worktree);
+      daemonRun = daemonPromise;
+      // Observed by the awaits below and by teardown; never an unhandled rejection.
+      daemonPromise.catch(() => undefined);
+
+      // The UI's flock subshell redirect (`) 9>"$lock_file"`) already created
+      // the lock file when it entered the install branch above.
+      const lockPath = join(worktree.toolDir, "workspace-deps.lock");
+      expect(existsSync(lockPath)).toBe(true);
+      const lockInode = statSync(lockPath).ino;
+
+      // Race two mutually exclusive, host-load-independent outcomes: either the
+      // daemon's own ensure_workspace_deps call registers as a kernel-level
+      // waiter on the UI's held lock (the gate is live), or the daemon reaches
+      // build/probe/start without ever registering as a waiter (the gate was
+      // skipped — this is exactly what the mutation check below must catch).
+      // No wall-clock budget is asserted here; only which of the two happens
+      // first, checked as fast as the loop can spin.
+      let daemonParked = false;
+      let daemonSkippedGate = false;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        if (hasPendingFlockWaiter(lockInode)) {
+          daemonParked = true;
+          break;
+        }
+        const log = readLog(worktree);
+        if (log.includes("build") || log.includes("cli-probe") || log.includes("daemon-start")) {
+          daemonSkippedGate = true;
+          break;
+        }
+        await sleep(10);
       }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    expect(readLog(worktree)).toContain("install-start");
-    expect(readLog(worktree)).not.toContain("install-end");
 
-    const daemonPromise = runIsolatedDaemon(worktree);
+      expect(daemonSkippedGate).toBe(false);
+      expect(daemonParked).toBe(true);
 
-    // The UI's flock subshell redirect (`) 9>"$lock_file"`) already created
-    // the lock file when it entered the install branch above.
-    const lockPath = join(worktree.toolDir, "workspace-deps.lock");
-    expect(existsSync(lockPath)).toBe(true);
-    const lockInode = statSync(lockPath).ino;
+      // Now backed by direct kernel-lock evidence (not elapsed time) that the
+      // daemon is blocked before build/probe/start, so this snapshot cannot
+      // pass "by accident" the way a fixed wall-clock window could.
+      const duringWindow = readLog(worktree);
+      expect(duringWindow).not.toContain("build");
+      expect(duringWindow).not.toContain("cli-probe");
+      expect(duringWindow).not.toContain("daemon-start");
 
-    // Race two mutually exclusive, host-load-independent outcomes: either the
-    // daemon's own ensure_workspace_deps call registers as a kernel-level
-    // waiter on the UI's held lock (the gate is live), or the daemon reaches
-    // build/probe/start without ever registering as a waiter (the gate was
-    // skipped — this is exactly what the mutation check below must catch).
-    // No wall-clock budget is asserted here; only which of the two happens
-    // first, checked as fast as the loop can spin.
-    let daemonParked = false;
-    let daemonSkippedGate = false;
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
-      if (hasPendingFlockWaiter(lockInode)) {
-        daemonParked = true;
-        break;
+      // Release the UI's install.
+      writeFileSync(fifoPath, "go\n");
+
+      await daemonPromise;
+      await uiPromise;
+
+      const finalLog = readLog(worktree);
+      const order = ["install-start", "install-end", "build", "cli-probe", "daemon-start"];
+      const indices: number[] = order.map((entry) => finalLog.indexOf(entry));
+      expect(indices.every((index) => index !== -1)).toBe(true);
+      for (let i = 1; i < indices.length; i += 1) {
+        const previous: number = indices[i - 1] ?? -1;
+        const current: number = indices[i] ?? -1;
+        expect(current).toBeGreaterThan(previous);
       }
-      const log = readLog(worktree);
-      if (log.includes("build") || log.includes("cli-probe") || log.includes("daemon-start")) {
-        daemonSkippedGate = true;
-        break;
+      expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(true);
+      // Only one repair ran total, no matter which sidecar took the lock.
+      expect(finalLog.filter((line) => line === "install-start")).toHaveLength(1);
+    } finally {
+      await stopScriptRun(uiRun);
+      if (daemonRun) {
+        await stopScriptRun(daemonRun);
       }
-      await sleep(10);
     }
-
-    expect(daemonSkippedGate).toBe(false);
-    expect(daemonParked).toBe(true);
-
-    // Now backed by direct kernel-lock evidence (not elapsed time) that the
-    // daemon is blocked before build/probe/start, so this snapshot cannot
-    // pass "by accident" the way a fixed wall-clock window could.
-    const duringWindow = readLog(worktree);
-    expect(duringWindow).not.toContain("build");
-    expect(duringWindow).not.toContain("cli-probe");
-    expect(duringWindow).not.toContain("daemon-start");
-
-    // Release the UI's install.
-    writeFileSync(fifoPath, "go\n");
-
-    await daemonPromise;
-    await uiPromise;
-
-    const finalLog = readLog(worktree);
-    const order = ["install-start", "install-end", "build", "cli-probe", "daemon-start"];
-    const indices: number[] = order.map((entry) => finalLog.indexOf(entry));
-    expect(indices.every((index) => index !== -1)).toBe(true);
-    for (let i = 1; i < indices.length; i += 1) {
-      const previous: number = indices[i - 1] ?? -1;
-      const current: number = indices[i] ?? -1;
-      expect(current).toBeGreaterThan(previous);
-    }
-    expect(existsSync(join(worktree.toolDir, "isolated-env.sh"))).toBe(true);
-    // Only one repair ran total, no matter which sidecar took the lock.
-    expect(finalLog.filter((line) => line === "install-start")).toHaveLength(1);
   });
 
   it("AC3: with a ready tree neither sidecar installs, and pre-seeded markers survive", async () => {
