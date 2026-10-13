@@ -5870,10 +5870,98 @@ describe("startConfiguredTriggers", () => {
         ]);
       }
 
-      function taggedBy(triggerId: string, sessionId: string) {
-        const session = taggedSession(sessionId);
+      function taggedBy(triggerId: string, sessionId: string, blockIndex = 0) {
+        const session = taggedSession(sessionId, blockIndex);
         return { ...session, triggerOrigin: { ...session.triggerOrigin, triggerId } };
       }
+
+      it("keeps the old trigger id on an orphan sibling the takeover did not plan", async () => {
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              triggerId: "old-name",
+              blockIndex: 0,
+              state: "running",
+              sessionId: "api-1",
+            }),
+            failedMember({ triggerId: "old-name", blockIndex: 1 }),
+            workItemMember({
+              triggerId: "old-name",
+              blockIndex: 2,
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date().toISOString(),
+            }),
+          ]),
+        ]);
+        listSessionsMock.mockReturnValue([taggedBy("old-name", "api-old", 2)]);
+        const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
+        const getMock = vi.fn().mockImplementation(async (id: string) => ({ id, ...WORKING }));
+        const { bus, controller } = await startTriggers(
+          deskConfig([
+            { agent: "claude", prompt: "a {{url}}" },
+            { agent: "opencode", prompt: "b {{url}}" },
+            { agent: "codex", prompt: "c {{url}}" },
+          ]),
+          { spawn: spawnMock, get: getMock },
+        );
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(spawnMock).toHaveBeenCalledTimes(1);
+          });
+          expect(memberOf(records, 2)).toMatchObject({
+            triggerId: "pick-up",
+            state: "spawning",
+            previousTriggerId: "old-name",
+          });
+
+          vi.setSystemTime(Date.now() + 46 * MINUTE);
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+          });
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+          expect(memberOf(records, 2)).toMatchObject({ state: "running", sessionId: "api-old" });
+        } finally {
+          await controller.stop();
+        }
+      });
+
+      it("carries the old trigger id into a second claim by the same trigger", async () => {
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              triggerId: "pick-up",
+              previousTriggerId: "old-name",
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            }),
+          ]),
+        ]);
+        listSessionsMock.mockReturnValue([]);
+        const claimed: Array<string | undefined> = [];
+        const spawnMock = vi.fn().mockImplementation(async () => {
+          claimed.push(memberOf(records)?.previousTriggerId);
+          return { id: "api-new" };
+        });
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+          get: vi.fn().mockResolvedValue({ id: "api-new", ...WORKING }),
+        });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(spawnMock).toHaveBeenCalledTimes(1);
+          });
+          expect(claimed).toEqual(["old-name"]);
+        } finally {
+          await controller.stop();
+        }
+      });
 
       it("adopts the live session tagged by the orphaned trigger instead of respawning", async () => {
         const records = lostOldNameRecords();

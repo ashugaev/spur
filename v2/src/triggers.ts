@@ -403,9 +403,17 @@ function claimWorkItemBlocks(
     workItemRecordBase(ctx),
     (current) => [
       ...current
-        .map((member) =>
-          adoptsOrphans && isOrphan(member) ? { ...member, triggerId: ctx.triggerId } : member,
-        )
+        .map((member) => {
+          if (!adoptsOrphans || !isOrphan(member)) return member;
+          const previousTriggerId = member.previousTriggerId ?? member.triggerId;
+          return {
+            ...member,
+            triggerId: ctx.triggerId,
+            ...(member.state !== "running" && previousTriggerId !== undefined
+              ? { previousTriggerId }
+              : {}),
+          };
+        })
         .filter(
           (member) =>
             !(consumesLegacy && member.triggerId === undefined) &&
