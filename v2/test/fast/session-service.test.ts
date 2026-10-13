@@ -215,7 +215,9 @@ const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolve
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const lookupTmuxPanePidMock = vi.fn((_sessionName?: string, _options?: { fresh?: boolean }) =>
-  Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
+  Promise.resolve<
+    { status: "ok"; panePid: number | null; paneDead?: boolean } | { status: "unavailable" }
+  >({
     status: "ok",
     panePid: null,
   }),
@@ -34094,6 +34096,34 @@ describe("SessionService", () => {
     );
   });
 
+  it("S1 killAgentPaneAndConfirmExit looks up the pane pid fresh and forwards the dead flag", async () => {
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "main",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4242, paneDead: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1");
+
+    expect(lookupTmuxPanePidMock).toHaveBeenCalledWith("api-1", { fresh: true });
+    expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ panePid: 4242, paneDead: true }),
+    );
+  });
+
   it("kills a renamed-project session using repo-path symlink exclusions from the current config", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -51478,6 +51508,11 @@ describe("SessionService", () => {
       createSessionStore(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      // Restore's own fresh pane lookup keeps the unavailable default; the
+      // kill path's fresh lookup (second call) reads an ok pane without a pid.
+      lookupTmuxPanePidMock
+        .mockResolvedValueOnce({ status: "unavailable" })
+        .mockResolvedValue({ status: "ok", panePid: null });
       let freshProbes = 0;
       isProcessRunningInTmuxMock.mockImplementation(
         async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {

@@ -744,7 +744,7 @@ export async function getTmuxPanePid(
 }
 
 export type TmuxPanePidLookup =
-  | { status: "ok"; panePid: number | null }
+  | { status: "ok"; panePid: number | null; paneDead: boolean }
   | { status: "unavailable" };
 
 // Same read as getTmuxPanePid, but keeps "tmux could not be read" apart from
@@ -767,7 +767,12 @@ export async function lookupTmuxPanePid(
   if (!readable) {
     return { status: "unavailable" };
   }
-  return { status: "ok", panePid: panes.get(sessionName)?.activePanePid ?? null };
+  const entry = panes.get(sessionName);
+  return {
+    status: "ok",
+    panePid: entry?.activePanePid ?? null,
+    paneDead: entry?.activePaneDead ?? false,
+  };
 }
 
 interface PsRow {

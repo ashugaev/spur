@@ -17042,7 +17042,7 @@ export class SessionService {
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17055,6 +17055,7 @@ export class SessionService {
     }
     const capture = await capturePaneAgentProcesses({
       panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {

@@ -13,9 +13,11 @@ import {
   canReadProcessEnv,
   collectDescendants,
   listProcesses,
+  listSessionMemberPids,
   readProcessCwd,
   readProcessEnvValue,
   readProcessIdentity,
+  readProcessStat,
   signalPid,
   snapshotProcesses,
   snapshotProcessLiveness,
@@ -182,8 +184,13 @@ export type PaneAgentCapture =
 const CAPTURE_RETRY_DELAY_MS = 100;
 
 // P1, pane-rooted and exact: descendants of `panePid` whose args match this
-// session's own agent matchers. `panePid: null` (pane already gone, or the
-// caller never resolved one) reads as an empty capture — never throws.
+// session's own agent matchers, plus every other member of the pane's kernel
+// session (sid === panePid). The session pass catches processes re-parented to
+// init after the agent wrapper died, and MCP children that never match an
+// agent matcher. It runs only while the pane is alive and `panePid` is still a
+// live session leader, so a dead pane whose pid number was recycled never
+// widens the kill set. `panePid: null` (pane already gone, or the caller never
+// resolved one) reads as an empty capture — never throws.
 //
 // "unavailable" when the process table could not be read. That must NOT
 // collapse into an empty capture: an empty capture makes
@@ -194,6 +201,7 @@ const CAPTURE_RETRY_DELAY_MS = 100;
 // usually transient fork pressure.
 export async function capturePaneAgentProcesses(input: {
   panePid: number | null;
+  paneDead: boolean;
   processMatchers: readonly string[];
 }): Promise<PaneAgentCapture> {
   if (input.panePid === null) {
@@ -219,6 +227,20 @@ export async function capturePaneAgentProcesses(input: {
     const proc = byPid.get(pid);
     if (proc && matchers.some((matcher) => matcher.test(proc.args))) {
       refs.push({ pid: proc.pid, identity: await readProcessIdentity(proc.pid) });
+    }
+  }
+  const { panePid } = input;
+  if (!input.paneDead && panePid > 1 && (await readProcessStat(panePid))?.sid === panePid) {
+    const captured = new Set(refs.map((ref) => ref.pid));
+    for (const pid of await listSessionMemberPids(panePid)) {
+      if (pid === panePid || pid === process.pid || captured.has(pid)) {
+        continue;
+      }
+      const stat = await readProcessStat(pid);
+      if (stat !== null && stat.sid === panePid) {
+        refs.push({ pid, identity: stat.identity });
+        captured.add(pid);
+      }
     }
   }
   return { status: "ok", processes: refs };

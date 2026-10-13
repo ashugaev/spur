@@ -9,6 +9,8 @@ interface FakeProc {
   elapsedSeconds: number;
   args: string;
   env?: Record<string, string>;
+  // Kernel session id; undefined reads as an unreadable /proc stat.
+  sid?: number | undefined;
 }
 
 let fakeTable: FakeProc[] = [];
@@ -44,6 +46,14 @@ const snapshotProcessesMock = vi.fn(async () =>
     : ({ status: "ok", processes: toEntries() } as const),
 );
 const readProcessIdentityMock = vi.fn(async (pid: number) => identities.get(pid) ?? null);
+const listSessionMemberPidsMock = vi.fn(async (sid: number) =>
+  fakeTable.filter((proc) => proc.sid === sid).map((proc) => proc.pid),
+);
+const readProcessStatMock = vi.fn(async (pid: number) => {
+  const sid = fakeTable.find((proc) => proc.pid === pid)?.sid;
+  const identity = identities.get(pid);
+  return sid === undefined || identity === undefined ? null : { sid, identity };
+});
 // Real /proc reads on the fake pids used below (10/11/20/21/70/etc.) would hit
 // live kernel-thread pids on this host — the vi.mock spread only passes an
 // UNNAMED export through to the real implementation, so this must be named
@@ -78,6 +88,8 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => {
     snapshotProcesses: snapshotProcessesMock,
     readProcessEnvValue: readProcessEnvValueMock,
     readProcessIdentity: readProcessIdentityMock,
+    listSessionMemberPids: listSessionMemberPidsMock,
+    readProcessStat: readProcessStatMock,
     readProcessCwd: readProcessCwdMock,
     canReadProcessEnv: canReadProcessEnvMock,
     snapshotProcessLiveness: snapshotProcessLivenessMock,
@@ -144,6 +156,8 @@ beforeEach(() => {
   listProcessesMock.mockClear();
   snapshotProcessesMock.mockClear();
   readProcessIdentityMock.mockClear();
+  listSessionMemberPidsMock.mockClear();
+  readProcessStatMock.mockClear();
   readProcessCwdMock.mockClear();
   readProcessEnvValueMock.mockClear();
   canReadProcessEnvMock.mockClear();
@@ -159,12 +173,16 @@ afterEach(() => {
 
 describe("capturePaneAgentProcesses", () => {
   it("returns an empty capture when panePid is null", async () => {
-    expect(await capturePaneAgentProcesses({ panePid: null, processMatchers: ["claude"] })).toEqual(
-      {
-        status: "ok",
-        processes: [],
-      },
-    );
+    expect(
+      await capturePaneAgentProcesses({
+        panePid: null,
+        paneDead: false,
+        processMatchers: ["claude"],
+      }),
+    ).toEqual({
+      status: "ok",
+      processes: [],
+    });
   });
 
   it("reports unavailable when the process table cannot be read, never an empty capture", async () => {
@@ -173,7 +191,9 @@ describe("capturePaneAgentProcesses", () => {
     // agent — the duplicate this module exists to prevent. The capture must
     // stay distinguishable from "the pane had no agent processes".
     processSnapshotUnavailable = true;
-    expect(await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] })).toEqual({
+    expect(
+      await capturePaneAgentProcesses({ panePid: 1, paneDead: false, processMatchers: ["claude"] }),
+    ).toEqual({
       status: "unavailable",
     });
   });
@@ -188,7 +208,11 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({
+      panePid: 1,
+      paneDead: false,
+      processMatchers: ["claude"],
+    });
     expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
     expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: null }] });
   });
@@ -199,7 +223,11 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 1, ppid: 0, rssKb: 1, elapsedSeconds: 1, args: "-zsh" },
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({
+      panePid: 1,
+      paneDead: false,
+      processMatchers: ["claude"],
+    });
     expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: "starttime-2" }] });
   });
 
@@ -215,10 +243,150 @@ describe("capturePaneAgentProcesses", () => {
       },
       { pid: 3, ppid: 0, rssKb: 300, elapsedSeconds: 1, args: "/usr/bin/claude --other" },
     ];
-    const capture = await capturePaneAgentProcesses({ panePid: 1, processMatchers: ["claude"] });
+    const capture = await capturePaneAgentProcesses({
+      panePid: 1,
+      paneDead: false,
+      processMatchers: ["claude"],
+    });
     expect(capture.status).toBe("ok");
     if (capture.status !== "ok") throw new Error("unreachable");
     expect(capture.processes.map((ref) => ref.pid)).toEqual([2]);
+    expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
+  });
+
+  describe("pane kernel session members", () => {
+    const row = (pid: number, ppid: number, args: string, sid?: number): FakeProc => ({
+      pid,
+      ppid,
+      rssKb: 1,
+      elapsedSeconds: 1,
+      args,
+      sid,
+    });
+    const pane = (paneDead = false): Parameters<typeof capturePaneAgentProcesses>[0] => ({
+      panePid: 100,
+      paneDead,
+      processMatchers: ["codex"],
+    });
+    const capturedPids = async (
+      input: Parameters<typeof capturePaneAgentProcesses>[0],
+    ): Promise<number[]> => {
+      const capture = await capturePaneAgentProcesses(input);
+      if (capture.status !== "ok") throw new Error("unreachable");
+      return capture.processes.map((ref) => ref.pid);
+    };
+
+    it("T1 captures a re-parented native binary and its non-matching MCP child", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [901, "s901"],
+        [902, "s902"],
+      ]);
+      fakeTable = [
+        row(100, 1, "-zsh", 100),
+        row(901, 900, "/opt/codex/native/codex", 100),
+        row(902, 901, "npm exec @playwright/mcp", 100),
+      ];
+      const capture = await capturePaneAgentProcesses(pane());
+      expect(capture).toEqual({
+        status: "ok",
+        processes: [
+          { pid: 901, identity: "s901" },
+          { pid: 902, identity: "s902" },
+        ],
+      });
+    });
+
+    it("T2 ignores a matching process from another session that is not a pane descendant", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [50, "s50"],
+      ]);
+      fakeTable = [row(100, 1, "-zsh", 100), row(51, 1, "codex", 50), row(52, 1, "codex")];
+      expect(await capturedPids(pane())).toEqual([]);
+    });
+
+    it("T3 never captures the daemon pid or the pane leader", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [process.pid, "daemon"],
+      ]);
+      fakeTable = [row(100, 1, "-zsh", 100), row(process.pid, 1, "node spur", 100)];
+      expect(await capturedPids(pane())).toEqual([]);
+    });
+
+    it("T4 reads nothing for a null pane pid", async () => {
+      expect(
+        await capturePaneAgentProcesses({ panePid: null, paneDead: false, processMatchers: ["x"] }),
+      ).toEqual({ status: "ok", processes: [] });
+      expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
+      expect(readProcessStatMock).not.toHaveBeenCalled();
+    });
+
+    it("T6 terminateAgentProcesses signals the re-parented members", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [901, "s901"],
+        [902, "s902"],
+      ]);
+      fakeTable = [
+        row(100, 1, "-zsh", 100),
+        row(901, 900, "codex", 100),
+        row(902, 901, "npm exec @playwright/mcp", 100),
+      ];
+      const capture = await capturePaneAgentProcesses(pane());
+      if (capture.status !== "ok") throw new Error("unreachable");
+      await terminateAgentProcesses(capture.processes, {
+        hupGraceMs: 5,
+        termGraceMs: 5,
+        killGraceMs: 5,
+      });
+      expect(signalPidMock).toHaveBeenCalledWith(901, "SIGHUP");
+      expect(signalPidMock).toHaveBeenCalledWith(902, "SIGHUP");
+    });
+
+    it("T7 drops a member whose stat is unreadable", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [902, "s902"],
+      ]);
+      fakeTable = [
+        row(100, 1, "-zsh", 100),
+        row(901, 1, "codex-helper", 100),
+        row(902, 1, "npm exec @playwright/mcp", 100),
+      ];
+      expect(await capturedPids(pane())).toEqual([902]);
+    });
+
+    it("T8 skips the session pass when the pane pid is not a session leader", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [901, "s901"],
+      ]);
+      fakeTable = [row(100, 1, "-zsh", 7), row(901, 1, "codex", 100)];
+      expect(await capturedPids(pane())).toEqual([]);
+      expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
+    });
+
+    it("T9 equals the descendant pass when the member listing is empty", async () => {
+      identities = new Map([[100, "s100"]]);
+      fakeTable = [row(100, 1, "-zsh", 100), row(101, 100, "codex")];
+      listSessionMemberPidsMock.mockResolvedValueOnce([]);
+      expect(await capturePaneAgentProcesses(pane())).toEqual({
+        status: "ok",
+        processes: [{ pid: 101, identity: null }],
+      });
+    });
+
+    it("T10 never runs the session pass for a dead pane even when a live leader holds its pid", async () => {
+      identities = new Map([
+        [100, "s100"],
+        [901, "s901"],
+      ]);
+      fakeTable = [row(100, 1, "-zsh", 100), row(901, 1, "other-session-member", 100)];
+      expect(await capturedPids(pane(true))).toEqual([]);
+      expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
+    });
   });
 });
 
