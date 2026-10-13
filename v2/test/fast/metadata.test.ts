@@ -10,6 +10,8 @@ import {
   deleteWorkItemLifecycle,
   hasPendingTelegramSend,
   listSessions,
+  listProjectSessions,
+  readListedSession,
   clearGitHubPollDisabledSession,
   listGitHubPollDisabledEntries,
   listGitHubPollDisabledSourceIds,
@@ -2368,6 +2370,114 @@ describe("listSessions record cache", () => {
 
     expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
     expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+  });
+
+  it("does not read an indexed per-session shard dir", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    const shardDir = join(dataDir, "sessions", "api-1");
+    mkdirSync(shardDir, { recursive: true });
+    writeFileSync(
+      join(shardDir, "ghost.json"),
+      `${JSON.stringify({ ...fixtureSession("ghost"), id: "ghost" })}\n`,
+    );
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+  });
+
+  it("lists a project dir named like an indexed session id when records are indexed under it", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...fixtureSession("sp-review"), project: "api" });
+    writeSession(dataDir, { ...fixtureSession("sp-1a2b"), project: "sp-review" });
+
+    expect(
+      listSessions(dataDir)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(["sp-1a2b", "sp-review"]);
+  });
+
+  it("scans every dir when the index is corrupt", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    writeSession(dataDir, { ...fixtureSession("api-2"), project: "other" });
+    writeFileSync(join(dataDir, "sessions", ".index.json"), "{not json", "utf-8");
+
+    expect(
+      listSessions(dataDir)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(["api-1", "api-2"]);
+  });
+});
+
+describe("listProjectSessions", () => {
+  function fixtureSession(id: string, project: string): SessionRecord {
+    return {
+      id,
+      project,
+      agent: "claude",
+      prompt: "ship it",
+      branch: id,
+      worktree: true,
+      worktreePath: `/tmp/spur-worktrees/${project}/${id}`,
+      tmuxSession: id,
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+  }
+
+  it("returns only that project with listSessions identity and keeps other projects cached", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1", "api"));
+    writeSession(dataDir, fixtureSession("web-1", "web"));
+
+    const full = listSessions(dataDir);
+    const scoped = listProjectSessions(dataDir, "api");
+    expect(scoped.map((s) => s.id)).toEqual(["api-1"]);
+    expect(scoped[0]).toBe(full.find((s) => s.id === "api-1"));
+
+    const after = listSessions(dataDir);
+    expect(after.find((s) => s.id === "web-1")).toBe(full.find((s) => s.id === "web-1"));
+  });
+
+  it("returns [] for a missing project dir", async () => {
+    const dataDir = await newDataDir();
+    expect(listProjectSessions(dataDir, "nope")).toEqual([]);
+  });
+});
+
+describe("readListedSession", () => {
+  const record = (): SessionRecord => ({
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "ship it",
+    branch: "api-1",
+    worktree: true,
+    worktreePath: "/tmp/spur-worktrees/api/api-1",
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:01:00.000Z",
+  });
+
+  it("returns the listSessions object, a new one after a write, null when missing", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, record());
+
+    const listed = listSessions(dataDir)[0];
+    expect(readListedSession(dataDir, "api-1")).toBe(listed);
+
+    writeSession(dataDir, { ...record(), status: "completed" });
+    const rewritten = readListedSession(dataDir, "api-1");
+    expect(rewritten).not.toBe(listed);
+    expect(rewritten?.status).toBe("completed");
+
+    expect(readListedSession(dataDir, "missing-1")).toBeNull();
   });
 });
 

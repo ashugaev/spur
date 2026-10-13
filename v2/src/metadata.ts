@@ -1247,6 +1247,48 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+// A dir removed between the parent readdir and this one is skipped; every
+// other readdir failure still throws.
+function scanProjectDir(projectDir: string, visited: Set<string>, sessions: SessionRecord[]): void {
+  let fileNames: string[];
+  try {
+    fileNames = readdirSync(projectDir);
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return;
+    throw error;
+  }
+  for (const fileName of fileNames) {
+    if (!fileName.endsWith(".json")) continue;
+    const filePath = join(projectDir, fileName);
+    visited.add(filePath);
+    const session = tryReadSessionFile(filePath);
+    if (session) {
+      sessions.push(session);
+    }
+  }
+}
+
+// Project dirs named by an index value (sessions/<project>/<id>.json), computed
+// once per index object: readSessionIndex returns the same object while the
+// index file fingerprint is unchanged.
+const indexProjectSegments = new WeakMap<object, ReadonlySet<string>>();
+
+function projectSegmentsOf(index: Readonly<Record<string, string>>): ReadonlySet<string> {
+  const cached = indexProjectSegments.get(index);
+  if (cached) return cached;
+  const segments = new Set<string>();
+  for (const path of Object.values(index)) {
+    const project = path.split(sep)[1];
+    if (project) segments.add(project);
+  }
+  indexProjectSegments.set(index, segments);
+  return segments;
+}
+
+function sortNewestFirst(sessions: SessionRecord[]): SessionRecord[] {
+  return sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
@@ -1254,26 +1296,38 @@ export function listSessions(dataDir: string): SessionRecord[] {
     return [];
   }
 
+  // Per-session log shard dirs (sessions/<sessionId>) sit beside project dirs
+  // and hold no records. An indexed session id that no index value uses as a
+  // project segment is a shard dir: skip it.
+  const index = readSessionIndex(dataDir);
+  const projectSegments = projectSegmentsOf(index);
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
-      const filePath = join(projectDir, fileName);
-      visited.add(filePath);
-      const session = tryReadSessionFile(filePath);
-      if (session) {
-        sessions.push(session);
-      }
-    }
+    if (Object.hasOwn(index, entry.name) && !projectSegments.has(entry.name)) continue;
+    scanProjectDir(join(rootDir, entry.name), visited, sessions);
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
 
-  sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  return sessions;
+  return sortNewestFirst(sessions);
+}
+
+export function listProjectSessions(dataDir: string, projectId: string): SessionRecord[] {
+  const projectDir = join(dataDir, "sessions", projectId);
+  const sessions: SessionRecord[] = [];
+  const visited = new Set<string>();
+  scanProjectDir(projectDir, visited, sessions);
+  pruneStaleSessionFileCacheEntries(projectDir, visited);
+  return sortNewestFirst(sessions);
+}
+
+// Same cached object listSessions returns for an unchanged file; null when the
+// record is missing.
+export function readListedSession(dataDir: string, sessionId: string): SessionRecord | null {
+  const path = findSessionFilePath(dataDir, sessionId);
+  return path ? tryReadSessionFile(path) : null;
 }
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
