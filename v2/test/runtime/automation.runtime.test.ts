@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -145,6 +145,23 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
     }
     _resetGhPathCacheForTests();
   }
+}
+
+// The source emits only on change against its per-session snapshot. The
+// startup poll can skip a session whose branch PR lookup SessionService
+// auto-detect still owns, so a state flipped before the snapshot exists is
+// the first observation: baselined, never emitted (#1017).
+async function waitForSourceBaseline(
+  context: RuntimeTestContext,
+  sessionId: string,
+): Promise<void> {
+  await pollUntil(
+    async () => readGitHubSourceSnapshot(context.dataDir, "api", "pr-watch", sessionId),
+    {
+      timeoutMs: 15_000,
+      accept: (value) => value !== null,
+    },
+  );
 }
 
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
@@ -384,18 +401,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -534,6 +540,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-ci": {
@@ -1088,18 +1095,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
-        const snapshotPath = join(
-          context.dataDir,
-          "source-state",
-          "github",
-          "api",
-          "pr-watch",
-          `${session.id}.json`,
-        );
-        await pollUntil(async () => existsSync(snapshotPath), {
-          timeoutMs: 15_000,
-          accept: Boolean,
-        });
+        await waitForSourceBaseline(context, session.id);
 
         await context.writeGhState({
           prsByBranch: {
@@ -1271,6 +1267,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         });
 
         try {
+          await waitForSourceBaseline(context, session.id);
           await context.writeGhState({
             prsByBranch: {
               "feature-runtime-merge-conflict": {
