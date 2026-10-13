@@ -461,7 +461,6 @@ exit 42
       }
       return dir;
     };
-    const makeFakeGitDir = (): Promise<string> => makeToolStub(true);
     const runGit = (inner: string, pathValue: string) =>
       spawnSync(join(inner, "git"), ["--version"], {
         encoding: "utf8",
@@ -472,7 +471,7 @@ exit 42
     it("resolves real git past a nested wrapper in both PATH orders", async () => {
       const inner = await makeWrapper("inner");
       const outer = await makeWrapper("outer");
-      const fakeBin = await makeFakeGitDir();
+      const fakeBin = await makeToolStub(true);
 
       for (const pathValue of [`${inner}:${outer}:${fakeBin}`, `${outer}:${inner}:${fakeBin}`]) {
         const result = runGit(inner, pathValue);
@@ -486,7 +485,7 @@ exit 42
       const inner = await makeWrapper("inner");
       const legacy = await createTempDir("spur-slots-legacy-");
       tempDirs.push(legacy);
-      const fakeBin = await makeFakeGitDir();
+      const fakeBin = await makeToolStub(true);
       writeFileSync(
         join(legacy, "git"),
         `#!/usr/bin/env bash
@@ -510,7 +509,14 @@ exec "$REAL_GIT" "$@"
         { encoding: "utf8", mode: 0o755 },
       );
 
-      for (const pathValue of [`${inner}:${legacy}:${fakeBin}`, `${legacy}:${inner}:${fakeBin}`]) {
+      const outer = await makeWrapper("outer");
+
+      for (const pathValue of [
+        `${inner}:${legacy}:${fakeBin}`,
+        `${legacy}:${inner}:${fakeBin}`,
+        `${inner}:${outer}:${legacy}:${fakeBin}`,
+        `${inner}:${legacy}:${outer}:${fakeBin}`,
+      ]) {
         const result = runGit(inner, pathValue);
         expect(result.status).toBe(0);
         expect(result.stdout).toBe("git version fake-real\n");
@@ -527,6 +533,37 @@ exec "$REAL_GIT" "$@"
       expect(result.status).toBe(127);
       expect(result.stderr).toContain("Spur git wrapper could not find git");
       expect(result.stderr).not.toContain("command not found");
+    });
+
+    it("blocks a bad-branch push through nested wrappers", async () => {
+      const inner = await makeWrapper("inner");
+      const outer = await makeWrapper("outer");
+      const fakeBin = await makeToolStub(false);
+      const capturedArgsPath = join(fakeBin, "git-args.txt");
+      writeFileSync(
+        join(fakeBin, "git"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "-C /repo branch --show-current" ]]; then
+  echo "bad-name"
+  exit 0
+fi
+printf '%s\\n' "$@" > ${JSON.stringify(capturedArgsPath)}
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      writeFileSync(join(inner, "spur-branch"), `#!/usr/bin/env bash\nexit 42\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      const result = spawnSync(join(inner, "git"), ["-C", "/repo", "push"], {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: `${inner}:${outer}:${fakeBin}` },
+      });
+      expect(result.status).toBe(42);
+      expect(() => readFileSync(capturedArgsPath, "utf8")).toThrow();
     });
   });
 
