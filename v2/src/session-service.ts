@@ -16468,7 +16468,17 @@ export class SessionService {
     if (options?.sensitivePromptSuffix) {
       const current = readSession(this.config.dataDir, sessionId);
       if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-      await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+      // The body leg has landed: a controls failure must not reject deliver(),
+      // or the trigger retry re-pastes the landed digest.
+      try {
+        await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
+      } catch (error) {
+        this.logEvent("session.controls.delivery_failed", {
+          level: "warn",
+          sessionId,
+          message: `Deferred controls send failed for ${sessionId} after the message landed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
     }
     return result;
   }

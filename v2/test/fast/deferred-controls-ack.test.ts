@@ -8,6 +8,7 @@ import {
   isProcessRunningInTmuxMock,
   probeTmuxProcessMatchMock,
   sendMessageToTmuxMock,
+  sendSensitiveMessageToTmuxMock,
   sendSubmitKeyToTmuxMock,
   logSpurEventMock,
   mockTimerPromisesSleepWithFakeTimers,
@@ -164,6 +165,68 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(holdAt);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it("a recovered body whose controls leg then fails on a probe diagnostic still resolves, holds, and pastes the body once", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: "/x.jsonl" }),
+      });
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: "/x.jsonl",
+      });
+      probeTmuxProcessMatchMock
+        .mockReset()
+        .mockImplementation(async () =>
+          sendSensitiveMessageToTmuxMock.mock.calls.length > 0
+            ? { alive: false, matchedByName: false, unresponsive: false, diagnostic: "tmux gone" }
+            : { alive: true, matchedByName: true, unresponsive: false },
+        );
+      sendMessageToTmuxMock.mockClear();
+
+      await expect(
+        service.deliver("api-1", "the task body", { sensitivePromptSuffix: controlsMessage() }),
+      ).resolves.toBeDefined();
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(eventsOf("session.message.delivery_recovered")).toHaveLength(1);
+      const failed = eventsOf("session.controls.delivery_failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.level).toBe("warn");
+      expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeDefined();
+      service.dispose();
+    });
+
+    it("an acked body whose controls send throws still resolves with one body paste", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("waiting", "idle");
+      mockClaudeJsonlState("waiting");
+      primeLiveNonAckingBinding();
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      sendMessageToTmuxMock.mockClear();
+      sendSensitiveMessageToTmuxMock.mockRejectedValueOnce(new Error("paste failed"));
+
+      await expect(
+        service.deliver("api-1", "the task body", { sensitivePromptSuffix: controlsMessage() }),
+      ).resolves.toBeDefined();
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(eventsOf("session.controls.delivery_failed")).toHaveLength(1);
+      expect(eventsOf("session.message.failed")).toHaveLength(0);
       service.dispose();
     });
 

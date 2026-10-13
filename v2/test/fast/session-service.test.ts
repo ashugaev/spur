@@ -103,6 +103,7 @@ import {
   killTmuxSessionTreeMock,
   sendMessageToTmuxMock,
   sendInterruptKeysToTmuxMock,
+  sendSensitiveMessageToTmuxMock,
   sendSubmitKeyToTmuxMock,
   sendMenuSelectionKeysMock,
   tmuxPaneDeadMock,
