@@ -7712,6 +7712,9 @@ export class SessionService {
           // everything else.
           continue;
         }
+        // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || !isTerminalSessionStatus(latest.status)) continue;
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
         // terminal anchor this loop would otherwise reap the pane a restorable
         // sibling is still using. Same active-workspace semantics as the

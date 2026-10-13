@@ -48678,6 +48678,40 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("leaves a sidecar alone when a reopen lands after the pass listed the record as terminal", async () => {
+      const sessions = seedReaperSession({
+        status: "completed",
+        sidecarNames: ["proxy"],
+        sidecarProcs: { proxy: { pid: 999_999_999, pgid: 999_999_999, starttime: 123 } },
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService(
+        "/tmp/spur.yaml",
+        "2026-03-18T10:00:00.000Z",
+      ) as unknown as {
+        reapOrphanedTmux(): Promise<void>;
+        dispose(): void;
+      };
+      writeSessionMock.mockClear();
+      killTmuxSessionMock.mockClear();
+      // reopen() flips the record to stopped after the pass's listSessions,
+      // while the snapshot still reads the pane absent.
+      refreshTmuxFleetSnapshotMock.mockImplementationOnce(async () => {
+        sessions.set("api-1", {
+          ...(sessions.get("api-1") as SessionRecord),
+          status: "stopped",
+        });
+      });
+
+      await service.reapOrphanedTmux();
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
     it("leaves a desk-shared sidecar alone under a terminal anchor with a live sibling, and reaps it once the sibling is terminal too", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
