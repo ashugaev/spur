@@ -1417,7 +1417,7 @@ type SessionServiceInternals = {
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
-  ): Promise<{ state: SessionState; session: SessionRecord }>;
+  ): Promise<{ state: SessionState; source: string; session: SessionRecord }>;
   classifySessionState(session: SessionRecord): Promise<SessionState>;
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
