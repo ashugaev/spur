@@ -548,6 +548,21 @@ describe("OpenCode adapter", () => {
       return (await spawnLines(countPath)).filter((line) => line === sessionId).length;
     }
 
+    it("still reads the export when the session worktree no longer exists", async () => {
+      const { dir } = await stubCountingOpenCode();
+      const gone = join(dir, "removed-worktree");
+      try {
+        const state = await readOpenCodeStateIn("ses_gone", gone);
+        expect(state).not.toBeNull();
+        const cwds = (await readFile(join(dir, "cwds.log"), "utf8")).split("\n").filter(Boolean);
+        expect(cwds).toHaveLength(1);
+        expect(cwds[0]).not.toBe(gone);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     // `opencode export` bootstraps an instance for its cwd; every fallback
     // export must run in the session's working directory, not the daemon's.
     it("runs every fallback export in the session working directory", async () => {
