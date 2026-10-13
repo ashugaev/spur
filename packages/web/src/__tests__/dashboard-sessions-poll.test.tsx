@@ -28,6 +28,7 @@ async function advance(ms: number) {
 
 describe("Dashboard sessions poll", () => {
   let sessionsOk: boolean;
+  let sessionsReadMs: number;
   let sessionsCalls: number[];
   let t0: number;
 
@@ -38,12 +39,14 @@ describe("Dashboard sessions poll", () => {
     window.history.replaceState(null, "", "/");
     setVisibility("visible");
     sessionsOk = true;
+    sessionsReadMs = 0;
     sessionsCalls = [];
     t0 = Date.now();
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url === "/api/sessions") {
         sessionsCalls.push(Date.now() - t0);
+        if (sessionsReadMs > 0) await new Promise((resolve) => setTimeout(resolve, sessionsReadMs));
         if (!sessionsOk) return new Response("{}", { status: 500 });
         return new Response(
           JSON.stringify({
@@ -118,6 +121,36 @@ describe("Dashboard sessions poll", () => {
     expect(sessionsCalls).toHaveLength(count);
     await advance(1);
     expect(sessionsCalls).toHaveLength(count + 1);
+    view.unmount();
+  });
+
+  it("spaces the next poll by a slow read's duration", async () => {
+    sessionsReadMs = 20_000;
+    const view = mount();
+    await advance(0);
+    expect(sessionsCalls).toHaveLength(1);
+    // The read settles at 20s; the next one starts 20s later (read time > 5s base).
+    await advance(39_999);
+    expect(sessionsCalls).toHaveLength(1);
+    await advance(1);
+    expect(sessionsCalls).toHaveLength(2);
+    view.unmount();
+  });
+
+  it("does not refetch on focus while polls are failing", async () => {
+    sessionsOk = false;
+    const view = mount();
+    await advance(100);
+    const afterFailure = sessionsCalls.length;
+    expect(afterFailure).toBe(2);
+
+    act(() => setVisibility("hidden"));
+    await advance(1_000);
+    await act(async () => {
+      setVisibility("visible");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(sessionsCalls).toHaveLength(afterFailure);
     view.unmount();
   });
 });

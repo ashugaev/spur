@@ -1257,6 +1257,16 @@ export function Dashboard() {
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
   const sessionsReadMsRef = useRef(0);
   const sessionsErrorBaselineRef = useRef(0);
+  const sessionsFailures = (state: {
+    dataUpdatedAt: number;
+    errorUpdatedAt: number;
+    errorUpdateCount: number;
+  }) => {
+    if (state.dataUpdatedAt >= state.errorUpdatedAt) {
+      sessionsErrorBaselineRef.current = state.errorUpdateCount;
+    }
+    return state.errorUpdateCount - sessionsErrorBaselineRef.current;
+  };
   const [lifecycleVersion, setLifecycleVersion] = useState(0);
   const publishTransitions = () => setLifecycleVersion((version) => version + 1);
   const {
@@ -1291,19 +1301,18 @@ export function Dashboard() {
       }
     },
     // Consecutive final failures = errorUpdateCount since the last success
-    // (it bumps once per failed fetch, retries included). Backoff and
+    // (it bumps once per final failure; retry attempts do not count). Backoff and
     // slow-read spacing share nextPollDelayMs with the other pollers.
-    refetchInterval: (query) => {
-      const { dataUpdatedAt, errorUpdatedAt, errorUpdateCount } = query.state;
-      if (dataUpdatedAt >= errorUpdatedAt) sessionsErrorBaselineRef.current = errorUpdateCount;
-      return nextPollDelayMs(
+    refetchInterval: (query) =>
+      nextPollDelayMs(
         SESSIONS_POLL_INTERVAL_MS,
-        errorUpdateCount - sessionsErrorBaselineRef.current,
+        sessionsFailures(query.state),
         sessionsReadMsRef.current,
-      );
-    },
+      ),
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    // A tab returning from hidden refetches at once, except while polls are
+    // failing: then the backoff schedule decides, so focus cannot bypass it.
+    refetchOnWindowFocus: (query) => sessionsFailures(query.state) === 0,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];
