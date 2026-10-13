@@ -63,7 +63,7 @@ function removeDeadTmpSiblings(dir: string, name: string): void {
     }
     const match = /^(\d+)\.\d+$/.exec(entry.slice(prefix.length));
     const pid = match?.[1] === undefined ? undefined : Number(match[1]);
-    if (pid === undefined || pid === process.pid || isProcessAlive(pid)) {
+    if (pid === undefined || isProcessAlive(pid)) {
       continue;
     }
     try {

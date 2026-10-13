@@ -12,7 +12,7 @@ import {
 } from "../../src/session-memory.js";
 import { createTempDir } from "../helpers/common.js";
 
-const fsFault = vi.hoisted(() => ({ failWrite: false }));
+const fsFault = vi.hoisted(() => ({ failWrite: false, failUnlink: false }));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
@@ -25,6 +25,12 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return actual.writeFileSync(...args);
     }) as typeof actual.writeFileSync,
+    unlinkSync: ((...args: Parameters<typeof actual.unlinkSync>) => {
+      if (fsFault.failUnlink) {
+        throw Object.assign(new Error("unlink denied"), { code: "EACCES" });
+      }
+      return actual.unlinkSync(...args);
+    }) as typeof actual.unlinkSync,
   };
 });
 
@@ -32,6 +38,7 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   fsFault.failWrite = false;
+  fsFault.failUnlink = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -145,8 +152,20 @@ describe("writeFileAtomic temp file hygiene", () => {
     const target = join(dir, "key.md");
     mkdirSync(join(target, "child"), { recursive: true });
 
-    expect(() => writeFileAtomic(target, "body")).toThrow();
+    expect(() => writeFileAtomic(target, "body")).toThrow(
+      expect.objectContaining({ code: "EISDIR" }),
+    );
     expect(readdirSync(dir)).toEqual(["key.md"]);
+  });
+
+  it("rethrows the original write error when tmp cleanup also fails", async () => {
+    const dir = await newDataDir();
+    fsFault.failWrite = true;
+    fsFault.failUnlink = true;
+
+    expect(() => writeFileAtomic(join(dir, "key.md"), "body")).toThrow(
+      expect.objectContaining({ code: "ENOSPC" }),
+    );
   });
 
   it("removes the tmp file and rethrows the original error when write fails", async () => {
