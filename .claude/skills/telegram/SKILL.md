@@ -1,6 +1,6 @@
 ---
 name: telegram
-description: Send a Telegram message via Bot API sendMessage.
+description: Sends a Telegram notification through Bot API sendMessage. Use when an agent must push a message to the operator's chat. Don't use for reading inbound messages.
 ---
 
 TELEGRAM BOT SKILL: env TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
@@ -11,9 +11,10 @@ TELEGRAM BOT SKILL: env TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 
 NEVER
 
-  - Bot API getUpdates. A Spur telegram source long-polls its bot token; a second poller gets 409 and an offset drops updates the daemon has not fetched.
+  - Bot API getUpdates. Spur telegram source owns token long-poll: second poller 409s, offset drops unfetched updates.
 
 
 INBOUND
 
-  Bound chat messages arrive as telegram:message sends; reply with `spur source reply`. Binding and routing: docs/configuration.md Telegram binding.
+  Arrival needs a matching `telegram:message` send trigger on a bound chat. Reply with `spur source reply`.
+  Binding and routing: docs/configuration.md#telegram-binding
