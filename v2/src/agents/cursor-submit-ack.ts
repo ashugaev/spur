@@ -1,4 +1,5 @@
 import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import {
   findCursorAckTranscriptFile,
@@ -19,6 +20,8 @@ export interface CursorSubmitBaseline {
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
   rotationOffsets?: Map<string, number>;
+  // Date.now() at capture, before the pane write; a rotated chat born after it was created by the send.
+  capturedAtMs?: number;
 }
 
 // Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
@@ -27,6 +30,8 @@ export interface CursorPersistedSubmitBaseline {
   file: string;
   size: number;
   rotated?: { file: string; size: number };
+  // Date.now() at capture; see CursorSubmitBaseline.capturedAtMs.
+  capturedAtMs?: number;
 }
 
 export function persistCursorSubmitBaseline(
@@ -37,6 +42,7 @@ export function persistCursorSubmitBaseline(
     file: baseline.file,
     size: baseline.size,
     ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
+    ...(baseline.capturedAtMs !== undefined ? { capturedAtMs: baseline.capturedAtMs } : {}),
   };
 }
 
@@ -49,6 +55,7 @@ export function restoreCursorSubmitBaseline(
     ...(persisted.rotated
       ? { rotationOffsets: new Map([[persisted.rotated.file, persisted.rotated.size]]) }
       : {}),
+    ...(persisted.capturedAtMs !== undefined ? { capturedAtMs: persisted.capturedAtMs } : {}),
   };
 }
 
@@ -76,16 +83,30 @@ export async function captureCursorSubmitBaseline(
   options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitBaseline | null> {
   const baseline = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
-  if (!baseline || !agentSessionId || !options?.cursorConfigDir) return baseline;
+  if (!baseline) return baseline;
+  if (!agentSessionId || !options?.cursorConfigDir) {
+    return { ...baseline, capturedAtMs: Date.now() };
+  }
   // An already-rotated chat: offset its file at send time, as the pinned one.
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
     agentSessionId,
     options.cursorConfigDir,
   );
-  if (!rotated) return baseline;
+  if (!rotated) return { ...baseline, capturedAtMs: Date.now() };
   const offset = await readCursorStableOffset(rotated).catch(() => 0);
-  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]) };
+  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]), capturedAtMs: Date.now() };
+}
+
+// True when the file's birth postdates the send-time capture, i.e. the send
+// created it. Strict ms compare: unknown birthtime (0) and same-ms keep the floor.
+async function bornAfterCapture(file: string, capturedAtMs: number | undefined): Promise<boolean> {
+  if (capturedAtMs === undefined) return false;
+  try {
+    return Math.floor((await stat(file)).birthtimeMs) > capturedAtMs;
+  } catch {
+    return false;
+  }
 }
 
 async function capturePinnedCursorBaseline(
@@ -225,7 +246,9 @@ export async function scanCursorJsonlForMessage(
       baseline.rotationOffsets ??= new Map();
       let offset = baseline.rotationOffsets.get(rotated);
       if (offset === undefined) {
-        offset = await readCursorStableOffset(rotated).catch(() => 0);
+        offset = (await bornAfterCapture(rotated, baseline.capturedAtMs))
+          ? 0
+          : await readCursorStableOffset(rotated).catch(() => 0);
         baseline.rotationOffsets.set(rotated, offset);
       }
       const found = await scanFileForUserText(rotated, offset, normalizedTarget);

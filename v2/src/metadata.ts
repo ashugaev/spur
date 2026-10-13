@@ -826,14 +826,18 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
     typeof record["size"] === "number"
   ) {
     const base = { file: record["file"], size: record["size"] };
+    if (agent === "claude") return { agent, ...base };
+    const stamp = record["capturedAtMs"];
+    const captured =
+      typeof stamp === "number" && Number.isFinite(stamp) ? { capturedAtMs: stamp } : {};
     const rotated = record["rotated"];
-    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
-      return { agent, ...base };
+    if (rotated === null || typeof rotated !== "object") {
+      return { agent, ...base, ...captured };
     }
     const { file, size } = rotated as Record<string, unknown>;
     return typeof file === "string" && typeof size === "number"
-      ? { agent, ...base, rotated: { file, size } }
-      : { agent, ...base };
+      ? { agent, ...base, rotated: { file, size }, ...captured }
+      : { agent, ...base, ...captured };
   }
   const offsets = record["offsets"];
   if (agent === "codex" && offsets !== null && typeof offsets === "object") {

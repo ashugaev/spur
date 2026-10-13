@@ -1905,6 +1905,8 @@ export type SubmitAckBaseline =
       size: number;
       /** Rotated chat transcript and its offset at send time. */
       rotated?: { file: string; size: number };
+      /** Date.now() at capture; a rotated chat born after it was created by the send. */
+      capturedAtMs?: number;
     }
   | {
       agent: "opencode";
