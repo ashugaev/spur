@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import {
   cursorChatIdFromTranscriptPath,
-  findCursorAckTranscriptFile,
+  findLatestCursorTranscriptFile,
   readCursorStableOffset,
   resolveCursorPinnedTranscriptPath,
 } from "../cursor-jsonl-state.js";
@@ -66,11 +66,13 @@ async function findRotatedCursorTranscript(
 ): Promise<string | null> {
   const resolvedId = await findCursorSessionId(worktreePath, { configDir: cursorConfigDir });
   if (!resolvedId || resolvedId === agentSessionId) return null;
-  return findCursorAckTranscriptFile(worktreePath, resolvedId);
+  return findLatestCursorTranscriptFile(worktreePath, resolvedId);
 }
 
 // The pinned id wins; otherwise the newest chat in the session-private config
-// dir. Never the shared project transcripts dir (#889).
+// dir. Never the shared project transcripts dir (#889): every transcript lookup
+// in this file must pass a chat id, or findLatestCursorTranscriptFile falls back
+// to newest-by-mtime over that shared dir.
 async function resolveCursorChatId(
   worktreePath: string,
   agentSessionId: string | undefined,
@@ -113,7 +115,7 @@ async function capturePinnedCursorBaseline(
   worktreePath: string,
   agentSessionId: string,
 ): Promise<CursorSubmitBaseline> {
-  const file = await findCursorAckTranscriptFile(worktreePath, agentSessionId);
+  const file = await findLatestCursorTranscriptFile(worktreePath, agentSessionId);
   if (!file) {
     // A pinned id with nothing on disk yet must still yield a WAITING baseline,
     // never null — session-service.ts treats a null binding as an unconditional,
@@ -230,7 +232,7 @@ export async function scanCursorJsonlForMessage(
       agentSessionId,
       options?.cursorConfigDir,
     );
-    const resolved = chatId ? await findCursorAckTranscriptFile(worktreePath, chatId) : null;
+    const resolved = chatId ? await findLatestCursorTranscriptFile(worktreePath, chatId) : null;
     if (!resolved) {
       return { found: false, scannedFile: null };
     }
@@ -273,7 +275,7 @@ export async function scanCursorJsonlForMessage(
     // rescan must still run even when the chat id itself never rotated.
   }
 
-  const latest = await findCursorAckTranscriptFile(worktreePath, pinnedId);
+  const latest = await findLatestCursorTranscriptFile(worktreePath, pinnedId);
   if (!latest || latest === baseline.file) {
     return { found: false, scannedFile: baseline.file };
   }
