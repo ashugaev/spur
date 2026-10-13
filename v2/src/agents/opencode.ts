@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,16 @@ const execFileAsync = promisify(execFile);
 const OPENCODE_SESSION_LIST_TIMEOUT_MS = 20_000;
 const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
 
+// A cwd that is no longer a directory (session worktree removed) is dropped:
+// spawn would fail with ENOENT, and the CLI's output does not depend on it.
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // `opencode` truncates its own stdout at 128 KB when stdout is a pipe: it exits
 // before the pipe drains, so a piped `export` of any session with real history
 // yields invalid JSON. Capturing into a file is the only shape that returns the
@@ -34,7 +45,7 @@ export async function readOpenCodeJson(
     try {
       await new Promise<void>((resolve, reject) => {
         const child = spawn(opencodeCommand(), args, {
-          ...(options.cwd ? { cwd: options.cwd } : {}),
+          ...(options.cwd && isDirectory(options.cwd) ? { cwd: options.cwd } : {}),
           stdio: ["ignore", handle.fd, "ignore"],
         });
         const timer = setTimeout(() => {
