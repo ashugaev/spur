@@ -6018,6 +6018,11 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       await service.restore("api-1");
 
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
       if (expectedCall) {
         expect(captureCursorRestoreBoundaryMock).toHaveBeenCalledWith(...expectedCall);
       } else {
@@ -18555,6 +18560,9 @@ describe("SessionService", () => {
 
       expect(classified.state).toBe("working");
       expect(classified.state).not.toBe("rate_limited");
+      // The result carries no rateLimit field; a non-jsonl source proves no
+      // transcript (and so no transcript rate limit) was consulted.
+      expect(classified.source).not.toBe("jsonl");
       expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
       expect(findAgentSessionIdMock).toHaveBeenCalledWith("cursor", cursorSession.worktreePath, {
         cursorConfigDir: join(TEST_DATA_DIR, "cursor", cursorSession.id),
@@ -45494,6 +45502,11 @@ describe("SessionService", () => {
         "cursor",
         expect.objectContaining({ agentSessionId: "private-chat" }),
       );
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
 
       readAgentConversationMock.mockClear();
       findAgentSessionIdMock.mockResolvedValue(null);

@@ -940,7 +940,7 @@ describe("findCursorAckTranscriptFile", () => {
 
   // AC1: a symlinked worktree whose stale raw-slug dir is NON-EMPTY resolves,
   // with no id, to the newer file under the realpath slug. This is the
-  // 177-event bucket: first-dir-wins would
+  // 177-event bucket: the pre-#890 no-id resolver's first-dir-wins would
   // return the stale alias file forever; the ack-only global-newest rule
   // self-corrects once the live agent writes under the canonical slug.
   it("resolves to the newer file under the realpath slug when the alias dir is stale but non-empty", async () => {
