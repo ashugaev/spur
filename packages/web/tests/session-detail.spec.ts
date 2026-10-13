@@ -420,7 +420,9 @@ test.describe("S1: Session detail header", () => {
     });
     await page.goto("/sessions/detail-missing");
 
-    await expect(page.getByRole("alert")).toContainText("Unable to load this session");
+    await expect(page.getByTestId("session-load-failed")).toContainText(
+      "Unable to load this session",
+    );
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);

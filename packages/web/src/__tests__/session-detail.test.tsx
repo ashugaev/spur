@@ -6200,6 +6200,27 @@ describe("SessionDetail load state", () => {
     expect(calls.session).toBe(4);
   });
 
+  it("resets the attempt counter to 1 when FAILED turns back into STARTING", async () => {
+    vi.useFakeTimers();
+    let code = 503;
+    mockSessionStatus(() => code);
+    render(<SessionDetail sessionId="api-a1" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    code = 404;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(screen.getByTestId("session-load-failed")).toBeInTheDocument();
+    code = 503;
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("session-load-starting")).toHaveTextContent("Retrying · attempt 1");
+  });
+
   it("stops the card timer on unmount", async () => {
     vi.useFakeTimers();
     const calls = mockSessionStatus(() => 503);
