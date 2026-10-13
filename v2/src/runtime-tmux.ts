@@ -1093,7 +1093,7 @@ export async function createTmuxSession(input: {
   launchScriptDir: string;
   env?: Record<string, string>;
 }): Promise<void> {
-  const paneEnv = buildPaneEnv(input.env);
+  const paneEnv = buildPaneEnv({ DISABLE_AUTO_UPDATE: "true", ...input.env });
   const scriptPath = writeAgentLaunchScript(input.launchScriptDir, input.launchCommand);
   // Env file lives in the session tool dir, so it goes away with the session
   // if the pane never starts; the pane deletes it on start otherwise.
@@ -1144,8 +1144,9 @@ function writeAgentLaunchScript(dir: string, launchCommand: string): string {
 // prompt (oh-my-zsh's "update? [Y/n]") ate the first typed character, so
 // codex started as `ODEX_HOME=...` on the default home and Spur never saw
 // its rollout. The login+interactive shell keeps the user's rc environment
-// (PATH, nvm, exported keys) exactly as a typed launch had; an rc prompt now
-// waits visibly in the pane instead of corrupting the command. Sourcing the
+// (PATH, nvm, exported keys) exactly as a typed launch had. Pane env sets
+// DISABLE_AUTO_UPDATE=true: suppresses the omz update prompt. Other rc
+// prompts still wait visibly in the pane, show in ready-timeout tail. Sourcing the
 // script keeps the agent a direct child of the pane shell, and the pane
 // drops to the same login shell when the agent exits.
 // The env file launcher runs first, so the env lands before any rc file, as
