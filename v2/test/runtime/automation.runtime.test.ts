@@ -15,11 +15,13 @@ import type { SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
+  configureOwnedPushRemote,
   createRuntimeTestContext,
   isTmuxAvailable,
   killTmuxSessionsByPrefix,
   syncTmuxEnvironment,
   type RuntimeTestContext,
+  waitForSourceBaseline,
 } from "../helpers/runtime.js";
 
 const tmuxOk = await isTmuxAvailable();
@@ -109,10 +111,7 @@ function runtimeEnv(context: RuntimeTestContext) {
 }
 
 async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
-  await execFileAsync("git", ["config", "push.default", "current"], { cwd: context.repoDir });
-  await execFileAsync("git", ["config", "remote.pushDefault", "upstream"], {
-    cwd: context.repoDir,
-  });
+  await configureOwnedPushRemote(context);
   await syncTmuxEnvironment(runtimeEnv(context));
 }
 
@@ -145,23 +144,6 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
     }
     _resetGhPathCacheForTests();
   }
-}
-
-// The source emits only on change against its per-session snapshot. The
-// startup poll can skip a session whose branch PR lookup SessionService
-// auto-detect still owns, so a state flipped before the snapshot exists is
-// the first observation: baselined, never emitted (#1017).
-async function waitForSourceBaseline(
-  context: RuntimeTestContext,
-  sessionId: string,
-): Promise<void> {
-  await pollUntil(
-    async () => readGitHubSourceSnapshot(context.dataDir, "api", "pr-watch", sessionId),
-    {
-      timeoutMs: 15_000,
-      accept: (value) => value !== null,
-    },
-  );
 }
 
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
