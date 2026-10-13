@@ -3975,6 +3975,52 @@ describe("StatusBar", () => {
     expect(resourceFetches).toBe(1);
   });
 
+  it("sends no resources poll while the tab is hidden and refetches on return", async () => {
+    vi.useFakeTimers();
+    try {
+      let resourceFetches = 0;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources") {
+          resourceFetches += 1;
+          return new Response(JSON.stringify({ available: false }));
+        }
+        return new Response("{}");
+      });
+      renderStatusBar();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(resourceFetches).toBe(1);
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(resourceFetches).toBe(1);
+
+      // Returning to the tab refetches the stale snapshot at once.
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(resourceFetches).toBe(2);
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "visible",
+      });
+      vi.useRealTimers();
+    }
+  });
+
   it("shows daemon offline when the sessions query errors", async () => {
     mockStatusBarFetch({
       resources: { available: false },
