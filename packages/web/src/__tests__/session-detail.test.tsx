@@ -6017,6 +6017,44 @@ describe("SessionDetail load state", () => {
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
 
+  it.each(["Daemon is starting", `Session not found\n${"detail".repeat(80)}`])(
+    "preserves load error detail and recovers with Retry: %s",
+    async (detail) => {
+      let recovered = false;
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          return new Response(JSON.stringify(recovered ? sessionFixture() : { error: detail }), {
+            status: recovered ? 200 : 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+        }
+        if (url === "/api/runtime/info") {
+          return new Response(JSON.stringify({ lifecycleInstanceId: "test-instance" }), {
+            status: 200,
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+      const card = await screen.findByRole("region", { name: "Unable to load this session." });
+      expect(card.querySelector("p")?.textContent).toBe(detail);
+      expect(card.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+      expect(card.querySelector(".animate-spin")).toBeNull();
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /back/i })).toBeInTheDocument();
+
+      recovered = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+      await screen.findByRole("heading", { name: "Fix auth" });
+      expect(screen.queryByRole("region", { name: "Unable to load this session." })).toBeNull();
+    },
+  );
+
   it("shows a page load error instead of stale content when the current session fails", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

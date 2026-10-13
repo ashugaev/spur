@@ -66,7 +66,7 @@ import { Spinner } from "@/components/icons/Spinner";
 import { TrashIcon } from "@/components/icons/TrashIcon";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { SessionTodo } from "@/components/SessionTodo";
-import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS } from "@/design/classes";
+import { HARD_WRAP_TEXT_CLASS, INPUT_CLASS, STATUS_CARD_CLASS } from "@/design/classes";
 import { BG_BASE_HEX, SPARK_GLYPH_PATH } from "@/design/colors";
 import {
   formatAbsoluteTime,
@@ -4499,16 +4499,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           />
         </>
       ) : error ? (
-        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
-          <p>Unable to load this session.</p>
-          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
-          <button
-            type="button"
-            onClick={() => void loadSession()}
-            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
+        <div className="flex flex-1 items-center justify-center py-5">
+          <section
+            aria-labelledby="session-load-error-heading"
+            className={`w-full max-w-sm ${STATUS_CARD_CLASS}`}
           >
-            Retry
-          </button>
+            <div className="flex items-start gap-3">
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0 text-[var(--color-status-attention)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v6M12 17h.01" />
+              </svg>
+              <div className="min-w-0">
+                <h2
+                  className="font-bold text-[var(--color-text-primary)]"
+                  id="session-load-error-heading"
+                >
+                  Unable to load this session.
+                </h2>
+                <p
+                  className={`mt-1 normal-case tracking-normal text-[var(--color-text-secondary)] ${HARD_WRAP_TEXT_CLASS}`}
+                >
+                  {error}
+                </p>
+              </div>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => void loadSession()}
+                className="border border-[var(--color-status-attention)] px-3 py-1 font-bold uppercase text-[var(--color-status-attention)] outline-none transition-colors hover:bg-[var(--color-status-attention)] hover:text-[var(--color-bg-elevated)] focus-visible:bg-[var(--color-status-attention)] focus-visible:text-[var(--color-bg-elevated)]"
+              >
+                Retry
+              </button>
+            </div>
+          </section>
         </div>
       ) : (
         <CenteredLoader className="flex-1" label="Loading session" />
