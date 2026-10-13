@@ -465,7 +465,12 @@ describe("summarizeFailingCi", () => {
           checksFromPrNode(
             prNode([
               status("ERROR", "2026-01-01T00:00:00Z"),
-              run("SUCCESS", "2026-01-01T00:05:00Z", 7),
+              {
+                name: "Labeler",
+                conclusion: "SUCCESS",
+                status: "COMPLETED",
+                startedAt: "2026-01-01T00:05:00Z",
+              },
             ]),
           ),
         ),
