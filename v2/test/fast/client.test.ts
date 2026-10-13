@@ -763,7 +763,73 @@ describe("client deadlines", () => {
     expect(Date.now() - started).toBeLessThanOrEqual(32_000);
   });
 
-  it("restart throws on an unresponsive external-restart probe and never spawns", async () => {
+  it("ensureServer rejects within the wall-clock cap when every post-spawn probe hangs", async () => {
+    routeFetch((call, init) =>
+      call === 1 ? Promise.reject(new Error("connect ECONNREFUSED")) : pendingUntilAbort(init),
+    );
+    const { ensureServer } = await loadClientModule();
+    const started = Date.now();
+    const result = track(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await result.done();
+    expect(result.state.error?.message).toBe(
+      "Timed out waiting for daemon at http://127.0.0.1:4310",
+    );
+    expect(Date.now() - started).toBeLessThanOrEqual(60_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("restart rejects within the wall-clock cap when every post-spawn probe hangs", async () => {
+    vi.spyOn(process, "kill").mockImplementation(() => true);
+    routeFetch((call, init) => {
+      if (call === 1) return ready();
+      if (call <= 22) return Promise.reject(new Error("still down"));
+      return pendingUntilAbort(init);
+    });
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const started = Date.now();
+    const result = track(restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await result.done();
+    expect(result.state.error?.message).toBe(
+      "Timed out waiting for daemon restart at http://127.0.0.1:4310",
+    );
+    expect(Date.now() - started).toBeLessThanOrEqual(60_000);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop rejects within the wall-clock cap when a starting daemon then hangs", async () => {
+    routeFetch((call, init) =>
+      call === 1 ? Promise.resolve(new Response("{}", { status: 503 })) : pendingUntilAbort(init),
+    );
+    const { stopDaemonIfRunning } = await loadClientModule();
+    const started = Date.now();
+    const result = track(stopDaemonIfRunning("/tmp/spur.yaml"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await result.done();
+    expect(result.state.error?.message).toBe(
+      "Timed out waiting for daemon at http://127.0.0.1:4310 to finish starting",
+    );
+    expect(Date.now() - started).toBeLessThanOrEqual(60_000);
+  });
+
+  it("restart keeps polling an externally restarted daemon that is briefly unresponsive", async () => {
+    vi.spyOn(process, "kill").mockImplementation(() => true);
+    routeFetch((call, init) => {
+      if (call === 1) return ready();
+      if (call === 2) return Promise.reject(new Error("daemon stopped"));
+      if (call === 3) return pendingUntilAbort(init);
+      return ready();
+    });
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = track(restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await result.done();
+    expect(result.state.error).toBeUndefined();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("restart throws on an unresponsive external-restart wait and never spawns", async () => {
     vi.spyOn(process, "kill").mockImplementation(() => true);
     routeFetch((call, init) => {
       if (call === 1) return ready();
@@ -774,7 +840,7 @@ describe("client deadlines", () => {
     const assertion = expect(
       restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml"),
     ).rejects.toThrow(/did not answer GET \/info within 10s/);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(20_000);
     await assertion;
     expect(spawnMock).not.toHaveBeenCalled();
   });

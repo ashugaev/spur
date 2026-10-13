@@ -81,17 +81,9 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   const startedAt = Date.now();
   const request = deadlineController(mutation ? MUTATION_DEADLINE_MS : READ_DEADLINE_MS);
   const watchdogController = new AbortController();
-  let probing = false;
   const watchdog = setInterval(() => {
-    if (probing) return;
-    probing = true;
     void probeDaemonWithin(baseUrl, PROBE_DEADLINE_MS, watchdogController.signal).then((probe) => {
-      probing = false;
-      if (
-        probe !== "cancelled" &&
-        probe.state === "unresponsive" &&
-        !watchdogController.signal.aborted
-      ) {
+      if (probe !== "cancelled" && probe.state === "unresponsive") {
         request.controller.abort(WATCHDOG_ABORT_REASON);
       }
     });
@@ -346,11 +338,11 @@ async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
     return probe;
   }
 
-  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+  const deadline = waitDeadline(DAEMON_START_ATTEMPTS);
+  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS && Date.now() < deadline; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     probe = await probeDaemon(baseUrl);
-    if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
-    if (probe.state !== "starting") {
+    if (probe.state !== "starting" && probe.state !== "unresponsive") {
       return probe;
     }
   }
@@ -434,25 +426,30 @@ function spawnDaemon(
   child.unref();
 }
 
-// spawnedByUs: startup can block the daemon's event loop for a long time, so an
-// unresponsive probe keeps polling. Otherwise it is an old daemon we must not replace.
+// Wall-clock cap for a wait loop: its attempts plus one probe deadline, so probes that
+// hang cannot stretch it to attempts x probe deadline.
+function waitDeadline(attempts: number): number {
+  return Date.now() + attempts * DAEMON_START_RETRY_DELAY_MS + PROBE_DEADLINE_MS;
+}
+
+// Startup can block the daemon's event loop for a long time, so an unresponsive probe
+// keeps polling until the cap; `unresponsive` reports that the last probe still hung.
 async function waitForReadyDaemon(
   baseUrl: string,
   attempts: number,
-  spawnedByUs: boolean,
-): Promise<RuntimeInfo | undefined> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+): Promise<{ runtime?: RuntimeInfo; unresponsive: boolean }> {
+  const deadline = waitDeadline(attempts);
+  let unresponsive = false;
+  for (let attempt = 0; attempt < attempts && Date.now() < deadline; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     const probe = await probeDaemon(baseUrl);
     if (probe.state === "ready") {
-      return probe.info;
+      return { runtime: probe.info, unresponsive: false };
     }
-    if (probe.state === "unresponsive" && !spawnedByUs) {
-      throw unresponsiveDaemonError(baseUrl);
-    }
+    unresponsive = probe.state === "unresponsive";
   }
 
-  return undefined;
+  return { unresponsive };
 }
 
 export interface StopDaemonResult {
@@ -495,10 +492,13 @@ export async function restartDaemonIfRunning(
 
   // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
-  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS, false);
+  const external = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
+  let runtime = external.runtime;
   if (!runtime) {
+    // A daemon that held the port but never answered must not be forked over.
+    if (external.unresponsive) throw unresponsiveDaemonError(baseUrl);
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "restart");
-    runtime = await waitForReadyDaemon(baseUrl, DAEMON_START_ATTEMPTS, true);
+    runtime = (await waitForReadyDaemon(baseUrl, DAEMON_START_ATTEMPTS)).runtime;
   }
   if (!runtime) {
     throw new Error(`Timed out waiting for daemon restart at ${baseUrl}`);
@@ -524,26 +524,23 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     probe = await probeDaemon(baseUrl);
     if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
   }
-  let spawned = false;
   if (probe.state === "unreachable") {
     spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
-    spawned = true;
   }
 
-  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+  const deadline = waitDeadline(DAEMON_START_ATTEMPTS);
+  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS && Date.now() < deadline; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     probe = await probeDaemon(baseUrl);
     if (probe.state === "ready") {
       return baseUrl;
     }
-    if (probe.state === "unresponsive" && !spawned) throw unresponsiveDaemonError(baseUrl);
     if (probe.state === "incompatible") {
       await stopIncompatibleDaemon(baseUrl, probe.pid);
       probe = await probeDaemon(baseUrl);
       if (probe.state === "unresponsive") throw unresponsiveDaemonError(baseUrl);
       if (probe.state === "unreachable") {
         spawnDaemon(cliEntrypoint, resolvedConfigPath, "autostart");
-        spawned = true;
       }
     }
   }
