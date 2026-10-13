@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildOpenCodeConfig } from "../../src/agents/opencode.js";
 import {
   agentLaunchUsesForeignBinary,
+  buildAgentLaunchPlan,
   agentProcessMatchers,
   agentSessionConfig,
   agentStateStrategy,
@@ -50,6 +52,21 @@ describe("extractCommandBinary", () => {
       ),
     ).toBe("opencode");
     expect(extractCommandBinary("FOO='bar baz' A=1 node app.js", "fallback")).toBe("node");
+  });
+
+  it("skips double-quoted and backslash-escaped assignment values with spaces", () => {
+    expect(extractCommandBinary('VAR="a b" opencode --auto', "fallback")).toBe("opencode");
+    expect(extractCommandBinary(String.raw`VAR=a\ b opencode --auto`, "fallback")).toBe("opencode");
+  });
+
+  it("unquotes the binary after a restrictWrites OpenCode config prefix", () => {
+    const configContent = buildOpenCodeConfig(undefined, true);
+    const { launchCommand } = buildAgentLaunchPlan("opencode", "hello world", {
+      ...(configContent ? { opencodeConfigContent: configContent } : {}),
+    });
+    expect(launchCommand).toContain("git commit*");
+    expect(extractCommandBinary(launchCommand, "fallback")).toBe("opencode");
+    expect(agentLaunchUsesForeignBinary("opencode", launchCommand)).toBe(false);
   });
 
   it("recognizes assignments only from an unquoted and unescaped lexical prefix", () => {
