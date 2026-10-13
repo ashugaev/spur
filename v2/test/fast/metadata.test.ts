@@ -2218,6 +2218,25 @@ describe("listSessions concurrency", () => {
   });
 });
 
+describe("listSessions shard dirs", () => {
+  it("never scans the log shard dir of an indexed session", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api-1", tmuxSession: "api-1" });
+    const shardDir = join(dataDir, "sessions", "api-1");
+    mkdirSync(shardDir, { recursive: true });
+    writeFileSync(join(shardDir, "stray.json"), "{not json", "utf-8");
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api-1"]);
+  });
+
+  it("still scans a project dir named like an indexed session id", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, { ...sessionBase, id: "api", tmuxSession: "api" });
+
+    expect(listSessions(dataDir).map((s) => s.id)).toEqual(["api"]);
+  });
+});
+
 describe("listSessions record cache", () => {
   function fixtureSession(id: string): SessionRecord {
     return {

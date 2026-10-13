@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
@@ -1247,6 +1247,22 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+// sessions/ holds project dirs (sessions/<project>/<id>.json) next to
+// per-session log shard dirs (sessions/<id>/), hundreds of them on a live
+// fleet. A dir named after an indexed session id is a shard, unless an indexed
+// record lives inside it. Keyed on the cached index object, so a hit rebuilds
+// nothing.
+const shardDirNamesCache = new WeakMap<Readonly<Record<string, string>>, ReadonlySet<string>>();
+
+function indexedShardDirNames(index: Readonly<Record<string, string>>): ReadonlySet<string> {
+  const cached = shardDirNamesCache.get(index);
+  if (cached) return cached;
+  const projectDirNames = new Set(Object.values(index).map((path) => basename(dirname(path))));
+  const names = new Set(Object.keys(index).filter((id) => !projectDirNames.has(id)));
+  shardDirNamesCache.set(index, names);
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
@@ -1254,10 +1270,11 @@ export function listSessions(dataDir: string): SessionRecord[] {
     return [];
   }
 
+  const shardDirNames = indexedShardDirNames(readSessionIndex(dataDir));
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || shardDirNames.has(entry.name)) continue;
     const projectDir = join(rootDir, entry.name);
     for (const fileName of readdirSync(projectDir)) {
       if (!fileName.endsWith(".json")) continue;
