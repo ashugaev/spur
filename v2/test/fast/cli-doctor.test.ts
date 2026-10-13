@@ -1,3 +1,4 @@
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../../src/config.js";
 import type * as WorkspaceModule from "../../src/workspace.js";
@@ -99,11 +100,15 @@ describe("spur doctor CLI --config forwarding", () => {
     expect(loadInstanceConfigReadOnlyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("prints positional connect hint when project config exists", async () => {
-    findProjectConfigPathInDirectoryMock.mockReturnValue("/nonexistent/repo/spur.yaml");
+  it.each([
+    [path.join(process.cwd(), "spur.yml"), "`spur connect ./spur.yml`"],
+    [path.join(process.cwd(), "sub", "spur.yaml"), "`spur connect ./sub/spur.yaml`"],
+    [path.resolve(process.cwd(), "..", "other", "spur.yaml"), "`spur connect ../other/spur.yaml`"],
+  ])("prints positional connect hint naming the found path %s", async (found, hint) => {
+    findProjectConfigPathInDirectoryMock.mockReturnValue(found);
     await parseDoctor([]);
     const output = writeStdoutMock.mock.calls.map((call) => String(call[0])).join("");
-    expect(output).toContain("`spur connect spur.yaml`");
+    expect(output).toContain(hint);
     expect(output).not.toContain("connect --config");
   });
 });

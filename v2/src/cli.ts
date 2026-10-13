@@ -1099,7 +1099,9 @@ function renderDoctorResult(result: DoctorResult): string {
       dimText(
         `Project config already exists: ${displayPathFromCwd(result.existingProjectConfigPath)}`,
       ),
-      dimText("Next: `spur connect spur.yaml` or `spur list` from the repo."),
+      dimText(
+        `Next: \`spur connect ${displayPathFromCwd(result.existingProjectConfigPath)}\` or \`spur list\` from the repo.`,
+      ),
     );
     return lines.join("\n");
   }
