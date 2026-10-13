@@ -740,6 +740,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const pendingBatches = new Map<string, PendingBatch>();
   const interruptedKeys = new Map<string, number>();
   const serialByKey = new Map<string, Promise<void>>();
+  const tickFlushQueued = new Set<string>();
   const routeLeases = new Map<string, string>();
   const occurrenceReferencesByQueue = new Map<string, Set<string>>();
   const autoCompleteChecks: Array<() => void> = [];
@@ -1223,8 +1224,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (flushTimer || pendingBatches.size === 0 || stopped) return;
     flushTimer = setInterval(() => {
       for (const [queueKey, batch] of pendingBatches) {
+        // One tick flush per key in flight: the batch stays pending, so a
+        // skipped tick only delays delivery to the next one.
+        if (tickFlushQueued.has(queueKey)) continue;
+        tickFlushQueued.add(queueKey);
         enqueue(queueKey, async () => {
-          await flushPending(queueKey, batch);
+          try {
+            await flushPending(queueKey, batch);
+          } finally {
+            tickFlushQueued.delete(queueKey);
+          }
         });
       }
     }, 5_000);
