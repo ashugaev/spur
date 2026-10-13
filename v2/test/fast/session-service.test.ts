@@ -18286,9 +18286,14 @@ describe("SessionService", () => {
     expect(classifiedCall?.[1].message).not.toContain("jsonl=");
   });
 
-  it.each(["task_started", "function_call"] as const)(
-    "keeps hookless codex working after a ten-minute-old %s rollout",
-    async (reason) => {
+  it.each([
+    { reason: "task_started" as const },
+    { reason: "function_call" as const, callId: "call_1", withProgress: true },
+    { reason: "custom_tool_call" as const, callId: "call_1", withProgress: true },
+    { reason: "thread_settings_applied" as const, preceding: true, withProgress: true },
+  ])(
+    "keeps hookless codex working after a ten-minute-old $reason rollout",
+    async ({ reason, ...row }) => {
       const now = new Date("2026-04-14T19:30:00.000Z");
       vi.setSystemTime(now);
       const timestampMs = now.getTime() - 10 * 60_000;
@@ -18301,8 +18306,13 @@ describe("SessionService", () => {
           timestampMs,
           filePath: "/tmp/api-1/rollout.jsonl",
           reason,
+          ...("callId" in row ? { callId: row.callId } : {}),
+          ...("preceding" in row
+            ? { precedingState: { state: "working" as const, timestampMs } }
+            : {}),
         },
         rateLimit: null,
+        ...("withProgress" in row ? { lastProgressMs: timestampMs } : {}),
       });
 
       const { SessionService } = await loadSessionServiceModule();
@@ -18315,6 +18325,49 @@ describe("SessionService", () => {
         );
         expect(classified).toHaveLength(1);
         expect(classified[0]?.[1].message).toBe(`State: working (codex jsonl=${reason})`);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each([
+    {
+      silentMin: 11,
+      state: "waiting",
+      message: `State: waiting (codex stale, idle=${11 * 60_000}ms)`,
+    },
+    { silentMin: 9, state: "working", message: "State: working (codex jsonl=task_started)" },
+  ])(
+    "classifies hookless task_started as $state after $silentMin minutes of rollout silence",
+    async ({ silentMin, state, message }) => {
+      const now = new Date("2026-04-14T19:30:00.000Z");
+      vi.setSystemTime(now);
+      const timestampMs = now.getTime() - 20 * 60_000;
+      readSessionMock.mockReturnValue(runningSession({ agent: "codex" }));
+      readAgentHookStateMock.mockReturnValue(null);
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: {
+          state: "working",
+          timestamp: new Date(timestampMs).toISOString(),
+          timestampMs,
+          filePath: "/tmp/api-1/rollout.jsonl",
+          reason: "task_started",
+        },
+        rateLimit: null,
+        lastProgressMs: now.getTime() - silentMin * 60_000,
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      try {
+        expect((await service.get("api-1")).state).toBe(state);
+        const classified = logSpurEventMock.mock.calls.filter(
+          ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+        );
+        expect(classified).toHaveLength(1);
+        expect(classified[0]?.[1].message).toBe(message);
       } finally {
         service.dispose();
       }
@@ -18987,6 +19040,57 @@ describe("SessionService", () => {
       });
       expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("delivers a queued message once to a hookless codex turn silent past the hung threshold", async () => {
+    mockTimerPromisesSleepWithFakeTimers();
+    const now = new Date("2026-04-14T19:30:00.000Z");
+    vi.setSystemTime(now);
+    const timestampMs = now.getTime() - 20 * 60_000;
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      runningSession({
+        agent: "codex",
+        queuedMessages: { messages: ["please continue"], awaitingPrompt: false },
+      }),
+    );
+    readAgentHookStateMock.mockReturnValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(timestampMs).toISOString(),
+        timestampMs,
+        filePath: "/tmp/api-1/rollout.jsonl",
+        reason: "task_started",
+      },
+      rateLimit: null,
+      lastProgressMs: now.getTime() - 11 * 60_000,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith("api-1", "please continue", {
+        agent: "codex",
+        interrupt: false,
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      for (let poll = 0; poll < 3; poll += 1) {
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      }
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(agentInterruptKeysMock).not.toHaveBeenCalled();
+      const classified = logSpurEventMock.mock.calls.filter(
+        ([, entry]) => entry.event === "session.state.classified" && entry.sessionId === "api-1",
+      );
+      expect(classified).toHaveLength(1);
     } finally {
       service.dispose();
     }

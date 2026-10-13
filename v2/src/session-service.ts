@@ -668,6 +668,8 @@ const PANE_WRITE_FENCE_MS = 30_000;
 // any realistic single inference. 300s makes a false flip on a live inference highly unlikely while
 // still clearing an indefinite-"working" hang.
 const CODEX_HUNG_AFTER_TOOLS_MS = 300_000;
+// Hookless turns have no hook to rule out a running tool, so require longer rollout silence (pure inference observed to ~312s).
+const CODEX_HOOKLESS_HUNG_MS = 600_000;
 const RESTORE_WARMUP_MS = 30_000;
 const RESTORE_SETTLE_MS = 2_000;
 const USAGE_LIMIT_MENU_CONFIRM_COOLDOWN_MS = 10_000;
@@ -20911,6 +20913,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    staleSinceMs?: number;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
@@ -20964,6 +20967,21 @@ export class SessionService {
       }
     }
 
+    // Hookless: a bare task_started (no open tool call) with a silent rollout
+    // for the hookless threshold is a hung turn.
+    let staleSinceMs: number | undefined;
+    if (
+      !hookState &&
+      state === "working" &&
+      rolloutState?.reason === "task_started" &&
+      rolloutRead.lastProgressMs !== undefined &&
+      Date.now() - rolloutRead.lastProgressMs >= CODEX_HOOKLESS_HUNG_MS
+    ) {
+      state = "waiting";
+      source = "codex_stale";
+      staleSinceMs = rolloutRead.lastProgressMs;
+    }
+
     return {
       state,
       source,
@@ -20971,6 +20989,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(staleSinceMs !== undefined ? { staleSinceMs } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -22336,7 +22355,7 @@ export class SessionService {
         tokenUsages = codexState.tokenUsages;
         if (stateSource === "codex_stale" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
-          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - codexState.activityMs}ms)`;
+          classifiedDetail = `State: ${state} (codex stale, idle=${Date.now() - (codexState.staleSinceMs ?? codexState.activityMs)}ms)`;
         } else if (stateSource === "jsonl" && codexState.rolloutState) {
           historySourcePath = codexState.rolloutState.filePath;
           classifiedDetail = `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`;
