@@ -21959,8 +21959,7 @@ describe("SessionService", () => {
         service.dispose();
 
         const fresh = await newService();
-        const outcome = await spawnOutcome(fresh.service);
-        expect(outcome).not.toBeInstanceOf(fresh.SessionAdmissionDeniedError);
+        expect(await spawnOutcome(fresh.service)).toBeNull();
         fresh.service.dispose();
       });
 
@@ -21971,16 +21970,16 @@ describe("SessionService", () => {
         expect(await spawnOutcome(service)).toBeInstanceOf(SessionAdmissionDeniedError);
         readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(5_500_000_000));
         gate.readMemoryPressure(Date.now());
-        expect(await spawnOutcome(service)).not.toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(await spawnOutcome(service)).toBeNull();
         service.dispose();
       });
 
       it("T6 fails open on a null snapshot and on unlimited memory.max", async () => {
-        const { service, SessionAdmissionDeniedError } = await newService();
+        const { service } = await newService();
         readCgroupMemorySnapshotMock.mockReturnValue(null);
-        expect(await spawnOutcome(service)).not.toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(await spawnOutcome(service)).toBeNull();
         readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(9_000_000_000, null));
-        expect(await spawnOutcome(service)).not.toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(await spawnOutcome(service)).toBeNull();
         service.dispose();
       });
 
@@ -21993,8 +21992,8 @@ describe("SessionService", () => {
             memoryGuard: { ...config.admission.memoryGuard, enforceFloors: false },
           },
         });
-        const { service, SessionAdmissionDeniedError } = await newService();
-        expect(await spawnOutcome(service)).not.toBeInstanceOf(SessionAdmissionDeniedError);
+        const { service } = await newService();
+        expect(await spawnOutcome(service)).toBeNull();
         service.dispose();
       });
 
@@ -22025,9 +22024,10 @@ describe("SessionService", () => {
         const { service, SessionAdmissionDeniedError } = await newService();
         const gate = service as unknown as CgroupGateService;
         expect(await spawnOutcome(service)).toBeInstanceOf(SessionAdmissionDeniedError);
+        await gate.runMemoryShedTick();
         readCgroupMemorySnapshotMock.mockReturnValue(cgroupAt(7_000_000_000));
         await gate.runMemoryShedTick();
-        expect(await spawnOutcome(service)).not.toBeInstanceOf(SessionAdmissionDeniedError);
+        expect(await spawnOutcome(service)).toBeNull();
         service.dispose();
       });
     });
