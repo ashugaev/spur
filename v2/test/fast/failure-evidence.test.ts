@@ -19,6 +19,11 @@ describe("copyFailureEvidence", () => {
     await writeFile(join(sessionDir, "token.env"), "secret");
     await writeFile(join(sessionDir, "key.pem"), "secret");
     await writeFile(join(root, "real-secret"), "secret");
+    const toolsDir = join(root, "data", "session-tools", "s1");
+    await mkdir(join(toolsDir, "codex-home"), { recursive: true });
+    await mkdir(join(toolsDir, "claude-home"), { recursive: true });
+    await writeFile(join(toolsDir, "codex-home", "config.toml"), "x");
+    await writeFile(join(toolsDir, "claude-home", ".claude.json"), "x");
     await symlink(join(root, "real-secret"), join(sessionDir, "codex-home", "link"));
 
     await copyFailureEvidence(root, out);
@@ -31,5 +36,6 @@ describe("copyFailureEvidence", () => {
       expect(existsSync(join(copied, name))).toBe(false);
     }
     expect(existsSync(join(copied, "codex-home", "link"))).toBe(false);
+    expect(existsSync(join(out, "data", "session-tools"))).toBe(false);
   });
 });
