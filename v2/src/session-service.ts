@@ -7656,9 +7656,19 @@ export class SessionService {
       );
       let reaped = 0;
       let liveUnderTerminal = 0;
+      // One fleet fork for the whole pass: absent records read the shared
+      // snapshot instead of each forcing their own list-windows. Holds while
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
+      // degrades to a re-fork per expired read, as before.
+      await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
         let agentAlive = false;
-        const presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        let presence = await getTmuxSessionPresence(session.tmuxSession);
+        if (presence.present) {
+          // The snapshot can be a whole pass old for later records, so a name
+          // it lists is re-probed fresh before anything acts on it.
+          presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        }
         if (presence.present) {
           // A lone "process gone" read is inconclusive, not a verdict: a
           // transient tmux/ps failure reads exactly like an exited agent.

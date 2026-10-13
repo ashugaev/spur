@@ -48503,6 +48503,94 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    function seedReaperFleet(count: number): string[] {
+      const sessions = seedReaperSession({ status: "completed" });
+      const base = sessions.get("api-1") as SessionRecord;
+      for (let i = 2; i <= count; i += 1) {
+        sessions.set(`api-${i}`, {
+          ...base,
+          id: `api-${i}`,
+          branch: `api-${i}`,
+          tmuxSession: `api-${i}`,
+        });
+      }
+      return Array.from({ length: count }, (_, i) => `api-${i + 1}`);
+    }
+
+    function freshPresenceNames(): string[] {
+      return getTmuxSessionPresenceMock.mock.calls
+        .filter(([, options]) => options?.fresh === true)
+        .map(([name]) => name);
+    }
+
+    it("takes one fleet snapshot per pass and no fresh per-record probe when every tmux is absent", async () => {
+      const names = seedReaperFleet(20);
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      refreshTmuxFleetSnapshotMock.mockClear();
+      getTmuxSessionPresenceMock.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(refreshTmuxFleetSnapshotMock).toHaveBeenCalledTimes(1);
+      expect(freshPresenceNames().filter((name) => names.includes(name))).toEqual([]);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("re-probes fresh only the one record the snapshot lists as present", async () => {
+      seedReaperFleet(20);
+      tmuxSessionExistsMock.mockImplementation(async (name: string) => name === "api-7");
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      timerPromisesSleepMock.mockReset().mockResolvedValue(undefined);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      getTmuxSessionPresenceMock.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      // Two fresh reads for api-7: the reaper's re-probe plus confirmAgentExited's
+      // second sample. Every absent name gets none.
+      expect(freshPresenceNames()).toEqual(["api-7", "api-7"]);
+      expect(killTmuxSessionMock.mock.calls).toEqual([["api-7"]]);
+      service.dispose();
+    });
+
+    it("does not kill or reap sidecars when the fresh re-probe of a snapshot-present record is unresponsive", async () => {
+      seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+      getTmuxSessionPresenceMock.mockImplementation(async (_name, options) =>
+        options?.fresh
+          ? { present: false, unresponsive: true }
+          : { present: true, unresponsive: false },
+      );
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("does not kill or reap sidecars when the fleet snapshot failed", async () => {
+      seedReaperSession({ status: "completed", sidecarNames: ["proxy"] });
+      getTmuxSessionPresenceMock.mockResolvedValue({
+        present: false,
+        unresponsive: false,
+        diagnostic: "tmux list-windows: boom",
+      });
+      sidecarTmuxAliveMock.mockResolvedValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
     it("does not kill on a single false-negative process probe when the re-sample finds the agent alive", async () => {
       seedReaperSession({ status: "killed" });
       tmuxSessionExistsMock.mockResolvedValue(true);
