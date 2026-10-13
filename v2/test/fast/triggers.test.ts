@@ -5856,6 +5856,84 @@ describe("startConfiguredTriggers", () => {
       },
     );
 
+    describe("lost launch across a trigger rename", () => {
+      function lostOldNameRecords() {
+        return useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              triggerId: "old-name",
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            }),
+          ]),
+        ]);
+      }
+
+      function taggedBy(triggerId: string, sessionId: string) {
+        const session = taggedSession(sessionId);
+        return { ...session, triggerOrigin: { ...session.triggerOrigin, triggerId } };
+      }
+
+      it("adopts the live session tagged by the orphaned trigger instead of respawning", async () => {
+        const records = lostOldNameRecords();
+        listSessionsMock.mockReturnValue([taggedBy("old-name", "api-old")]);
+        const spawnMock = vi.fn().mockResolvedValue({ id: "api-new" });
+        const getMock = vi.fn().mockResolvedValue({ id: "api-old", ...WORKING });
+        const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
+          spawn: spawnMock,
+          get: getMock,
+        });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1);
+          });
+          expect(spawnMock).not.toHaveBeenCalled();
+          expect(memberOf(records)).toMatchObject({
+            triggerId: "pick-up",
+            state: "running",
+            sessionId: "api-old",
+          });
+        } finally {
+          await controller.stop();
+        }
+      });
+
+      it("does not adopt a session tagged by another configured trigger", async () => {
+        lostOldNameRecords();
+        listSessionsMock.mockReturnValue([taggedBy("someone-else", "api-other")]);
+        const base = workItemSpawnConfig();
+        const config = {
+          ...base,
+          projects: {
+            api: {
+              ...base.projects.api,
+              triggers: {
+                ...base.projects.api.triggers,
+                "someone-else": base.projects.api.triggers["pick-up"],
+              },
+            },
+          },
+        };
+        const spawnMock = vi.fn().mockResolvedValue({ id: "api-new" });
+        const getMock = vi.fn().mockResolvedValue({ id: "api-other", ...WORKING });
+        const { bus, controller } = await startTriggers(config, { spawn: spawnMock, get: getMock });
+
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => {
+            expect(spawnMock).toHaveBeenCalledTimes(1);
+          });
+          expect(getMock).not.toHaveBeenCalledWith("api-other");
+          expect(eventsOf("trigger.spawn.adopted")).toHaveLength(0);
+        } finally {
+          await controller.stop();
+        }
+      });
+    });
+
     it("resumes a persisted due retry after controller restart", async () => {
       const records = useWorkItemLifecycleStore([workItemLifecycle([failedMember()])]);
       const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });

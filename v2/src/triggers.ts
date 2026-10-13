@@ -548,19 +548,21 @@ interface FoundWorkItemSession {
   outcome: "adopt" | "completed";
 }
 
-// A session tagged with this exact trigger block that still stands for it.
-// With `discardErrored`, errored records of the block are discarded when none
+// A session tagged with this exact block of the item by one of `triggerIds`
+// that still stands for it. With `discardErrored`, errored records of the block are discarded when none
 // stands (the pre-spawn scan: they are about to be replaced).
 async function findTaggedWorkItemSession(
   ctx: WorkItemClaimContext,
   service: SessionService,
   blockIndex: number,
+  triggerIds: readonly string[],
   discardErrored = false,
 ): Promise<FoundWorkItemSession | undefined> {
   const tagged = listSessions(ctx.dataDir).filter(
     (session) =>
       session.project === ctx.projectId &&
-      session.triggerOrigin?.triggerId === ctx.triggerId &&
+      session.triggerOrigin !== undefined &&
+      triggerIds.includes(session.triggerOrigin.triggerId) &&
       session.triggerOrigin.sourceId === ctx.sourceId &&
       session.triggerOrigin.externalId === ctx.workItem.externalId &&
       session.triggerOrigin.blockIndex === blockIndex,
@@ -666,7 +668,25 @@ async function adoptExistingWorkItemSessions(
       legacyBlocks.push(entry);
       continue;
     }
-    const tagged = await findTaggedWorkItemSession(ctx, service, entry.blockIndex, true);
+    // A takeover rewrote orphan members to this trigger; a session they
+    // launched still carries the orphaned trigger id.
+    const triggerIds = [
+      ctx.triggerId,
+      ...entry.previous.flatMap((member) =>
+        member.triggerId !== undefined &&
+        member.triggerId !== ctx.triggerId &&
+        !ctx.sourceSpawnTriggerIds.has(member.triggerId)
+          ? [member.triggerId]
+          : [],
+      ),
+    ];
+    const tagged = await findTaggedWorkItemSession(
+      ctx,
+      service,
+      entry.blockIndex,
+      triggerIds,
+      true,
+    );
     if (tagged) found.set(entry.blockIndex, tagged);
   }
   if (legacyBlocks.length > 0) {
@@ -961,7 +981,7 @@ async function runSpawnTrigger(
           const survivor =
             error instanceof SessionAdmissionDeniedError
               ? undefined
-              : await findTaggedWorkItemSession(ctx, service, blockIndex);
+              : await findTaggedWorkItemSession(ctx, service, blockIndex, [ctx.triggerId]);
           if (survivor) {
             patchWorkItemMember(ctx, blockIndex, (member) =>
               settledMember(
