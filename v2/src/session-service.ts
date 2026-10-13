@@ -10840,7 +10840,7 @@ export class SessionService {
   async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     return loadSessionSuggestions({
       agent: session.agent,
@@ -11202,7 +11202,7 @@ export class SessionService {
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
 
     const services = listServiceInstancesForSession(this.config.dataDir, sessionId);
@@ -11216,7 +11216,7 @@ export class SessionService {
   async getService(sessionId: string, serviceId: string): Promise<ServiceInstanceView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const service = readServiceInstance(this.config.dataDir, sessionId, serviceId);
     if (!service) {
@@ -11232,7 +11232,7 @@ export class SessionService {
   ): Promise<ServiceInstanceView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.status !== "running") {
       throw new Error(`Session is not running: ${sessionId}`);
@@ -14422,7 +14422,7 @@ export class SessionService {
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     this.assertTokenBudgetAllowsActivation(session);
     if (!hasMessageContent(request)) {
@@ -14727,7 +14727,7 @@ export class SessionService {
   async answerQuestion(sessionId: string, optionIndex: number): Promise<void> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (session.agent !== "claude") {
       throw new Error("Interactive answering is only supported for claude sessions");
@@ -14781,7 +14781,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (typeof message !== "string" || !message.trim()) {
       throw new Error("message must be a non-empty string");
@@ -14796,7 +14796,7 @@ export class SessionService {
     });
     if (options?.sensitivePromptSuffix) {
       const current = readSession(this.config.dataDir, sessionId);
-      if (!current) throw new Error(`Session not found: ${sessionId}`);
+      if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       await this.sendDeferredSensitiveInitialMessage(current, options.sensitivePromptSuffix);
     }
     return result;
@@ -15335,7 +15335,8 @@ export class SessionService {
     const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
+      if (!initialSession)
+        throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       if (this.isLiveStateRateLimited(initialSession)) {
         this.logEvent("session.message.suppressed_rate_limited", {
           level: "info",
@@ -16252,7 +16253,7 @@ export class SessionService {
   ): Promise<CompleteDeskResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const candidates = this.listDeskSessions(session);
 
@@ -16477,7 +16478,7 @@ export class SessionService {
     const sidecarDepth = nextSidecarDepth(caller);
     let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     // An `errored` record can outlive the blip that wrote it while the agent
     // keeps working, and this path otherwise never reconciles. Probe the
@@ -16680,7 +16681,7 @@ export class SessionService {
   ): Promise<SidecarStopView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const project = this.resolveProjectForSession(session);
     const sidecarNames = sessionSidecarNames(session, project);
@@ -17274,7 +17275,7 @@ export class SessionService {
     const pauseReason = options?.stopReason ?? "manual_pause";
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     let session = currentSession;
     if (targetStatus === "stopped" && session.status === "paused") {
@@ -17446,7 +17447,7 @@ export class SessionService {
   private async killLocked(sessionId: string, request: KillSessionRequest): Promise<SessionView> {
     const currentSession = readSession(this.config.dataDir, sessionId);
     if (!currentSession) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     let session = currentSession;
     if (session.status === "completed") {
@@ -18334,7 +18335,7 @@ export class SessionService {
   ): Promise<SessionView> {
     let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     const reopenInvalidated = (): boolean =>
       this.reopensInFlight.get(sessionId)?.invalidated === true;
@@ -19311,7 +19312,7 @@ export class SessionService {
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (!this.lifecycleStampMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before auth migration`);
@@ -19635,7 +19636,7 @@ export class SessionService {
   async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (!isRespawnableStatus(session.status)) {
       throw new Error(
@@ -19826,7 +19827,7 @@ export class SessionService {
   ): Promise<PreparedHandoff> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     }
     if (
       session.status !== "running" &&
