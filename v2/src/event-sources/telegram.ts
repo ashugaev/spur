@@ -1642,7 +1642,7 @@ async function handleAgentChoiceCallback(
     await ctx.answerCallbackQuery(`Sent: ${choice.text}`);
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram choice ack failed: ${redactedErrorText(deps, error)}`,
     );
   }
   // Replacing the text also drops the keyboard, so the answered offer cannot be clicked again.
@@ -1651,7 +1651,7 @@ async function handleAgentChoiceCallback(
       await ctx.editMessageText(`${message.text}\n\nSelected: ${choice.text}`);
     } catch (error) {
       deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${errorText(error)}`,
+        `[source:${deps.projectId}/${deps.sourceId}] telegram choice edit failed: ${redactedErrorText(deps, error)}`,
       );
     }
   }
@@ -1993,7 +1993,7 @@ async function deliverRoutedPrompt(
     statusMessageId = extractMessageId(await ctx.reply(placeholderText(label, session.state)));
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram ack failed: ${redactedErrorText(deps, error)}`,
     );
   }
   // Read and replaced in one synchronous step: a reply that claimed the old
@@ -2244,7 +2244,7 @@ async function handleTelegramVoice(
     statusMessageId = extractMessageId(await ctx.reply("Transcribing voice message..."));
   } catch (error) {
     deps.logger.warn?.(
-      `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${errorText(error)}`,
+      `[source:${deps.projectId}/${deps.sourceId}] telegram voice ack failed: ${redactedErrorText(deps, error)}`,
     );
   }
 
