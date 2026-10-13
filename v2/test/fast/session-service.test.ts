@@ -8059,7 +8059,7 @@ describe("SessionService", () => {
     );
     expect(sent).toContain('`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`');
     expect(sent).toContain(
-      "Do not start long-running app, dev server, or test helper processes directly",
+      "Do not start long-running app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.",
     );
     expect(sent).toContain("One-shot test, lint, or type-check commands may run directly.");
     expect(sent).toContain(
@@ -31006,7 +31006,7 @@ describe("SessionService", () => {
     await expect(
       service.runService("api-1", "nope", { command: "pnpm dev", cwd: "/tmp/x" }),
     ).rejects.toThrow(
-      /^Unknown service for api: nope\. .*type: service and service: nope.*docs\/configuration\.md/,
+      /^Unknown service for api: nope\. .*type: service and service: nope under projects\.api\.sources .*docs\/configuration\.md#field-reference/,
     );
   });
 
