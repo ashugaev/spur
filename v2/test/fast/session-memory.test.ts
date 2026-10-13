@@ -1,18 +1,37 @@
-import { readFileSync } from "node:fs";
+import type * as NodeFs from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getSessionMemoryRecord,
   listSessionMemoryRecords,
   resolveSessionMemoryRecord,
   setSessionMemoryRecord,
+  writeFileAtomic,
 } from "../../src/session-memory.js";
 import { createTempDir } from "../helpers/common.js";
+
+const fsFault = vi.hoisted(() => ({ failWrite: false }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
+      if (fsFault.failWrite) {
+        actual.writeFileSync(args[0], "partial", "utf-8");
+        throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+      }
+      return actual.writeFileSync(...args);
+    }) as typeof actual.writeFileSync,
+  };
+});
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  fsFault.failWrite = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -117,5 +136,46 @@ describe("session memory storage", () => {
         tags: ["bad tag"],
       }),
     ).toThrow(/tags/);
+  });
+});
+
+describe("writeFileAtomic temp file hygiene", () => {
+  it("removes the tmp file and rethrows when rename fails", async () => {
+    const dir = await newDataDir();
+    const target = join(dir, "key.md");
+    mkdirSync(join(target, "child"), { recursive: true });
+
+    expect(() => writeFileAtomic(target, "body")).toThrow();
+    expect(readdirSync(dir)).toEqual(["key.md"]);
+  });
+
+  it("removes the tmp file and rethrows the original error when write fails", async () => {
+    const dir = await newDataDir();
+    fsFault.failWrite = true;
+
+    expect(() => writeFileAtomic(join(dir, "key.md"), "body")).toThrow(/no space/);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("removes dead-pid siblings of the same key on the next write", async () => {
+    const dir = await newDataDir();
+    const dead = "key.md.tmp.2147483646.1700000000000";
+    const otherKey = "other.md.tmp.2147483646.1700000000000";
+    writeFileSync(join(dir, dead), "x");
+    writeFileSync(join(dir, otherKey), "x");
+
+    writeFileAtomic(join(dir, "key.md"), "body");
+
+    expect(readdirSync(dir).sort()).toEqual(["key.md", otherKey]);
+  });
+
+  it("keeps siblings owned by a live pid", async () => {
+    const dir = await newDataDir();
+    const live = `key.md.tmp.${process.ppid}.1700000000000`;
+    writeFileSync(join(dir, live), "x");
+
+    writeFileAtomic(join(dir, "key.md"), "body");
+
+    expect(readdirSync(dir).sort()).toEqual(["key.md", live]);
   });
 });

@@ -1,5 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { SessionMemoryKind, SessionMemoryRecord } from "./types.js";
 
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -29,10 +37,50 @@ function sessionMemoryFilePath(dataDir: string, sessionId: string): string {
 // shared-memory (markdown). Tmp-name scheme is load-bearing: it must stay
 // distinguishable from a real key file so directory listings can skip residue.
 export function writeFileAtomic(path: string, contents: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  removeDeadTmpSiblings(dir, basename(path));
   const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmpPath, contents, "utf-8");
-  renameSync(tmpPath, path);
+  try {
+    writeFileSync(tmpPath, contents, "utf-8");
+    renameSync(tmpPath, path);
+  } catch (error) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Tmp may never have been created, or the rename already consumed it.
+    }
+    throw error;
+  }
+}
+
+// Residue of a writer that died between write and rename: same key, dead pid.
+function removeDeadTmpSiblings(dir: string, name: string): void {
+  const prefix = `${name}.tmp.`;
+  for (const entry of readdirSync(dir)) {
+    if (!entry.startsWith(prefix)) {
+      continue;
+    }
+    const match = /^(\d+)\.\d+$/.exec(entry.slice(prefix.length));
+    const pid = match?.[1] === undefined ? undefined : Number(match[1]);
+    if (pid === undefined || pid === process.pid || isProcessAlive(pid)) {
+      continue;
+    }
+    try {
+      unlinkSync(join(dir, entry));
+    } catch {
+      // Another writer may have removed it first.
+    }
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
