@@ -18337,6 +18337,11 @@ describe("SessionService", () => {
       state: "waiting",
       message: `State: waiting (codex stale, idle=${11 * 60_000}ms)`,
     },
+    {
+      silentMin: 10,
+      state: "waiting",
+      message: `State: waiting (codex stale, idle=${10 * 60_000}ms)`,
+    },
     { silentMin: 9, state: "working", message: "State: working (codex jsonl=task_started)" },
   ])(
     "classifies hookless task_started as $state after $silentMin minutes of rollout silence",
