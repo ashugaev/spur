@@ -600,6 +600,19 @@ describe("rotated chat created by the send (#982)", () => {
     expect((await scan(baseline, "continue")).found).toBe(false);
   });
 
+  it("C2b: a post-write chat with non-user and textless records ahead of the sent text acks on the first poll", async () => {
+    const { baseline, rotatedFile } = await setup([
+      { role: "assistant", message: { content: [{ type: "text", text: "hello" }] } },
+      { role: "user", message: { content: [] } },
+      userTurn("ship the task"),
+    ]);
+    stubBirthtime(rotatedFile, stamp + 5);
+    expect(await scan(baseline, "ship the task")).toEqual({
+      found: true,
+      scannedFile: rotatedFile,
+    });
+  });
+
   it("C3: a post-write chat sighted empty acks once its first record is the sent text", async () => {
     const { baseline, rotatedFile } = await setup([]);
     stubBirthtime(rotatedFile, stamp + 5);

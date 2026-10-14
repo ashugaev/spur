@@ -293,11 +293,9 @@ export async function scanCursorJsonlForMessage(
       // first record may ack past the floor. Only the first sighting needs the
       // check: a first record not yet flushed lands after the floor, and the
       // floor scan on every poll covers it.
-      baseline.rotationOffsets ??= new Map();
-      let offset = baseline.rotationOffsets.get(rotated);
+      let offset = baseline.rotationOffsets?.get(rotated);
       if (offset === undefined) {
-        offset = await readCursorStableOffset(rotated).catch(() => 0);
-        baseline.rotationOffsets.set(rotated, offset);
+        offset = await seedRotationOffset(baseline, rotated);
         if (
           (await bornAfterWriteStart(rotated, baseline.writeStartedAtMs)) &&
           (await scanFileForUserText(rotated, 0, normalizedTarget, true))
