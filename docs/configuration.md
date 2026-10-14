@@ -114,7 +114,9 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 ## Admission control
 
-Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+Spawn waits automatically for memory-guard or live-session-cap recovery; queue lasts for the daemon lifetime; `v2/src/session-service.ts`.
+Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
+Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 

@@ -1120,6 +1120,24 @@ function sessionRecord(
 
 let normalizeSessionPrBinding: typeof sessionPrModule.normalizeSessionPrBinding;
 
+async function expectResourceWait(service: { dispose(): void }, spawn: Promise<unknown>) {
+  const settled = vi.fn();
+  const result = spawn.then(
+    (value) => {
+      settled();
+      return value;
+    },
+    (error: unknown) => {
+      settled();
+      throw error;
+    },
+  );
+  for (let index = 0; index < 30; index += 1) await Promise.resolve();
+  expect(settled).not.toHaveBeenCalled();
+  service.dispose();
+  await expect(result).rejects.toThrow(/cancel|dispos|shut/i);
+}
+
 function createSessionStore(...initial: SessionRecord[]) {
   const sessions = new Map<string, SessionRecord>();
   for (const record of initial) sessions.set(record.id, normalizeSessionPrBinding(clone(record)));
@@ -20117,6 +20135,287 @@ describe("SessionService", () => {
     expect(timerPromisesSleepMock).not.toHaveBeenCalled();
   });
 
+  describe("resource spawn queue", () => {
+    type QueueService = {
+      runMemoryShedTick(): Promise<void>;
+      drainSpawnAdmissions(): void;
+      pendingSpawnIds: Set<string>;
+      spawnAdmissionWaiters: Set<unknown>;
+      admissionReservations: Map<symbol, string>;
+    };
+
+    function queueConfig() {
+      const config = baseConfig();
+      config.admission.memoryGuard.shedEnabled = false;
+      return config;
+    }
+
+    function recoverMemory() {
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 8_500_000_000,
+        swapTotalBytes: 4_000_000_000,
+        swapFreeBytes: 4_000_000_000,
+      });
+      readCgroupPressureMock.mockReturnValue({ someAvg10: 1, someAvg60: 1, fullAvg10: 0 });
+    }
+
+    it.each(["ram", "swap", "psi"] as const)(
+      "accepts %s pressure, retains queued messages, and launches once below the wake floor",
+      async (pressure) => {
+        mockTimerPromisesSleepWithFakeTimers();
+        mockClaudeJsonlState("waiting");
+        const config = queueConfig();
+        config.admission.memoryGuard.enforce = true;
+        config.admission.memoryGuard.minFreeSwapBytes = 1_000_000_000;
+        loadConfigMock.mockReturnValue(config);
+        recoverMemory();
+        if (pressure === "ram") {
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 7_000_000_000,
+            swapTotalBytes: 4_000_000_000,
+            swapFreeBytes: 4_000_000_000,
+          });
+        } else if (pressure === "swap") {
+          readHostMemoryMock.mockReturnValue({
+            totalBytes: 65_000_000 * 1024,
+            availableBytes: 8_500_000_000,
+            swapTotalBytes: 4_000_000_000,
+            swapFreeBytes: 100,
+          });
+        } else {
+          readCgroupPressureMock.mockReturnValue({ someAvg10: 21, someAvg60: 1, fullAvg10: 0 });
+        }
+        const sessions = createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const queue = service as unknown as QueueService;
+
+        const accepted = await service.spawnInBackground({ project: "api", prompt: "queued task" });
+        expect(accepted).toMatchObject({ id: "api-1", status: "spawning" });
+        await queue.runMemoryShedTick();
+        expect(sessions.get(accepted.id)?.status).toBe("spawning");
+        expect(createWorktreeMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect((await service.getHeadroom()).live.count).toBe(0);
+        await service.send(accepted.id, { message: "follow up", queue: true });
+        expect(sessions.get(accepted.id)?.queuedMessages?.messages).toEqual(["follow up"]);
+
+        recoverMemory();
+        await queue.runMemoryShedTick();
+        await service.settleBackgroundSpawns();
+        await vi.waitFor(() => {
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter(([, text]) => text === "follow up"),
+          ).toHaveLength(1);
+        });
+        await queue.runMemoryShedTick();
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get(accepted.id)?.status).toBe("running");
+        expect(
+          logSpurEventMock.mock.calls.some(
+            ([, event]) =>
+              event.event === "session.spawn.retrying" || event.event === "session.spawn.failed",
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it("kills a pending identity without launch or retry and frees queue ownership", async () => {
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const queue = service as unknown as QueueService;
+      const accepted = await service.spawnInBackground({ project: "api", prompt: "cancel task" });
+      await service.kill(accepted.id, { skipPrCheck: true, force: true });
+      recoverMemory();
+      await queue.runMemoryShedTick();
+      await service.settleBackgroundSpawns();
+      expect(readSessionMock(TEST_DATA_DIR, accepted.id)?.status).toBe("killed");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(queue.pendingSpawnIds.size).toBe(0);
+      expect(queue.spawnAdmissionWaiters.size).toBe(0);
+      expect(queue.admissionReservations.size).toBe(0);
+    });
+
+    it("stops accepted records on dispose and settles background waits", async () => {
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const accepted = await service.spawnInBackground({ project: "api", prompt: "shutdown task" });
+      service.dispose();
+      await service.settleBackgroundSpawns();
+      expect(readSessionMock(TEST_DATA_DIR, accepted.id)?.status).toBe("stopped");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("skips a capped project and grants its oldest eligible waiter once capacity returns", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = queueConfig();
+      config.admission.maxLiveSessions = 2;
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          ...config.projects,
+          api: { ...config.projects.api, maxLiveSessions: 1 },
+          web: {
+            ...config.projects.api,
+            path: "/repo/web",
+            sessionPrefix: "web",
+            maxLiveSessions: 1,
+          },
+        },
+      });
+      recoverMemory();
+      const occupant = sessionRecord({ id: "api-occupied" });
+      const sessions = createSessionStore(occupant);
+      reserveNextSessionIdMock
+        .mockResolvedValueOnce("api-1")
+        .mockResolvedValueOnce("api-2")
+        .mockResolvedValueOnce("web-1");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const queue = service as unknown as QueueService;
+      await service.spawnInBackground({ project: "api", prompt: "oldest" });
+      await service.spawnInBackground({ project: "api", prompt: "newest" });
+      await service.spawnInBackground({ project: "web", prompt: "other project" });
+      await vi.waitFor(() => expect(sessions.get("web-1")?.status).toBe("running"));
+      expect(sessions.get("api-1")?.status).toBe("spawning");
+      expect(sessions.get("api-2")?.status).toBe("spawning");
+      expect((await service.getHeadroom()).live.count).toBe(2);
+
+      sessions.set(occupant.id, { ...occupant, status: "stopped" });
+      await queue.runMemoryShedTick();
+      await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("running"));
+      expect(sessions.get("api-2")?.status).toBe("spawning");
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+      expect((await service.getHeadroom()).live.count).toBe(2);
+      service.dispose();
+      await service.settleBackgroundSpawns();
+    });
+
+    it("cancels a delivered grant before its continuation can launch", async () => {
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const queue = service as unknown as QueueService;
+      const accepted = await service.spawnInBackground({
+        project: "api",
+        prompt: "cancel granted task",
+      });
+      recoverMemory();
+      queue.drainSpawnAdmissions();
+      expect(queue.admissionReservations.size).toBe(1);
+      const kill = service.kill(accepted.id, { skipPrCheck: true, force: true });
+      await kill;
+      await service.settleBackgroundSpawns();
+      expect(readSessionMock(TEST_DATA_DIR, accepted.id)?.status).toBe("killed");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(queue.admissionReservations.size).toBe(0);
+    });
+
+    it("rejects invalid mode before entering a resource wait", async () => {
+      const config = configWithModes();
+      config.admission.maxLiveSessions = 0;
+      loadConfigMock.mockReturnValue(config);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await expect(
+        service.spawn({ project: "api", prompt: "invalid", mode: "bogus" }),
+      ).rejects.toThrow('Unknown mode "bogus"');
+      await expect(
+        service.spawnInBackground({ project: "api", prompt: "invalid", mode: "bogus" }),
+      ).rejects.toThrow('Unknown mode "bogus"');
+      expect((service as unknown as QueueService).spawnAdmissionWaiters.size).toBe(0);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps an internal foreground receipt pending until the admitted launch completes", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      let releaseReady: (() => void) | undefined;
+      waitForTmuxReadyMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseReady = resolve;
+          }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const queue = service as unknown as QueueService;
+      const settled = vi.fn();
+      const spawn = service.spawn({ project: "api", prompt: "internal caller" }).then((result) => {
+        settled();
+        return result;
+      });
+      await vi.waitFor(() => expect(queue.spawnAdmissionWaiters.size).toBe(1));
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(settled).not.toHaveBeenCalled();
+      recoverMemory();
+      await queue.runMemoryShedTick();
+      await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1));
+      expect(settled).not.toHaveBeenCalled();
+      releaseReady?.();
+      await expect(spawn).resolves.toMatchObject({ id: "api-1", status: "running" });
+      expect(settled).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects preparation crossing dispose before registering a pending identity", async () => {
+      loadConfigMock.mockReturnValue(queueConfig());
+      createSessionStore();
+      let releaseModel: ((model: string | undefined) => void) | undefined;
+      resolveCursorLaunchModelMock.mockImplementationOnce(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            releaseModel = resolve;
+          }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const spawn = service.spawnInBackground({
+        project: "api",
+        agent: "cursor",
+        prompt: "slow validation",
+      });
+      await vi.waitFor(() => expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1));
+      service.dispose();
+      releaseModel?.("composer");
+      await expect(spawn).rejects.toThrow(/cancel|dispos|shut/i);
+      await service.settleBackgroundSpawns();
+      expect((service as unknown as QueueService).spawnAdmissionWaiters.size).toBe(0);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe("admission control", () => {
     function withAdmission(overrides: Partial<AppConfig["admission"]> = {}) {
       const config = baseConfig();
@@ -20126,7 +20425,7 @@ describe("SessionService", () => {
       };
     }
 
-    it("rejects spawn over the global cap with the 3 stalest fleet candidates", async () => {
+    it("resource spawn queue waits over the global cap without writing a launch record", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 4 }));
       listSessionsMock.mockReturnValue([
         sessionRecord({ id: "api-newest", updatedAt: "2026-03-18T09:45:00.000Z" }),
@@ -20135,21 +20434,10 @@ describe("SessionService", () => {
         sessionRecord({ id: "api-old", updatedAt: "2026-03-18T09:15:00.000Z" }),
       ]);
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      let caught: unknown;
-      try {
-        await service.spawn({ project: "api", prompt: "hello" });
-      } catch (error) {
-        caught = error;
-      }
-
-      expect(caught).toBeInstanceOf(SessionAdmissionDeniedError);
-      expect((caught as InstanceType<typeof SessionAdmissionDeniedError>).statusCode).toBe(429);
-      expect((caught as Error).message).toBe(
-        'Cannot spawn session for project "api": at the global cap of 4 live sessions (4 slots claimed: 4 live, 0 reserved). Stop one of: api-oldest (api), api-old (api), api-new (api).',
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
       expect(writeSessionMock).not.toHaveBeenCalled();
       expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
     });
@@ -20202,7 +20490,7 @@ describe("SessionService", () => {
       expect(writeSessionMock).toHaveBeenCalled();
     });
 
-    it("admits the 100th session, refuses the 101st, and leaves an over-cap fleet untouched", async () => {
+    it("resource spawn queue admits the 100th session and waits for the 101st", async () => {
       mockClaudeJsonlState("waiting");
       loadConfigMock.mockReturnValue(
         withAdmission({ maxLiveSessions: 100, maxLiveSessionsSource: "default" }),
@@ -20212,7 +20500,7 @@ describe("SessionService", () => {
       );
       listSessionsMock.mockReturnValue(liveSessions.slice(0, 99));
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       await expect(service.spawn({ project: "api", prompt: "100th" })).resolves.toMatchObject({
@@ -20220,9 +20508,7 @@ describe("SessionService", () => {
       });
 
       listSessionsMock.mockReturnValue(liveSessions.slice(0, 100));
-      await expect(service.spawn({ project: "api", prompt: "101st" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "101st" }));
 
       listSessionsMock.mockReturnValue(liveSessions);
       const report = await service.getHeadroom();
@@ -20238,7 +20524,7 @@ describe("SessionService", () => {
       ["background", "global"],
       ["background", "project"],
     ] as const)(
-      "reserves %s spawn admission across async preparation at the %s cap",
+      "resource spawn queue reserves %s admission across worktree creation at the %s cap",
       async (mode, capScope) => {
         mockClaudeJsonlState("waiting");
         readHostMemoryMock.mockReturnValue({
@@ -20263,11 +20549,13 @@ describe("SessionService", () => {
             },
           },
         });
-        let releaseModel: ((value: string | undefined) => void) | undefined;
-        resolveCursorLaunchModelMock.mockImplementationOnce(
+        createSessionStore();
+        reserveNextSessionIdMock.mockResolvedValueOnce("api-1").mockResolvedValueOnce("api-2");
+        let releaseWorktree: ((value: string) => void) | undefined;
+        createWorktreeMock.mockImplementationOnce(
           () =>
-            new Promise<string | undefined>((resolve) => {
-              releaseModel = resolve;
+            new Promise<string>((resolve) => {
+              releaseWorktree = resolve;
             }),
         );
 
@@ -20277,42 +20565,34 @@ describe("SessionService", () => {
           mode === "foreground"
             ? service.spawn({ project: "api", agent: "cursor", prompt: "first" })
             : service.spawnInBackground({ project: "api", agent: "cursor", prompt: "first" });
-        await vi.waitFor(() => expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(createWorktreeMock).toHaveBeenCalledTimes(1));
 
         const competingSpawn =
           mode === "foreground"
             ? service.spawn({ project: "api", agent: "cursor", prompt: "second" })
             : service.spawnInBackground({ project: "api", agent: "cursor", prompt: "second" });
-        const expectedMessage =
-          capScope === "global"
-            ? 'Cannot spawn session for project "api": at the global cap of 1 live sessions (1 slot claimed: 0 live, 1 reserved). Wait for an in-flight spawn to finish, then stop a live session or retry.'
-            : 'Cannot spawn session for project "api": at its per-project cap of 1 live sessions (1 slot claimed: 0 live, 1 reserved). Wait for an in-flight spawn to finish, then stop a live session or retry.';
-        await expect(competingSpawn).rejects.toMatchObject({
-          message: expectedMessage,
-          statusCode: 429,
-        });
-        expect(resolveCursorLaunchModelMock).toHaveBeenCalledTimes(1);
-        expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+        const competingResult = mode === "background" ? await competingSpawn : undefined;
+        for (let index = 0; index < 30; index += 1) await Promise.resolve();
+        expect(createWorktreeMock).toHaveBeenCalledTimes(1);
+        expect(competingResult?.status).toBe(mode === "background" ? "spawning" : undefined);
 
-        releaseModel?.("composer-1.5");
+        releaseWorktree?.("/tmp/spur-worktrees/api/api-1");
         await expect(spawn).resolves.toMatchObject({ id: "api-1" });
-        if (mode === "background") {
-          await service.settleBackgroundSpawns();
-        }
+        if (mode === "foreground") await expectResourceWait(service, competingSpawn);
+        else service.dispose();
+        await service.settleBackgroundSpawns();
       },
     );
 
-    it("counts a status:running, state:waiting session toward the cap", async () => {
+    it("resource spawn queue counts a status:running, state:waiting session toward the cap", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
       listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", status: "running" })]);
       mockClaudeJsonlState("waiting");
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
     });
 
     it("releases the admission reservation from an unknown-mode spawn so the next spawn is not refused", async () => {
@@ -20338,11 +20618,11 @@ describe("SessionService", () => {
       });
     });
 
-    it("counts a session inside its restore warmup window exactly once though its on-disk status is stopped", async () => {
+    it("resource spawn queue counts a stopped session inside its restore warmup window", async () => {
       loadConfigMock.mockReturnValue(withAdmission({ maxLiveSessions: 1 }));
       listSessionsMock.mockReturnValue([sessionRecord({ id: "api-1", status: "stopped" })]);
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService(
         "/tmp/spur.yaml",
         "2026-03-18T10:00:00.000Z",
@@ -20353,9 +20633,7 @@ describe("SessionService", () => {
       };
       service.restoreWarmupUntil.set("api-1", Date.now() + 30_000);
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
     });
 
     it("restore() over cap throws and does not set restoreWarmupUntil or start MCP sidecars", async () => {
@@ -20464,13 +20742,9 @@ describe("SessionService", () => {
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
       const denied = service.spawn({ project: "api", prompt: "hello" });
-      await expect(denied).rejects.toMatchObject({
-        message:
-          'Cannot spawn session for project "api": at its per-project cap of 2 live sessions (2 slots claimed: 2 live, 0 reserved). Stop one of: api-old (api), api-new (api).',
-        statusCode: 429,
-      });
       const webResult = await service.spawn({ project: "web", prompt: "hello" });
       expect(webResult.id).toBe("web-1");
+      await expectResourceWait(service, denied);
     });
 
     it("admission.enabled: false admits spawn and restore regardless of live count", async () => {
@@ -20525,7 +20799,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("memory guard enforce:true + crossed rejects both spawn() and restore()", async () => {
+    it("resource spawn queue waits on enforced memory pressure while restore rejects", async () => {
       loadConfigMock.mockReturnValue(
         withAdmission({
           memoryGuard: {
@@ -20552,10 +20826,6 @@ describe("SessionService", () => {
       const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
-
       createSessionStore({
         id: "api-1",
         project: "api",
@@ -20574,44 +20844,37 @@ describe("SessionService", () => {
       tmuxSessionExistsMock.mockResolvedValueOnce(false);
 
       await expect(service.restore("api-1")).rejects.toThrow(SessionAdmissionDeniedError);
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
     });
 
-    it("denies spawn below the default-on admission floor", async () => {
+    it("resource spawn queue waits below the default-on admission floor", async () => {
       readHostMemoryMock.mockReturnValue({
         totalBytes: 65_000_000 * 1024,
         availableBytes: 7_000_000_000,
         swapTotalBytes: 0,
         swapFreeBytes: 0,
       });
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
     });
 
-    it("denies spawn below the floor when the report-only legacy guard is also crossed", async () => {
+    it("resource spawn queue waits below the floor when the report-only legacy guard is crossed", async () => {
       readHostMemoryMock.mockReturnValue({
         totalBytes: 65_000_000 * 1024,
         availableBytes: 100 * 1024,
         swapTotalBytes: 0,
         swapFreeBytes: 0,
       });
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
-      expect(logSpurEventMock).toHaveBeenCalledWith(
-        TEST_DATA_DIR,
-        expect.objectContaining({ event: "session.admission.memory_guard", level: "warn" }),
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
       expect(writeSessionMock).not.toHaveBeenCalled();
     });
 
-    it("denies spawn when cgroup PSI some avg10 crosses its threshold", async () => {
+    it("resource spawn queue waits when cgroup PSI some avg10 crosses its threshold", async () => {
       readHostMemoryMock.mockReturnValue({
         totalBytes: 65_000_000 * 1024,
         availableBytes: 20_000_000_000,
@@ -20619,12 +20882,10 @@ describe("SessionService", () => {
         swapFreeBytes: 0,
       });
       readCgroupPressureMock.mockReturnValue({ someAvg10: 20.01, someAvg60: 2, fullAvg10: 0 });
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
     });
 
     it("reports an unlimited fleet cgroup only when systemd-oomd is absent", async () => {
@@ -21866,7 +22127,7 @@ describe("SessionService", () => {
       };
     }
 
-    it("memory guard denial carries reason memory_guard and cap denial carries reason cap", async () => {
+    it("resource spawn queue cancels memory and cap waits on dispose", async () => {
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
         admission: {
@@ -21880,13 +22141,9 @@ describe("SessionService", () => {
       });
       readHostMemoryMock.mockReturnValue(denyingMemory(100 * 1024));
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toMatchObject({
-        reason: "memory_guard",
-        statusCode: 429,
-      });
-      service.dispose();
+      await expectResourceWait(service, service.spawn({ project: "api", prompt: "hello" }));
 
       loadConfigMock.mockReturnValue({
         ...baseConfig(),
@@ -21894,16 +22151,7 @@ describe("SessionService", () => {
       });
       readHostMemoryMock.mockReturnValue(null);
       const service2 = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await expect(service2.spawn({ project: "api", prompt: "hello" })).rejects.toMatchObject({
-        reason: "cap",
-        statusCode: 429,
-      });
-      expect(
-        (await service2
-          .spawn({ project: "api", prompt: "hello" })
-          .catch((error) => error)) instanceof SessionAdmissionDeniedError,
-      ).toBe(true);
-      service2.dispose();
+      await expectResourceWait(service2, service2.spawn({ project: "api", prompt: "hello" }));
     });
 
     it("emits one hold engaged event per episode regardless of tick count, then clears after ten consecutive recovered ticks", async () => {
@@ -43688,6 +43936,110 @@ describe("SessionService", () => {
     });
   });
 
+  describe("handoff resource queue", () => {
+    it("complete cancels a delivered handoff grant before source teardown", async () => {
+      const config = baseConfig();
+      config.admission.memoryGuard.shedEnabled = false;
+      loadConfigMock.mockReturnValue(config);
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 7_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      const sessions = createSessionStore(
+        sessionRecord({ id: "api-1", worktreePath: "/tmp/spur-worktrees/api/api-1" }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as SessionServiceInternals & {
+        spawnAdmissionWaiters: Set<unknown>;
+        drainSpawnAdmissions(): void;
+      };
+      const outcome = service
+        .handoff("api-1", { agent: "cursor" }, { todoActor: { kind: "human", origin: "ui" } })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(internals.spawnAdmissionWaiters.size).toBe(1));
+      readHostMemoryMock.mockReturnValue({
+        totalBytes: 65_000_000 * 1024,
+        availableBytes: 20_000_000_000,
+        swapTotalBytes: 0,
+        swapFreeBytes: 0,
+      });
+      internals.drainSpawnAdmissions();
+      expect(internals.admissionReservations.size).toBe(1);
+      await service.complete(
+        "api-1",
+        { skipPrCheck: true },
+        { todoActor: { kind: "human", origin: "ui" } },
+      );
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(sessions.get("api-1")?.status).toBe("completed");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(internals.handoffsInFlight.size).toBe(0);
+      expect(internals.spawnAdmissionWaiters.size).toBe(0);
+      expect(internals.admissionReservations.size).toBe(0);
+    });
+
+    it.each(["complete", "completeDesk", "selfDestruct", "kill"] as const)(
+      "%s cancels a resource wait without recovery or lifecycle lock conflict",
+      async (operation) => {
+        const config = baseConfig();
+        config.admission.memoryGuard.shedEnabled = false;
+        loadConfigMock.mockReturnValue(config);
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 7_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        const sessions = createSessionStore(
+          sessionRecord({
+            id: "api-1",
+            worktreePath: "/tmp/spur-worktrees/api/api-1",
+            selfDestruct: { enabled: true },
+          }),
+        );
+        workspaceExistsMock.mockReturnValue(true);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const internals = service as unknown as SessionServiceInternals & {
+          spawnAdmissionWaiters: Set<unknown>;
+        };
+        const handoff = service.handoff(
+          "api-1",
+          { agent: "cursor" },
+          { todoActor: { kind: "human", origin: "ui" } },
+        );
+        const outcome = handoff.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(internals.spawnAdmissionWaiters.size).toBe(1));
+        expect(sessions.get("api-1")?.status).toBe("running");
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+
+        if (operation === "kill") {
+          await service.kill("api-1", { skipPrCheck: true, force: true });
+        } else if (operation === "selfDestruct") {
+          await service.selfDestruct("api-1");
+        } else {
+          await service[operation](
+            "api-1",
+            { skipPrCheck: true },
+            { todoActor: { kind: "human", origin: "ui" } },
+          );
+        }
+        expect(await outcome).toBeInstanceOf(Error);
+        expect(sessions.get("api-1")?.status).toBe(operation === "kill" ? "killed" : "completed");
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(internals.handoffsInFlight.size).toBe(0);
+        expect(internals.spawnAdmissionWaiters.size).toBe(0);
+        expect(internals.admissionReservations.size).toBe(0);
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+      },
+    );
+  });
+
   describe("handoff", () => {
     it("preserves the source when an explicit OpenCode model is unavailable", async () => {
       const sessions = createSessionStore();
@@ -43980,7 +44332,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("denies handoff on an over-cap fleet and leaves the source session live and untouched", async () => {
+    it("handoff resource queue leaves the over-cap source live and untouched", async () => {
       const config = baseConfig();
       loadConfigMock.mockReturnValue({
         ...config,
@@ -43995,18 +44347,14 @@ describe("SessionService", () => {
           worktreePath: "/tmp/spur-worktrees/api/api-1",
         }),
       );
-      // A second live session that stays live even once api-1 is excluded as
-      // "the session being replaced" — the fleet is over cap independent of
-      // the handoff, so it must be refused.
+      // The replacement remains blocked by another live session.
       sessions.set("api-2", sessionRecord({ id: "api-2", status: "running" }));
       workspaceExistsMock.mockReturnValue(true);
 
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.handoff("api-1", { agent: "cursor" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      await expectResourceWait(service, service.handoff("api-1", { agent: "cursor" }));
 
       expect(killTmuxSessionMock).not.toHaveBeenCalled();
       expect(writeSessionMock).not.toHaveBeenCalled();
@@ -44059,7 +44407,7 @@ describe("SessionService", () => {
       );
       workspaceExistsMock.mockReturnValue(true);
       reserveNextSessionIdMock.mockResolvedValue("api-2");
-      const { SessionService, SessionAdmissionDeniedError } = await loadSessionServiceModule();
+      const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       const internals = service as unknown as { attentionMonitorRunning: boolean };
       await vi.waitFor(() => expect(internals.attentionMonitorRunning).toBe(false));
@@ -44074,12 +44422,11 @@ describe("SessionService", () => {
 
       const handoff = service.handoff("api-1", { agent: "cursor" });
       await vi.waitFor(() => expect(captureTmuxPaneMock).toHaveBeenCalled());
-      await expect(service.spawn({ project: "api", prompt: "race" })).rejects.toThrow(
-        SessionAdmissionDeniedError,
-      );
+      const competing = service.spawn({ project: "api", prompt: "race" });
 
       releaseCapture?.("");
       await expect(handoff).resolves.toMatchObject({ id: "api-2" });
+      await expectResourceWait(service, competing);
     });
 
     it("serializes add-first against handoff before side effects", async () => {
@@ -46013,7 +46360,7 @@ describe("SessionService", () => {
     });
 
     it.each(["selfDestruct", "handoff"] as const)(
-      "reserves original completion before %s waits without owning the spawned session",
+      "tracks original completion after %s activation without owning the spawned session",
       async (action) => {
         const records = seed();
         const { SessionService } = await loadSessionServiceModule();
@@ -46026,6 +46373,14 @@ describe("SessionService", () => {
         });
         const hold = new Promise<void>((resolve) => {
           release = resolve;
+        });
+        let releaseActivation = () => {};
+        let enteredActivation = () => {};
+        const activationReady = new Promise<void>((resolve) => {
+          enteredActivation = resolve;
+        });
+        const activationHold = new Promise<void>((resolve) => {
+          releaseActivation = resolve;
         });
         const predecessor = internals.withWorkspaceLifecycleLocks("api-1", () => {
           entered();
@@ -46040,7 +46395,11 @@ describe("SessionService", () => {
         };
         if (action === "handoff") {
           vi.spyOn(internals, "handoffTransaction").mockImplementation((id) =>
-            internals.withWorkspaceLifecycleLocks(id, () => mutate(id)),
+            internals.withWorkspaceLifecycleLocks(id, async () => {
+              enteredActivation();
+              await activationHold;
+              return mutate(id);
+            }),
           );
         } else {
           vi.spyOn(internals, "applyManualStatusLocked").mockImplementation(mutate);
@@ -46049,20 +46408,30 @@ describe("SessionService", () => {
           action === "handoff"
             ? service.handoff("api-1", { agent: "claude", notes: "next" })
             : service.selfDestruct("api-1");
+        void operation.catch(() => {});
         try {
+          if (action === "handoff") {
+            expect((await service.get("api-1")).lifecycle.operation).toBeNull();
+            release();
+            await predecessor;
+            await activationReady;
+          }
           expect((await service.get("api-1")).lifecycle.operation).toMatchObject({
             action: "complete",
             phase: "pending",
           });
           expect((await service.get("api-2")).lifecycle.operation).toBeNull();
           release();
+          releaseActivation();
           await predecessor;
           const result = await operation;
           expect((await service.get("api-1")).lifecycle.operation?.phase).toBe("succeeded");
           if (action === "handoff") expect(result.lifecycle.operation).toBeNull();
         } finally {
           release();
+          releaseActivation();
           service.dispose();
+          await operation.catch(() => {});
         }
       },
     );

@@ -2938,9 +2938,30 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
-  sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
+}
+
+class SpawnAdmissionCancelledError extends Error {
+  constructor(readonly reason: "disposed" | "killed" | "handoff") {
+    super(`Spawn admission cancelled: ${reason}`);
+  }
+}
+
+interface SpawnAdmissionWaiter {
+  projectId: string;
+  sessionId?: string;
+  replacingSessionId?: string;
+  reservation?: symbol;
+  resolve: (reservation: symbol) => void;
+  reject: (error: SpawnAdmissionCancelledError) => void;
+}
+
+interface HandoffAdmission {
+  token: symbol;
+  session: SessionRecord;
+  launchSelection: AgentLaunchSelection;
+  admissionReservation: symbol;
 }
 
 function resolveCarriedSpawnModel(
@@ -3476,10 +3497,16 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
+  private readonly spawnAdmissionWaiters = new Set<SpawnAdmissionWaiter>();
+  private readonly pendingSpawnIds = new Set<string>();
+  private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
-    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
+    {
+      token: symbol;
+      phase: "waiting" | "activating";
+    }
   >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
@@ -3725,6 +3752,10 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.admissionStopped = true;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      this.cancelSpawnAdmission(waiter, "disposed");
+    }
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -3778,6 +3809,7 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    this.drainSpawnAdmissions();
     // One host-memory read shared by both calls below: updateMemoryHold's
     // wake-context check and runMemoryShed's opening pressure sample would
     // otherwise each take their own /proc read microseconds apart for the
@@ -5957,6 +5989,9 @@ export class SessionService {
     operationId: string | undefined,
     work: () => Promise<SessionView | { completedIds: string[] }>,
   ): Promise<SessionView | CompleteDeskResponse> {
+    if (action === "complete") {
+      for (const id of targetIds) this.cancelWaitingHandoff(id);
+    }
     for (const id of targetIds) {
       if (!readSession(this.config.dataDir, id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${id}`);
@@ -11763,17 +11798,15 @@ export class SessionService {
       closeoutOwnerTransfer?: boolean;
       sensitivePromptSuffix?: string;
       receiptToken?: symbol;
+      /** HTTP accepts a spawning identity when admission must wait. */
+      acceptQueued?: boolean;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation =
-      options?.admissionReservation ??
-      this.reserveAdmission(request.project, "spawn", {
-        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
-      });
-    let admissionReserved = true;
+    let admissionReservation = options?.admissionReservation;
+    let admissionReserved = admissionReservation !== undefined;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -11832,6 +11865,32 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
+      if (request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
+      if (admissionReservation === undefined) {
+        if (options?.acceptQueued) {
+          this.drainSpawnAdmissions();
+          admissionReservation =
+            this.tryReserveSpawnAdmission(request.project, undefined, false) ?? undefined;
+          if (admissionReservation === undefined) return await this.spawnInBackground(request);
+        } else {
+          admissionReservation = await this.waitForSpawnAdmission(request.project, {
+            ...(options?.replacingSessionId
+              ? { replacingSessionId: options.replacingSessionId }
+              : {}),
+          });
+        }
+        admissionReserved = true;
+      }
+      this.consumeSpawnAdmission(admissionReservation);
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -12391,6 +12450,7 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
         : undefined;
@@ -12564,7 +12624,7 @@ export class SessionService {
       });
       throw error;
     } finally {
-      if (admissionReserved) {
+      if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
       if (sessionId) {
@@ -12875,8 +12935,6 @@ export class SessionService {
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation = this.reserveAdmission(request.project, "spawn");
-    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -12923,6 +12981,16 @@ export class SessionService {
         this.config.models.codexHome,
       );
       resolvedModel = launchSelection.model;
+      if (worktree && request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -12999,12 +13067,13 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+      this.pendingSpawnIds.add(sessionId);
+      this.spawnsInFlight.add(sessionId);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
-      this.admissionReservations.delete(admissionReservation);
-      admissionReserved = false;
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -13051,11 +13120,15 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
         preflightBatchId,
       };
     } catch (error) {
+      if (sessionId) {
+        this.pendingSpawnIds.delete(sessionId);
+        this.spawnsInFlight.delete(sessionId);
+      }
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
@@ -13107,10 +13180,6 @@ export class SessionService {
         },
       });
       throw error;
-    } finally {
-      if (admissionReserved) {
-        this.admissionReservations.delete(admissionReservation);
-      }
     }
   }
 
@@ -13136,6 +13205,7 @@ export class SessionService {
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     try {
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
@@ -13358,7 +13428,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -13415,7 +13485,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         artifactsSessionId: workspaceIdOf(runningRecord),
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
@@ -13437,7 +13507,7 @@ export class SessionService {
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          launchScriptDir: prepared.sessionToolDir,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
         });
         const current = readSession(this.config.dataDir, runningRecord.id);
@@ -13660,19 +13730,43 @@ export class SessionService {
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
-    this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = await this.enrich(prepared.placeholder);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
           try {
+            const reservation = await this.waitForSpawnAdmission(request.project, {
+              sessionId: prepared.sessionId,
+            });
+            try {
+              this.consumeSpawnAdmission(reservation);
+              const current = readSession(this.config.dataDir, prepared.sessionId);
+              if (!current || current.status !== "spawning") {
+                throw new SpawnAdmissionCancelledError("killed");
+              }
+              this.pendingSpawnIds.delete(prepared.sessionId);
+            } finally {
+              this.admissionReservations.delete(reservation);
+            }
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
               const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
               if (result === "completed") {
                 return;
               }
             }
+          } catch (error) {
+            if (!(error instanceof SpawnAdmissionCancelledError)) throw error;
+            if (error.reason === "disposed") {
+              const current = readSession(this.config.dataDir, prepared.sessionId);
+              if (current?.status === "spawning") {
+                writeSession(this.config.dataDir, {
+                  ...withQueuedMessages(current, [], false),
+                  status: "stopped",
+                  updatedAt: nowIso(),
+                });
+              }
+            }
           } finally {
+            this.pendingSpawnIds.delete(prepared.sessionId);
             this.spawnsInFlight.delete(prepared.placeholder.id);
             resolve();
           }
@@ -13681,7 +13775,7 @@ export class SessionService {
     });
     this.backgroundSpawnRuns.add(run);
     void run.finally(() => this.backgroundSpawnRuns.delete(run));
-    return placeholder;
+    return this.enrich(prepared.placeholder);
   }
 
   async spawnShepherd(
@@ -17440,6 +17534,12 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
+    this.cancelWaitingHandoff(sessionId);
+    if (this.pendingSpawnIds.has(sessionId)) {
+      for (const waiter of this.spawnAdmissionWaiters) {
+        if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+      }
+    }
     return this.withWorkspaceLifecycleLocks(sessionId, () => this.killLocked(sessionId, request));
   }
 
@@ -19732,18 +19832,85 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.handoffTransaction(sessionId, request, options),
-    );
+    const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = this.validateHandoffSource(sessionId, options);
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const agent = parseAgentName(request.agent);
+      const token = Symbol(`handoff:${sessionId}`);
+      this.handoffsInFlight.set(sessionId, {
+        token,
+        phase: "waiting",
+      });
+      try {
+        const launchSelection = await resolveSpawnRequestLaunchSelection(
+          resolveRespawnRequest(session, {
+            agent,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            ...(request.reasoningEffort !== undefined
+              ? { reasoningEffort: request.reasoningEffort }
+              : {}),
+          }),
+          this.getProject(session.project),
+          agent,
+          this.config.models.codexHome,
+        );
+        if (this.handoffsInFlight.get(sessionId)?.token !== token) {
+          throw new SpawnAdmissionCancelledError("handoff");
+        }
+        return { token, session, launchSelection };
+      } catch (error) {
+        if (this.handoffsInFlight.get(sessionId)?.token === token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+        throw error;
+      }
+    });
+    let reservation: symbol | undefined;
+    try {
+      if (this.handoffsInFlight.get(sessionId)?.token !== waiting.token) {
+        throw new SpawnAdmissionCancelledError("handoff");
+      }
+      reservation = await this.waitForSpawnAdmission(waiting.session.project, {
+        replacingSessionId: sessionId,
+      });
+      const claim = this.handoffsInFlight.get(sessionId);
+      if (claim?.token !== waiting.token) throw new SpawnAdmissionCancelledError("handoff");
+      this.consumeSpawnAdmission(reservation);
+      claim.phase = "activating";
+      const admissionReservation = reservation;
+      return await this.runLifecycle("complete", [sessionId], undefined, () =>
+        this.handoffTransaction(sessionId, request, options, {
+          ...waiting,
+          admissionReservation,
+        }),
+      );
+    } finally {
+      if (reservation !== undefined) this.admissionReservations.delete(reservation);
+      if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
+        this.handoffsInFlight.delete(sessionId);
+      }
+    }
+  }
+
+  private cancelWaitingHandoff(sessionId: string): void {
+    const claim = this.handoffsInFlight.get(sessionId);
+    if (claim?.phase !== "waiting") return;
+    this.handoffsInFlight.delete(sessionId);
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.replacingSessionId === sessionId) this.cancelSpawnAdmission(waiter, "handoff");
+    }
   }
 
   private async handoffTransaction(
     sessionId: string,
     request: HandoffSessionRequest,
-    options?: { todoActor?: TodoActor },
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
   ): Promise<SessionView> {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options),
+      this.prepareHandoffLocked(sessionId, request, options, waiting),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -19810,20 +19977,13 @@ export class SessionService {
       return await this.enrich(finalized);
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
-      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
-          this.handoffsInFlight.delete(sessionId);
-        }
-      });
-      this.admissionReservations.delete(prepared.admissionReservation);
     }
   }
 
-  private async prepareHandoffLocked(
+  private validateHandoffSource(
     sessionId: string,
-    request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<PreparedHandoff> {
+  ): SessionRecord {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -19851,33 +20011,29 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    // Gate before any teardown below. The source session is still on-disk as
-    // running/spawning here, so a denial leaves it fully untouched — no kill,
-    // no status flip. The successor replaces the source rather than adding to
-    // the fleet, so exclude it from the live count: a handoff at exactly the
-    // cap is net-neutral (stop one, start one) and must be allowed.
-    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
-      replacingSessionId: session.id,
-    });
+    return session;
+  }
+
+  private async prepareHandoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
+  ): Promise<PreparedHandoff> {
+    const session = this.validateHandoffSource(sessionId, options);
+    const admissionReservation = waiting.admissionReservation;
+    if (
+      this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
+      workspaceIdOf(session) !== workspaceIdOf(waiting.session) ||
+      session.worktreePath !== waiting.session.worktreePath ||
+      session.closeoutOwner !== waiting.session.closeoutOwner
+    ) {
+      throw new Error(`Handoff source changed before admission for ${sessionId}`);
+    }
 
     try {
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
-      const carriedRequest = resolveRespawnRequest(session, {
-        agent,
-        ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined
-          ? { reasoningEffort: request.reasoningEffort }
-          : {}),
-      });
-      const launchSelection = await resolveSpawnRequestLaunchSelection(
-        carriedRequest,
-        this.getProject(session.project),
-        agent,
-        this.config.models.codexHome,
-      );
+      const launchSelection = waiting.launchSelection;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -19948,7 +20104,7 @@ export class SessionService {
         },
       });
 
-      const token = Symbol(`handoff:${sessionId}`);
+      const token = waiting.token;
       const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
       const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
       const sourceStamp: HandoffSourceStamp = {
@@ -19961,7 +20117,6 @@ export class SessionService {
         updatedAt: sourceForSpawn.updatedAt,
         tmuxSession: sourceForSpawn.tmuxSession,
       };
-      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
       return {
@@ -21089,7 +21244,10 @@ export class SessionService {
     records: SessionRecord[];
   } {
     const live = listSessions(this.config.dataDir).filter(
-      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+      (session) =>
+        session.id !== excludeSessionId &&
+        !this.pendingSpawnIds.has(session.id) &&
+        this.isLiveSessionRecord(session),
     );
     const byProject = new Map<string, number>();
     for (const session of live) {
@@ -21188,13 +21346,13 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
-    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol; quiet?: boolean },
   ): void {
     const admission = this.config.admission;
     const sample = this.evaluateMemoryDenial(context);
     const legacyGuardDetail = sample?.legacyDetail;
     const floorGuardDetail = sample?.floorDetail;
-    if (legacyGuardDetail) {
+    if (legacyGuardDetail && !opts?.quiet) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
         projectId,
@@ -21212,11 +21370,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
         "memory_guard",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const live = this.countLiveSessions(opts?.replacingSessionId);
@@ -21236,11 +21395,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const totalLive = live.total + reservedTotal;
@@ -21249,24 +21409,85 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
   }
 
-  private reserveAdmission(
+  private tryReserveSpawnAdmission(
     projectId: string,
-    context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string },
-  ): symbol {
-    this.assertAdmissible(projectId, context, opts);
+    replacingSessionId?: string,
+    quiet = true,
+  ): symbol | null {
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+    try {
+      this.assertAdmissible(projectId, "spawn", {
+        ...(replacingSessionId ? { replacingSessionId } : {}),
+        quiet,
+      });
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) return null;
+      throw error;
+    }
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
+  }
+
+  private waitForSpawnAdmission(
+    projectId: string,
+    opts: { sessionId?: string; replacingSessionId?: string } = {},
+  ): Promise<symbol> {
+    if (this.admissionStopped) return Promise.reject(new SpawnAdmissionCancelledError("disposed"));
+    return new Promise<symbol>((resolve, reject) => {
+      this.drainSpawnAdmissions();
+      const waiter: SpawnAdmissionWaiter = { projectId, ...opts, resolve, reject };
+      const reservation = this.tryReserveSpawnAdmission(projectId, opts.replacingSessionId, false);
+      this.spawnAdmissionWaiters.add(waiter);
+      if (reservation !== null) {
+        waiter.reservation = reservation;
+        resolve(reservation);
+      }
+    });
+  }
+
+  private drainSpawnAdmissions(): void {
+    if (this.admissionStopped) return;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== undefined) continue;
+      const reservation = this.tryReserveSpawnAdmission(
+        waiter.projectId,
+        waiter.replacingSessionId,
+      );
+      if (reservation === null) continue;
+      waiter.reservation = reservation;
+      waiter.resolve(reservation);
+    }
+  }
+
+  private consumeSpawnAdmission(reservation: symbol): void {
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== reservation) continue;
+      this.spawnAdmissionWaiters.delete(waiter);
+      break;
+    }
+    if (this.admissionStopped || !this.admissionReservations.has(reservation)) {
+      throw new SpawnAdmissionCancelledError(this.admissionStopped ? "disposed" : "killed");
+    }
+  }
+
+  private cancelSpawnAdmission(
+    waiter: SpawnAdmissionWaiter,
+    reason: SpawnAdmissionCancelledError["reason"],
+  ): void {
+    this.spawnAdmissionWaiters.delete(waiter);
+    if (waiter.reservation !== undefined) this.admissionReservations.delete(waiter.reservation);
+    waiter.reject(new SpawnAdmissionCancelledError(reason));
   }
 
   // Cheap admission snapshot for the daemon-startup log: cap and live count
