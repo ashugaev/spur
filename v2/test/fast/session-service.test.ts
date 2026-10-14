@@ -49629,6 +49629,93 @@ describe("SessionService", () => {
         return WATCHED.reduce((total, event) => total + events(event).length, 0);
       }
 
+      describe("unexpected admission check failure", () => {
+        function failFirstCheck(service: unknown): void {
+          vi.spyOn(
+            service as { assertAdmissible(...args: unknown[]): unknown },
+            "assertAdmissible",
+          ).mockImplementationOnce(() => {
+            throw new Error("host memory read blew up");
+          });
+        }
+
+        function failureEvents(kind: "interval" | "daily") {
+          return [`session.wake.${kind}_deferred`, `session.wake.${kind}_failed`].flatMap((name) =>
+            events(name),
+          );
+        }
+
+        it("defers only the failing interval record and still wakes the next one", async () => {
+          capAt(10);
+          trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          const due = "2026-03-18T10:04:59.000Z";
+          const wake = (id: string) => ({
+            nextDueAt: due,
+            intervalMs: 60_000,
+            message: `interval-${id}`,
+            stopCondition: "Stop condition",
+          });
+          const sessions = createSessionStore(
+            stoppedRecord("api-1", { intervalWake: wake("api-1") }),
+            stoppedRecord("api-2", { intervalWake: wake("api-2") }),
+          );
+          const service = await createDisposedSessionService();
+          failFirstCheck(service);
+
+          await tick(service);
+
+          await waitForRealTime(() => expect(wakeSends("interval-api-2")).toBe(1));
+          expect(wakeSends("interval-api-1")).toBe(0);
+          const logged = failureEvents("interval");
+          expect(logged).toHaveLength(1);
+          expect(logged[0]).toMatchObject({
+            event: "session.wake.interval_deferred",
+            sessionId: "api-1",
+          });
+          expect(logged[0]?.message).toContain("host memory read blew up");
+          expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:59.000Z");
+          service.dispose();
+        });
+
+        it("defers only the failing daily record and still wakes the next one", async () => {
+          capAt(10);
+          trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          const at = (hours: number, minutes: number, seconds = 0) =>
+            new Date(2026, 2, 19, hours, minutes, seconds).getTime();
+          const wake = (id: string) => ({
+            dailyAt: ["09:00", "09:40"],
+            nextDueAt: new Date(at(9, 0)).toISOString(),
+            message: `daily-${id}`,
+            stopCondition: "Stop condition",
+          });
+          const sessions = createSessionStore(
+            stoppedRecord("api-1", { dailyWake: wake("api-1") }),
+            stoppedRecord("api-2", { dailyWake: wake("api-2") }),
+          );
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+          failFirstCheck(service);
+
+          await tick(service);
+
+          await waitForRealTime(() => expect(wakeSends("daily-api-2")).toBe(1));
+          expect(wakeSends("daily-api-1")).toBe(0);
+          const logged = failureEvents("daily");
+          expect(logged).toHaveLength(1);
+          expect(logged[0]).toMatchObject({
+            event: "session.wake.daily_deferred",
+            sessionId: "api-1",
+          });
+          expect(logged[0]?.message).toContain("host memory read blew up");
+          expect(sessions.get("api-1")?.dailyWake?.admissionDeferredOccurrence).toBe(
+            new Date(at(9, 0)).toISOString(),
+          );
+          service.dispose();
+        });
+      });
+
       describe("interval", () => {
         const DUE = "2026-03-18T10:04:59.000Z";
         const ids = ["api-1", "api-2", "api-3", "api-4"];

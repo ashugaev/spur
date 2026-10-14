@@ -5597,8 +5597,9 @@ export class SessionService {
   }
 
   // Runs after the occurrence claim: a denial before it would leave the wake
-  // due and retry every tick.
-  private wakeAdmissionDenial(sessionId: string): SessionAdmissionDeniedError | null {
+  // due and retry every tick. An unexpected check failure denies only this
+  // record: rethrowing would abort the wake loop for every later session.
+  private wakeAdmissionDenial(sessionId: string): Error | null {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current || !wakeRelaunchNeedsAdmission(current)) return null;
     try {
@@ -5606,7 +5607,8 @@ export class SessionService {
       return null;
     } catch (error) {
       if (error instanceof SessionAdmissionDeniedError) return error;
-      throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      return new Error(`admission check failed: ${message}`);
     }
   }
 
@@ -5636,7 +5638,7 @@ export class SessionService {
     session: SessionRecord,
     dailyWake: SessionDailyWakeState,
     claimedNextDueAt: string,
-    denial: SessionAdmissionDeniedError,
+    denial: Error,
     now: number,
   ): Promise<void> {
     const occurrence = dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt;
