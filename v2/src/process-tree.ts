@@ -123,7 +123,14 @@ export type ProcessListRunner = (
 ) => Promise<{ stdout: string }>;
 
 const runProcessList: ProcessListRunner = async (file, args, options) => {
-  const { stdout } = await execFileAsync(file, args, options);
+  // Deadline via AbortSignal, not execFile `timeout`: `timeout` destroys stdout
+  // before SIGTERM and still resolves success when the child exits 0, returning
+  // truncated or empty output (#1194). The signal always rejects instead.
+  const { stdout } = await execFileAsync(file, args, {
+    encoding: options.encoding,
+    maxBuffer: options.maxBuffer,
+    signal: AbortSignal.timeout(options.timeout),
+  });
   return { stdout };
 };
 
@@ -156,7 +163,12 @@ export async function snapshotProcesses(
   } catch {
     return { status: "unavailable" };
   }
-  return { status: "ok", processes: parseProcessRows(stdout) };
+  const processes = parseProcessRows(stdout);
+  // `ps -e` always lists at least itself: zero rows is a cut or empty read.
+  if (processes.length === 0) {
+    return { status: "unavailable" };
+  }
+  return { status: "ok", processes };
 }
 
 // Degrade-quietly wrapper for callers that legitimately treat a failed `ps` as
@@ -237,9 +249,10 @@ export type ProcessLivenessSnapshot =
 // relaunch/switchAuth and both spawn-failure teardowns).
 //
 // "unavailable" on ANY exec failure (spawn error, EAGAIN/EMFILE under fork
-// pressure, timeout) — never on "ps ran and found nothing", since `-eo`
-// with no `-p` filter has no "no such pid" failure mode of its own to
-// confuse with a real exec failure. A snapshot that could not be taken must
+// pressure, timeout) and on a zero-row table (`ps -e` always lists itself, so
+// zero rows is a cut or empty read) — never on a table that lists processes
+// but not the tracked pid, since `-eo` with no `-p` filter has no "no such
+// pid" failure mode of its own to confuse with a real exec failure. A snapshot that could not be taken must
 // never be read as "found nobody, so everyone is dead": the caller MUST
 // treat every pid it was tracking as still alive. A captured agent falsely
 // read as dead lets a failOnSurvivors:true caller (restore/relaunch/
@@ -268,6 +281,7 @@ export async function snapshotProcessLiveness(
     return { status: "unavailable" };
   }
   const alivePids = new Set<number>();
+  let rowCount = 0;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -276,9 +290,14 @@ export async function snapshotProcessLiveness(
     const pid = Number(match[1]);
     const state = match[2] ?? "";
     if (!Number.isInteger(pid)) continue;
+    rowCount += 1;
     if (!isZombieProcessState(state)) {
       alivePids.add(pid);
     }
+  }
+  // Counted before zombie filtering: a zombie-only table is a real table.
+  if (rowCount === 0) {
+    return { status: "unavailable" };
   }
   return { status: "ok", alivePids };
 }

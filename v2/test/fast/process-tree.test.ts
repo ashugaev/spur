@@ -1,5 +1,7 @@
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type * as childProcessModule from "node:child_process";
+import type * as processTreeModule from "../../src/process-tree.js";
 import {
   canReadProcessTree,
   classifyProcessOwnership,
@@ -169,6 +171,7 @@ describe("snapshotProcessLiveness", () => {
         execFile: (
           _file: string,
           _args: string[],
+          _options: unknown,
           callback: (error: NodeJS.ErrnoException | null) => void,
         ) => {
           const error = new Error(
@@ -190,6 +193,78 @@ describe("snapshotProcessLiveness", () => {
       vi.doUnmock("node:child_process");
       vi.resetModules();
     }
+  });
+});
+
+interface MockedExecOptions {
+  encoding?: string;
+  maxBuffer?: number;
+  signal?: AbortSignal;
+  timeout?: number;
+}
+
+// Loads process-tree against a child_process whose promisified execFile
+// resolves `stdout`, and hands back the module plus the recorded exec calls.
+async function withMockedPs<T>(
+  stdout: string,
+  body: (
+    mod: typeof processTreeModule,
+    calls: Array<[string, string[], MockedExecOptions]>,
+  ) => Promise<T>,
+): Promise<T> {
+  const calls: Array<[string, string[], MockedExecOptions]> = [];
+  const execFileAsyncMock = vi.fn(
+    async (file: string, args: string[], options: MockedExecOptions) => {
+      calls.push([file, args, options]);
+      return { stdout, stderr: "" };
+    },
+  );
+  vi.resetModules();
+  vi.doMock("node:child_process", async (importOriginal) => {
+    const actual = await importOriginal<typeof childProcessModule>();
+    return {
+      ...actual,
+      execFile: Object.assign(vi.fn(), { [promisify.custom]: execFileAsyncMock }),
+    };
+  });
+  try {
+    return await body(await import("../../src/process-tree.js"), calls);
+  } finally {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  }
+}
+
+describe("runProcessList deadline", () => {
+  it("T10: passes a deadline signal, not an execFile timeout", async () => {
+    await withMockedPs("1 S\n", async (mod, calls) => {
+      const snapshot = await mod.snapshotProcessLiveness();
+
+      expect(snapshot.status).toBe("ok");
+      if (snapshot.status !== "ok") throw new Error("unreachable");
+      expect(snapshot.alivePids.has(1)).toBe(true);
+      const options = calls[0]?.[2];
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      expect(options).not.toHaveProperty("timeout");
+      expect(options?.encoding).toBe("utf8");
+      expect(options?.maxBuffer).toBeGreaterThan(0);
+    });
+  });
+
+  it("T12: zero parsed rows is unavailable, and isPidAlive reads alive", async () => {
+    await withMockedPs("", async (mod) => {
+      expect(await mod.snapshotProcessLiveness()).toEqual({ status: "unavailable" });
+      expect(await mod.isPidAlive(process.pid)).toBe(true);
+    });
+  });
+
+  it("T13: a zombie-only table is a real table, not unavailable", async () => {
+    await withMockedPs("123 Z\n", async (mod) => {
+      const snapshot = await mod.snapshotProcessLiveness();
+      expect(snapshot.status).toBe("ok");
+      if (snapshot.status !== "ok") throw new Error("unreachable");
+      expect(snapshot.alivePids.size).toBe(0);
+    });
   });
 });
 
@@ -218,6 +293,15 @@ describe("snapshotProcesses", () => {
 
     expect(await snapshotProcesses(failing)).toEqual({ status: "unavailable" });
     expect(await listProcesses(failing)).toEqual([]);
+  });
+
+  it("T12: an empty or blank ps enumeration is unavailable, not an empty fleet", async () => {
+    expect(await snapshotProcesses(async () => ({ stdout: "\n" }))).toEqual({
+      status: "unavailable",
+    });
+    expect(await snapshotProcesses(async () => ({ stdout: "" }))).toEqual({
+      status: "unavailable",
+    });
   });
 
   it("bounds ps enumeration and degrades to unavailable on timeout", async () => {
