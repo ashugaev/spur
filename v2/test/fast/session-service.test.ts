@@ -34005,6 +34005,54 @@ describe("SessionService", () => {
         expect(reapedEvents()).toEqual([]);
       });
 
+      function addKilledSibling(sessions: Map<string, SessionRecord>) {
+        sessions.set(
+          "api-4",
+          sessionRecord({
+            id: "api-4",
+            deskId: "api-1",
+            status: "killed",
+            worktreePath: TEST_DATA_DIR,
+            sidecarNames: [SIDECAR],
+            updatedAt: OLD,
+          }),
+        );
+      }
+
+      it("keeps a retained-error sidecar when a killed sibling still has a live agent", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, false);
+        addKilledSibling(sessions);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive(["api-4"]);
+
+        const plan = await service.collectAndExecuteSidecarReapPass(
+          [...sessions.values()],
+          new Set([`api-1--${SIDECAR}`]),
+        );
+
+        expect(plan.reap).toEqual([]);
+        expect(plan.keep.map((k) => k.reason)).toEqual(["retained_error"]);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+      });
+
+      it("execute keeps the sidecar when a killed sibling has a live agent at execute time", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, false);
+        addKilledSibling(sessions);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive(["api-4"]);
+
+        await service.executeSidecarReapPlan(
+          planOf("api-1"),
+          contextOf("api-1", { identity: identityOf(2_000_000_000), workspaceRuntime: "dead" }),
+        );
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+      });
+
       it("execute keeps owner_missing behavior when the owner record is gone", async () => {
         const { service } = await setup();
         paneAliveUntilKilled(["api-1"]);

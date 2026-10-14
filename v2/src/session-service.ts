@@ -4662,9 +4662,11 @@ export class SessionService {
             candidates: [{ ...candidate, workspaceRuntime: "dead" }],
           }).reap.length > 0;
         let samples: MemberRuntimeSample[] = [];
+        const runtimeMembers =
+          needsRuntime && owner ? this.listWorkspaceRuntimeMembers(owner, sessions) : [];
         if (needsRuntime) {
           samples = await Promise.all(
-            workspaceMembers.map((member) => {
+            runtimeMembers.map((member) => {
               let pending = memberSamples.get(member.id);
               if (!pending) {
                 pending = this.sampleMemberRuntime(member, false);
@@ -4676,7 +4678,7 @@ export class SessionService {
         }
         const workspaceRuntime = needsRuntime ? foldMemberRuntime(samples) : undefined;
         if (workspaceRuntime === "pending") {
-          pendingRuntime.push({ candidate, members: workspaceMembers, samples });
+          pendingRuntime.push({ candidate, members: runtimeMembers, samples });
         } else if (workspaceRuntime) {
           candidate.workspaceRuntime = workspaceRuntime;
         }
@@ -4835,10 +4837,11 @@ export class SessionService {
     }
     if (this.isDeliveryStopped()) return;
     if (owner) {
-      const members = this.listDeskSessions(owner, listSessions(this.config.dataDir));
+      const listed = listSessions(this.config.dataDir);
+      const members = this.listDeskSessions(owner, listed);
       if (entryContext.workspaceRuntime === "dead") {
         // The plan confirmed death with two samples; re-prove it per member.
-        for (const member of members) {
+        for (const member of this.listWorkspaceRuntimeMembers(owner, listed)) {
           const sample = await this.sampleMemberRuntime(member, true);
           if (sample === "live" || sample === "unknown") {
             skip();
@@ -12854,6 +12857,19 @@ export class SessionService {
           workspaceIdOf(member) === anchor &&
           member.status !== "killed",
       )
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  // Every record of the workspace, killed ones included: a killed record can
+  // still own a live agent (kill path tolerates survivors), so liveness must
+  // not inherit listDeskSessions' killed filter.
+  private listWorkspaceRuntimeMembers(
+    session: SessionRecord,
+    sessionBatch: readonly SessionRecord[],
+  ): SessionRecord[] {
+    const anchor = workspaceIdOf(session);
+    return sessionBatch
+      .filter((member) => member.project === session.project && workspaceIdOf(member) === anchor)
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
