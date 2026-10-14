@@ -573,6 +573,61 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
+  it("flags the verbatim captured menu when the wait-here option wraps in a narrow pane", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically when the",
+      "  limit resets",
+      "  3. Ask your admin for more usage",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("flags the reordered menu when the add-funds option wraps in a narrow pane", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Add funds to continue with",
+      "  usage credits",
+      "  2. Upgrade your plan",
+      "  3. Stop and wait for limit to reset",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("flags the Pro menu when the stop option itself wraps", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit",
+      "  to reset",
+      "  2. Switch to usage credits",
+      "  3. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("returns null when a prose line precedes the first option in the menu block", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "some prose before the options",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
   it("returns null when a non-numbered prose line sits inside the menu block", () => {
     const paneText = [
       "What do you want to do?",
@@ -736,6 +791,32 @@ describe("claudeUsageMenuOptionOneSelected", () => {
       "   Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns true when the wrapped option-2 label follows a selected option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Wait here, then continue automatically when the",
+      "  limit resets",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
+  });
+
+  it("returns false when the selected option-1 label carries wrapped extra text", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  and buy credits",
+      "  2. Upgrade your plan",
+      "",
+      "Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
   });
 
   it("returns false for plain unrelated text", () => {

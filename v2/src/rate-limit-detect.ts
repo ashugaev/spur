@@ -312,7 +312,7 @@ const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/
 // does not prove the menu is still live.
 const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
 
-// Numbered option lines of the live menu block in the pane tail, or null when
+// Numbered option lines (wrapped continuations joined by a space) of the live menu block in the pane tail, or null when
 // the tail holds no header + numbered/blank lines + footer block.
 function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
   const allLines = paneText.split("\n").map((line) => line.trim());
@@ -330,8 +330,14 @@ function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
   const options: string[] = [];
   for (const line of lines.slice(headerIndex + 1, footerIndex)) {
     if (line === "") continue;
-    if (!CLAUDE_USAGE_MENU_NUMBERED.test(line)) return null;
-    options.push(line);
+    if (CLAUDE_USAGE_MENU_NUMBERED.test(line)) {
+      options.push(line);
+      continue;
+    }
+    // Narrow panes wrap a long option label onto an unnumbered next line.
+    const last = options.pop();
+    if (last === undefined) return null;
+    options.push(`${last} ${line}`);
   }
   return options;
 }
