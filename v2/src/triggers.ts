@@ -1143,7 +1143,19 @@ async function runWorkItemAutoCompleteTrigger(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isSessionNotFoundError(message)) {
-        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        const remaining = updateWorkItemMembers(
+          dataDir,
+          projectId,
+          sourceId,
+          lifecycle,
+          (members) =>
+            members.filter(
+              (member) => !(member.state === "running" && member.sessionId === lifecycle.sessionId),
+            ),
+        );
+        if (remaining.members.length === 0) {
+          deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        }
         logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
           level: "info",
           sessionId: lifecycle.sessionId,

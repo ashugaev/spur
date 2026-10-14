@@ -116,7 +116,7 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     expect(ghTransportMock).toHaveBeenCalledTimes(1);
 
-    handle.stop();
+    await handle.stop();
   });
 
   it("case 2: a registry entry recorded before a fresh handle start survives it", async () => {
@@ -135,7 +135,7 @@ describe("github poll-disabled registry survives a real restart", () => {
       .filter((entry) => entry.event === "source.poll.disabled");
     expect(disabledEvents).toHaveLength(0);
 
-    handle.stop();
+    await handle.stop();
   });
 
   it("case 3 (mutation check): removing the registry file re-arms polling", async () => {
@@ -160,7 +160,7 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     expect(ghTransportMock).toHaveBeenCalledTimes(1);
 
-    handle.stop();
+    await handle.stop();
   });
 
   // A8: the recheck deadline is stamped onto the disk entry (lastCheckedAtMs), so a
@@ -177,7 +177,7 @@ describe("github poll-disabled registry survives a real restart", () => {
     handleBeforeWindow.runOnStart?.();
     await flushPollCycle();
     expect(ghTransportMock).toHaveBeenCalledTimes(0);
-    handleBeforeWindow.stop();
+    await handleBeforeWindow.stop();
 
     const registryPath = join(
       dataDir,
@@ -205,6 +205,6 @@ describe("github poll-disabled registry survives a real restart", () => {
     await flushPollCycle();
     expect(ghTransportMock).toHaveBeenCalledTimes(1);
 
-    handleAfterWindow.stop();
+    await handleAfterWindow.stop();
   });
 });

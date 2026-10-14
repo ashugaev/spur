@@ -10,6 +10,7 @@ import type {
   ReviewSignalRefreshResult,
 } from "../../src/review-providers/types.js";
 import { EventBus } from "../../src/event-bus.js";
+import type { TriggerGroupController } from "../../src/triggers.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
@@ -6817,57 +6818,171 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("clears the work item when auto-complete hits a SessionResourceNotFoundError", async () => {
-    // Dynamic import so the error class comes from the same session-service.js
-    // module instance triggers.ts uses. isSessionNotFoundError matches on
-    // .message, so this pins that the typed class preserves the message text
-    // of the converted `Session not found:` throws.
-    const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
-    const getMock = vi.fn().mockResolvedValue({
-      id: "api-9",
-      status: "running",
-      state: "waiting",
-      workspaceExists: true,
-    });
-    const completeMock = vi
-      .fn()
-      .mockRejectedValue(new SessionResourceNotFoundError("Session not found: api-9"));
-    useWorkItemLifecycleStore([
-      runningWorkItemLifecycle({ createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }),
-    ]);
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { get: getMock, complete: completeMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      await vi.waitFor(() => {
-        expect(deleteWorkItemLifecycleMock).toHaveBeenCalledWith(
-          DATA_DIR,
-          "api",
-          "pr-watch",
-          "acme/api#42",
-        );
+  it.each(["get", "complete"])(
+    "clears a legacy singleton when auto-complete %s hits a SessionResourceNotFoundError",
+    async (missingAt) => {
+      // Dynamic import so the error class comes from the same session-service.js
+      // module instance triggers.ts uses. isSessionNotFoundError matches on
+      // .message, so this pins that the typed class preserves the message text
+      // of the converted `Session not found:` throws.
+      const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
+      const getMock = vi.fn().mockResolvedValue({
+        id: "api-9",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
       });
-      expect(logSpurEventMock).toHaveBeenCalledWith(
-        DATA_DIR,
-        expect.objectContaining({
-          event: "trigger.work_item_auto_complete.noop",
-          level: "info",
-        }),
-      );
-      expect(logSpurEventMock).not.toHaveBeenCalledWith(
-        DATA_DIR,
-        expect.objectContaining({ event: "trigger.work_item_auto_complete.failed" }),
-      );
-    } finally {
-      await controller.stop();
-    }
-  });
+      const missing = new SessionResourceNotFoundError("Session not found: api-9");
+      const completeMock = vi.fn().mockRejectedValue(missing);
+      if (missingAt === "get") getMock.mockRejectedValue(missing);
+      useWorkItemLifecycleStore([workItemLifecycle([workItemMember({ triggerId: undefined })])]);
+      const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config: workItemSpawnConfig() as never,
+        bus,
+        sessionService: { get: getMock, complete: completeMock } as never,
+        logger: { warn: vi.fn() },
+      });
+
+      try {
+        await vi.waitFor(() => {
+          expect(deleteWorkItemLifecycleMock).toHaveBeenCalledWith(
+            DATA_DIR,
+            "api",
+            "pr-watch",
+            "acme/api#42",
+          );
+        });
+        expect(logSpurEventMock).toHaveBeenCalledWith(
+          DATA_DIR,
+          expect.objectContaining({
+            event: "trigger.work_item_auto_complete.noop",
+            level: "info",
+          }),
+        );
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          DATA_DIR,
+          expect.objectContaining({ event: "trigger.work_item_auto_complete.failed" }),
+        );
+      } finally {
+        await controller.stop();
+      }
+    },
+  );
+
+  it.each([
+    { missingAt: "get", siblingState: "running" },
+    { missingAt: "complete", siblingState: "running" },
+    { missingAt: "get", siblingState: "failed" },
+    { missingAt: "complete", siblingState: "failed" },
+  ] as const)(
+    "preserves a $siblingState sibling after parsed config evolution and missing owner at $missingAt",
+    async ({ missingAt, siblingState }) => {
+      const configDir = mkdtempSync(join(tmpdir(), "spur-auto-complete-config-"));
+      const configPath = join(configDir, "spur.yaml");
+      const { loadConfig } = await import("../../src/config.js");
+      const raw = workItemSpawnConfig({ autoComplete: false });
+      const project = raw.projects.api;
+      const spawn: { blocks: { prompt: string }[]; autoComplete?: boolean } = {
+        blocks: [{ prompt: "owner" }, { prompt: "peer" }],
+      };
+      const historical = {
+        ...raw,
+        worktreeDir: join(configDir, "worktrees"),
+        projects: {
+          api: {
+            ...project,
+            path: configDir,
+            triggers: { "pick-up": { ...project.triggers["pick-up"], spawn } },
+          },
+        },
+      };
+      const sibling = workItemMember({
+        blockIndex: 1,
+        state: siblingState,
+        sessionId: siblingState === "running" ? "api-peer" : undefined,
+        ...(siblingState === "failed"
+          ? { nextRetryAt: new Date(Date.now() - 60_000).toISOString(), error: "retry peer" }
+          : {}),
+      });
+      const records = useWorkItemLifecycleStore([
+        workItemLifecycle(
+          [
+            workItemMember(),
+            workItemMember({ blockIndex: 1, sessionId: "api-peer", claimedAt: sibling.claimedAt }),
+          ],
+          { autoComplete: false },
+        ),
+      ]);
+      let controller: TriggerGroupController | undefined;
+      try {
+        writeFileSync(configPath, JSON.stringify(historical));
+        const historicalConfig = loadConfig(configPath);
+        expect(historicalConfig.projects.api?.triggers["pick-up"]).toMatchObject({
+          spawn: { blocks: [{ prompt: "owner" }, { prompt: "peer" }] },
+        });
+        spawn.blocks = [{ prompt: "owner" }];
+        spawn.autoComplete = true;
+        writeFileSync(configPath, JSON.stringify(historical));
+        const currentConfig = loadConfig(configPath);
+        const { startConfiguredTriggers } = await loadTriggersModule();
+        const get = vi.fn().mockResolvedValue({ status: "running", state: "working" });
+        const complete = vi.fn();
+        const bus = new EventBus();
+        controller = startConfiguredTriggers({
+          config: currentConfig,
+          bus,
+          sessionService: { get, complete } as never,
+          logger: { warn: vi.fn() },
+        });
+        bus.emit(workItemEvent());
+        await vi.waitFor(() => {
+          expect(records.get("acme/api#42")).toMatchObject({
+            autoComplete: true,
+            members: [
+              expect.objectContaining({ sessionId: "api-9" }),
+              expect.objectContaining({ sessionId: "api-peer" }),
+            ],
+          });
+        });
+        await controller.stop();
+        if (siblingState === "failed") {
+          updateWorkItemMembersMock(
+            DATA_DIR,
+            "api",
+            "pr-watch",
+            records.get("acme/api#42"),
+            (members: WorkItemMember[]) =>
+              members.map((member) => (member.blockIndex === 1 ? sibling : member)),
+          );
+        }
+        const { SessionResourceNotFoundError } = await import("../../src/session-service.js");
+        const missing = new SessionResourceNotFoundError("Session not found: api-9");
+        if (missingAt === "get") get.mockRejectedValue(missing);
+        else {
+          get.mockResolvedValue({ status: "running", state: "waiting" });
+          complete.mockRejectedValue(missing);
+        }
+        controller = startConfiguredTriggers({
+          config: currentConfig,
+          bus: new EventBus(),
+          sessionService: { get, complete } as never,
+          logger: { warn: vi.fn() },
+        });
+        await vi.waitFor(() => {
+          expect(records.get("acme/api#42")).toMatchObject({
+            state: siblingState,
+            members: [sibling],
+          });
+        });
+        expect(deleteWorkItemLifecycleMock).not.toHaveBeenCalled();
+      } finally {
+        await controller?.stop();
+        rmSync(configDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("blocks auto-complete before the minimum age or while needs_input", async () => {
     const getMock = vi.fn().mockResolvedValue({

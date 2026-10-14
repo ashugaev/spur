@@ -44,18 +44,18 @@ async function createFixture(): Promise<Fixture> {
   const repoPath = join(root, "repo");
   const dataDir = join(root, "data");
   const worktreeDir = join(root, "worktrees");
-  await mkdir(originPath, { recursive: true });
   await mkdir(repoPath, { recursive: true });
   await mkdir(worktreeDir, { recursive: true });
-  await execFileAsync("git", ["init", "--bare", "--initial-branch=main", originPath]);
   await git(repoPath, "init", "--initial-branch=main");
   await git(repoPath, "config", "user.email", "discard@example.com");
   await git(repoPath, "config", "user.name", "Discard Test");
   await writeFile(join(repoPath, "README.md"), "fixture\n", "utf8");
   await git(repoPath, "add", "README.md");
   await git(repoPath, "commit", "-m", "init");
+  await git(root, "clone", "--bare", repoPath, originPath);
   await git(repoPath, "remote", "add", "origin", originPath);
-  await git(repoPath, "push", "-u", "origin", "main");
+  await git(repoPath, "fetch", "origin");
+  await git(repoPath, "branch", "--set-upstream-to=origin/main", "main");
   const logEvent = vi.fn();
   const standIn = {
     config: { dataDir },
