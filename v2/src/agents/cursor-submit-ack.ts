@@ -228,6 +228,7 @@ async function scanFileForUserText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
+  firstUserRecordOnly = false,
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
@@ -239,9 +240,11 @@ async function scanFileForUserText(
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractUserMessageText(parsed);
-        if (text !== null && normalize(text).includes(normalizedTarget)) {
+        if (text === null) continue;
+        const matches = normalize(text).includes(normalizedTarget);
+        if (matches || firstUserRecordOnly) {
           reader.close();
-          return true;
+          return matches;
         }
       }
     } finally {
@@ -283,13 +286,24 @@ export async function scanCursorJsonlForMessage(
       // Baseline against the file's size the FIRST time this binding sees
       // it, and remember that offset for every later poll of the same
       // binding, so only records written after that sighting can ack.
+      //
+      // A chat born after the pane write was created by this send, so the sent
+      // query is its FIRST user record. Birthtime is not trustworthy enough to
+      // scan such a chat from 0 (any later record could ack), so only that
+      // first record may ack past the floor. Only the first sighting needs the
+      // check: a first record not yet flushed lands after the floor, and the
+      // floor scan on every poll covers it.
       baseline.rotationOffsets ??= new Map();
       let offset = baseline.rotationOffsets.get(rotated);
       if (offset === undefined) {
-        offset = (await bornAfterWriteStart(rotated, baseline.writeStartedAtMs))
-          ? 0
-          : await readCursorStableOffset(rotated).catch(() => 0);
+        offset = await readCursorStableOffset(rotated).catch(() => 0);
         baseline.rotationOffsets.set(rotated, offset);
+        if (
+          (await bornAfterWriteStart(rotated, baseline.writeStartedAtMs)) &&
+          (await scanFileForUserText(rotated, 0, normalizedTarget, true))
+        ) {
+          return { found: true, scannedFile: rotated };
+        }
       }
       const found = await scanFileForUserText(rotated, offset, normalizedTarget);
       return { found, scannedFile: rotated };

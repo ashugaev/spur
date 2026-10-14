@@ -591,6 +591,53 @@ describe("rotated chat created by the send (#982)", () => {
     expect((await scan(legacy, "continue")).found).toBe(false);
   });
 
+  // A chat born after the write has the sent query as its FIRST user record;
+  // birthtime alone never lets a later record ack.
+  it("C1: a post-write chat whose first record is an old query does not ack a later repeat", async () => {
+    const { baseline, rotatedFile } = await setup([userTurn("old query"), userTurn("continue")]);
+    stubBirthtime(rotatedFile, stamp + 5);
+    expect((await scan(baseline, "continue")).found).toBe(false);
+    expect((await scan(baseline, "continue")).found).toBe(false);
+  });
+
+  it("C3: a post-write chat sighted empty acks once its first record is the sent text", async () => {
+    const { baseline, rotatedFile } = await setup([]);
+    stubBirthtime(rotatedFile, stamp + 5);
+    expect((await scan(baseline, "ship the task")).found).toBe(false);
+    await appendJsonl(rotatedFile, [userTurn("ship the task")]);
+    expect(await scan(baseline, "ship the task")).toEqual({
+      found: true,
+      scannedFile: rotatedFile,
+    });
+  });
+
+  it("C4: a restored binding applies the same first-record rule to a post-write chat", async () => {
+    const { baseline, rotatedFile } = await setup([userTurn("other"), userTurn("continue")]);
+    stubBirthtime(rotatedFile, stamp + 5);
+    const restored = restoreCursorSubmitBaseline({
+      file: baseline.file,
+      size: baseline.size,
+      writeStartedAtMs: stamp,
+    });
+    expect((await scan(restored, "continue")).found).toBe(false);
+  });
+
+  it("C5: acks the second rotated chat when its first record is the sent text", async () => {
+    const { baseline, rotatedFile } = await setup([userTurn("other")]);
+    const secondFile = await makeJsonl("rotated-second.jsonl", [userTurn("ship the task")]);
+    statMock.mockImplementation(async (path: string) => {
+      const real = (await realStatHolder.stat?.(path)) as Record<string, unknown>;
+      return path === rotatedFile || path === secondFile
+        ? { ...real, birthtimeMs: stamp + 5 }
+        : real;
+    });
+    expect((await scan(baseline, "ship the task")).found).toBe(false);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? secondFile : baseline.file,
+    );
+    expect(await scan(baseline, "ship the task")).toEqual({ found: true, scannedFile: secondFile });
+  });
+
   // The adapter mutates both objects in place; mirror it.
   async function captureAndMark(
     pinnedFile: string,
