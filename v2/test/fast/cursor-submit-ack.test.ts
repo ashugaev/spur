@@ -432,6 +432,182 @@ describe("scanCursorJsonlForMessage", () => {
 });
 
 describe("cursor submit baseline across a restart", () => {
+  const options = { cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
+
+  async function restoreStoredBaseline(persisted: ReturnType<typeof persistCursorSubmitBaseline>) {
+    const dataDir = await createTempDir("spur-cursor-ack-");
+    tempDirs.push(dataDir);
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "ship it",
+      branch: "feature/cursor-ack",
+      worktree: true,
+      worktreePath: "/tmp/worktree",
+      tmuxSession: "api-1",
+      launchCommand: "cursor",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+      queuedMessageTyped: {
+        message: "continue",
+        typedAt: "2026-03-18T10:00:00.000Z",
+        ackBaseline: { agent: "cursor", ...persisted },
+      },
+    });
+    const stored = readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline;
+    if (stored?.agent !== "cursor") throw new Error("expected cursor baseline");
+    return restoreCursorSubmitBaseline(stored);
+  }
+
+  it("refreshes the pinned prewrite floor before submission", async () => {
+    const file = await makeJsonl("pinned-prewrite.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(file);
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected baseline");
+    const capturedFloor = live.size;
+    const persisted = persistCursorSubmitBaseline(live);
+    await appendJsonl(file, [userTurn("continue old query")]);
+    const refreshedFloor = (await stat(file)).size;
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree", "pinned-id", options);
+    const scan = (baseline: typeof live) =>
+      scanCursorJsonlForMessage(baseline, "continue", "/tmp/worktree", "pinned-id", options);
+    expect((await scan(live)).found).toBe(false);
+    expect(refreshedFloor).toBeGreaterThan(capturedFloor);
+    expect(live.size).toBe(refreshedFloor);
+    expect(persisted.size).toBe(refreshedFloor);
+    const restored = await restoreStoredBaseline(JSON.parse(JSON.stringify(persisted)));
+    expect((await scan(restored)).found).toBe(false);
+    await appendJsonl(file, [userTurn("continue new query")]);
+    expect((await scan(live)).found).toBe(true);
+    expect((await scan(restored)).found).toBe(true);
+    expect(live.size).toBe(refreshedFloor);
+  });
+
+  it("refreshes a known rotated prewrite floor before submission", async () => {
+    const pinned = await makeJsonl("pinned-known.jsonl", [userTurn("unrelated")]);
+    const rotated = await makeJsonl("rotated-known.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktree, id) =>
+      id === "rotated-id" ? rotated : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected baseline");
+    const capturedFloor = live.rotationOffsets?.get(rotated);
+    const persisted = persistCursorSubmitBaseline(live);
+    await appendJsonl(rotated, [userTurn("continue old query")]);
+    const refreshedFloor = (await stat(rotated)).size;
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree", "pinned-id", options);
+    const scan = (baseline: typeof live) =>
+      scanCursorJsonlForMessage(baseline, "continue", "/tmp/worktree", "pinned-id", options);
+    expect((await scan(live)).found).toBe(false);
+    expect(refreshedFloor).toBeGreaterThan(capturedFloor ?? 0);
+    expect(live.rotationOffsets?.get(rotated)).toBe(refreshedFloor);
+    expect(persisted.rotated).toEqual({ file: rotated, size: refreshedFloor });
+    const restored = await restoreStoredBaseline(JSON.parse(JSON.stringify(persisted)));
+    expect((await scan(restored)).found).toBe(false);
+    await appendJsonl(rotated, [userTurn("continue new query")]);
+    expect((await scan(live)).found).toBe(true);
+    expect((await scan(restored)).found).toBe(true);
+    expect(live.rotationOffsets?.get(rotated)).toBe(refreshedFloor);
+  });
+
+  it("persists the current rotation when an older map entry comes first", async () => {
+    const pinned = await makeJsonl("pinned-multiple.jsonl", [userTurn("unrelated")]);
+    const older = await makeJsonl("older-rotation.jsonl", [userTurn("unrelated")]);
+    const current = await makeJsonl("current-rotation.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktree, id) =>
+      id === "older-id" ? older : id === "current-id" ? current : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue("older-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected baseline");
+    const olderFloor = live.rotationOffsets?.get(older);
+    findCursorSessionIdMock.mockResolvedValue("current-id");
+    const scan = (baseline: typeof live) =>
+      scanCursorJsonlForMessage(baseline, "continue", "/tmp/worktree", "pinned-id", options);
+    expect((await scan(live)).found).toBe(false);
+    expect([...(live.rotationOffsets?.keys() ?? [])]).toEqual([older, current]);
+    const persisted = persistCursorSubmitBaseline(live);
+    await appendJsonl(current, [userTurn("continue old query")]);
+    const refreshedFloor = (await stat(current)).size;
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree", "pinned-id", options);
+    expect(persisted.rotated).toEqual({ file: current, size: refreshedFloor });
+    expect(live.rotationOffsets?.get(older)).toBe(olderFloor);
+    expect((await scan(live)).found).toBe(false);
+    const restored = await restoreStoredBaseline(JSON.parse(JSON.stringify(persisted)));
+    expect(restored.rotationOffsets?.get(current)).toBe(refreshedFloor);
+    expect((await scan(restored)).found).toBe(false);
+    await appendJsonl(current, [userTurn("continue new query")]);
+    expect((await scan(live)).found).toBe(true);
+    expect((await scan(restored)).found).toBe(true);
+  });
+
+  it("refreshes the pinned floor without a session id or private config", async () => {
+    const file = await makeJsonl("unpinned-prewrite.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(file);
+    const live = await captureCursorSubmitBaseline("/tmp/worktree");
+    if (!live) throw new Error("expected baseline");
+    const persisted = persistCursorSubmitBaseline(live);
+    await appendJsonl(file, [userTurn("continue old query")]);
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree");
+    expect(live.size).toBe((await stat(file)).size);
+    expect(persisted.size).toBe(live.size);
+    expect((await scanCursorJsonlForMessage(live, "continue", "/tmp/worktree")).found).toBe(false);
+    await appendJsonl(file, [userTurn("continue new query")]);
+    expect((await scanCursorJsonlForMessage(live, "continue", "/tmp/worktree")).found).toBe(true);
+  });
+
+  it.each(["truncated", "missing"])("keeps floors when %s", async (state) => {
+    const pinned = await makeJsonl("pinned-retain.jsonl", [userTurn("unrelated")]);
+    const rotated = await makeJsonl("rotated-retain.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktree, id) =>
+      id === "rotated-id" ? rotated : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected baseline");
+    const persisted = persistCursorSubmitBaseline(live);
+    const original = structuredClone(persisted);
+    for (const file of [pinned, rotated]) {
+      if (state === "missing") await rm(file);
+      else await writeFile(file, "");
+    }
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree", "pinned-id", options);
+    expect(live.size).toBe(original.size);
+    expect(live.rotationOffsets?.get(rotated)).toBe(original.rotated?.size);
+    expect(persisted).toEqual({ ...original, writeStartedAtMs: 123 });
+  });
+
+  it.each(["pinned", "rotated"])("keeps the %s stable prefix", async (path) => {
+    const pinned = await makeJsonl("pinned-stable.jsonl", [userTurn("unrelated")]);
+    const rotated = await makeJsonl("rotated-stable.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktree, id) =>
+      id === "rotated-id" ? rotated : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue(path === "rotated" ? "rotated-id" : "pinned-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected baseline");
+    const persisted = persistCursorSubmitBaseline(live);
+    const file = path === "rotated" ? rotated : pinned;
+    await appendJsonl(file, [userTurn("continue old query")]);
+    const stableFloor = (await stat(file)).size;
+    const laterRecord = JSON.stringify(userTurn("continue new query"));
+    await writeFile(file, `{"type":"turn_ended"}\n\n${laterRecord.slice(0, -5)}`, { flag: "a" });
+    await markCursorWriteStart(live, persisted, 123, "/tmp/worktree", "pinned-id", options);
+    expect(path === "rotated" ? persisted.rotated?.size : persisted.size).toBe(stableFloor);
+    const restored = await restoreStoredBaseline(persisted);
+    const scan = (baseline: typeof live) =>
+      scanCursorJsonlForMessage(baseline, "continue", "/tmp/worktree", "pinned-id", options);
+    expect((await scan(live)).found).toBe(false);
+    await writeFile(file, `${laterRecord.slice(-5)}\n`, { flag: "a" });
+    expect((await scan(live)).found).toBe(true);
+    expect((await scan(restored)).found).toBe(true);
+    expect(path === "rotated" ? live.rotationOffsets?.get(rotated) : live.size).toBe(stableFloor);
+  });
+
   it("offsets an already-rotated chat at send time and keeps that offset through persist and restore", async () => {
     const pinnedFile = await makeJsonl("pinned-restart.jsonl", [userTurn("earlier turn")]);
     const rotatedFile = await makeJsonl("rotated-restart.jsonl", [userTurn("continue")]);

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
 import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
+import type * as CursorModule from "../../src/agents/cursor.js";
+import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
 
 vi.mock("../../src/cursor-token-usage.js", () => ({
   ensureCursorTokenUsageHook: vi.fn(() => true),
@@ -19,6 +21,9 @@ const {
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
   readClaudeSessionStatusMock,
+  readCursorStableOffsetMock,
+  findCursorSessionIdMock,
+  findCursorAckTranscriptFileMock,
 } = vi.hoisted(() => ({
   readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
@@ -31,6 +36,9 @@ const {
   readFileMock: vi.fn(),
   captureCursorSubmitBaselineMock: vi.fn(),
   scanCursorJsonlForMessageMock: vi.fn(),
+  readCursorStableOffsetMock: vi.fn(),
+  findCursorSessionIdMock: vi.fn(),
+  findCursorAckTranscriptFileMock: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -77,6 +85,17 @@ vi.mock("../../src/agents/cursor-submit-ack.js", async (importOriginal) => ({
   scanCursorJsonlForMessage: scanCursorJsonlForMessageMock,
 }));
 
+vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorJsonlStateModule>()),
+  readCursorStableOffset: readCursorStableOffsetMock,
+  findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
+}));
+
+vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorModule>()),
+  findCursorSessionId: findCursorSessionIdMock,
+}));
+
 import {
   agentEarlySubmitResendAllowed,
   agentHasLaunchSubmitAck,
@@ -101,6 +120,9 @@ beforeEach(() => {
     .mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   captureCursorSubmitBaselineMock.mockReset();
   scanCursorJsonlForMessageMock.mockReset();
+  readCursorStableOffsetMock.mockReset().mockRejectedValue(new Error("ENOENT"));
+  findCursorSessionIdMock.mockReset();
+  findCursorAckTranscriptFileMock.mockReset();
 });
 
 describe("setupAgentHooks", () => {
@@ -593,9 +615,10 @@ describe("createAgentSubmitAckBinding", () => {
   });
 
   it("stamps the write start on both the persisted baseline and the live scan baseline (#982)", async () => {
-    const live: { file: string; size: number; writeStartedAtMs?: number } = {
+    const live: CursorSubmitAckModule.CursorSubmitBaseline = {
       file: "/some/chat.jsonl",
       size: 7,
+      rotationOffsets: new Map([["/rotated/chat.jsonl", 9]]),
     };
     captureCursorSubmitBaselineMock.mockResolvedValue(live);
     scanCursorJsonlForMessageMock.mockResolvedValue({
@@ -603,12 +626,29 @@ describe("createAgentSubmitAckBinding", () => {
       scannedFile: "/some/chat.jsonl",
     });
 
-    const binding = await createAgentSubmitAckBinding("cursor", ctx);
-    expect(binding?.baseline).toEqual({ agent: "cursor", file: "/some/chat.jsonl", size: 7 });
+    readCursorStableOffsetMock.mockImplementation(async (file: string) =>
+      file === live.file ? 70 : 90,
+    );
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    findCursorAckTranscriptFileMock.mockResolvedValue("/rotated/chat.jsonl");
+    const binding = await createAgentSubmitAckBinding("cursor", {
+      ...ctx,
+      agentSessionId: "pinned-id",
+      cursorConfigDir: "/tmp/cursor-config",
+    });
+    const persisted = binding?.baseline;
     await binding?.markWriteStart?.(123);
     await binding?.scan("hello");
 
-    expect(binding?.baseline).toMatchObject({ agent: "cursor", writeStartedAtMs: 123 });
+    expect(binding?.baseline).toBe(persisted);
+    expect(persisted).toMatchObject({
+      agent: "cursor",
+      size: 70,
+      rotated: { file: "/rotated/chat.jsonl", size: 90 },
+      writeStartedAtMs: 123,
+    });
+    expect(live.size).toBe(70);
+    expect(live.rotationOffsets?.get("/rotated/chat.jsonl")).toBe(90);
     expect(live.writeStartedAtMs).toBe(123);
     expect(scanCursorJsonlForMessageMock.mock.calls[0]?.[0]).toBe(live);
   });

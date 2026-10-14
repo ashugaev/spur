@@ -1588,10 +1588,27 @@ describe("SessionService", () => {
     });
 
     it("D1 (#982): stamps the ack baseline once, before the sensitive pane write and never on an Enter resend", async () => {
-      const markWriteStart = vi.fn().mockResolvedValue(undefined);
+      const baseline: {
+        agent: "cursor";
+        file: string;
+        size: number;
+        rotated?: { file: string; size: number };
+      } = { agent: "cursor", file: "/t/c.jsonl", size: 7 };
+      const markWriteStart = vi.fn(async () => {
+        await Promise.resolve();
+        baseline.size = 70;
+        baseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
+      });
       createAgentSubmitAckBindingMock.mockResolvedValue({
+        baseline,
         scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: null }),
         markWriteStart,
+      });
+      sendSensitiveMessageToTmuxMock.mockImplementationOnce(async () => {
+        expect(baseline).toMatchObject({
+          size: 70,
+          rotated: { file: "/t/rotated.jsonl", size: 90 },
+        });
       });
       isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
       mockTimerPromisesSleepWithFakeTimers();
@@ -1604,6 +1621,7 @@ describe("SessionService", () => {
       );
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
       const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
       // After the binding is built (this path has no alive probe), before the paste.
       expect(createAgentSubmitAckBindingMock.mock.invocationCallOrder[0]).toBeLessThan(hookOrder);

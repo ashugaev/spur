@@ -15125,14 +15125,24 @@ describe("SessionService", () => {
         file: string;
         size: number;
         writeStartedAtMs?: number;
+        rotated?: { file: string; size: number };
       };
       const markWriteStart = vi.fn(async (atMs: number) => {
+        await Promise.resolve();
         ackBaseline.writeStartedAtMs = atMs;
+        ackBaseline.size = 70;
+        ackBaseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
       });
       createAgentSubmitAckBindingMock.mockResolvedValue({
         baseline: ackBaseline,
         scan: vi.fn(),
         markWriteStart,
+      });
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        expect(ackBaseline).toMatchObject({
+          size: 70,
+          rotated: { file: "/t/rotated.jsonl", size: 90 },
+        });
       });
       let releaseAck: () => void = () => {};
       const gate = new Promise<void>((resolve) => {
@@ -15152,6 +15162,7 @@ describe("SessionService", () => {
       });
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
       // After the last alive probe before the paste, then the paste.
       const pasteOrder = sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0;
@@ -15165,6 +15176,8 @@ describe("SessionService", () => {
       expect(stamp).toEqual(expect.any(Number));
       expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
         ...ackBaseline,
+        size: 70,
+        rotated: { file: "/t/rotated.jsonl", size: 90 },
         writeStartedAtMs: stamp,
       });
       releaseAck();

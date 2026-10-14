@@ -13,8 +13,8 @@ export interface CursorSubmitBaseline {
   // Mutated in place across polls of the same binding (session-service.ts
   // captures one baseline object and calls scan() repeatedly against it, see
   // waitForSubmitAck). Records the byte offset a rotated chat-id transcript
-  // was FIRST seen at, so a later poll only scans records written after that
-  // sighting rather than the rotated file's full pre-existing history.
+  // was first seen at, refreshed once before the pane write. Later polls only
+  // scan records written after that floor, never the full pre-existing history.
   // Optional: attached lazily by scanCursorJsonlForMessage the first time a
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
@@ -99,12 +99,16 @@ export async function captureCursorSubmitBaseline(
   return seeded;
 }
 
-// Floors `rotated` at its current stable size, remembered for every later poll.
+async function readSubmitFloor(file: string, previous: number): Promise<number> {
+  return Math.max(previous, await readCursorStableOffset(file).catch(() => previous));
+}
+
+// Floors `rotated` at its stable size without lowering a remembered offset.
 async function seedRotationOffset(
   baseline: CursorSubmitBaseline,
   rotated: string,
 ): Promise<number> {
-  const offset = await readCursorStableOffset(rotated).catch(() => 0);
+  const offset = await readSubmitFloor(rotated, baseline.rotationOffsets?.get(rotated) ?? 0);
   baseline.rotationOffsets ??= new Map();
   baseline.rotationOffsets.set(rotated, offset);
   return offset;
@@ -112,8 +116,8 @@ async function seedRotationOffset(
 
 // Called once per send, right before the pane write. Stamps the write start on
 // the live baseline and its persisted twin (both mutated in place, never
-// copied), and floors a chat Cursor rotated into between capture and the write
-// so a restart or hold resume keeps that floor.
+// copied), and refreshes pinned/current rotated floors so a restart or hold
+// resume excludes complete records already present before this hook.
 export async function markCursorWriteStart(
   baseline: CursorSubmitBaseline,
   persisted: CursorPersistedSubmitBaseline,
@@ -124,13 +128,15 @@ export async function markCursorWriteStart(
 ): Promise<void> {
   baseline.writeStartedAtMs = atMs;
   persisted.writeStartedAtMs = atMs;
+  baseline.size = await readSubmitFloor(baseline.file, baseline.size);
+  persisted.size = baseline.size;
   if (!agentSessionId || !options?.cursorConfigDir) return;
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
     agentSessionId,
     options.cursorConfigDir,
   );
-  if (!rotated || baseline.rotationOffsets?.has(rotated)) return;
+  if (!rotated) return;
   persisted.rotated = { file: rotated, size: await seedRotationOffset(baseline, rotated) };
 }
 
