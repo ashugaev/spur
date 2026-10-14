@@ -827,9 +827,9 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
   ) {
     const base = { file: record["file"], size: record["size"] };
     if (agent === "claude") return { agent, ...base };
-    const stamp = record["capturedAtMs"];
+    const stamp = record["writeStartedAtMs"];
     const captured =
-      typeof stamp === "number" && Number.isFinite(stamp) ? { capturedAtMs: stamp } : {};
+      typeof stamp === "number" && Number.isFinite(stamp) ? { writeStartedAtMs: stamp } : {};
     const rotated = record["rotated"];
     if (rotated === null || typeof rotated !== "object") {
       return { agent, ...base, ...captured };

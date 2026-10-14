@@ -592,6 +592,33 @@ describe("createAgentSubmitAckBinding", () => {
     expect(result).toEqual({ found: true, lastScannedFile: "/rotated/chat.jsonl" });
   });
 
+  it("stamps the write start on both the persisted baseline and the live scan baseline (#982)", async () => {
+    const live: { file: string; size: number; writeStartedAtMs?: number } = {
+      file: "/some/chat.jsonl",
+      size: 7,
+    };
+    captureCursorSubmitBaselineMock.mockResolvedValue(live);
+    scanCursorJsonlForMessageMock.mockResolvedValue({
+      found: false,
+      scannedFile: "/some/chat.jsonl",
+    });
+
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    expect(binding?.baseline).toEqual({ agent: "cursor", file: "/some/chat.jsonl", size: 7 });
+    await binding?.markWriteStart?.(123);
+    await binding?.scan("hello");
+
+    expect(binding?.baseline).toMatchObject({ agent: "cursor", writeStartedAtMs: 123 });
+    expect(live.writeStartedAtMs).toBe(123);
+    expect(scanCursorJsonlForMessageMock.mock.calls[0]?.[0]).toBe(live);
+  });
+
+  it("gives only cursor a markWriteStart hook (#982)", async () => {
+    captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/c.jsonl", size: 1 });
+    const claude = await createAgentSubmitAckBinding("claude", ctx);
+    expect(claude?.markWriteStart).toBeUndefined();
+  });
+
   it("forwards cursorConfigDir into the cursor scan when present", async () => {
     captureCursorSubmitBaselineMock.mockResolvedValue({ file: "/some/chat.jsonl", size: 7 });
     scanCursorJsonlForMessageMock.mockResolvedValue({

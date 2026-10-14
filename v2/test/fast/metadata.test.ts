@@ -2083,7 +2083,7 @@ describe("session metadata PR migration", () => {
         file: "/k.jsonl",
         size: 9,
         rotated: { file: "/r.jsonl", size: 40 },
-        capturedAtMs: 1_700_000_000_000,
+        writeStartedAtMs: 1_700_000_000_000,
       },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },
@@ -2132,7 +2132,7 @@ describe("session metadata PR migration", () => {
       size: 9,
       rotated: { file: "/r.jsonl", size: 40 },
     };
-    const badStamp = { ...survivors, capturedAtMs: "x" } as unknown as SubmitAckBaseline;
+    const badStamp = { ...survivors, writeStartedAtMs: "x" } as unknown as SubmitAckBaseline;
     writeSession(dataDir, {
       ...base,
       queuedMessageTyped: { message: "m", typedAt, ackBaseline: badStamp },
@@ -2144,7 +2144,7 @@ describe("session metadata PR migration", () => {
       queuedMessageTyped: {
         message: "m",
         typedAt,
-        ackBaseline: { ...survivors, capturedAtMs: 1_700_000_000_000 } as SubmitAckBaseline,
+        ackBaseline: { ...survivors, writeStartedAtMs: 1_700_000_000_000 } as SubmitAckBaseline,
       },
     });
     const sessionPath = join(dataDir, "sessions", "api", "api-1.json");

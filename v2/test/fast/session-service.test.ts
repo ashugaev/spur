@@ -15112,6 +15112,57 @@ describe("SessionService", () => {
       });
     });
 
+    // #982: the write-start stamp is taken inside the input lock, right before
+    // the pane write, and rides the persisted marker; an Enter resend never
+    // re-stamps.
+    it("stamps the ack baseline once, right before the pane write", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const ackBaseline = { agent: "cursor", file: "/t/c.jsonl", size: 7 } as {
+        agent: "cursor";
+        file: string;
+        size: number;
+        writeStartedAtMs?: number;
+      };
+      const markWriteStart = vi.fn(async (atMs: number) => {
+        ackBaseline.writeStartedAtMs = atMs;
+      });
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        baseline: ackBaseline,
+        scan: vi.fn(),
+        markWriteStart,
+      });
+      let releaseAck: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+        .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+        .mockImplementation(async () => {
+          await gate;
+          return { found: true, lastScannedFile: "/x.jsonl" };
+        });
+
+      const sent = service.send("api-1", { message: "first" });
+      await waitForRealTime(() => {
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      });
+
+      expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(markWriteStart.mock.invocationCallOrder[0]).toBeLessThan(
+        sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
+        ...ackBaseline,
+        writeStartedAtMs: expect.any(Number),
+      });
+      expect(markWriteStart).toHaveBeenCalledTimes(1);
+      releaseAck();
+      await sent;
+    });
+
     const restartBaseline = { agent: "claude", file: "/t/claude.jsonl", size: 42 } as const;
 
     function seedTypedBeforeRestart(

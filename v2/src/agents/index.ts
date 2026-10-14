@@ -35,6 +35,7 @@ import {
 import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
+  markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -178,6 +179,8 @@ export interface AgentEarlyResendContext {
 export interface SubmitAckBinding {
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
+  /** Called once per send right before the pane write; mutates `baseline` in place. Cursor only. */
+  markWriteStart?(atMs: number): Promise<void>;
 }
 
 export interface ConversationReadContext {
@@ -657,18 +660,34 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       if (!baseline) {
         return null;
       }
+      const cursorOptions = ctx.cursorConfigDir
+        ? { cursorConfigDir: ctx.cursorConfigDir }
+        : undefined;
+      const persistedBaseline: Extract<SubmitAckBaseline, { agent: "cursor" }> = {
+        agent: "cursor",
+        ...persistCursorSubmitBaseline(baseline),
+      };
       return {
-        baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
+        baseline: persistedBaseline,
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,
             text,
             ctx.worktreePath,
             ctx.agentSessionId,
-            ctx.cursorConfigDir ? { cursorConfigDir: ctx.cursorConfigDir } : undefined,
+            cursorOptions,
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
+        markWriteStart: (atMs) =>
+          markCursorWriteStart(
+            baseline,
+            persistedBaseline,
+            atMs,
+            ctx.worktreePath,
+            ctx.agentSessionId,
+            cursorOptions,
+          ),
       };
     },
   },

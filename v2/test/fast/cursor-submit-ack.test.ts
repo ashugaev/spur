@@ -46,6 +46,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 import {
   captureCursorSubmitBaseline,
+  markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -122,24 +123,23 @@ describe("captureCursorSubmitBaseline", () => {
     resolveCursorPinnedTranscriptPathMock.mockResolvedValue(pendingPath);
     const result = await captureCursorSubmitBaseline("/tmp/worktree", "some-id");
     expect(result).not.toBeNull();
-    expect(result).toEqual({ file: pendingPath, size: 0, capturedAtMs: expect.any(Number) });
+    expect(result).toEqual({ file: pendingPath, size: 0 });
   });
 
-  it("stamps capturedAtMs within the capture window; persist and restore carry it only when set", async () => {
+  it("captures no write-start stamp; persist and restore carry it only when set", async () => {
     const filePath = await makeJsonl("stamp.jsonl", [userTurn("hi")]);
     findCursorAckTranscriptFileMock.mockResolvedValue(filePath);
-    const before = Date.now();
     const result = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id");
-    const after = Date.now();
-    expect(result?.capturedAtMs).toBeGreaterThanOrEqual(before);
-    expect(result?.capturedAtMs).toBeLessThanOrEqual(after);
+    expect(result).not.toBeNull();
     if (!result) return;
-    const persisted = persistCursorSubmitBaseline(result);
-    expect(persisted.capturedAtMs).toBe(result.capturedAtMs);
-    expect(restoreCursorSubmitBaseline(persisted).capturedAtMs).toBe(result.capturedAtMs);
+    expect("writeStartedAtMs" in result).toBe(false);
+    expect("writeStartedAtMs" in persistCursorSubmitBaseline(result)).toBe(false);
+    const stamped = { ...result, writeStartedAtMs: 123 };
+    const persisted = persistCursorSubmitBaseline(stamped);
+    expect(persisted.writeStartedAtMs).toBe(123);
+    expect(restoreCursorSubmitBaseline(persisted).writeStartedAtMs).toBe(123);
     const bare = restoreCursorSubmitBaseline({ file: filePath, size: 1 });
-    expect("capturedAtMs" in bare).toBe(false);
-    expect("capturedAtMs" in persistCursorSubmitBaseline(bare)).toBe(false);
+    expect("writeStartedAtMs" in bare).toBe(false);
   });
 
   it("still returns null with no id and nothing resolved (I3, unchanged)", async () => {
@@ -304,7 +304,7 @@ describe("scanCursorJsonlForMessage", () => {
     findCursorAckTranscriptFileMock.mockResolvedValue(null);
     resolveCursorPinnedTranscriptPathMock.mockResolvedValue(pendingPath);
     const baseline = await captureCursorSubmitBaseline("/tmp/worktree", "pending-id");
-    expect(baseline).toEqual({ file: pendingPath, size: 0, capturedAtMs: expect.any(Number) });
+    expect(baseline).toEqual({ file: pendingPath, size: 0 });
     if (!baseline) throw new Error("expected a baseline");
 
     const firstPoll = await scanCursorJsonlForMessage(baseline, "pending turn", "/tmp/worktree");
@@ -474,7 +474,6 @@ describe("cursor submit baseline across a restart", () => {
       file: pinnedFile,
       size: (await stat(pinnedFile)).size,
       rotated: { file: rotatedFile, size: rotatedSize },
-      capturedAtMs: expect.any(Number),
     });
 
     // Cursor writes the sent turn to the rotated chat, then the daemon restarts.
@@ -518,14 +517,13 @@ describe("cursor submit baseline across a restart", () => {
     expect(live && persistCursorSubmitBaseline(live)).toEqual({
       file: pinnedFile,
       size: (await stat(pinnedFile)).size,
-      capturedAtMs: expect.any(Number),
     });
   });
 });
 
 // #982: a rotated chat CREATED BY the send has the sent query as its first
 // record, already below the first-sighting floor. Cursor records carry no
-// timestamp, so the file's birthtime against the capture stamp decides.
+// timestamp, so the file's birthtime against the pane-write stamp decides.
 describe("rotated chat created by the send (#982)", () => {
   const options = { cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
   const stamp = 1_700_000_000_000;
@@ -540,7 +538,7 @@ describe("rotated chat created by the send (#982)", () => {
     const baseline = {
       file: pinnedFile,
       size: (await stat(pinnedFile)).size,
-      capturedAtMs: stamp,
+      writeStartedAtMs: stamp,
     };
     return { baseline, rotatedFile };
   }
@@ -548,7 +546,7 @@ describe("rotated chat created by the send (#982)", () => {
   const scan = (baseline: Parameters<typeof scanCursorJsonlForMessage>[0], text: string) =>
     scanCursorJsonlForMessage(baseline, text, "/tmp/worktree", "pinned-id", options);
 
-  it("acks on the first poll when the rotated chat was born after capture", async () => {
+  it("acks on the first poll when the rotated chat was born after the write start", async () => {
     const { baseline, rotatedFile } = await setup([userTurn("ship the task")]);
     stubBirthtime(rotatedFile, stamp + 5);
     expect(await scan(baseline, "ship the task")).toEqual({
@@ -557,7 +555,7 @@ describe("rotated chat created by the send (#982)", () => {
     });
   });
 
-  it("keeps the floor for a rotated chat born before capture", async () => {
+  it("keeps the floor for a rotated chat born before the write start", async () => {
     const { baseline, rotatedFile } = await setup([userTurn("continue")]);
     stubBirthtime(rotatedFile, stamp - 5000);
     expect(await scan(baseline, "continue")).toEqual({ found: false, scannedFile: rotatedFile });
@@ -593,16 +591,100 @@ describe("rotated chat created by the send (#982)", () => {
     expect((await scan(legacy, "continue")).found).toBe(false);
   });
 
-  it("survives capture, persist, JSON, session storage and restore", async () => {
+  // The adapter mutates both objects in place; mirror it.
+  async function captureAndMark(
+    pinnedFile: string,
+    atMs: number,
+  ): Promise<{
+    live: NonNullable<Awaited<ReturnType<typeof captureCursorSubmitBaseline>>>;
+    persisted: { agent: "cursor"; file: string; size: number } & ReturnType<
+      typeof persistCursorSubmitBaseline
+    >;
+  }> {
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected a baseline");
+    const persisted = { agent: "cursor" as const, ...persistCursorSubmitBaseline(live) };
+    await markCursorWriteStart(live, persisted, atMs, "/tmp/worktree", "pinned-id", options);
+    return { live, persisted };
+  }
+
+  // R1: a chat rotated in between capture and the pane write (born before the
+  // write stamp) holding the old query never acks it.
+  it("R1: keeps the floor for an old matching query in a chat born before the write start", async () => {
+    const pinnedFile = await makeJsonl("pinned-r1.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-r1.jsonl", [userTurn("continue")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    // Real clock: the chat is born after capture and before the write stamp.
+    const writeAt = Date.now() + 1000;
+    const { live } = await captureAndMark(pinnedFile, writeAt);
+    expect(live.writeStartedAtMs).toBe(writeAt);
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    stubBirthtime(rotatedFile, writeAt - 500);
+    expect((await scan(live, "continue")).found).toBe(false);
+  });
+
+  it("R2: acks on the first poll a chat born after the write start", async () => {
+    const pinnedFile = await makeJsonl("pinned-r2.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-r2.jsonl", [userTurn("ship the task")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    const { live } = await captureAndMark(pinnedFile, stamp);
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    stubBirthtime(rotatedFile, stamp + 5);
+    expect(await scan(live, "ship the task")).toEqual({ found: true, scannedFile: rotatedFile });
+  });
+
+  // R3: F rotated in after capture but before the write holds the old query.
+  // The write-start hook floors it on the live baseline AND on the persisted
+  // one, so the restart path keeps the same floor.
+  it("R3: floors a chat rotated in before the write, live and after persist and restore", async () => {
+    const pinnedFile = await makeJsonl("pinned-r3.jsonl", [userTurn("earlier turn")]);
+    const rotatedFile = await makeJsonl("rotated-r3.jsonl", [userTurn("continue")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
+      agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
+    );
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
+    if (!live) throw new Error("expected a baseline");
+    const persisted = { agent: "cursor" as const, ...persistCursorSubmitBaseline(live) };
+    expect(persisted.rotated).toBeUndefined();
+    // Rotation lands after capture; the hook (called at write time) sees it.
+    findCursorSessionIdMock.mockResolvedValue("rotated-id");
+    const writeAt = Date.now() + 1000;
+    stubBirthtime(rotatedFile, writeAt - 500);
+    await markCursorWriteStart(live, persisted, writeAt, "/tmp/worktree", "pinned-id", options);
+    expect(persisted.rotated).toEqual({
+      file: rotatedFile,
+      size: (await stat(rotatedFile)).size,
+    });
+
+    await appendJsonl(rotatedFile, [userTurn("continue")]);
+    expect((await scan(live, "continue")).found).toBe(true);
+
+    const restored = restoreCursorSubmitBaseline(
+      JSON.parse(JSON.stringify(persisted)) as typeof persisted,
+    );
+    expect(await scan(restored, "continue")).toEqual({ found: true, scannedFile: rotatedFile });
+    // Without the new turn the old query alone does not ack after restore.
+    const beforeAppend = restoreCursorSubmitBaseline({
+      ...persisted,
+      rotated: { file: rotatedFile, size: (await stat(rotatedFile)).size },
+    });
+    expect((await scan(beforeAppend, "continue")).found).toBe(false);
+  });
+
+  it("survives capture, write start, persist, JSON, session storage and restore", async () => {
     const pinnedFile = await makeJsonl("pinned-rt.jsonl", [userTurn("earlier turn")]);
     findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
     findCursorSessionIdMock.mockResolvedValue(null);
-    const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
-    expect(live?.capturedAtMs).toEqual(expect.any(Number));
-    if (!live) return;
-    const persisted = JSON.parse(JSON.stringify(persistCursorSubmitBaseline(live))) as ReturnType<
-      typeof persistCursorSubmitBaseline
-    >;
+    const { live, persisted: marked } = await captureAndMark(pinnedFile, stamp);
+    expect(live.writeStartedAtMs).toBe(stamp);
+    const persisted = JSON.parse(JSON.stringify(marked)) as typeof marked;
     const dataDir = await createTempDir("spur-cursor-ack-");
     tempDirs.push(dataDir);
     writeSession(dataDir, {
@@ -621,11 +703,11 @@ describe("rotated chat created by the send (#982)", () => {
       queuedMessageTyped: {
         message: "m",
         typedAt: "2026-03-18T10:00:30.000Z",
-        ackBaseline: { agent: "cursor", ...persisted },
+        ackBaseline: persisted,
       },
     });
     const stored = readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline;
-    expect(stored).toMatchObject({ agent: "cursor", capturedAtMs: live.capturedAtMs });
+    expect(stored).toMatchObject({ agent: "cursor", writeStartedAtMs: stamp });
     if (stored?.agent !== "cursor") throw new Error("expected cursor baseline");
     const restored = restoreCursorSubmitBaseline(stored);
 
@@ -635,7 +717,7 @@ describe("rotated chat created by the send (#982)", () => {
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
-    stubBirthtime(rotatedFile, (live.capturedAtMs ?? 0) + 5);
+    stubBirthtime(rotatedFile, stamp + 5);
     expect(await scan(restored, "ship the task")).toEqual({
       found: true,
       scannedFile: rotatedFile,

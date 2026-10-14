@@ -20,8 +20,8 @@ export interface CursorSubmitBaseline {
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
   rotationOffsets?: Map<string, number>;
-  // Date.now() at capture, before the pane write; a rotated chat born after it was created by the send.
-  capturedAtMs?: number;
+  // Date.now() just before the pane write (markCursorWriteStart); a rotated chat born after it was created by the send.
+  writeStartedAtMs?: number;
 }
 
 // Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
@@ -30,8 +30,8 @@ export interface CursorPersistedSubmitBaseline {
   file: string;
   size: number;
   rotated?: { file: string; size: number };
-  // Date.now() at capture; see CursorSubmitBaseline.capturedAtMs.
-  capturedAtMs?: number;
+  // Date.now() just before the pane write; see CursorSubmitBaseline.writeStartedAtMs.
+  writeStartedAtMs?: number;
 }
 
 export function persistCursorSubmitBaseline(
@@ -42,7 +42,9 @@ export function persistCursorSubmitBaseline(
     file: baseline.file,
     size: baseline.size,
     ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
-    ...(baseline.capturedAtMs !== undefined ? { capturedAtMs: baseline.capturedAtMs } : {}),
+    ...(baseline.writeStartedAtMs !== undefined
+      ? { writeStartedAtMs: baseline.writeStartedAtMs }
+      : {}),
   };
 }
 
@@ -55,7 +57,9 @@ export function restoreCursorSubmitBaseline(
     ...(persisted.rotated
       ? { rotationOffsets: new Map([[persisted.rotated.file, persisted.rotated.size]]) }
       : {}),
-    ...(persisted.capturedAtMs !== undefined ? { capturedAtMs: persisted.capturedAtMs } : {}),
+    ...(persisted.writeStartedAtMs !== undefined
+      ? { writeStartedAtMs: persisted.writeStartedAtMs }
+      : {}),
   };
 }
 
@@ -82,29 +86,64 @@ export async function captureCursorSubmitBaseline(
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
 ): Promise<CursorSubmitBaseline | null> {
-  const capturedAtMs = Date.now();
   const baseline = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
-  if (!baseline) return baseline;
-  if (!agentSessionId || !options?.cursorConfigDir) {
-    return { ...baseline, capturedAtMs };
-  }
+  if (!baseline || !agentSessionId || !options?.cursorConfigDir) return baseline;
   // An already-rotated chat: offset its file at send time, as the pinned one.
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
     agentSessionId,
     options.cursorConfigDir,
   );
-  if (!rotated) return { ...baseline, capturedAtMs };
-  const offset = await readCursorStableOffset(rotated).catch(() => 0);
-  return { ...baseline, rotationOffsets: new Map([[rotated, offset]]), capturedAtMs };
+  if (!rotated) return baseline;
+  const seeded: CursorSubmitBaseline = { ...baseline };
+  await seedRotationOffset(seeded, rotated);
+  return seeded;
 }
 
-// True when the file's birth postdates the send-time capture, i.e. the send
+// Floors `rotated` at its current stable size, remembered for every later poll.
+async function seedRotationOffset(
+  baseline: CursorSubmitBaseline,
+  rotated: string,
+): Promise<number> {
+  const offset = await readCursorStableOffset(rotated).catch(() => 0);
+  baseline.rotationOffsets ??= new Map();
+  baseline.rotationOffsets.set(rotated, offset);
+  return offset;
+}
+
+// Called once per send, right before the pane write. Stamps the write start on
+// the live baseline and its persisted twin (both mutated in place, never
+// copied), and floors a chat Cursor rotated into between capture and the write
+// so a restart or hold resume keeps that floor.
+export async function markCursorWriteStart(
+  baseline: CursorSubmitBaseline,
+  persisted: CursorPersistedSubmitBaseline,
+  atMs: number,
+  worktreePath: string,
+  agentSessionId?: string,
+  options?: { cursorConfigDir?: string },
+): Promise<void> {
+  baseline.writeStartedAtMs = atMs;
+  persisted.writeStartedAtMs = atMs;
+  if (!agentSessionId || !options?.cursorConfigDir) return;
+  const rotated = await findRotatedCursorTranscript(
+    worktreePath,
+    agentSessionId,
+    options.cursorConfigDir,
+  );
+  if (!rotated || baseline.rotationOffsets?.has(rotated)) return;
+  persisted.rotated = { file: rotated, size: await seedRotationOffset(baseline, rotated) };
+}
+
+// True when the file's birth postdates the pane write start, i.e. the send
 // created it. Strict ms compare: unknown birthtime (0) and same-ms keep the floor.
-async function bornAfterCapture(file: string, capturedAtMs: number | undefined): Promise<boolean> {
-  if (capturedAtMs === undefined) return false;
+async function bornAfterWriteStart(
+  file: string,
+  writeStartedAtMs: number | undefined,
+): Promise<boolean> {
+  if (writeStartedAtMs === undefined) return false;
   try {
-    return Math.floor((await stat(file)).birthtimeMs) > capturedAtMs;
+    return Math.floor((await stat(file)).birthtimeMs) > writeStartedAtMs;
   } catch {
     return false;
   }
@@ -247,7 +286,7 @@ export async function scanCursorJsonlForMessage(
       baseline.rotationOffsets ??= new Map();
       let offset = baseline.rotationOffsets.get(rotated);
       if (offset === undefined) {
-        offset = (await bornAfterCapture(rotated, baseline.capturedAtMs))
+        offset = (await bornAfterWriteStart(rotated, baseline.writeStartedAtMs))
           ? 0
           : await readCursorStableOffset(rotated).catch(() => 0);
         baseline.rotationOffsets.set(rotated, offset);

@@ -1587,6 +1587,30 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("D1 (#982): stamps the ack baseline once, before the sensitive pane write and never on an Enter resend", async () => {
+      const markWriteStart = vi.fn().mockResolvedValue(undefined);
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: null }),
+        markWriteStart,
+      });
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await deferredInternals(service).sendDeferredSensitiveInitialMessage(
+        runningSession(),
+        controlsMessage(),
+      );
+
+      expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(markWriteStart.mock.invocationCallOrder[0]).toBeLessThan(
+        sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(sendSubmitKeyToTmuxMock.mock.calls.length).toBeGreaterThan(0);
+      service.dispose();
+    });
+
     it("AC2: a real deliver() whose controls leg times out on a live agent does not fail and does not re-send the body", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
