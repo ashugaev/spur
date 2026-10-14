@@ -4721,7 +4721,8 @@ export class SessionService {
 
   // One member's runtime liveness for the sidecar reaper. In-flight lifecycle
   // work reads "unknown" (never dead); a probe failure or unresponsive tmux/ps
-  // also reads "unknown". Terminal members expect no runtime.
+  // also reads "unknown". Terminal members are probed too: a live agent under
+  // a completed/killed record still holds the workspace.
   private async sampleMemberRuntime(
     member: SessionRecord,
     fresh: boolean,
@@ -4736,7 +4737,6 @@ export class SessionService {
     ) {
       return "unknown";
     }
-    if (isTerminalSessionStatus(member.status)) return "dead";
     try {
       const runtime = await this.readRuntimeSnapshot(member, { fresh });
       if (runtime.processAlive) return "live";
@@ -4836,12 +4836,8 @@ export class SessionService {
     if (this.isDeliveryStopped()) return;
     if (owner) {
       const members = this.listDeskSessions(owner, listSessions(this.config.dataDir));
-      if (
-        entryContext.workspaceRuntime === "dead" ||
-        members.some((member) =>
-          hasRetainedSessionError(member, this.lastClassifiedLogStates.get(member.id)),
-        )
-      ) {
+      if (entryContext.workspaceRuntime === "dead") {
+        // The plan confirmed death with two samples; re-prove it per member.
         for (const member of members) {
           const sample = await this.sampleMemberRuntime(member, true);
           if (sample === "live" || sample === "unknown") {
@@ -4849,6 +4845,15 @@ export class SessionService {
             return;
           }
         }
+      } else if (
+        members.some((member) =>
+          hasRetainedSessionError(member, this.lastClassifiedLogStates.get(member.id)),
+        )
+      ) {
+        // An error that appeared after a plan that never confirmed death
+        // stays retained (as before this change); the next pass confirms.
+        skip();
+        return;
       }
     }
     if (this.isDeliveryStopped()) return;

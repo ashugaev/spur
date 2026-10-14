@@ -33546,7 +33546,7 @@ describe("SessionService", () => {
         }
       }
 
-      it("reaps a retained-error desk past TTL when every non-terminal member is dead, completed member unprobed", async () => {
+      it("reaps a retained-error desk past TTL when every member runtime is dead, completed member included", async () => {
         const { sessions, service } = await setup();
         retainedDesk(sessions, true);
         paneAliveUntilKilled(["api-1"]);
@@ -33557,10 +33557,10 @@ describe("SessionService", () => {
         expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
         expect(reapedEvents().map((e) => e.details.reason)).toEqual(["idle_ttl"]);
         expect(confirmSleeps()).toBe(1);
-        // confirm + execute step 4, per non-terminal member; none for the completed one.
+        // confirm + execute step 4, per member; the completed member is probed too.
         expect(freshReads("api-1")).toBe(2);
         expect(freshReads("api-2")).toBe(2);
-        expect(freshReads("api-3")).toBe(0);
+        expect(freshReads("api-3")).toBe(2);
       });
 
       it("held lock: a desk sibling that turns live during the hold keeps the sidecar", async () => {
@@ -33950,7 +33950,7 @@ describe("SessionService", () => {
         expect(sessions.get("api-1")?.slots).toEqual(record.slots);
       });
 
-      it("execute reaps a dead-runtime sidecar whose owner gained a retained error after planning", async () => {
+      it("execute keeps a sidecar whose owner gained a retained error after a plan that never confirmed death", async () => {
         const { sessions, service } = await setup();
         const record = exitedSolo("api-1", {}, ["error"]);
         sessions.set("api-1", record);
@@ -33966,8 +33966,43 @@ describe("SessionService", () => {
           contextOf("api-1", { identity: identityOf(2_000_000_000), workspaceRuntime: undefined }),
         );
 
-        expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
-        expect(reapedEvents()).toHaveLength(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+        // No single-sample kill: execute takes no fresh read without a dead plan.
+        expect(freshReads("api-1")).toBe(0);
+      });
+
+      it("keeps a retained-error sidecar when a completed sibling still has a live agent", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, true);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive(["api-3"]);
+
+        const plan = await service.collectAndExecuteSidecarReapPass(
+          [...sessions.values()],
+          new Set([`api-1--${SIDECAR}`]),
+        );
+
+        expect(plan.reap).toEqual([]);
+        expect(plan.keep.map((k) => k.reason)).toEqual(["retained_error"]);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+      });
+
+      it("execute keeps the sidecar when a completed sibling has a live agent at execute time", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, true);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+
+        agentRuntimeLive(["api-3"]);
+        await service.executeSidecarReapPlan(
+          planOf("api-1"),
+          contextOf("api-1", { identity: identityOf(2_000_000_000), workspaceRuntime: "dead" }),
+        );
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
       });
 
       it("execute keeps owner_missing behavior when the owner record is gone", async () => {
