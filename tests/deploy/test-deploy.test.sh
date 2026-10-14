@@ -190,6 +190,26 @@ run_b "b-symlink"        "$FAKE_SYM"
 run_b "b-leading-space"  " $FAKE_HOME/.local"
 run_b "b-trailing-space" "$FAKE_HOME/.local "
 
+# Published mode keeps the prefix guard ahead of registry verification/install.
+rm -f "$MARKER"
+if HOME="$FAKE_HOME" SPUR_TEST_DEPLOY_PREFIX="$FAKE_SYM" PATH="$FAKE_BIN:$PATH" \
+  bash "$test_deploy_script" --published-tarball "$tgz_a2" --release-proof "$WORK_DIR/missing.json" \
+  >"$WORK_DIR/published-prefix.log" 2>&1; then
+  bad "b-published: production prefix accepted"
+elif [[ -f "$MARKER" ]] || ! grep -q "refusing production npm prefix" "$WORK_DIR/published-prefix.log"; then
+  bad "b-published: production prefix guard did not run first"
+else
+  ok "b-published: refuses production prefix before publication verification"
+fi
+
+if bash "$test_deploy_script" --published-tarball "$tgz_a2" >"$WORK_DIR/published-input.log" 2>&1; then
+  bad "b-published-proof: missing release proof accepted"
+elif grep -q "published tarball and release proof required" "$WORK_DIR/published-input.log"; then
+  ok "b-published-proof: missing release proof rejected"
+else
+  bad "b-published-proof: missing-proof error absent"
+fi
+
 # c: onboarding-test.sh guard — npm prefix == HOME/.local with trailing slash
 # Placed here because it tests the same prefix-refusal boundary as the b-cases.
 ONBOARDING_SCRIPT="$repo_root/tests/integration/onboarding-test.sh"

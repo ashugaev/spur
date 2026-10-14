@@ -34,6 +34,21 @@ const initialSpurConfig = process.env["SPUR_CONFIG"];
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
+it("parses caller-pinned release continuation and rejects invalid interval/digest", async () => {
+  const configPath = await writeConfig(
+    `projects:\n  app:\n    path: $REPO_PATH\n    releaseContinuation:\n      policyFile: private.json\n      policyDigest: ${"a".repeat(64)}\n`,
+  );
+  expect(loadConfig(configPath).projects["app"]?.releaseContinuation).toEqual({
+    policyFile: join(configPath, "..", "private.json"),
+    policyDigest: "a".repeat(64),
+    intervalSeconds: 60,
+  });
+  const invalid = await writeConfig(
+    `projects:\n  app:\n    path: $REPO_PATH\n    releaseContinuation:\n      policyFile: private.json\n      policyDigest: invalid\n      intervalSeconds: 0\n`,
+  );
+  expect(() => loadConfig(invalid)).toThrow("intervalSeconds");
+});
+
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
 }

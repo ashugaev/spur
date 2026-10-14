@@ -3,9 +3,165 @@ import {
   closeTelegramTopic,
   editTelegramTopic,
   sendTelegramChatAction,
+  sendTelegramMessageOnce,
   sendTelegramReply,
 } from "../../src/telegram-source-state.js";
 import { presentConsent, proposeConsent } from "../../src/review-interface-consent.js";
+
+describe("sendTelegramMessageOnce", () => {
+  const config = { token: "synthetic-token" };
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("accepts the actual message id and matching chat without changing plain text", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true, result: { message_id: 55, chat: { id: 123 } } })),
+    );
+    const text = "PR опубликован\nВерсия доставлена\nОшибки исправлены\nСессии завершены";
+
+    await expect(sendTelegramMessageOnce(config, 123, text)).resolves.toEqual({
+      status: "accepted",
+      messageId: 55,
+      chatId: 123,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.telegram.org/botsynthetic-token/sendMessage",
+      expect.objectContaining({
+        body: JSON.stringify({ chat_id: 123, text }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it.each([
+    { status: 400, description: "Bad Request" },
+    { status: 403, description: "Forbidden" },
+    { status: 429, description: "Too Many Requests", parameters: { retry_after: 12 } },
+  ])(
+    "returns proven rejection $status without retry",
+    async ({ status, description, ...extra }) => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, error_code: status, description, ...extra }), {
+          status,
+        }),
+      );
+
+      await expect(sendTelegramMessageOnce(config, 123, "report")).resolves.toEqual({
+        status: "rejected",
+        errorCode: status,
+        ...(status === 429 ? { retryAfterMs: 12_000 } : {}),
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([-1, 0.5, "12", Number.MAX_SAFE_INTEGER])(
+    "ignores invalid server retry_after %s",
+    async (retryAfter) => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests",
+            parameters: { retry_after: retryAfter },
+          }),
+          { status: 429 },
+        ),
+      );
+      await expect(sendTelegramMessageOnce(config, 123, "report")).resolves.toEqual({
+        status: "rejected",
+        errorCode: 429,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    { ok: true, result: { message_id: 55, chat: { id: 456 } } },
+    { ok: true, result: { message_id: 55 } },
+    { result: { message_id: 55, chat: { id: 123 } } },
+    { ok: true, result: { message_id: 0, chat: { id: 123 } } },
+    { ok: true, result: { message_id: 1.5, chat: { id: 123 } } },
+    { ok: true, result: { message_id: "55", chat: { id: 123 } } },
+    { ok: true, result: { message_id: 55, chat: { id: "123" } } },
+    { ok: true, result: null },
+    { ok: false, error_code: 400, description: "Bad Request" },
+    null,
+    [],
+  ])("keeps a malformed or mismatching receipt uncertain: %j", async (payload) => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload)));
+    await expect(sendTelegramMessageOnce(config, 123, "report")).resolves.toEqual({
+      status: "uncertain",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { body: "not JSON", status: 200 },
+    { body: "not JSON", status: 429 },
+    {
+      body: JSON.stringify({ ok: false, error_code: 500, description: "Server error" }),
+      status: 500,
+    },
+    { body: JSON.stringify({ ok: false, error_code: 403, description: "Forbidden" }), status: 400 },
+  ])("keeps HTTP $status with an unproven outcome uncertain", async ({ body, status }) => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(new Response(body, { status }));
+    await expect(sendTelegramMessageOnce(config, 123, "report")).resolves.toEqual({
+      status: "uncertain",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([new DOMException("Timed out", "TimeoutError"), new Error("Socket disconnected")])(
+    "does not resend when the response is lost after dispatch",
+    async (error) => {
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockRejectedValueOnce(error);
+      await expect(sendTelegramMessageOnce(config, 123, "report")).resolves.toEqual({
+        status: "uncertain",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("bounds a stalled dispatched request by an abort timeout without retry", async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), delay);
+      return controller.signal;
+    });
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementationOnce(async (_input, init) => {
+      await new Promise<void>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("response lost")), {
+          once: true,
+        });
+      });
+      return new Response();
+    });
+
+    const sending = sendTelegramMessageOnce(config, 123, "report");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(sending).resolves.toEqual({ status: "uncertain" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    timeout.mockRestore();
+  });
+});
 
 describe("sendTelegramReply", () => {
   beforeEach(() => {

@@ -39,6 +39,12 @@ import {
   type UserActionOrigin,
 } from "./user-action-log.js";
 import { startConfiguredBacklogs } from "./backlog/index.js";
+import {
+  startReleaseContinuations,
+  type ReleaseContinuationController,
+} from "./release-continuation.js";
+import { readSession } from "./metadata.js";
+import { ReviewAppError } from "./github-app.js";
 import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
 import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/types.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
@@ -836,6 +842,7 @@ export async function startServer(
       sources?.clearPollDisabledOverride(projectId, sourceId, sessionId) ?? null,
   );
   let backlogs: { stop(): void } | null = null;
+  let releaseContinuations: ReleaseContinuationController | null = null;
   let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
@@ -861,6 +868,17 @@ export async function startServer(
     sendError(response, status, message);
   };
   const startAutomation = async (): Promise<void> => {
+    releaseContinuations = await startReleaseContinuations({
+      config: service.config,
+      bus,
+      session: (id) => readSession(service.config.dataDir, id),
+      view: (id) => service.get(id),
+      send: (id, message) => service.send(id, { message }),
+      restore: (id) => service.restore(id),
+      complete: (id, guard) => service.completeForRelease(id, guard),
+      reviewerEvidence: (id) => service.releaseReviewerEvidence(id),
+      warn: logger.warn ?? writeStderr,
+    });
     const nextTriggers = startConfiguredTriggers({
       config: service.config,
       bus,
@@ -906,6 +924,8 @@ export async function startServer(
       backlogs = nextBacklogs;
       runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
+      await releaseContinuations.stop();
+      releaseContinuations = null;
       await nextTriggers.stop();
       backlogs?.stop();
       backlogs = null;
@@ -927,6 +947,8 @@ export async function startServer(
     const previousConfig = service.config;
     const previousRegistryPaths = service.getRegistryPaths();
 
+    await releaseContinuations?.stop();
+    releaseContinuations = null;
     await sources?.stop();
     sources = null;
     backlogs?.stop();
@@ -1791,6 +1813,35 @@ export async function startServer(
         return;
       }
 
+      if (
+        method === "POST" &&
+        (path === "/release-continuation/affirmations" ||
+          path === "/release-continuation/transitions")
+      ) {
+        if (!releaseContinuations) {
+          sendError(response, 409, "continuation-unregistered");
+          return;
+        }
+        const authorization = request.headers.authorization;
+        if (!authorization?.startsWith("Bearer ")) {
+          sendError(response, 401, "continuation-launch-missing");
+          return;
+        }
+        const body = await readJsonBody<unknown>(request);
+        try {
+          await releaseContinuations.ingress(
+            body,
+            authorization.slice(7),
+            path.endsWith("/affirmations"),
+          );
+          sendJson(response, 200, { status: "accepted" });
+        } catch (error) {
+          if (!(error instanceof ReviewAppError)) throw error;
+          sendError(response, 409, error.category);
+        }
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
@@ -2461,6 +2512,8 @@ export async function startServer(
         // poll sleep and would otherwise keep typing into panes after shutdown.
         service.dispose();
         autoPing.dispose();
+        await releaseContinuations?.stop();
+        releaseContinuations = null;
         const closePromise = closeServer();
         const sourceController = sources;
         if (sourceController) {

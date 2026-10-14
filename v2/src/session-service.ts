@@ -22,7 +22,7 @@ import {
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
 import { userInfo } from "node:os";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   agentBusyQueuedSendAwaitsPrompt,
@@ -81,6 +81,7 @@ import {
   reapRecordedIdentity,
   reapRecordedPortDaemon,
   reapSidecarPane,
+  readProcStarttime,
   readProcessStarttime,
   signalSidecarPane,
   snapshotProcesses,
@@ -2586,6 +2587,54 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
 // Exported for unit testing. Names come solely from project config, filtered
 // to the session's agent (a built-in scoped away from an agent, e.g. cursor,
 // is never enumerated) — there is no per-session sidecar override state.
+export interface ReleaseTaskIdentity {
+  sessionId: string;
+  project: string;
+  workspaceId: string;
+  worktreePath: string;
+  branch: string;
+  repository: string | null;
+  pr: number | null;
+  taskDigest: string;
+  launchDigest: string | null;
+  updatedAt: string;
+}
+
+export interface ReleaseCompletionGuard {
+  identity: ReleaseTaskIdentity;
+  members: ReleaseTaskIdentity[];
+  archive: { path: string; digest: string };
+}
+
+export type ReleaseCompletionResult = {
+  status: "verified" | "retained-shared" | "unknown";
+  reason?: string;
+};
+
+export function captureReleaseTaskIdentity(session: SessionRecord): ReleaseTaskIdentity {
+  return {
+    sessionId: session.id,
+    project: session.project,
+    workspaceId: workspaceIdOf(session),
+    worktreePath: session.worktreePath,
+    branch: session.branch,
+    repository: session.pr?.repo ?? null,
+    pr: session.pr?.number ?? null,
+    taskDigest: createHash("sha256")
+      .update(
+        JSON.stringify({
+          prompt: session.prompt,
+          originalTaskPrompt: session.originalTaskPrompt ?? null,
+        }),
+      )
+      .digest("hex"),
+    launchDigest: session.agentLaunchId
+      ? createHash("sha256").update(session.agentLaunchId).digest("hex")
+      : null,
+    updatedAt: session.updatedAt,
+  };
+}
+
 export function sessionSidecarNames(
   session: Pick<SessionRecord, "sidecarNames" | "agent">,
   project?: Pick<ProjectConfig, "sidecars">,
@@ -16214,12 +16263,273 @@ export class SessionService {
     );
   }
 
+  async completeForRelease(
+    sessionId: string,
+    guard: ReleaseCompletionGuard,
+  ): Promise<ReleaseCompletionResult> {
+    const lifecycleIds = [
+      sessionId,
+      guard.identity.workspaceId,
+      ...guard.members.flatMap((member) => [member.sessionId, member.workspaceId]),
+    ];
+    return this.withSessionLifecycleLocks(lifecycleIds, async () => {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session || !isDeepStrictEqual(captureReleaseTaskIdentity(session), guard.identity)) {
+        return { status: "unknown", reason: "release_task_changed_or_missing" };
+      }
+      if (!session.agentLaunchId || !session.pr) {
+        return { status: "unknown", reason: "release_task_identity_unavailable" };
+      }
+      const history = await this.getConversation(sessionId, { from: 0 });
+      const userInputs = history.entries.filter(
+        (entry) => entry.kind === "message" && entry.role === "user",
+      );
+      if (
+        queuedMessages(session).length > 0 ||
+        session.queuedMessageTyped ||
+        session.submitUnconfirmedAt ||
+        session.submitFailedMessage
+      ) {
+        return { status: "unknown", reason: "release_input_delivery_unconfirmed" };
+      }
+      if (history.startIndex !== 0 || history.totalEntries !== history.entries.length) {
+        return { status: "unknown", reason: "release_native_history_incomplete" };
+      }
+      if (userInputs.length > 1) {
+        return { status: "unknown", reason: "release_native_input_identity_unavailable" };
+      }
+      if (
+        userInputs.length !== 1 ||
+        userInputs[0]?.kind !== "message" ||
+        ![session.prompt, session.originalTaskPrompt].includes(userInputs[0].text)
+      ) {
+        return { status: "unknown", reason: "release_current_task_provenance_unavailable" };
+      }
+      const siblings = listSessions(this.config.dataDir).filter(
+        (candidate) =>
+          candidate.id !== session.id &&
+          (workspaceIdOf(candidate) === workspaceIdOf(session) ||
+            candidate.worktreePath === session.worktreePath),
+      );
+      if (
+        siblings.some(
+          (candidate) =>
+            !guard.members.some(
+              (member) =>
+                isDeepStrictEqual(captureReleaseTaskIdentity(candidate), member) &&
+                member.repository === guard.identity.repository &&
+                member.pr === guard.identity.pr,
+            ),
+        )
+      ) {
+        return { status: "retained-shared", reason: "release_workspace_has_unregistered_member" };
+      }
+      try {
+        const archivePath = realpathSync(guard.archive.path);
+        const archiveStat = statSync(archivePath);
+        if (!archiveStat.isFile() || (archiveStat.mode & 0o077) !== 0) {
+          throw new Error("Release archive is not a private regular file");
+        }
+        for (const root of [
+          session.worktreePath,
+          this.config.worktreeDir,
+          ...guard.members.map((member) => member.worktreePath),
+          join(this.config.dataDir, "session-artifacts"),
+          join(this.config.dataDir, "sessions"),
+          join(this.config.dataDir, "session-tools"),
+        ]) {
+          const canonicalRoot = existsSync(root) ? realpathSync(root) : resolvePath(root);
+          const fromRoot = relative(canonicalRoot, archivePath);
+          if (
+            fromRoot === "" ||
+            (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot))
+          ) {
+            throw new Error("Release archive is inside removable session resources");
+          }
+        }
+        const bytes = readFileSync(archivePath);
+        if (createHash("sha256").update(bytes).digest("hex") !== guard.archive.digest) {
+          throw new Error("Release archive digest mismatch");
+        }
+        const manifest: unknown = JSON.parse(bytes.toString("utf8"));
+        const { updatedAt: _updatedAt, ...identity } = guard.identity;
+        if (
+          !manifest ||
+          typeof manifest !== "object" ||
+          !("members" in manifest) ||
+          !Array.isArray(manifest.members) ||
+          !manifest.members.some(
+            (member: unknown) =>
+              member !== null &&
+              typeof member === "object" &&
+              "identity" in member &&
+              isDeepStrictEqual(member.identity, identity),
+          )
+        ) {
+          throw new Error("Release archive does not bind this task generation");
+        }
+      } catch {
+        return { status: "unknown", reason: "release_archive_unverified" };
+      }
+      const projection = ensureTodoLedger(this.config.dataDir, session);
+      const block = todoLedgerBlock(projection);
+      if (block === "empty") throw new TodoEmptyLedgerError([sessionId]);
+      if (block) throw new TodoOpenWorkError([{ sessionId, ...unfinishedTodo(projection) }]);
+      try {
+        if (listServiceInstancesForSession(this.config.dataDir, sessionId).length > 0) {
+          throw new Error("Release service process generation ownership unavailable");
+        }
+        const project = this.resolveProjectForSession(session);
+        for (const name of sessionSidecarNames(session, project)) {
+          if (
+            this.hasRunningWorkspaceMembers(session) &&
+            project?.sidecars[name] &&
+            !project.sidecars[name].mcp
+          )
+            continue;
+          const ownerId = this.sidecarOwnerIdForName(session, project, name);
+          const owner = readSession(this.config.dataDir, ownerId);
+          const identity = owner?.sidecarProcs?.[name];
+          const pane = await this.lookupPanePidQuietly(sidecarTmuxSession(ownerId, name), {
+            fresh: true,
+          });
+          if (pane.status !== "ok") throw new Error("Release sidecar pane ownership unavailable");
+          if (pane.panePid !== null) {
+            if (!identity || identity.pid !== pane.panePid)
+              throw new Error("Release sidecar launch ownership unavailable");
+            const process = await readProcStarttime(identity.pid);
+            if (
+              process.kind !== "ok" ||
+              process.starttime !== identity.starttime ||
+              !(await snapshotProcesses()).ok
+            ) {
+              throw new Error("Release sidecar process generation ownership unavailable");
+            }
+          } else if (identity) {
+            const process = await readProcStarttime(identity.pid);
+            if (
+              process.kind === "unknown" ||
+              (process.kind === "ok" && process.starttime === identity.starttime)
+            ) {
+              throw new Error("Release orphan sidecar ownership unavailable");
+            }
+          }
+          for (const port of Object.values(owner?.sidecarPorts?.[name] ?? {})) {
+            if (
+              listSessions(this.config.dataDir).some(
+                (candidate) =>
+                  candidate.id !== ownerId &&
+                  !guard.members.some((member) => member.sessionId === candidate.id) &&
+                  Object.values(candidate.sidecarPorts ?? {}).some((ports) =>
+                    Object.values(ports).includes(port),
+                  ),
+              )
+            ) {
+              return {
+                status: "retained-shared",
+                reason: "release_sidecar_port_has_unregistered_owner",
+              };
+            }
+            if (pane.panePid === null && !(await isHostPortFree(port))) {
+              throw new Error("Release detached sidecar ownership unavailable");
+            }
+          }
+        }
+        const launch = await captureAgentProcessesForLaunch({
+          sessionId,
+          agentLaunchId: session.agentLaunchId,
+          processMatchers: sessionProcessMatchers(session),
+        });
+        if (launch.status !== "ok") throw new Error("Release launch process probe unavailable");
+        const agentPane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+        if (
+          agentPane.status !== "ok" ||
+          (agentPane.panePid !== null && launch.processes.length === 0)
+        ) {
+          throw new Error("Release agent launch ownership unavailable");
+        }
+        const observed = readSession(this.config.dataDir, sessionId);
+        if (!observed || !isDeepStrictEqual(captureReleaseTaskIdentity(observed), guard.identity)) {
+          throw new Error("Release task changed during resource observation");
+        }
+        const resourcesAlreadyGone =
+          session.status === "completed" &&
+          !existsSync(join(this.config.dataDir, "session-artifacts", workspaceIdOf(session))) &&
+          !existsSync(join(this.config.dataDir, "session-tools", sessionId)) &&
+          sessionSidecarNames(session, this.resolveProjectForSession(session)).length === 0 &&
+          listServiceInstancesForSession(this.config.dataDir, sessionId).length === 0;
+        if (resourcesAlreadyGone) {
+          if (launch.processes.length > 0)
+            throw new Error("Completed release session has live processes");
+          const pane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+          if (pane.status !== "ok" || pane.panePid !== null)
+            throw new Error("Release pane absence unverified");
+        } else {
+          await this.applyManualStatusLocked(
+            sessionId,
+            "completed",
+            { prAction: "leave_open" },
+            {
+              skipEnrichment: true,
+              strictReleaseCleanup: true,
+              todoActor: { kind: "system", source: "release_continuation" },
+            },
+          );
+        }
+        const workspace = probeWorkspace(session.worktreePath);
+        if (workspace.diagnostic) throw new Error("Release workspace absence unverified");
+        if (
+          existsSync(join(this.config.dataDir, "session-artifacts", workspaceIdOf(session))) ||
+          existsSync(join(this.config.dataDir, "session-tools", sessionId))
+        ) {
+          if (siblings.length > 0)
+            return { status: "retained-shared", reason: "release_shared_artifacts_retained" };
+          throw new Error("Release session artifacts remain");
+        }
+        if (workspace.exists) {
+          if (siblings.length > 0 || !session.worktree)
+            return { status: "retained-shared", reason: "release_workspace_retained" };
+          throw new Error("Release worktree still exists");
+        }
+        return { status: "verified" };
+      } catch (error) {
+        return {
+          status: "unknown",
+          reason: error instanceof Error ? error.message : "release_cleanup_unverified",
+        };
+      }
+    });
+  }
+
   async readTodo(sessionId: string): Promise<TodoProjection> {
     return this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const session = readSession(this.config.dataDir, sessionId);
       if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
       return ensureTodoLedger(this.config.dataDir, session);
     });
+  }
+
+  async releaseReviewerEvidence(sessionId: string): Promise<{
+    nativeAgentAlive: boolean | null;
+    historyAvailable: boolean;
+    initialAcknowledged: boolean | null;
+  }> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session?.agentLaunchId)
+      return { nativeAgentAlive: null, historyAvailable: false, initialAcknowledged: null };
+    const capture = await captureAgentProcessesForLaunch({
+      sessionId,
+      agentLaunchId: session.agentLaunchId,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    const history = await this.getConversation(sessionId, { from: 0 });
+    return {
+      nativeAgentAlive: capture.status === "ok" ? capture.processes.length > 0 : null,
+      historyAvailable: history.entries.length > 0,
+      // Retained native IDs/history do not prove acceptance of this launch.
+      // The submit scanner exposes queue acceptance, not a durable native input identity.
+      initialAcknowledged: null,
+    };
   }
 
   async mutateTodo(
@@ -16843,7 +17153,7 @@ export class SessionService {
   // Signals every torn-down sidecar's pane first, then confirms the whole
   // batch through ONE shared grace window — not one sleep per sidecar (that
   // would multiply teardown latency by sidecar count).
-  private async teardownSessionSidecars(session: SessionRecord): Promise<void> {
+  private async teardownSessionSidecars(session: SessionRecord, strict = false): Promise<void> {
     if (this.isDeliveryStopped()) return;
     const project = this.resolveProjectForSession(session);
     // Recheck sibling retention before each signal and identity removal.
@@ -16868,6 +17178,13 @@ export class SessionService {
         continue;
       }
       const ownerId = this.sidecarOwnerIdForName(session, project, scName);
+      if (strict) {
+        const pane = await this.lookupPanePidQuietly(sidecarTmuxSession(ownerId, scName), {
+          fresh: true,
+        });
+        if (pane.status !== "ok") throw new Error("Release sidecar pane ownership unavailable");
+        if (pane.panePid === null) continue;
+      }
       selected.push({ ownerId, scName });
     }
     if (this.isDeliveryStopped()) return;
@@ -16899,6 +17216,9 @@ export class SessionService {
       pendingBySidecar.push({ ownerId, scName, pending });
     }
     const outcomes = await confirmReaps(pendingBySidecar.map((entry) => entry.pending));
+    if (strict && outcomes.some((outcome) => outcome.blindKill || outcome.survivors.length > 0)) {
+      throw new Error("Release sidecar process absence unverified");
+    }
     if (this.isDeliveryStopped()) return;
     for (const [index, entry] of pendingBySidecar.entries()) {
       this.logSidecarReapSurvivors(entry.ownerId, entry.scName, outcomes[index] ?? null);
@@ -16946,10 +17266,38 @@ export class SessionService {
     return kept ? { ...rest, sidecarPorts: kept } : rest;
   }
 
-  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
-    await this.teardownSessionSidecars(session);
+  private async cleanupSessionServices(session: SessionRecord, strict = false): Promise<void> {
+    await this.teardownSessionSidecars(session, strict);
+    const pending: PendingReap[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
-      await signalSidecarPane(service.tmuxSession);
+      pending.push(await signalSidecarPane(service.tmuxSession));
+    }
+    if (strict && pending.length > 0) {
+      const outcomes = await confirmReaps(pending);
+      if (outcomes.some((outcome) => outcome.blindKill || outcome.survivors.length > 0)) {
+        throw new Error("Release service process absence unverified");
+      }
+    }
+    if (strict) {
+      const project = this.resolveProjectForSession(session);
+      const retainedShared = this.hasRunningWorkspaceMembers(session);
+      for (const [name, identity] of Object.entries(session.sidecarProcs ?? {})) {
+        if (retainedShared && project?.sidecars[name] && !project.sidecars[name].mcp) continue;
+        const process = await readProcStarttime(identity.pid);
+        if (
+          process.kind === "unknown" ||
+          (process.kind === "ok" && process.starttime === identity.starttime)
+        ) {
+          throw new Error("Release sidecar identity still live or unreadable");
+        }
+      }
+      for (const [name, ports] of Object.entries(session.sidecarPorts ?? {})) {
+        if (retainedShared && project?.sidecars[name] && !project.sidecars[name].mcp) continue;
+        for (const port of Object.values(ports)) {
+          if (!(await isHostPortFree(port)))
+            throw new Error("Release sidecar port still occupied or unreadable");
+        }
+      }
     }
     deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
@@ -17058,10 +17406,11 @@ export class SessionService {
       SessionRecord,
       "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
     >,
-    options: { failOnSurvivors: boolean },
+    options: { failOnSurvivors: boolean; requireKnownProbe?: boolean },
   ): Promise<void> {
     const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
     if (paneLookup.status === "unavailable") {
+      if (options.requireKnownProbe) throw new Error("Release agent pane probe unavailable");
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
       // teardown.
@@ -17262,6 +17611,8 @@ export class SessionService {
     options: {
       retainInList?: boolean;
       skipEnrichment: true;
+      strictReleaseCleanup?: boolean;
+      todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
     },
@@ -17273,6 +17624,7 @@ export class SessionService {
     options?: {
       retainInList?: boolean;
       skipEnrichment?: false;
+      strictReleaseCleanup?: boolean;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
@@ -17285,6 +17637,7 @@ export class SessionService {
     options?: {
       retainInList?: boolean;
       skipEnrichment?: boolean;
+      strictReleaseCleanup?: boolean;
       todoActor?: TodoActor;
       eventAction?: ManualStatusAction;
       stopReason?: SessionRecord["stopReason"];
@@ -17317,7 +17670,7 @@ export class SessionService {
       await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
-    if (session.status === targetStatus) {
+    if (session.status === targetStatus && !options?.strictReleaseCleanup) {
       if (targetStatus === "stopped" && hasSessionErrorEvidence(session)) {
         const record: SessionRecord = {
           ...this.sessionWithReleasedSidecarPorts(session),
@@ -17339,7 +17692,10 @@ export class SessionService {
       }
       return options?.skipEnrichment ? undefined : this.enrich(session);
     }
-    if (isTerminalSessionStatus(session.status)) {
+    if (
+      isTerminalSessionStatus(session.status) &&
+      !(options?.strictReleaseCleanup && session.status === "completed")
+    ) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
     }
     const eventAction: ManualStatusAction =
@@ -17361,8 +17717,17 @@ export class SessionService {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
       if (!request.skipRuntimeTeardown) {
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
-        await this.cleanupSessionServices(session);
+        await this.killAgentPaneAndConfirmExit(session, {
+          failOnSurvivors: options?.strictReleaseCleanup === true,
+          ...(options?.strictReleaseCleanup ? { requireKnownProbe: true } : {}),
+        });
+        if (options?.strictReleaseCleanup) {
+          await this.reconcileOwnedOrphanAgent(session);
+          const pane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+          if (pane.status !== "ok" || pane.panePid !== null)
+            throw new Error("Release agent pane remains unverified");
+        }
+        await this.cleanupSessionServices(session, options?.strictReleaseCleanup);
       }
       if (targetStatus === "completed") {
         const { ranCleanup } = this.removeSessionArtifacts(session);

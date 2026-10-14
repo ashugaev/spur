@@ -1,5 +1,5 @@
 import type * as cryptoModule from "node:crypto";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29618,6 +29618,409 @@ describe("SessionService", () => {
         const view = dashboardViews.find((v) => v.id === id);
         expect(view).toMatchObject({ runningSidecarNames: ["daemon"] });
       }
+    });
+  });
+
+  describe("release completion", () => {
+    async function setup(
+      status: SessionRecord["status"] = "running",
+      agent: SessionRecord["agent"] = "claude",
+    ) {
+      const session: SessionRecord = {
+        id: "api-release",
+        project: "api",
+        agent,
+        prompt: "Release fixture task",
+        originalTaskPrompt: "Release fixture task",
+        branch: "feature/release-fixture",
+        pr: {
+          repo: "fixture/repository",
+          number: 42,
+          url: "https://github.com/fixture/repository/pull/42",
+        },
+        worktree: true,
+        worktreePath: join(TEST_DATA_DIR, "release-worktree"),
+        tmuxSession: "api-release",
+        launchCommand: "claude",
+        agentLaunchId: "fixture-launch",
+        status,
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        sidecarNames: [],
+      };
+      const sessions = createSessionStore(session);
+      const artifacts = join(TEST_DATA_DIR, "session-artifacts", session.id);
+      mkdirSync(artifacts, { recursive: true });
+      writeFileSync(join(artifacts, "proof.txt"), "fixture proof");
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      workspaceExistsMock.mockReturnValue(false);
+      const { SessionService, captureReleaseTaskIdentity } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", session.createdAt, {
+        deferBackgroundLoops: true,
+      });
+      vi.spyOn(service, "getConversation").mockResolvedValue({
+        messages: [],
+        entries: [{ kind: "message", role: "user", text: session.prompt }],
+        durationMs: 0,
+        state: "waiting",
+        startIndex: 0,
+        totalEntries: 1,
+      });
+      const identity = captureReleaseTaskIdentity(session);
+      const { updatedAt: _updatedAt, ...archivedIdentity } = identity;
+      const bytes = JSON.stringify({ members: [{ identity: archivedIdentity }] });
+      const path = join(TEST_DATA_DIR, "release-archive.json");
+      writeFileSync(path, bytes, { mode: 0o600 });
+      const guard = {
+        identity,
+        members: [identity],
+        archive: { path, digest: createHash("sha256").update(bytes).digest("hex") },
+      };
+      const artifactModule = await import("../../src/session-artifacts.js");
+      vi.mocked(artifactModule.deleteSessionArtifactsDir).mockImplementation((_dataDir, id) => {
+        rmSync(join(TEST_DATA_DIR, "session-artifacts", id), { recursive: true, force: true });
+      });
+      return {
+        service,
+        SessionService,
+        session,
+        sessions,
+        guard,
+        captureReleaseTaskIdentity,
+        artifacts,
+      };
+    }
+
+    it("requires an archive before any destructive action", async () => {
+      const { service, session, guard, artifacts } = await setup();
+      rmSync(guard.archive.path);
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+        reason: "release_archive_unverified",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("release reviewer evidence rejects retained native identity", async () => {
+      const { service, session, sessions } = await setup();
+      sessions.set(session.id, { ...session, agentSessionId: "prior-native-session" });
+      expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+        historyAvailable: true,
+        initialAcknowledged: null,
+      });
+      expect(service.getConversation).toHaveBeenCalledWith(session.id, { from: 0 });
+      captureAgentProcessesForLaunchMock.mockResolvedValue({ status: "unavailable" });
+      expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+        nativeAgentAlive: null,
+        initialAcknowledged: null,
+      });
+    });
+
+    it.each(["digest", "identity", "worktree", "permissions"])(
+      "rejects an archive with invalid %s",
+      async (failure) => {
+        const { service, session, guard, artifacts } = await setup();
+        if (failure === "digest") guard.archive.digest = "0".repeat(64);
+        if (failure === "identity") {
+          const bytes = JSON.stringify({ members: [] });
+          writeFileSync(guard.archive.path, bytes);
+          guard.archive.digest = createHash("sha256").update(bytes).digest("hex");
+        }
+        if (failure === "worktree" || failure === "permissions") {
+          const bytes = readFileSync(guard.archive.path);
+          const directory = failure === "worktree" ? session.worktreePath : TEST_DATA_DIR;
+          mkdirSync(directory, { recursive: true });
+          guard.archive.path = join(directory, "invalid-archive.json");
+          writeFileSync(guard.archive.path, bytes, {
+            mode: failure === "permissions" ? 0o644 : 0o600,
+          });
+        }
+        expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+          status: "unknown",
+          reason: "release_archive_unverified",
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(existsSync(artifacts)).toBe(true);
+      },
+    );
+
+    it.each(["prompt", "agentLaunchId", "updatedAt"] as const)(
+      "rejects a changed %s generation",
+      async (field) => {
+        const { service, session, sessions, guard } = await setup();
+        sessions.set(session.id, { ...session, [field]: "changed" });
+        expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+          status: "unknown",
+          reason: "release_task_changed_or_missing",
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("retains an unrelated terminal session sharing the workspace", async () => {
+      const { service, session, sessions, guard } = await setup();
+      sessions.set("api-unrelated", {
+        ...session,
+        id: "api-unrelated",
+        status: "completed",
+        prompt: "Unrelated task",
+      });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "retained-shared",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("retains a new task delivered to the same session without changing its initial prompt", async () => {
+      const { service, session, guard } = await setup();
+      vi.mocked(service.getConversation).mockResolvedValue({
+        messages: [],
+        entries: [
+          { kind: "message", role: "user", text: session.prompt },
+          { kind: "message", role: "user", text: "Start unrelated task" },
+        ],
+        durationMs: 0,
+        state: "waiting",
+        startIndex: 0,
+        totalEntries: 2,
+      });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+        reason: "release_native_input_identity_unavailable",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["claude", "codex"] as const)("reads full %s history", async (agent) => {
+      const { service, session, guard } = await setup("running", agent);
+      vi.mocked(service.getConversation).mockRestore();
+      const entries = [
+        { kind: "message" as const, role: "user" as const, text: session.prompt },
+        ...Array.from({ length: 1000 }, () => ({
+          kind: "message" as const,
+          role: "assistant" as const,
+          text: "Fixture progress",
+        })),
+      ];
+      readAgentConversationMock.mockResolvedValue(entries);
+      readClaudeConversationTailMock.mockResolvedValue({
+        entries: entries.slice(-10),
+        state: "waiting",
+        totalEntries: entries.length,
+        startIndex: entries.length - 10,
+        hasMore: true,
+        reader: { filePath: "fixture.jsonl" },
+      });
+      expect(await service.completeForRelease(session.id, guard)).toEqual({ status: "verified" });
+      expect(readAgentConversationMock).toHaveBeenCalled();
+    });
+
+    it("retains a truncated native history instead of treating its tail as a task", async () => {
+      const { service, session, guard, artifacts } = await setup();
+      vi.mocked(service.getConversation).mockResolvedValue({
+        messages: [],
+        entries: [{ kind: "message", role: "user", text: session.prompt }],
+        durationMs: 0,
+        state: "waiting",
+        startIndex: 3,
+        totalEntries: 4,
+      });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+        reason: "release_native_history_incomplete",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it.each(["Fresh review", "Affirm release", "Continue owner", "Release fixture task"])(
+      "retains later input %s without durable native identity even after restart",
+      async (message) => {
+        const { service, SessionService, session, guard, artifacts } = await setup();
+        vi.mocked(service.getConversation).mockResolvedValue({
+          messages: [],
+          entries: [
+            { kind: "message", role: "user", text: session.prompt },
+            { kind: "message", role: "user", text: message },
+          ],
+          durationMs: 0,
+          state: "waiting",
+          startIndex: 0,
+          totalEntries: 2,
+        });
+        expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+          status: "unknown",
+          reason: "release_native_input_identity_unavailable",
+        });
+        const restarted = new SessionService("/tmp/spur.yaml", session.createdAt, {
+          deferBackgroundLoops: true,
+        });
+        vi.spyOn(restarted, "getConversation").mockResolvedValue(
+          await service.getConversation(session.id, { from: 0 }),
+        );
+        expect(await restarted.completeForRelease(session.id, guard)).toMatchObject({
+          status: "unknown",
+          reason: "release_native_input_identity_unavailable",
+        });
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(existsSync(artifacts)).toBe(true);
+      },
+    );
+
+    it("retains native-unacknowledged input before any resource cleanup", async () => {
+      const { service, session, sessions, guard, artifacts } = await setup();
+      sessions.set(session.id, { ...session, submitUnconfirmedAt: session.updatedAt });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+        reason: "release_input_delivery_unconfirmed",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("checks current task identity after waiting for the lifecycle lock", async () => {
+      const { service, session, sessions, guard } = await setup();
+      let enter: () => void = () => {};
+      let release: () => void = () => {};
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const internals = service as unknown as {
+        withSessionLifecycleLocks<T>(ids: string[], task: () => Promise<T>): Promise<T>;
+      };
+      const held = internals.withSessionLifecycleLocks([session.id], async () => {
+        enter();
+        await blocked;
+      });
+      await entered;
+      const completion = service.completeForRelease(session.id, guard);
+      sessions.set(session.id, { ...session, prompt: "New unrelated task" });
+      release();
+      await held;
+      expect(await completion).toMatchObject({
+        status: "unknown",
+        reason: "release_task_changed_or_missing",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a task replacement during structured process observation", async () => {
+      const { service, session, sessions, guard } = await setup();
+      captureAgentProcessesForLaunchMock.mockImplementationOnce(async () => {
+        sessions.set(session.id, { ...session, agentLaunchId: "replacement-launch" });
+        return { status: "ok", processes: [] };
+      });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("retains an empty ledger even for an already-completed session", async () => {
+      const { service, session, guard } = await setup("completed");
+      await mockTodoLedger({
+        revision: "empty",
+        status: "active",
+        counts: { total: 0, open: 0, held: 0, completed: 0, cancelled: 0 },
+        items: [],
+        finishOverrides: [],
+      });
+      await expect(service.completeForRelease(session.id, guard)).rejects.toThrow();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("enforces the real ToDo gate for system completion", async () => {
+      const { service, session, guard } = await setup();
+      await mockTodoLedger(heldProjection("fixture-held", "Resolve fixture work"));
+      await expect(service.completeForRelease(session.id, guard)).rejects.toThrow();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("retains artifacts when the structured launch probe is unavailable", async () => {
+      const { service, session, guard, artifacts } = await setup();
+      captureAgentProcessesForLaunchMock.mockResolvedValue({ status: "unavailable" });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+      });
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("retains a service without a persisted process generation before any kill", async () => {
+      const { service, session, guard, artifacts } = await setup();
+      listServiceInstancesForSessionMock.mockReturnValue([
+        {
+          sessionId: session.id,
+          project: session.project,
+          serviceId: "fixture-service",
+          command: "fixture-service",
+          cwd: session.worktreePath,
+          tmuxSession: "fixture-service",
+          status: "running",
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        },
+      ]);
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("retains an exclusive sidecar with no proved launch ownership before any kill", async () => {
+      const { service, session, sessions, guard, artifacts } = await setup();
+      sessions.set(session.id, { ...session, sidecarNames: ["fixture-sidecar"] });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 123 });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+      });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("retains artifacts when owned processes survive", async () => {
+      const { service, session, guard, artifacts } = await setup();
+      terminateAgentProcessesMock.mockResolvedValue({ status: "survivors", pids: [123] });
+      expect(await service.completeForRelease(session.id, guard)).toMatchObject({
+        status: "unknown",
+      });
+      expect(existsSync(artifacts)).toBe(true);
+    });
+
+    it("verifies already-completed resource absence without repeating teardown", async () => {
+      const { service, session, guard, artifacts } = await setup("completed");
+      rmSync(artifacts, { recursive: true });
+      expect(await service.completeForRelease(session.id, guard)).toEqual({ status: "verified" });
+      expect(await service.completeForRelease(session.id, guard)).toEqual({ status: "verified" });
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("completes an archived task through the existing individual cleanup", async () => {
+      const { service, session, sessions, guard, captureReleaseTaskIdentity, artifacts } =
+        await setup();
+      expect(await service.completeForRelease(session.id, guard)).toEqual({ status: "verified" });
+      expect(sessions.get(session.id)?.status).toBe("completed");
+      expect(existsSync(artifacts)).toBe(false);
+      const completed = sessions.get(session.id);
+      if (!completed) throw new Error("Missing completed fixture");
+      expect(
+        await service.completeForRelease(session.id, {
+          ...guard,
+          identity: captureReleaseTaskIdentity(completed),
+        }),
+      ).toEqual({ status: "verified" });
+    });
+
+    it("preserves ordinary completion tolerance for process survivors", async () => {
+      const { service, session } = await setup();
+      terminateAgentProcessesMock.mockResolvedValue({ status: "survivors", pids: [123] });
+      expect((await service.complete(session.id, { prAction: "leave_open" })).status).toBe(
+        "completed",
+      );
     });
   });
 

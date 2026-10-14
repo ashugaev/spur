@@ -35,3 +35,10 @@ MERGE AUTHORITY
   Block strict success for pending/failing/missing/canceled/skipped/neutral required execution; no bypass.
   Reject footer, PR-owned receipt, prompt affirmation or replayed consent as protected approval proof.
   Require producer provenance, revision/lifecycle invalidation and privileged runner isolation before activation.
+  Resume registered releases under caller-pinned policy; review success grants no authority.
+  Permit scoped owner squash only with operator authority, accepted native action-time enforcement and fresh complete caller-trusted gate; generic vote auto-merge stays OFF.
+  Require current H/B, designated App receipts/launch-bound affirmations, independent coverage, both-lane interface attestation, required matching consent, strict required CI and zero blocking threads.
+  Reconcile ambiguous delivery/mutation before retry; own task through squash, semantic publication and verified isolated deployment of published package.
+  After verified release, archive evidence before individual task cleanup; preserve unrelated resources and honest ToDo gates, then one caller-pinned operator report.
+  Block blind uncertain-report resend; recover designated reviewers within persisted bounds after verified changed prerequisites.
+  Keep unavailable caller/fixture/current-launch producers blocked; pinned claims alone grant no producer identity or retry authority.

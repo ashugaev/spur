@@ -84,17 +84,8 @@ async function callTelegram<T>(
 ): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const response = await fetch(`https://api.telegram.org/bot${config.token}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      let payload: TelegramApiResponse<T> | null = null;
-      try {
-        payload = (await response.json()) as TelegramApiResponse<T>;
-      } catch {
-        // Use status text below.
-      }
+      const { response, payload: rawPayload } = await requestTelegram(config, method, body);
+      const payload = rawPayload as TelegramApiResponse<T> | null;
       if (response.ok && payload?.ok !== false && payload && "result" in payload) {
         return payload.result;
       }
@@ -110,6 +101,100 @@ async function callTelegram<T>(
       if (delayMs === null) throw error;
       await sleep(delayMs);
     }
+  }
+}
+
+async function requestTelegram(
+  config: Pick<TelegramSourceConfig, "token">,
+  method: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<{ response: Response; payload: unknown }> {
+  const response = await fetch(`https://api.telegram.org/bot${config.token}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    // A malformed body cannot establish delivery or rejection.
+  }
+  return { response, payload };
+}
+
+export type TelegramMessageSendOutcome =
+  | { status: "accepted"; messageId: number; chatId: number }
+  | { status: "rejected"; errorCode: number; retryAfterMs?: number }
+  | { status: "uncertain" };
+
+/** One plain-text send. Only a matching Bot API receipt proves acceptance. */
+export async function sendTelegramMessageOnce(
+  config: Pick<TelegramSourceConfig, "token">,
+  chatId: number,
+  text: string,
+): Promise<TelegramMessageSendOutcome> {
+  try {
+    const { response, payload } = await requestTelegram(
+      config,
+      "sendMessage",
+      { chat_id: chatId, text },
+      AbortSignal.timeout(30_000),
+    );
+    if (typeof payload !== "object" || payload === null) return { status: "uncertain" };
+    if (response.ok && "ok" in payload && payload.ok === true && "result" in payload) {
+      const result = payload.result;
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "message_id" in result &&
+        typeof result.message_id === "number" &&
+        Number.isSafeInteger(result.message_id) &&
+        result.message_id > 0 &&
+        "chat" in result &&
+        typeof result.chat === "object" &&
+        result.chat !== null &&
+        "id" in result.chat &&
+        typeof result.chat.id === "number" &&
+        Number.isSafeInteger(result.chat.id) &&
+        result.chat.id === chatId
+      ) {
+        return { status: "accepted", messageId: result.message_id, chatId: result.chat.id };
+      }
+    }
+    if (
+      response.status >= 400 &&
+      response.status < 500 &&
+      "ok" in payload &&
+      payload.ok === false &&
+      "error_code" in payload &&
+      payload.error_code === response.status &&
+      "description" in payload &&
+      typeof payload.description === "string"
+    ) {
+      const parameters = "parameters" in payload ? payload.parameters : undefined;
+      const retryAfter =
+        typeof parameters === "object" && parameters !== null && "retry_after" in parameters
+          ? parameters.retry_after
+          : undefined;
+      return {
+        status: "rejected",
+        errorCode: response.status,
+        ...(response.status === 429 &&
+        typeof retryAfter === "number" &&
+        Number.isSafeInteger(retryAfter) &&
+        retryAfter >= 0 &&
+        Number.isSafeInteger(retryAfter * 1_000)
+          ? { retryAfterMs: retryAfter * 1_000 }
+          : {}),
+      };
+    }
+    return { status: "uncertain" };
+  } catch {
+    // Dispatch may have succeeded before the response was lost. Never resend here.
+    return { status: "uncertain" };
   }
 }
 

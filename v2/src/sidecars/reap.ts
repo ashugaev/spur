@@ -582,14 +582,14 @@ export async function reapSidecarPane(
   );
 }
 
-type StarttimeProbe =
+export type StarttimeProbe =
   | { kind: "ok"; starttime: number; state: string | undefined }
   | { kind: "gone" }
   | { kind: "unknown" };
 
 // /proc/<pid>/stat field 22 (starttime). The comm field is parenthesized and
 // may itself contain spaces, so parsing anchors on the last ')'.
-async function readProcStarttime(pid: number): Promise<StarttimeProbe> {
+export async function readProcStarttime(pid: number): Promise<StarttimeProbe> {
   let content: string;
   try {
     content = await readFile(`/proc/${pid}/stat`, "utf8");

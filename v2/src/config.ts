@@ -1730,6 +1730,30 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const label = `projects.${projectId}`;
   const raw = asObject(value, label);
   const path = resolveFrom(configDir, asString(raw["path"], `${label}.path`));
+  const releaseRaw =
+    raw["releaseContinuation"] === undefined
+      ? undefined
+      : asObject(raw["releaseContinuation"], `${label}.releaseContinuation`);
+  const releaseContinuation =
+    releaseRaw === undefined
+      ? undefined
+      : {
+          policyFile: resolveFrom(
+            configDir,
+            asString(releaseRaw["policyFile"], `${label}.releaseContinuation.policyFile`),
+          ),
+          policyDigest: asString(
+            releaseRaw["policyDigest"],
+            `${label}.releaseContinuation.policyDigest`,
+          ),
+          intervalSeconds:
+            asOptionalPositiveInteger(
+              releaseRaw["intervalSeconds"],
+              `${label}.releaseContinuation.intervalSeconds`,
+            ) ?? 60,
+        };
+  if (releaseContinuation && !/^[a-f0-9]{64}$/.test(releaseContinuation.policyDigest))
+    throw new Error(`${label}.releaseContinuation.policyDigest must be SHA-256`);
   const projectEnv = readProjectEnv(path);
   const name = asOptionalString(raw["name"], `${label}.name`);
   const defaultBranch = asOptionalString(raw["defaultBranch"], `${label}.defaultBranch`) ?? "main";
@@ -1848,6 +1872,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   return {
     ...(name !== undefined ? { name } : {}),
     path,
+    ...(releaseContinuation ? { releaseContinuation } : {}),
     defaultBranch,
     sessionPrefix,
     worktree,

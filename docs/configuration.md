@@ -6,9 +6,16 @@ Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, 
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
+`projects.<id>.releaseContinuation.{policyFile,policyDigest,intervalSeconds}`: absent disables; caller-owned SHA-256-pinned policy outside checkouts; positive integer interval, default 60 seconds; `v2/src/config.ts`, `v2/src/release-continuation.ts`.
+Continuation private `postRelease`: absent disables task-bound archive/cleanup/report; report includes durable flow outcomes; incomplete history, unconfirmed/extra native input or unavailable task/process provenance retains resources; `v2/src/release-post.ts`, `v2/src/session-service.ts`.
+Continuation registration `reviewerRecovery`: absent disables; explicit `maxAttempts` 1..3, `cooldownSeconds` >=60, lane task digests; unavailable caller/fixture/current-launch acceptance producers block attempts; `v2/src/release-continuation.ts`.
+Recovery `callerCurrent` and `environmentRepair.challenger`: absent defaults null; `environmentRepair.evidence` requires null or pin; claims remain diagnostic, not producer identity or retry authority; `v2/src/release-continuation.ts`.
 `SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
 Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
 Approval writer variables `SPUR_CODE_REVIEW_ACTOR`, `SPUR_BROWSER_REVIEW_ACTOR`: distinct bot actor IDs; `.github/workflows/review-approval.yml`.
+Required native `Spur Strict CI`: four same-run required jobs must succeed; `.github/workflows/ci.yml`.
+Published-package deploy `SPUR_ISOLATED_DAEMON_URL`, `SPUR_TEST_DEPLOY_RECEIPT`: required owned loopback daemon outside default port, optional installed-version/HTTP receipt file; `scripts/test-deploy.sh`.
+Postrelease `TELEGRAM_BOT_TOKEN`: existing primary bot, caller-pinned private recipient proof; accepted chat/message response or durable uncertain outcome; `v2/src/release-post.ts`, `v2/src/telegram-source-state.ts`.
 
 ## Config registry
 

@@ -1,4 +1,5 @@
 import type { HostMemory } from "./host-memory.js";
+import type { ReleaseContinuationConfig } from "./release-continuation.js";
 
 export type AgentName = "claude" | "codex" | "cursor" | "opencode";
 export const SPUR_DAEMON_API_VERSION = 3;
@@ -743,6 +744,7 @@ export interface ProjectMcpConfig {
 }
 
 export interface ProjectConfig {
+  releaseContinuation?: ReleaseContinuationConfig;
   name?: string;
   path: string;
   defaultBranch: string;
@@ -1601,7 +1603,7 @@ export interface CompleteSessionRequest {
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
   | { kind: "human"; origin: "cli" | "ui" }
-  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
+  | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" | "release_continuation" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
 
