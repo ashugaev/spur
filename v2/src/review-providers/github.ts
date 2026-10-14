@@ -382,13 +382,15 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
 
 // A re-run (e.g. draft->ready) leaves the superseded run on the same head commit.
 // Runs are superseded per check suite, never per run: within one (kind, app,
-// workflow, name) key a run is dropped only when a different suite of that key
-// was created strictly later. Runs of one suite are siblings. A missing suite id
-// or unparseable timestamp keeps the check. StatusContext: latest createdAt wins.
+// workflow, trigger event, name) key a run is dropped only when a suite of that
+// key was created strictly later; siblings of one suite share a createdAt, so
+// they are kept. A missing suite id or unparseable timestamp keeps the check.
+// StatusContext: latest createdAt wins.
 export interface GitHubRunCheck extends GitHubCheck {
   kind?: "check_run" | "status_context";
   appId?: number;
   workflowId?: number;
+  event?: string;
   suiteId?: number;
   // CheckRun: check suite createdAt. StatusContext: context createdAt.
   createdAt?: string;
@@ -399,6 +401,7 @@ function checkRunKey(check: GitHubRunCheck): string {
     check.kind ?? null,
     check.appId ?? null,
     check.workflowId ?? null,
+    check.event ?? null,
     check.name,
   ]);
 }
@@ -409,17 +412,20 @@ function checkTime(check: GitHubRunCheck): number {
 }
 
 function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
-  return checks.filter((check) => {
-    const at = checkTime(check);
-    if (Number.isNaN(at)) return true;
-    const key = checkRunKey(check);
-    return !checks.some(
-      (other) =>
-        checkRunKey(other) === key &&
-        (other.suiteId === undefined || other.suiteId !== check.suiteId) &&
-        checkTime(other) > at,
-    );
-  });
+  const entries = checks.map((check) => ({
+    check,
+    key: checkRunKey(check),
+    at: checkTime(check),
+  }));
+  const latest = new Map<string, number>();
+  for (const { key, at } of entries) {
+    if (!Number.isNaN(at) && at > (latest.get(key) ?? Number.NEGATIVE_INFINITY)) {
+      latest.set(key, at);
+    }
+  }
+  return entries
+    .filter(({ key, at }) => Number.isNaN(at) || at >= (latest.get(key) ?? at))
+    .map(({ check }) => check);
 }
 
 export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
@@ -483,7 +489,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
-    ... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{workflow{databaseId}}}}
+    ... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}}
     ... on StatusContext{context state createdAt}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
@@ -546,6 +552,7 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
       const run = suite && isRecord(suite.workflowRun) ? suite.workflowRun : null;
       const workflow = run && isRecord(run.workflow) ? run.workflow : null;
       const workflowId = workflow ? readNumber(workflow.databaseId) : null;
+      const event = run ? readString(run.event) : null;
       return [
         {
           name,
@@ -553,6 +560,7 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
           kind: checkName ? "check_run" : "status_context",
           ...(appId !== null ? { appId } : {}),
           ...(workflowId !== null ? { workflowId } : {}),
+          ...(event ? { event } : {}),
           ...(suiteId !== null ? { suiteId } : {}),
           ...(createdAt ? { createdAt } : {}),
         },
@@ -1585,7 +1593,7 @@ function signalPageToFetch(
 function signalPageField(index: number, page: PullRequestSignalPage): string {
   const connection =
     page.kind === "checks"
-      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{workflow{databaseId}}}} ... on StatusContext{context state createdAt}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
         : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;

@@ -376,13 +376,14 @@ describe("summarizeFailingCi", () => {
     state: string,
     suiteId: number | undefined,
     createdAt: string,
-    ids: { appId?: number; workflowId?: number; name?: string } = {},
+    ids: { appId?: number; workflowId?: number; event?: string; name?: string } = {},
   ): GitHubRunCheck => ({
     name: ids.name ?? "build",
     state,
     kind: "check_run",
     ...(ids.appId !== undefined ? { appId: ids.appId } : {}),
     ...(ids.workflowId !== undefined ? { workflowId: ids.workflowId } : {}),
+    ...(ids.event !== undefined ? { event: ids.event } : {}),
     ...(suiteId !== undefined ? { suiteId } : {}),
     createdAt,
   });
@@ -412,10 +413,19 @@ describe("summarizeFailingCi", () => {
 
   it("never drops sibling runs of one suite against each other", () => {
     const ids = { appId: 1, workflowId: 7 };
-    // same suite id, sibling timestamps deliberately inconsistent
-    const checks = [cr("FAILURE", 10, T0, ids), cr("SUCCESS", 10, T1, ids)];
+    const checks = [cr("FAILURE", 10, T0, ids), cr("SUCCESS", 10, T0, ids)];
     expect(summarizeFailingCi(checks)).toBe(FAILING);
     expect(summarizeFailingCi([...checks].reverse())).toBe(FAILING);
+  });
+
+  it("keeps a push failure when a later pull_request suite of the same workflow succeeds", () => {
+    const base = { appId: 1, workflowId: 7 };
+    expect(
+      summarizeFailingCi([
+        cr("FAILURE", 10, T0, { ...base, event: "push" }),
+        cr("SUCCESS", 11, T1, { ...base, event: "pull_request" }),
+      ]),
+    ).toBe(FAILING);
   });
 
   it("flags a cancelled run in a later suite than a success of the same key", () => {
@@ -449,7 +459,13 @@ describe("summarizeFailingCi", () => {
     });
     const run = (
       conclusion: string,
-      suite: { id: number; createdAt: string; app: number; workflow: number | null },
+      suite: {
+        id: number;
+        createdAt: string;
+        app: number;
+        workflow: number | null;
+        event?: string;
+      },
     ): unknown => ({
       name: "Labeler",
       conclusion,
@@ -458,7 +474,10 @@ describe("summarizeFailingCi", () => {
         databaseId: suite.id,
         createdAt: suite.createdAt,
         app: { databaseId: suite.app },
-        workflowRun: suite.workflow === null ? null : { workflow: { databaseId: suite.workflow } },
+        workflowRun:
+          suite.workflow === null
+            ? null
+            : { event: suite.event, workflow: { databaseId: suite.workflow } },
       },
     });
     const FAIL = "CI is failing: Labeler.";
@@ -484,6 +503,14 @@ describe("summarizeFailingCi", () => {
       const success = run("SUCCESS", { id: 2, createdAt: T1, app: 6, workflow: null });
       expect(summarizeFailingCi(checksFromPrNode(prNode([failure, success])))).toBe(FAIL);
       expect(summarizeFailingCi(checksFromPrNode(prNode([success, failure])))).toBe(FAIL);
+    });
+
+    it("keeps a push failure when a later pull_request suite of the same workflow succeeds", () => {
+      const node = prNode([
+        run("FAILURE", { id: 1, createdAt: T0, app: 5, workflow: 7, event: "push" }),
+        run("SUCCESS", { id: 2, createdAt: T1, app: 5, workflow: 7, event: "pull_request" }),
+      ]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBe(FAIL);
     });
 
     it("keeps a failure next to a sibling success in the same suite", () => {
