@@ -12544,7 +12544,15 @@ export class SessionService {
           // spawn is already failing; a survivor throw here would bury the
           // original error instead of surfacing it.
           await this.killAgentPaneAndConfirmExit(
-            { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+            {
+              id: sessionId,
+              tmuxSession: sessionId,
+              agent,
+              launchCommand: "",
+              ...(launchCandidate?.agentLaunchId
+                ? { agentLaunchId: launchCandidate.agentLaunchId }
+                : {}),
+            },
             { failOnSurvivors: false },
           );
           // Non-mcp project sidecars are desk-shared: a sibling can already be
@@ -12698,6 +12706,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     workspacePath: string,
     finalFailure: boolean,
+    agentLaunchId: string | undefined,
   ): Promise<void> {
     // Called from the background-spawn retry catch, which wraps every stage
     // from tmux.create through record.write — same rationale as the
@@ -12711,6 +12720,7 @@ export class SessionService {
         tmuxSession: prepared.sessionId,
         agent: prepared.agent,
         launchCommand: prepared.placeholder.launchCommand,
+        ...(agentLaunchId ? { agentLaunchId } : {}),
       },
       { failOnSurvivors: false },
     );
@@ -13885,7 +13895,12 @@ export class SessionService {
         this.spawnWasKilled(sessionId) ||
         attempt >= SPAWN_RETRY_ATTEMPTS ||
         initialPromptSent;
-      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalAttempt);
+      await this.cleanupBackgroundSpawnAttempt(
+        prepared,
+        workspacePath,
+        finalAttempt,
+        launchCandidate?.agentLaunchId,
+      );
       // Re-read after the cleanup await: a kill can land during it.
       const killed = this.spawnWasKilled(sessionId);
       const finalFailure = finalAttempt || killed;
@@ -14218,6 +14233,7 @@ export class SessionService {
     }
     if (
       pane.panePid === null ||
+      pane.paneDead ||
       capture.processes.length === 0 ||
       capture.processes.some((process) => process.identity === null)
     ) {
@@ -14225,7 +14241,10 @@ export class SessionService {
     }
     const starttime = await readProcessStarttime(pane.panePid);
     const paneCapture = await capturePaneAgentProcesses({
+      sessionId: record.id,
+      agentLaunchId: record.agentLaunchId,
       panePid: pane.panePid,
+      paneDead: pane.paneDead,
       processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
     });
     if (
@@ -17801,10 +17820,13 @@ export class SessionService {
   }
 
   private async killAgentPaneAndConfirmExit(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
+    >,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17816,7 +17838,10 @@ export class SessionService {
       });
     }
     const capture = await capturePaneAgentProcesses({
+      sessionId: session.id,
+      agentLaunchId: session.agentLaunchId,
       panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {
@@ -18940,7 +18965,7 @@ export class SessionService {
             failure,
           },
         });
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+        await this.killAgentPaneAndConfirmExit(failedAttempt, { failOnSurvivors: true });
         usedFreshLaunch = true;
         agentLaunchId = newAgentLaunchId();
         env = buildLaunchEnv(agentLaunchId);
@@ -19791,7 +19816,7 @@ export class SessionService {
         if (launched) {
           await this.retainLaunchedError(launchCandidate, error);
         } else if (cleanupGeneration) {
-          await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+          await this.killAgentPaneAndConfirmExit(launchCandidate, { failOnSurvivors: false });
           await this.cleanupSessionServices(latest);
         }
       });
