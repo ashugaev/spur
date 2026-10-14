@@ -26781,6 +26781,8 @@ describe("SessionService", () => {
 
       expect(result.state).toBe("stopped");
       expect(result.status).toBe("stopped");
+      const { isRestorableSession } = await loadSessionServiceModule();
+      expect(isRestorableSession({ ...result, workspaceExists: true })).toBe(true);
       expect(sessions.get("api-1")?.status).toBe("stopped");
       expect(sessions.get("api-1")?.error).toBeUndefined();
       expect(sessions.get("api-1")?.errorSource).toBeUndefined();
@@ -49726,6 +49728,7 @@ describe("SessionService", () => {
           await tick(service, at(9, 15, 2));
           await waitForRealTime(() => expect(wakeSends("daily-api-1")).toBe(1));
           expect(events("session.wake.daily_sent")).toHaveLength(1);
+          expect(events("session.wake.daily_sent")[0]?.details?.["nextDueAt"]).toBe(iso(at(9, 0)));
           expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe(iso(at(9, 40)));
           expect(sessions.get("api-1")?.dailyWake).not.toHaveProperty(
             "admissionDeferredOccurrence",

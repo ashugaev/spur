@@ -606,6 +606,13 @@ const LEGACY_RUNTIME_DIAGNOSTICS = [
   "tmux process failed:",
 ];
 
+// Daily wake schedule without the admission retry marker: every claim write
+// drops it, the claimed occurrence is the one now in flight.
+function withoutAdmissionDeferral(dailyWake: SessionDailyWakeState): SessionDailyWakeState {
+  const { admissionDeferredOccurrence: _deferredOccurrence, ...schedule } = dailyWake;
+  return schedule;
+}
+
 // Status whose record claims a live agent runtime. Only these carry a runtime
 // probe failure as a session error; any other status ignores it.
 function expectsLiveRuntime(status: SessionStatus): boolean {
@@ -5429,9 +5436,7 @@ export class SessionService {
         ) {
           continue;
         }
-        // Every claim write drops the admission retry marker: the claimed
-        // occurrence is the one now in flight.
-        const { admissionDeferredOccurrence: _deferredOccurrence, ...dailySchedule } = dailyWake;
+        const dailySchedule = withoutAdmissionDeferral(dailyWake);
         const claimedDailyNextDueAt = await this.withWorkspaceLifecycleLocks(
           session.id,
           async (): Promise<string | null> => {
@@ -5538,7 +5543,7 @@ export class SessionService {
               projectId: session.project,
               message: `Sent daily wake to ${session.id}`,
               details: {
-                nextDueAt: dailyWake.nextDueAt,
+                nextDueAt: dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt,
                 dailyAt: dailyWake.dailyAt,
               },
             });
@@ -14067,10 +14072,9 @@ export class SessionService {
           cause: error,
         });
       }
-      const { admissionDeferredOccurrence: _deferredOccurrence, ...dailySchedule } = dailyWake;
       writeSession(this.config.dataDir, {
         ...current,
-        dailyWake: { ...dailySchedule, nextDueAt: nextDueAt.toISOString() },
+        dailyWake: { ...withoutAdmissionDeferral(dailyWake), nextDueAt: nextDueAt.toISOString() },
         updatedAt: nowIso(),
       });
       claimedNextDueAt = nextDueAt.toISOString();
