@@ -11,6 +11,8 @@ ATTEMPT
 
   Separate local implementation verdict from live publication; no active PR leaves publication NOT REQUIRED, not BLOCKED.
   Local gates falsify spec/checks without shared receipts or GitHub writes; local APPROVED never counts as published approval.
+  Select local CHANGES_REQUESTED for demonstrated defects or failed required code checks; preserve verdict through evidence/access/publication blockers.
+  Select local BLOCKED for missing required proof/access without demonstrated failure; select APPROVED only with all required checks/proof satisfied.
   Require caller-owned App config; probe network/publication access after attempt registration.
   Use caller's trusted `spur review-app` executable outside reviewed checkout for every transition.
   Missing capability blocks live publication; workspace-write/top-level bypass alone proves no child access outside workspace.
@@ -19,7 +21,7 @@ ATTEMPT
   Prepare identity/H/B/digest before checkout/QA; add verdict/body/evidence to separate publication input afterward.
   Start QA only after confirmed App-authored public PENDING; failed transport blocks QA and owner continuation.
   Receipt fields: session, attempt, H, B, contractDigest, status, evidence, reviewId; use repository owner/name namespaces.
-  Persist review failure through `spur review-app block`; new attempt required after review blocker. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
+  Persist evidence/access/publication blockers through `spur review-app block`; new attempt required after review blocker. Utility owns receipt transitions/locks; prohibit manual receipt replacement.
   Receipt write failure blocks; notify owner. Never recover eligibility from historical approval alone.
   Checkout H; bind test environment and artifacts to H/B. Record configuration/environment fingerprints.
 
@@ -53,15 +55,15 @@ DELTA
 PUBLICATION
 
   Re-read H/B before publication; changed pair invalidates pass.
-  Publish through `spur review-app publish --app-config <file> --request <file> --json`.
+  Publish through `spur review-app publish --app-config <file> --request <file> --json`: local APPROVED -> native APPROVE -> readback APPROVED; CHANGES_REQUESTED -> REQUEST_CHANGES -> CHANGES_REQUESTED.
   Measure lane identity/access through `spur review-app status`; missing config/access blocks. No human-token or unpinned fallback.
-  Body: conclusion, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections.
+  Native review body: conclusion, findings, lane/session/attempt, H/B, digest, status, scenario evidence, exclusions, checks and objections. Private reports or generic issue-state announcements never substitute.
   Code title: Code Review Conclusion. Browser title: Browser QA Conclusion. Use Objections: none only on clean pass.
   Verify returned review ID/state/commit_id; retrieve submitted review and compare. Re-read PR H/B afterward.
-  Denial, self-author restriction, mismatch, missing evidence or observed race yields BLOCKED; never claim approval.
-  Report local conclusion separately; self-author denial needs authorized non-author credentials, never COMMENT substituted for approval.
+  Denial, self-author restriction, mismatch, missing evidence or observed race leaves publication BLOCKED; retain local verdict, never claim submitted native verdict.
+  Self-author denial needs authorized non-author credentials; never substitute COMMENT for native verdict.
   Persist APPROVED only after verified publication/freshness; include returned reviewId in receipt.
-  Require confirmed App-authored final state alongside pinned native verdict; issue-comment state never replaces native approval.
+  Require confirmed App-authored final state alongside pinned native verdict/readback.
   Persist CHANGES_REQUESTED only after verified publication; otherwise retain BLOCKED.
   Notify matching PR owner only on verdict/attempt/head change; include receipt and bounded aggregate-read request under existing user authorization.
   Resolve owner via Spur PR binding, excluding own session; absent owner/send failure records BLOCKED notification status.
