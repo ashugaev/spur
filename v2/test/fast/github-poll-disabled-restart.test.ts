@@ -112,9 +112,8 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
-    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     handle.stop();
   });
@@ -156,9 +155,8 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
-    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     handle.stop();
   });
@@ -202,8 +200,7 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handleAfterWindow = await startHandle(dataDir);
     handleAfterWindow.runOnStart?.();
-    await flushPollCycle();
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     handleAfterWindow.stop();
   });
