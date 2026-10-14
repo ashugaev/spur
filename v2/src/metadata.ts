@@ -1132,7 +1132,6 @@ function validateDurableSpawnFields(session: SessionRecord): void {
       "launchSelection",
       "submission",
       "pane",
-      "openCodeBaseline",
       "telegramOrigin",
     ],
     "intent",
@@ -1147,15 +1146,6 @@ function validateDurableSpawnFields(session: SessionRecord): void {
     durableString(intent["defaultBranch"]) && durableString(intent["preflightBatchId"]),
     "intent branch/preflight",
   );
-  if (intent["openCodeBaseline"] !== undefined) {
-    const baseline = intent["openCodeBaseline"];
-    durableCheck(
-      session.agent === "opencode" &&
-        durableStrings(baseline) &&
-        new Set(baseline).size === baseline.length,
-      "OpenCode native session baseline",
-    );
-  }
   const request = durableObject(
     intent["request"],
     [

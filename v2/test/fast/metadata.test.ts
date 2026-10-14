@@ -1059,54 +1059,6 @@ describe("durable spawn metadata", () => {
   });
 
   it.each([
-    { phase: "queued", baseline: [] },
-    { phase: "workspace_ready", baseline: [] },
-    { phase: "launching", baseline: [] },
-    { phase: "queued", baseline: ["ses_prior_1", "ses_prior_2"] },
-    { phase: "workspace_ready", baseline: ["ses_prior_1", "ses_prior_2"] },
-    { phase: "launching", baseline: ["ses_prior_1", "ses_prior_2"] },
-  ] as const)(
-    "preserves an OpenCode native session baseline during $phase: $baseline",
-    async ({ phase, baseline }) => {
-      const dataDir = await newDataDir();
-      const session = acceptedSession();
-      session.agent = "opencode";
-      session.spawnIntent.request.agent = "opencode";
-      session.spawnIntent.phase = phase;
-      session.spawnIntent.openCodeBaseline = [...baseline];
-      writeSession(dataDir, session);
-      expect(readSession(dataDir, session.id)?.spawnIntent?.openCodeBaseline).toEqual(baseline);
-    },
-  );
-
-  it.each([
-    { label: "non-OpenCode agent", agent: "claude", baseline: ["ses_prior"] },
-    { label: "duplicate ids", agent: "opencode", baseline: ["ses_prior", "ses_prior"] },
-    { label: "empty id", agent: "opencode", baseline: [""] },
-    { label: "blank id", agent: "opencode", baseline: [" "] },
-    { label: "non-string id", agent: "opencode", baseline: [42] },
-    { label: "non-array baseline", agent: "opencode", baseline: "ses_prior" },
-  ])("rejects an OpenCode baseline with $label", async ({ agent, baseline }) => {
-    const dataDir = await newDataDir();
-    const session = acceptedSession();
-    writeSession(dataDir, session);
-    const corrupted = {
-      ...session,
-      agent,
-      spawnIntent: {
-        ...session.spawnIntent,
-        request: { ...session.spawnIntent.request, agent },
-        openCodeBaseline: baseline,
-      },
-    };
-    writeFileSync(join(dataDir, "sessions", "api", "api-1.json"), JSON.stringify(corrupted));
-    expect(() => readSession(dataDir, session.id)).toThrow("OpenCode native session baseline");
-    expect(() => writeSession(dataDir, corrupted as SessionRecord)).toThrow(
-      "OpenCode native session baseline",
-    );
-  });
-
-  it.each([
     { label: "missing receipt", patch: { spawnReceipt: undefined } },
     {
       label: "receipt version",

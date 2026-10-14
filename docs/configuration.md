@@ -117,6 +117,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 Spawn waits automatically for memory-guard or live-session-cap recovery; `v2/src/session-service.ts`.
 Accepted background and resource-queued HTTP spawns retain session id, launch intent, messages, attachments, and selected account across daemon restart; `v2/src/session-service.ts`, `v2/src/metadata.ts`.
 Recovery adopts confirmed existing runtime; uncertain runtime or startup delivery holds and rechecks automatically; `v2/src/session-service.ts`.
+OpenCode recovery without a persisted native session id stays `session.spawn.recovery_held`; history and prompt acknowledgment cannot supply ownership; `v2/src/session-service.ts`.
 
 Restore and wake reject memory-guard or cap denial (`429`); `v2/src/session-service.ts`.
 Limits: `v2/src/config.ts`; reports: [`GET /headroom`](daemon-api.md), [`spur doctor`](commands.md#doctor).

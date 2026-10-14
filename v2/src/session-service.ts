@@ -13629,34 +13629,27 @@ export class SessionService {
               freshLaunch: true,
             })
           : null;
-      runningRecord = this.checkpointSpawn({ ...runningRecord, status: "spawning" }, "launching", {
-        state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
-        ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
-        message: startupMessage,
-        ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
-      });
+      runningRecord = this.checkpointSpawn(
+        { ...runningRecord, status: "spawning" },
+        agent === "opencode" ? "workspace_ready" : "launching",
+        {
+          state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+          ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+          message: startupMessage,
+          ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+        },
+      );
       prepared.placeholder = runningRecord;
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
-        if (openCodeSessionBaseline && runningRecord.spawnIntent) {
-          runningRecord = this.writeSpawnRecord({
-            ...runningRecord,
-            spawnIntent: {
-              ...runningRecord.spawnIntent,
-              openCodeBaseline: [...openCodeSessionBaseline.sessionIds],
-              ...(promptDeliveredOnLaunch
-                ? {
-                    submission: {
-                      ...runningRecord.spawnIntent.submission,
-                      state: "uncertain",
-                      uncertainAt: nowIso(),
-                    },
-                  }
-                : {}),
-            },
+        if (openCodeSessionBaseline) {
+          runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+            ...runningRecord.spawnIntent?.submission,
+            state: promptDeliveredOnLaunch ? "uncertain" : "pending",
+            ...(promptDeliveredOnLaunch ? { uncertainAt: nowIso() } : {}),
           });
         }
 
@@ -13841,6 +13834,7 @@ export class SessionService {
     } catch (error) {
       const interrupted = readSession(this.config.dataDir, sessionId);
       if (
+        (this.admissionStopped && interrupted?.spawnIntent) ||
         error instanceof SpawnAdmissionCancelledError ||
         (interrupted?.spawnReceipt && !interrupted.spawnIntent)
       ) {
@@ -14268,36 +14262,15 @@ export class SessionService {
   private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
     const intent = record.spawnIntent;
     if (!intent) return;
+    if (record.agent === "opencode" && !record.agentSessionId) {
+      throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+    }
     const evidence = await this.observeDurableRuntime(record);
     if (evidence.state === "unknown") throw new Error(evidence.reason);
-    let openCodeLaunchConfirmed = false;
-    if (record.agent === "opencode" && intent.openCodeBaseline) {
-      openCodeLaunchConfirmed = await withOpenCodeLaunchIdentityLock(
-        record.worktreePath,
-        async () => {
-          const agentSessionId =
-            record.agentSessionId ??
-            (evidence.state === "matching"
-              ? await resolveNewOpenCodeSessionId({
-                  worktreePath: record.worktreePath,
-                  sessionIds: new Set(intent.openCodeBaseline),
-                })
-              : null);
-          if (!agentSessionId || intent.openCodeBaseline?.includes(agentSessionId)) return false;
-          await this.withWorkspaceLifecycleLocks(record.id, async () => {
-            const current = readSession(this.config.dataDir, record.id);
-            if (
-              !current?.spawnIntent ||
-              isTerminalSessionStatus(current.status) ||
-              current.agentLaunchId !== record.agentLaunchId
-            )
-              throw new SpawnAdmissionCancelledError("killed");
-            record = this.writeSpawnRecord({ ...current, agentSessionId });
-          });
-          return waitForOpenCodeLaunchMessage(agentSessionId, 0);
-        },
-      );
-    }
+    const openCodeLaunchConfirmed =
+      record.agent === "opencode" &&
+      record.agentSessionId !== undefined &&
+      (await waitForOpenCodeLaunchMessage(record.agentSessionId, 0));
     if (evidence.state === "absent") {
       await this.withWorkspaceLifecycleLocks(record.id, async () => {
         const current = readSession(this.config.dataDir, record.id);

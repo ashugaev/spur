@@ -20801,7 +20801,6 @@ describe("SessionService", () => {
         expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
         expect(sessions.get("api-1")?.spawnIntent).toMatchObject({
           phase: "launching",
-          openCodeBaseline: [],
           submission: { state: "uncertain" },
         });
       });
@@ -20868,6 +20867,261 @@ describe("SessionService", () => {
       expect(createWorktreeMock).toHaveBeenCalledTimes(1);
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
       expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("durable OpenCode native recovery", () => {
+    it("preserves accepted workspace and artifacts when native-history capture rejects after dispose", async () => {
+      const sessions = createSessionStore();
+      const actualAgents = await vi.importActual<typeof agentIndexModule>(
+        "../../src/agents/index.js",
+      );
+      buildAgentLaunchPlanMock.mockImplementation(actualAgents.buildAgentLaunchPlan);
+      createAgentSubmitAckBindingMock.mockImplementation(actualAgents.createAgentSubmitAckBinding);
+      const worktreePath = join(TEST_ARTIFACTS_ROOT, "allocated-workspace");
+      createWorktreeMock.mockImplementationOnce(async () => {
+        mkdirSync(worktreePath, { recursive: true });
+        return worktreePath;
+      });
+      let rejectCapture: ((error: Error) => void) | undefined;
+      captureOpenCodeSessionBaselineMock.mockImplementationOnce(
+        () =>
+          new Promise<openCodeModule.OpenCodeSessionBaseline>((_resolve, reject) => {
+            rejectCapture = reject;
+          }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const first = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const accepted = await first.spawnInBackground({
+        project: "api",
+        agent: "opencode",
+        prompt: "preserve native allocation",
+        attachments: [
+          { name: "notes.txt", data: Buffer.from("preserve accepted evidence").toString("base64") },
+        ],
+      });
+      await vi.waitFor(() => expect(captureOpenCodeSessionBaselineMock).toHaveBeenCalledTimes(1));
+      const checkpoint = clone(sessions.get(accepted.id));
+      expect(checkpoint?.spawnIntent?.phase).toBe("workspace_ready");
+      expect(checkpoint?.worktreePath).toBe(worktreePath);
+      const artifactId = checkpoint?.startupAttachmentIds?.[0];
+      if (!artifactId) throw new Error("Missing accepted startup artifact");
+      const artifactPath = join(artifactDirForSession(accepted.id), artifactId);
+      expect(readFileSync(artifactPath, "utf8")).toBe("preserve accepted evidence");
+      first.dispose();
+      rejectCapture?.(new Error("native history read failed after disposal"));
+      await first.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)).toEqual(checkpoint);
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(readFileSync(artifactPath, "utf8")).toBe("preserve accepted evidence");
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      readSessionArtifactMock.mockReturnValue({
+        id: artifactId,
+        name: "notes.txt",
+        path: artifactPath,
+      });
+      const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      await (restored as unknown as { runMemoryShedTick(): Promise<void> }).runMemoryShedTick();
+      await restored.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)).toMatchObject({
+        id: accepted.id,
+        status: "running",
+        worktreePath,
+        startupAttachmentIds: [artifactId],
+      });
+      expect(readFileSync(artifactPath, "utf8")).toBe("preserve accepted evidence");
+      expect(createWorktreeMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    async function interruptedNativeBinding(trustedNativeId?: string) {
+      const config = baseConfig();
+      config.admission.maxLiveSessions = 2;
+      config.admission.memoryGuard.shedEnabled = false;
+      config.projects.api.path = process.cwd();
+      config.projects.api.worktree = false;
+      loadConfigMock.mockReturnValue(config);
+      const anchor = sessionRecord({
+        id: "api-anchor",
+        agent: "opencode",
+        status: "completed",
+        worktreePath: process.cwd(),
+      });
+      const sessions = createSessionStore(anchor);
+      const actualAgents = await vi.importActual<typeof agentIndexModule>(
+        "../../src/agents/index.js",
+      );
+      const actualOpenCode = await vi.importActual<typeof openCodeModule>(
+        "../../src/agents/opencode.js",
+      );
+      buildAgentLaunchPlanMock.mockImplementation(actualAgents.buildAgentLaunchPlan);
+      createAgentSubmitAckBindingMock.mockImplementation(actualAgents.createAgentSubmitAckBinding);
+      captureOpenCodeSessionBaselineMock.mockResolvedValue({
+        worktreePath: process.cwd(),
+        sessionIds: new Set(["ses_old"]),
+      });
+      if (trustedNativeId) resolveNewOpenCodeSessionIdMock.mockResolvedValue(trustedNativeId);
+      else
+        resolveNewOpenCodeSessionIdMock.mockRejectedValue(new Error("Native binding interrupted"));
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const { readProcessStarttime } = await import("../../src/sidecars/reap.js");
+      const starttime = await readProcessStarttime(process.pid);
+      if (starttime === null) throw new Error("Missing test process generation");
+      const processRef = { pid: process.pid, identity: String(starttime) };
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [processRef],
+        complete: true,
+      });
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: [processRef] });
+      let releaseReady: (() => void) | undefined;
+      let releaseLaunchMessage: ((confirmed: boolean) => void) | undefined;
+      if (trustedNativeId) {
+        waitForOpenCodeLaunchMessageMock.mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              releaseLaunchMessage = resolve;
+            }),
+        );
+      } else {
+        waitForTmuxReadyMock.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseReady = resolve;
+            }),
+        );
+      }
+      const { SessionService } = await loadSessionServiceModule({ realPaneGeneration: true });
+      const first = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const accepted = await first.spawnInBackground({
+        project: "api",
+        agent: "opencode",
+        prompt: "recover native identity",
+        reuseWorkspaceSessionId: anchor.id,
+      });
+      if (trustedNativeId)
+        await vi.waitFor(() => expect(waitForOpenCodeLaunchMessageMock).toHaveBeenCalledTimes(1));
+      else await vi.waitFor(() => expect(waitForTmuxReadyMock).toHaveBeenCalledTimes(1));
+      first.dispose();
+      releaseReady?.();
+      releaseLaunchMessage?.(false);
+      await first.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)?.agentSessionId).toBe(trustedNativeId);
+      expect(sessions.get(accepted.id)?.spawnIntent).toMatchObject({
+        phase: "launching",
+        submission: { state: "uncertain" },
+      });
+      expect(sessions.get(accepted.id)?.spawnIntent).not.toHaveProperty("openCodeBaseline");
+      createTmuxSessionMock.mockClear();
+      sendMessageToTmuxMock.mockClear();
+      reserveNextSessionIdMock.mockClear();
+      resolveNewOpenCodeSessionIdMock.mockClear();
+      captureOpenCodeSessionBaselineMock.mockClear();
+      waitForOpenCodeLaunchMessageMock.mockClear();
+      return { SessionService, accepted, anchor, sessions, actualOpenCode };
+    }
+
+    it("refuses the unique unseen native session already pinned to a sibling in the reused workspace", async () => {
+      const { SessionService, accepted, anchor, sessions, actualOpenCode } =
+        await interruptedNativeBinding();
+      sessions.set(
+        "api-sibling",
+        sessionRecord({
+          id: "api-sibling",
+          workspaceId: anchor.id,
+          agent: "opencode",
+          agentSessionId: "ses_new",
+          agentLaunchId: "sibling-launch",
+          worktreePath: process.cwd(),
+        }),
+      );
+      resolveNewOpenCodeSessionIdMock.mockImplementation(
+        async (baseline: openCodeModule.OpenCodeSessionBaseline) =>
+          actualOpenCode.diffOpenCodeSessionIds(baseline, new Set(["ses_old", "ses_new"])),
+      );
+      waitForOpenCodeLaunchMessageMock.mockResolvedValue(true);
+      const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      await (restored as unknown as { runMemoryShedTick(): Promise<void> }).runMemoryShedTick();
+      await restored.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)?.agentSessionId).toBeUndefined();
+      expect(sessions.get(accepted.id)?.spawnIntent).toBeDefined();
+      expect(sessions.get(accepted.id)?.error).toBeDefined();
+      expect(sessions.get("api-sibling")?.agentSessionId).toBe("ses_new");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(waitForOpenCodeLaunchMessageMock).not.toHaveBeenCalled();
+      expect(resolveNewOpenCodeSessionIdMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { history: "old IDs only", ids: ["ses_old"], launchMessage: false },
+      {
+        history: "ambiguous new IDs",
+        ids: ["ses_old", "ses_new", "ses_other"],
+        launchMessage: false,
+      },
+      {
+        history: "unique ID without launch input",
+        ids: ["ses_old", "ses_new"],
+        launchMessage: false,
+      },
+      { history: "unique ID with launch input", ids: ["ses_old", "ses_new"], launchMessage: true },
+    ])("holds unbound native identity despite $history", async ({ ids, launchMessage }) => {
+      const { SessionService, accepted, sessions, actualOpenCode } =
+        await interruptedNativeBinding();
+      resolveNewOpenCodeSessionIdMock.mockImplementation(
+        async (baseline: openCodeModule.OpenCodeSessionBaseline) =>
+          actualOpenCode.diffOpenCodeSessionIds(baseline, new Set(ids)),
+      );
+      waitForOpenCodeLaunchMessageMock.mockResolvedValue(launchMessage);
+      const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      const queue = restored as unknown as { runMemoryShedTick(): Promise<void> };
+      await queue.runMemoryShedTick();
+      await restored.settleBackgroundSpawns();
+      await queue.runMemoryShedTick();
+      expect(sessions.get(accepted.id)?.agentSessionId).toBeUndefined();
+      expect(sessions.get(accepted.id)?.spawnIntent).toBeDefined();
+      expect(sessions.get(accepted.id)?.error).toBeDefined();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(captureOpenCodeSessionBaselineMock).not.toHaveBeenCalled();
+      expect(resolveNewOpenCodeSessionIdMock).not.toHaveBeenCalled();
+      expect(waitForOpenCodeLaunchMessageMock).not.toHaveBeenCalled();
+    });
+
+    it("adopts the persisted trusted native binding only after its own launch input is confirmed", async () => {
+      const { SessionService, accepted, sessions } = await interruptedNativeBinding("ses_trusted");
+      waitForOpenCodeLaunchMessageMock.mockResolvedValue(false);
+      const restored = new SessionService("/tmp/spur.yaml", "2026-03-18T10:06:00.000Z");
+      const queue = restored as unknown as { runMemoryShedTick(): Promise<void> };
+      await queue.runMemoryShedTick();
+      await restored.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)?.agentSessionId).toBe("ses_trusted");
+      expect(sessions.get(accepted.id)?.spawnIntent).toBeDefined();
+      expect(sessions.get(accepted.id)?.error).toBeDefined();
+      expect(waitForOpenCodeLaunchMessageMock).toHaveBeenCalledWith("ses_trusted", 0);
+      waitForOpenCodeLaunchMessageMock.mockResolvedValue(true);
+      await queue.runMemoryShedTick();
+      await restored.settleBackgroundSpawns();
+      expect(sessions.get(accepted.id)).toMatchObject({
+        id: accepted.id,
+        status: "running",
+        agentSessionId: "ses_trusted",
+      });
+      expect(sessions.get(accepted.id)?.spawnIntent).toBeUndefined();
+      expect(sessions.get(accepted.id)?.error).toBeUndefined();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(captureOpenCodeSessionBaselineMock).not.toHaveBeenCalled();
+      expect(resolveNewOpenCodeSessionIdMock).not.toHaveBeenCalled();
     });
   });
 
@@ -57350,7 +57604,7 @@ describe("SessionService", () => {
         const service = await createDisposedSessionService();
         // Seed a cached refusal for this session+sidecar directly, bypassing
         // a real conflict — this pins only the clear, not the gate.
-        const conflictKey = "api-1 proxy";
+        const conflictKey = "api-1\u0000proxy";
         // @ts-expect-error test-only access to a private map
         service.sidecarStartConflictState.set(conflictKey, {
           failures: 3,

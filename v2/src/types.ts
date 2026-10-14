@@ -1513,7 +1513,6 @@ export interface DurableSpawnIntent {
     ackBaseline?: SubmitAckBaseline;
   };
   pane?: { pid: number; starttime: number };
-  openCodeBaseline?: string[];
   telegramOrigin?: TelegramSpawnOrigin;
 }
 
