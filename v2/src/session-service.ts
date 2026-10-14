@@ -252,6 +252,7 @@ import {
   readTelegramBindings,
   readServiceInstance,
   readSession,
+  archiveSessions,
   readInterfaceConsent,
   writeInterfaceConsent,
   recordTelegramMessages,
@@ -499,6 +500,7 @@ import {
   type TelegramReplyTarget,
   type TelegramSourceConfig,
   type TelegramSpawnOrigin,
+  type WorkItemTriggerOrigin,
   TELEGRAM_CHOICE_CALLBACK_PREFIX,
   TELEGRAM_MESSAGE_EVENT,
   type SharedMemoryEntryResponse,
@@ -574,6 +576,7 @@ import {
   branchRefsExist,
   branchStatus,
   createWorktree,
+  deleteLocalBranch,
   findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
@@ -10828,6 +10831,33 @@ export class SessionService {
     return loadProjectSuggestions(agent, project.path);
   }
 
+  // Cleans up what a hard spawn failure of a work-item trigger block left
+  // behind before a replacement spawns: the session's own local branch (named
+  // after its id, never reused) and the errored record. Untagged or non-errored
+  // records are not touched. The record is archived whatever the delete does.
+  async discardFailedSpawn(sessionId: string): Promise<void> {
+    const record = readSession(this.config.dataDir, sessionId);
+    // launchCommand stays empty until the agent launches: a launched session
+    // is not a never-started spawn leftover.
+    if (!record || record.status !== "errored" || !record.triggerOrigin) return;
+    if (record.launchCommand !== "") return;
+    if (record.branch === record.id) {
+      try {
+        await deleteLocalBranch(this.getProject(record.project).path, record.branch);
+      } catch (error) {
+        this.logEvent("trigger.spawn.discard_failed", {
+          level: "warn",
+          sessionId,
+          projectId: record.project,
+          message: `Could not delete branch ${record.branch}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      }
+    }
+    archiveSessions(this.config.dataDir, [record]);
+  }
+
   async branchStatus(projectId: string, name: string): Promise<BranchExistsResponse> {
     const project = this.getProject(projectId);
     const normalized = normalizeBranchName(name);
@@ -11765,6 +11795,8 @@ export class SessionService {
       receiptToken?: symbol;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
+      /** Internal: set by a work-item spawn trigger, never from the HTTP body. */
+      triggerOrigin?: WorkItemTriggerOrigin;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -12003,6 +12035,7 @@ export class SessionService {
         ...(request.slots?.links?.length
           ? { slots: { links: normalizeSlotLinks(request.slots.links) } }
           : {}),
+        ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
@@ -12492,6 +12525,7 @@ export class SessionService {
             updatedAt: nowIso(),
             error: message,
             errorSource: "other",
+            ...(options?.triggerOrigin ? { triggerOrigin: options.triggerOrigin } : {}),
           };
           const killed = this.spawnWasKilled(sessionId);
           const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
