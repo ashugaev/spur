@@ -1905,7 +1905,7 @@ export type SubmitAckBaseline =
       size: number;
       /** Rotated chat transcript and its offset at send time. */
       rotated?: { file: string; size: number };
-      /** Date.now() just before the pane write; a rotated chat born after it was created by the send. */
+      /** Retained write-start stamp; file birth cannot prove submission. */
       writeStartedAtMs?: number;
     }
   | {

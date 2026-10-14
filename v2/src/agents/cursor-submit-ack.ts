@@ -1,5 +1,4 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import {
   findCursorAckTranscriptFile,
@@ -20,7 +19,7 @@ export interface CursorSubmitBaseline {
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
   rotationOffsets?: Map<string, number>;
-  // Date.now() just before the pane write (markCursorWriteStart); a rotated chat born after it was created by the send.
+  // Retained in persisted baselines; file birth relative to this stamp cannot prove submission.
   writeStartedAtMs?: number;
 }
 
@@ -135,20 +134,6 @@ export async function markCursorWriteStart(
   persisted.rotated = { file: rotated, size: await seedRotationOffset(baseline, rotated) };
 }
 
-// True when the file's birth postdates the pane write start, i.e. the send
-// created it. Strict ms compare: unknown birthtime (0) and same-ms keep the floor.
-async function bornAfterWriteStart(
-  file: string,
-  writeStartedAtMs: number | undefined,
-): Promise<boolean> {
-  if (writeStartedAtMs === undefined) return false;
-  try {
-    return Math.floor((await stat(file)).birthtimeMs) > writeStartedAtMs;
-  } catch {
-    return false;
-  }
-}
-
 async function capturePinnedCursorBaseline(
   worktreePath: string,
   agentSessionId?: string,
@@ -228,7 +213,6 @@ async function scanFileForUserText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
-  firstUserRecordOnly = false,
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
@@ -242,7 +226,7 @@ async function scanFileForUserText(
         const text = extractUserMessageText(parsed);
         if (text === null) continue;
         const matches = normalize(text).includes(normalizedTarget);
-        if (matches || firstUserRecordOnly) {
+        if (matches) {
           reader.close();
           return matches;
         }
@@ -287,21 +271,12 @@ export async function scanCursorJsonlForMessage(
       // it, and remember that offset for every later poll of the same
       // binding, so only records written after that sighting can ack.
       //
-      // A chat born after the pane write was created by this send, so the sent
-      // query is its FIRST user record. Birthtime is not trustworthy enough to
-      // scan such a chat from 0 (any later record could ack), so only that
-      // first record may ack past the floor. Only the first sighting needs the
-      // check: a first record not yet flushed lands after the floor, and the
-      // floor scan on every poll covers it.
+      // A new file can copy old matching text before the paste completes.
+      // Birthtime and first-record position cannot prove which send wrote it.
+      // Keep the floor even if it excludes a legitimate first record.
       let offset = baseline.rotationOffsets?.get(rotated);
       if (offset === undefined) {
         offset = await seedRotationOffset(baseline, rotated);
-        if (
-          (await bornAfterWriteStart(rotated, baseline.writeStartedAtMs)) &&
-          (await scanFileForUserText(rotated, 0, normalizedTarget, true))
-        ) {
-          return { found: true, scannedFile: rotated };
-        }
       }
       const found = await scanFileForUserText(rotated, offset, normalizedTarget);
       return { found, scannedFile: rotated };

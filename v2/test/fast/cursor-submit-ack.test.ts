@@ -1,5 +1,4 @@
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import type * as FsPromisesModule from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,8 +8,6 @@ const {
   findCursorAckTranscriptFileMock,
   resolveCursorPinnedTranscriptPathMock,
   findCursorSessionIdMock,
-  statMock,
-  realStatHolder,
 } = vi.hoisted(() => ({
   findCursorAckTranscriptFileMock:
     vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
@@ -18,16 +15,7 @@ const {
     vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
   findCursorSessionIdMock:
     vi.fn<(worktreePath: string, options?: { configDir?: string }) => Promise<string | null>>(),
-  statMock: vi.fn<(path: string) => Promise<unknown>>(),
-  realStatHolder: { stat: undefined as undefined | ((path: string) => Promise<unknown>) },
 }));
-
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof FsPromisesModule>();
-  realStatHolder.stat = actual.stat as unknown as (path: string) => Promise<unknown>;
-  statMock.mockImplementation(realStatHolder.stat);
-  return { ...actual, stat: statMock };
-});
 
 vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => {
   const actual = await importOriginal<typeof CursorJsonlStateModule>();
@@ -58,17 +46,7 @@ beforeEach(() => {
   findCursorAckTranscriptFileMock.mockReset();
   resolveCursorPinnedTranscriptPathMock.mockReset();
   findCursorSessionIdMock.mockReset();
-  statMock.mockReset();
-  if (realStatHolder.stat) statMock.mockImplementation(realStatHolder.stat);
 });
-
-// Report `birthtimeMs` for `target` only; every other path stats for real.
-function stubBirthtime(target: string, birthtimeMs: number): void {
-  statMock.mockImplementation(async (path: string) => {
-    const real = (await realStatHolder.stat?.(path)) as Record<string, unknown>;
-    return path === target ? { ...real, birthtimeMs } : real;
-  });
-}
 
 afterEach(async () => {
   while (tempDirs.length > 0) {
@@ -521,10 +499,9 @@ describe("cursor submit baseline across a restart", () => {
   });
 });
 
-// #982: a rotated chat CREATED BY the send has the sent query as its first
-// record, already below the first-sighting floor. Cursor records carry no
-// timestamp, so the file's birthtime against the pane-write stamp decides.
-describe("rotated chat created by the send (#982)", () => {
+// Defer #982's below-floor first-record acknowledgement: file birth cannot
+// distinguish a send-created record from old history copied before paste.
+describe("conservative rotated-chat acknowledgement", () => {
   const options = { cursorConfigDir: "/tmp/spur-data/cursor/session-1" };
   const stamp = 1_700_000_000_000;
 
@@ -546,76 +523,44 @@ describe("rotated chat created by the send (#982)", () => {
   const scan = (baseline: Parameters<typeof scanCursorJsonlForMessage>[0], text: string) =>
     scanCursorJsonlForMessage(baseline, text, "/tmp/worktree", "pinned-id", options);
 
-  it("acks on the first poll when the rotated chat was born after the write start", async () => {
+  it("defers a matching first record below the floor even after the write stamp", async () => {
     const { baseline, rotatedFile } = await setup([userTurn("ship the task")]);
-    stubBirthtime(rotatedFile, stamp + 5);
+    expect((await stat(rotatedFile)).birthtimeMs).toBeGreaterThan(stamp);
     expect(await scan(baseline, "ship the task")).toEqual({
-      found: true,
+      found: false,
       scannedFile: rotatedFile,
     });
-  });
-
-  it("keeps the floor for a rotated chat born before the write start", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("continue")]);
-    stubBirthtime(rotatedFile, stamp - 5000);
-    expect(await scan(baseline, "continue")).toEqual({ found: false, scannedFile: rotatedFile });
-  });
-
-  it("keeps the floor when birthtime is unknown (0), acking only a later turn", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("ship the task")]);
-    stubBirthtime(rotatedFile, 0);
     expect((await scan(baseline, "ship the task")).found).toBe(false);
     await appendJsonl(rotatedFile, [userTurn("ship the task")]);
     expect((await scan(baseline, "ship the task")).found).toBe(true);
   });
 
-  it("keeps the floor for a sub-millisecond-later birthtime (floored to the stamp)", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("continue")]);
-    stubBirthtime(rotatedFile, stamp + 0.5);
-    expect((await scan(baseline, "continue")).found).toBe(false);
-  });
-
-  it("keeps the floor when stat of the rotated file rejects", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("continue")]);
-    statMock.mockImplementation(async (path: string) => {
-      if (path === rotatedFile) throw new Error("ENOENT");
-      return realStatHolder.stat?.(path);
-    });
-    expect((await scan(baseline, "continue")).found).toBe(false);
-  });
-
   it("keeps the floor for a legacy baseline without a stamp", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("continue")]);
-    stubBirthtime(rotatedFile, stamp + 5);
+    const { baseline } = await setup([userTurn("continue")]);
     const legacy = restoreCursorSubmitBaseline({ file: baseline.file, size: baseline.size });
     expect((await scan(legacy, "continue")).found).toBe(false);
   });
 
-  // A chat born after the write has the sent query as its FIRST user record;
-  // birthtime alone never lets a later record ack.
   it("C1: a post-write chat whose first record is an old query does not ack a later repeat", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("old query"), userTurn("continue")]);
-    stubBirthtime(rotatedFile, stamp + 5);
+    const { baseline } = await setup([userTurn("old query"), userTurn("continue")]);
     expect((await scan(baseline, "continue")).found).toBe(false);
     expect((await scan(baseline, "continue")).found).toBe(false);
   });
 
-  it("C2b: a post-write chat with non-user and textless records ahead of the sent text acks on the first poll", async () => {
+  it("C2b: keeps the floor after non-user and textless records ahead of matching text", async () => {
     const { baseline, rotatedFile } = await setup([
       { role: "assistant", message: { content: [{ type: "text", text: "hello" }] } },
       { role: "user", message: { content: [] } },
       userTurn("ship the task"),
     ]);
-    stubBirthtime(rotatedFile, stamp + 5);
     expect(await scan(baseline, "ship the task")).toEqual({
-      found: true,
+      found: false,
       scannedFile: rotatedFile,
     });
   });
 
   it("C3: a post-write chat sighted empty acks once its first record is the sent text", async () => {
     const { baseline, rotatedFile } = await setup([]);
-    stubBirthtime(rotatedFile, stamp + 5);
     expect((await scan(baseline, "ship the task")).found).toBe(false);
     await appendJsonl(rotatedFile, [userTurn("ship the task")]);
     expect(await scan(baseline, "ship the task")).toEqual({
@@ -624,9 +569,8 @@ describe("rotated chat created by the send (#982)", () => {
     });
   });
 
-  it("C4: a restored binding applies the same first-record rule to a post-write chat", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("other"), userTurn("continue")]);
-    stubBirthtime(rotatedFile, stamp + 5);
+  it("C4: a restored binding floors a post-write chat", async () => {
+    const { baseline } = await setup([userTurn("other"), userTurn("continue")]);
     const restored = restoreCursorSubmitBaseline({
       file: baseline.file,
       size: baseline.size,
@@ -635,19 +579,18 @@ describe("rotated chat created by the send (#982)", () => {
     expect((await scan(restored, "continue")).found).toBe(false);
   });
 
-  it("C5: acks the second rotated chat when its first record is the sent text", async () => {
-    const { baseline, rotatedFile } = await setup([userTurn("other")]);
+  it("C5: floors the second rotated chat and acknowledges only a later append", async () => {
+    const { baseline } = await setup([userTurn("other")]);
     const secondFile = await makeJsonl("rotated-second.jsonl", [userTurn("ship the task")]);
-    statMock.mockImplementation(async (path: string) => {
-      const real = (await realStatHolder.stat?.(path)) as Record<string, unknown>;
-      return path === rotatedFile || path === secondFile
-        ? { ...real, birthtimeMs: stamp + 5 }
-        : real;
-    });
     expect((await scan(baseline, "ship the task")).found).toBe(false);
     findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "rotated-id" ? secondFile : baseline.file,
     );
+    expect(await scan(baseline, "ship the task")).toEqual({
+      found: false,
+      scannedFile: secondFile,
+    });
+    await appendJsonl(secondFile, [userTurn("ship the task")]);
     expect(await scan(baseline, "ship the task")).toEqual({ found: true, scannedFile: secondFile });
   });
 
@@ -682,21 +625,29 @@ describe("rotated chat created by the send (#982)", () => {
     const { live } = await captureAndMark(pinnedFile, writeAt);
     expect(live.writeStartedAtMs).toBe(writeAt);
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
-    stubBirthtime(rotatedFile, writeAt - 500);
     expect((await scan(live, "continue")).found).toBe(false);
   });
 
-  it("R2: acks on the first poll a chat born after the write start", async () => {
+  it("N2b: rejects old first text created after the hook and before any pane write, including after restart", async () => {
     const pinnedFile = await makeJsonl("pinned-r2.jsonl", [userTurn("earlier turn")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(pinnedFile);
+    findCursorSessionIdMock.mockResolvedValue("pinned-id");
+    const { live } = await captureAndMark(pinnedFile, stamp);
+    // No pane write or new submission occurs between the hook and this rotation.
     const rotatedFile = await makeJsonl("rotated-r2.jsonl", [userTurn("ship the task")]);
+    expect((await stat(rotatedFile)).birthtimeMs).toBeGreaterThan(stamp);
     findCursorAckTranscriptFileMock.mockImplementation(async (_worktreePath, agentSessionId) =>
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
-    findCursorSessionIdMock.mockResolvedValue("pinned-id");
-    const { live } = await captureAndMark(pinnedFile, stamp);
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
-    stubBirthtime(rotatedFile, stamp + 5);
-    expect(await scan(live, "ship the task")).toEqual({ found: true, scannedFile: rotatedFile });
+    expect(await scan(live, "ship the task")).toEqual({ found: false, scannedFile: rotatedFile });
+    const persisted = persistCursorSubmitBaseline(live);
+    expect(persisted.rotated).toEqual({ file: rotatedFile, size: (await stat(rotatedFile)).size });
+    const restored = restoreCursorSubmitBaseline(persisted);
+    expect((await scan(restored, "ship the task")).found).toBe(false);
+    await appendJsonl(rotatedFile, [userTurn("ship the task")]);
+    expect((await scan(live, "ship the task")).found).toBe(true);
+    expect((await scan(restored, "ship the task")).found).toBe(true);
   });
 
   // R3: F rotated in after capture but before the write holds the old query.
@@ -716,7 +667,6 @@ describe("rotated chat created by the send (#982)", () => {
     // Rotation lands after capture; the hook (called at write time) sees it.
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
     const writeAt = Date.now() + 1000;
-    stubBirthtime(rotatedFile, writeAt - 500);
     await markCursorWriteStart(live, persisted, writeAt, "/tmp/worktree", "pinned-id", options);
     expect(persisted.rotated).toEqual({
       file: rotatedFile,
@@ -777,10 +727,13 @@ describe("rotated chat created by the send (#982)", () => {
       agentSessionId === "rotated-id" ? rotatedFile : pinnedFile,
     );
     findCursorSessionIdMock.mockResolvedValue("rotated-id");
-    stubBirthtime(rotatedFile, stamp + 5);
     expect(await scan(restored, "ship the task")).toEqual({
-      found: true,
+      found: false,
       scannedFile: rotatedFile,
     });
+    const refloored = restoreCursorSubmitBaseline(persistCursorSubmitBaseline(restored));
+    expect((await scan(refloored, "ship the task")).found).toBe(false);
+    await appendJsonl(rotatedFile, [userTurn("ship the task")]);
+    expect((await scan(refloored, "ship the task")).found).toBe(true);
   });
 });
