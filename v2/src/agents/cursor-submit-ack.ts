@@ -7,9 +7,7 @@ import {
 } from "../cursor-jsonl-state.js";
 import { findCursorSessionId } from "./cursor.js";
 
-export interface CursorSubmitBaseline {
-  file: string;
-  size: number;
+export type CursorSubmitBaseline = CursorPersistedSubmitBaseline & {
   // Mutated in place across polls of the same binding (session-service.ts
   // captures one baseline object and calls scan() repeatedly against it, see
   // waitForSubmitAck). Records the byte offset a rotated chat-id transcript
@@ -19,14 +17,30 @@ export interface CursorSubmitBaseline {
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
   rotationOffsets?: Map<string, number>;
-}
+};
 
 // Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
 // send-time offset rides along so a restart's scan starts where the live one did.
-export interface CursorPersistedSubmitBaseline {
-  file: string;
-  size: number;
+export type CursorPersistedSubmitBaseline = (
+  | { file: string; size: number; deliveryId?: string }
+  | { file: null; size: 0; deliveryId: string }
+) & {
   rotated?: { file: string; size: number };
+};
+
+export function isCursorDeliveryId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+export function cursorDeliveryInput(deliveryId: string, message: string): string {
+  return `${cursorDeliveryMarker(deliveryId)}${message}`;
+}
+
+function cursorDeliveryMarker(deliveryId: string): string {
+  return `[Spur delivery: ${deliveryId}]\n\n`;
 }
 
 export function persistCursorSubmitBaseline(
@@ -34,8 +48,13 @@ export function persistCursorSubmitBaseline(
 ): CursorPersistedSubmitBaseline {
   const rotated = baseline.rotationOffsets?.entries().next().value;
   return {
-    file: baseline.file,
-    size: baseline.size,
+    ...(baseline.file === null
+      ? { file: null, size: 0, deliveryId: baseline.deliveryId }
+      : {
+          file: baseline.file,
+          size: baseline.size,
+          ...(baseline.deliveryId ? { deliveryId: baseline.deliveryId } : {}),
+        }),
     ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
   };
 }
@@ -43,12 +62,16 @@ export function persistCursorSubmitBaseline(
 export function restoreCursorSubmitBaseline(
   persisted: CursorPersistedSubmitBaseline,
 ): CursorSubmitBaseline {
+  const { rotated } = persisted;
   return {
-    file: persisted.file,
-    size: persisted.size,
-    ...(persisted.rotated
-      ? { rotationOffsets: new Map([[persisted.rotated.file, persisted.rotated.size]]) }
-      : {}),
+    ...(persisted.file === null
+      ? { file: null, size: 0, deliveryId: persisted.deliveryId }
+      : {
+          file: persisted.file,
+          size: persisted.size,
+          ...(persisted.deliveryId ? { deliveryId: persisted.deliveryId } : {}),
+        }),
+    ...(rotated ? { rotationOffsets: new Map([[rotated.file, rotated.size]]) } : {}),
   };
 }
 
@@ -57,7 +80,7 @@ export function restoreCursorSubmitBaseline(
 // dir (never the shared project transcripts dir — see #889/#890).
 async function findRotatedCursorTranscript(
   worktreePath: string,
-  agentSessionId: string,
+  agentSessionId: string | undefined,
   cursorConfigDir: string,
 ): Promise<string | null> {
   const resolvedId = await findCursorSessionId(worktreePath, { configDir: cursorConfigDir });
@@ -67,16 +90,22 @@ async function findRotatedCursorTranscript(
 
 export interface CursorSubmitAckScanResult {
   found: boolean;
-  scannedFile: string;
+  scannedFile: string | null;
 }
 
 export async function captureCursorSubmitBaseline(
   worktreePath: string,
   agentSessionId?: string,
-  options?: { cursorConfigDir?: string },
+  options?: { cursorConfigDir?: string; deliveryId?: string },
 ): Promise<CursorSubmitBaseline | null> {
-  const baseline = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
-  if (!baseline || !agentSessionId || !options?.cursorConfigDir) return baseline;
+  const captured = await capturePinnedCursorBaseline(worktreePath, agentSessionId);
+  const baseline: CursorSubmitBaseline | null = captured
+    ? { ...captured, ...(options?.deliveryId ? { deliveryId: options.deliveryId } : {}) }
+    : options?.deliveryId
+      ? { file: null, size: 0, deliveryId: options.deliveryId }
+      : null;
+  if (!baseline || (!agentSessionId && !baseline.deliveryId) || !options?.cursorConfigDir)
+    return baseline;
   // An already-rotated chat: offset its file at send time, as the pinned one.
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
@@ -113,9 +142,11 @@ export async function markCursorWriteStart(
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
 ): Promise<void> {
-  baseline.size = await readSubmitFloor(baseline.file, baseline.size);
-  persisted.size = baseline.size;
-  if (!agentSessionId || !options?.cursorConfigDir) return;
+  if (baseline.file !== null) {
+    baseline.size = await readSubmitFloor(baseline.file, baseline.size);
+    if (persisted.file !== null) persisted.size = baseline.size;
+  }
+  if ((!agentSessionId && !baseline.deliveryId) || !options?.cursorConfigDir) return;
   const rotated = await findRotatedCursorTranscript(
     worktreePath,
     agentSessionId,
@@ -204,6 +235,7 @@ async function scanFileForUserText(
   filePath: string,
   startOffset: number,
   normalizedTarget: string,
+  deliveryId?: string,
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
@@ -216,7 +248,13 @@ async function scanFileForUserText(
         if (!parsed) continue;
         const text = extractUserMessageText(parsed);
         if (text === null) continue;
-        const matches = normalize(text).includes(normalizedTarget);
+        const normalized = normalize(text);
+        const marker = deliveryId ? cursorDeliveryMarker(deliveryId) : null;
+        const markerIndex = marker ? normalized.indexOf(marker) : -1;
+        const matches = marker
+          ? markerIndex >= 0 &&
+            normalized.slice(markerIndex + marker.length).includes(normalizedTarget)
+          : normalized.includes(normalizedTarget);
         if (matches) {
           reader.close();
           return matches;
@@ -243,11 +281,14 @@ export async function scanCursorJsonlForMessage(
     return { found: false, scannedFile: baseline.file };
   }
 
-  if (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget)) {
+  if (
+    baseline.file !== null &&
+    (await scanFileForUserText(baseline.file, baseline.size, normalizedTarget, baseline.deliveryId))
+  ) {
     return { found: true, scannedFile: baseline.file };
   }
 
-  if (agentSessionId && options?.cursorConfigDir) {
+  if ((agentSessionId || baseline.deliveryId) && options?.cursorConfigDir) {
     const rotated = await findRotatedCursorTranscript(
       worktreePath,
       agentSessionId,
@@ -264,12 +305,18 @@ export async function scanCursorJsonlForMessage(
       //
       // A new file can copy old matching text before the paste completes.
       // Birthtime and first-record position cannot prove which send wrote it.
-      // Keep the floor even if it excludes a legitimate first record.
+      // Keep the floor. Only the exact current input identity allows a
+      // correlated binding to inspect a legitimate first record below it.
       let offset = baseline.rotationOffsets?.get(rotated);
       if (offset === undefined) {
         offset = await seedRotationOffset(baseline, rotated);
       }
-      const found = await scanFileForUserText(rotated, offset, normalizedTarget);
+      const found = await scanFileForUserText(
+        rotated,
+        baseline.deliveryId ? 0 : offset,
+        normalizedTarget,
+        baseline.deliveryId,
+      );
       return { found, scannedFile: rotated };
     }
     // No chat-id rotation (or no rotated file yet): fall through to the
@@ -283,6 +330,6 @@ export async function scanCursorJsonlForMessage(
   if (!latest || latest === baseline.file) {
     return { found: false, scannedFile: baseline.file };
   }
-  const found = await scanFileForUserText(latest, 0, normalizedTarget);
+  const found = await scanFileForUserText(latest, 0, normalizedTarget, baseline.deliveryId);
   return { found, scannedFile: latest };
 }

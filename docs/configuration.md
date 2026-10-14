@@ -146,6 +146,8 @@ A session bound to a PR GitHub reports as nonexistent stops signal polling after
 
 ## Events
 
+Cursor input correlation: [send, queue](commands.md#send-queue); retained baseline: [Session routes](daemon-api.md#session-routes).
+
 Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
 
 Event names by source:

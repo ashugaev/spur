@@ -34,6 +34,7 @@ import { readSession, writeSession } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
 import {
   captureCursorSubmitBaseline,
+  cursorDeliveryInput,
   markCursorWriteStart,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
@@ -76,6 +77,111 @@ function userTurn(text: string): Record<string, unknown> {
 }
 
 describe("captureCursorSubmitBaseline", () => {
+  it.each([false, true])("Q1/Q1b: live and restored first query, no-ID=%s", async (noId) => {
+    const deliveryId = "a1111111-1111-4111-8111-111111111111";
+    const file = await makeJsonl("first-correlated.jsonl", []);
+    const pinnedFile = await makeJsonl("original-pinned.jsonl", []);
+    findCursorAckTranscriptFileMock.mockResolvedValue(null);
+    resolveCursorPinnedTranscriptPathMock.mockResolvedValue(pinnedFile);
+    findCursorSessionIdMock.mockResolvedValue(null);
+    const options = { cursorConfigDir: "/owned/config", deliveryId };
+    const sessionId = noId ? undefined : "pinned";
+    const baseline = await captureCursorSubmitBaseline("/owned/worktree", sessionId, options);
+    if (!baseline) throw new Error("missing correlated baseline");
+    expect(baseline.file).toBe(noId ? null : pinnedFile);
+    const persisted = persistCursorSubmitBaseline(baseline);
+    await markCursorWriteStart(baseline, persisted, "/owned/worktree", sessionId, options);
+    const dataDir = await createTempDir("spur-correlated-restore-");
+    tempDirs.push(dataDir);
+    writeSession(dataDir, {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "ship café",
+      branch: "feature/test",
+      worktree: true,
+      worktreePath: "/owned/worktree",
+      tmuxSession: "api-1",
+      launchCommand: "cursor",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:00:00.000Z",
+      queuedMessageTyped: {
+        message: "ship café",
+        typedAt: "2026-03-18T10:00:00.000Z",
+        ackBaseline: { agent: "cursor", ...persisted },
+      },
+    });
+    const stored = readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline;
+    if (stored?.agent !== "cursor") throw new Error("missing restored correlated baseline");
+    const input = cursorDeliveryInput(deliveryId, "ship café");
+    // Owned source fixture models exactly one submitted user record; no native claim.
+    await appendJsonl(file, [userTurn(`<user_query>\n${input}\n</user_query>`)]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(file);
+    findCursorSessionIdMock.mockResolvedValue("new-chat");
+    for (const current of [baseline, restoreCursorSubmitBaseline(stored)]) {
+      const result = await scanCursorJsonlForMessage(
+        current,
+        "ship café",
+        "/owned/worktree",
+        sessionId,
+        options,
+      );
+      expect(result.found).toBe(true);
+      expect(current.rotationOffsets?.get(file)).toBeGreaterThan(0);
+    }
+  });
+
+  it("Q2/Q3b: rejects stale, wrong, split and non-user identities before accepting the current submission", async () => {
+    const deliveryId = "a1111111-1111-4111-8111-111111111111";
+    const priorId = "b2222222-2222-4222-8222-222222222222";
+    const file = await makeJsonl("correlation-negatives.jsonl", [userTurn("ship café")]);
+    findCursorAckTranscriptFileMock.mockResolvedValue(file);
+    findCursorSessionIdMock.mockResolvedValue("pinned");
+    const options = { cursorConfigDir: "/owned/config", deliveryId };
+    const baseline = await captureCursorSubmitBaseline("/owned/worktree", "pinned", options);
+    if (!baseline) throw new Error("missing baseline");
+    const persisted = persistCursorSubmitBaseline(baseline);
+    await appendJsonl(file, [userTurn("ship café")]);
+    await markCursorWriteStart(baseline, persisted, "/owned/worktree", "pinned", options);
+    const rotated = await makeJsonl("new-rotation.jsonl", [
+      userTurn("ship café"),
+      userTurn(cursorDeliveryInput(priorId, "ship café")),
+      { ...userTurn(cursorDeliveryInput(deliveryId, "ship café")), role: "assistant" },
+      userTurn(`[Spur delivery: ${deliveryId}]`),
+      userTurn("ship café"),
+      userTurn(`[Spur delivery: ${deliveryId.slice(0, -1)}]\n\nship café`),
+    ]);
+    findCursorSessionIdMock.mockResolvedValue("rotated");
+    findCursorAckTranscriptFileMock.mockImplementation(async (_path, id) =>
+      id === "rotated" ? rotated : file,
+    );
+    let submissions = 0;
+    for (const current of [baseline, restoreCursorSubmitBaseline(persisted)]) {
+      const result = await scanCursorJsonlForMessage(
+        current,
+        "ship café",
+        "/owned/worktree",
+        "pinned",
+        options,
+      );
+      expect(result.found).toBe(false);
+    }
+    expect(submissions).toBe(0);
+    submissions++;
+    await appendJsonl(rotated, [userTurn(cursorDeliveryInput(deliveryId, "ship café"))]);
+    expect(submissions).toBe(1);
+    const restored = restoreCursorSubmitBaseline(persisted);
+    const result = await scanCursorJsonlForMessage(
+      restored,
+      "ship café",
+      "/owned/worktree",
+      "pinned",
+      options,
+    );
+    expect(result.found).toBe(true);
+  });
+
   it("returns null when no transcript exists and no id is given", async () => {
     findCursorAckTranscriptFileMock.mockResolvedValue(null);
     const result = await captureCursorSubmitBaseline("/tmp/worktree");
@@ -767,9 +873,7 @@ describe("conservative rotated-chat acknowledgement", () => {
   // The adapter mutates both objects in place; mirror it.
   async function captureAndMark(): Promise<{
     live: NonNullable<Awaited<ReturnType<typeof captureCursorSubmitBaseline>>>;
-    persisted: { agent: "cursor"; file: string; size: number } & ReturnType<
-      typeof persistCursorSubmitBaseline
-    >;
+    persisted: { agent: "cursor" } & ReturnType<typeof persistCursorSubmitBaseline>;
   }> {
     const live = await captureCursorSubmitBaseline("/tmp/worktree", "pinned-id", options);
     if (!live) throw new Error("expected a baseline");

@@ -81,7 +81,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 
 ## send, queue
 
-`spur send <sessionId> <message>` refuses exhausted token budgets. `spur queue <sessionId> list|remove|flush [index]`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events).
+`spur send <sessionId> <message>` refuses exhausted token budgets; acknowledged non-slash Cursor input prepends `[Spur delivery: <UUIDv4>]` plus two newlines, queue text unchanged; `v2/src/agents/cursor-submit-ack.ts`. `spur queue <sessionId> list|remove|flush [index]`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes). Events: [configuration.md#events](configuration.md#events).
 
 ## connect, disconnect
 

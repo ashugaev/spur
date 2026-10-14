@@ -15113,7 +15113,7 @@ describe("SessionService", () => {
       });
     });
 
-    it("refreshes the ack baseline once, right before the pane write", async () => {
+    it("Q4: normal authorized paste carries delivery identity and refreshes once", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -15131,6 +15131,7 @@ describe("SessionService", () => {
       });
       createAgentSubmitAckBindingMock.mockResolvedValue({
         baseline: ackBaseline,
+        inputText: "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nfirst",
         scan: vi.fn(),
         markWriteStart,
       });
@@ -15159,6 +15160,12 @@ describe("SessionService", () => {
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toBe(
+        "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nfirst",
+      );
+      expect(createAgentSubmitAckBindingMock.mock.calls[0]?.[1]).toMatchObject({
+        message: "first",
+      });
       const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
       // After the last alive probe before the paste, then the paste.
       const pasteOrder = sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0;
@@ -15229,12 +15236,13 @@ describe("SessionService", () => {
       expect(scan).toHaveBeenCalledWith("typed");
     });
 
-    it("rebinds a cursor restart scan with the session's cursor config dir, so a rotated chat acks", async () => {
+    it("Q3: rebinds a cursor restart scan with retained delivery identity without another paste", async () => {
       mockCursorJsonlState("waiting");
       const cursorBaseline = {
         agent: "cursor",
         file: "/t/pinned.jsonl",
         size: 9,
+        deliveryId: "a1111111-1111-4111-8111-111111111111",
         rotated: { file: "/t/rotated.jsonl", size: 40 },
       } as const;
       const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: "/t/rotated.jsonl" });

@@ -1587,7 +1587,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("D1: refreshes the ack baseline once, before the sensitive pane write and never on an Enter resend", async () => {
+    it("Q4b: sensitive stdin paste carries delivery identity before Enter-only retry", async () => {
       const baseline: {
         agent: "cursor";
         file: string;
@@ -1601,6 +1601,7 @@ describe("SessionService", () => {
       });
       createAgentSubmitAckBindingMock.mockResolvedValue({
         baseline,
+        inputText: "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nsensitive controls",
         scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: null }),
         markWriteStart,
       });
@@ -1623,6 +1624,12 @@ describe("SessionService", () => {
       expect(markWriteStart).toHaveBeenCalledTimes(1);
       expect(markWriteStart).toHaveBeenCalledWith();
       expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock.mock.calls[0]?.[1]).toBe(
+        "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nsensitive controls",
+      );
+      expect(createAgentSubmitAckBindingMock.mock.calls[0]?.[1]).toMatchObject({
+        message: controlsMessage(),
+      });
       const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
       // After the binding is built (this path has no alive probe), before the paste.
       expect(createAgentSubmitAckBindingMock.mock.invocationCallOrder[0]).toBeLessThan(hookOrder);

@@ -759,6 +759,30 @@ describe("agentSubmitAckPacing", () => {
 });
 
 describe("cursor submit-ack resume", () => {
+  it("Q3/Q3b: restored cursor binding reuses identity, fresh paste differs, slash stays unchanged", async () => {
+    const ctx = {
+      worktreePath: "/owned/worktree",
+      codexSessionsDir: "/owned/codex",
+      message: "continue",
+    };
+    captureCursorSubmitBaselineMock.mockImplementation(async (_path, _id, options) => {
+      if (!options?.deliveryId) return null;
+      return { file: null, size: 0, deliveryId: options.deliveryId };
+    });
+    const first = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!first || first.baseline.agent !== "cursor") throw new Error("missing cursor binding");
+    const id = first.baseline.deliveryId;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(first.inputText).toBe(`[Spur delivery: ${id}]\n\ncontinue`);
+    const restored = await resumeAgentSubmitAckBinding("cursor", ctx, first.baseline);
+    expect(restored?.baseline).toEqual(first.baseline);
+    expect(restored?.inputText).toBe(first.inputText);
+    expect(captureCursorSubmitBaselineMock).toHaveBeenCalledTimes(1);
+    const next = await createAgentSubmitAckBinding("cursor", ctx);
+    expect(next?.baseline).not.toEqual(first.baseline);
+    const slash = await createAgentSubmitAckBinding("cursor", { ...ctx, message: "/help" });
+    expect(slash).toBeNull();
+  });
   it("rebinds a persisted rotated-chat offset and forwards cursorConfigDir to the scan", async () => {
     scanCursorJsonlForMessageMock.mockResolvedValue({ found: true, scannedFile: "/r.jsonl" });
     const ctx = {
