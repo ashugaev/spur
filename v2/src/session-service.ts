@@ -1331,6 +1331,10 @@ interface SessionRuntimeSnapshot {
 interface SidecarReapEntryContext {
   identity: SidecarProcessIdentity | undefined;
   workspaceRuntime: WorkspaceRuntime | undefined;
+  // Set with workspaceRuntime "dead": member id -> runtime key of every member
+  // whose samples produced that verdict. Execute trusts the verdict only for
+  // exactly these members and runtimes.
+  confirmedMembers: ReadonlyMap<string, string> | undefined;
 }
 
 // "dead_looking" = one plain read found no live agent; it is confirmed by a
@@ -1558,6 +1562,20 @@ function buildConversationResponse(
  * return zero entries with no scrollable element left to trigger a
  * recovery re-fetch.
  */
+// The fields readRuntimeSnapshot keys on (tmux name, agent, launch command)
+// plus the native session id a restore/relaunch rewrites.
+function memberRuntimeKey(
+  member: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand" | "agentSessionId">,
+): string {
+  return [member.tmuxSession, member.agent, member.launchCommand, member.agentSessionId ?? ""].join(
+    "\u0000",
+  );
+}
+
+function confirmedMemberMap(members: readonly SessionRecord[]): Map<string, string> {
+  return new Map(members.map((member) => [member.id, memberRuntimeKey(member)]));
+}
+
 // Workspace verdict: any live member wins, then any unknown; "pending" while a
 // dead-looking member still awaits its fresh confirm read.
 function foldMemberRuntime(samples: readonly MemberRuntimeSample[]): WorkspaceRuntime | "pending" {
@@ -4686,6 +4704,8 @@ export class SessionService {
         context.set(tmuxName, {
           identity,
           workspaceRuntime: candidate.workspaceRuntime,
+          confirmedMembers:
+            candidate.workspaceRuntime === "dead" ? confirmedMemberMap(runtimeMembers) : undefined,
         });
       }
     }
@@ -4715,7 +4735,12 @@ export class SessionService {
         // dead_looking away); keep the type honest and fail closed.
         candidate.workspaceRuntime = resolved === "pending" ? "unknown" : resolved;
         const entry = context.get(candidate.tmuxName);
-        if (entry) entry.workspaceRuntime = candidate.workspaceRuntime;
+        if (entry) {
+          entry.workspaceRuntime = candidate.workspaceRuntime;
+          if (candidate.workspaceRuntime === "dead") {
+            entry.confirmedMembers = confirmedMemberMap(members);
+          }
+        }
       }
     }
     return { candidates, context };
@@ -4787,6 +4812,7 @@ export class SessionService {
       const entryContext = context.get(entry.tmuxName) ?? {
         identity: undefined,
         workspaceRuntime: undefined,
+        confirmedMembers: undefined,
       };
       await this.withWorkspaceLifecycleLocks(entry.ownerId, () =>
         this.reapSidecarEntryLocked(entry, entryContext, preSignalSnapshot),
@@ -4840,8 +4866,18 @@ export class SessionService {
       const listed = listSessions(this.config.dataDir);
       const members = this.listDeskSessions(owner, listed);
       if (entryContext.workspaceRuntime === "dead") {
-        // The plan confirmed death with two samples; re-prove it per member.
-        for (const member of this.listWorkspaceRuntimeMembers(owner, listed)) {
+        // The plan confirmed death with two samples for a specific member set
+        // and runtimes; anything else needs the next pass's own confirmation.
+        const runtimeMembers = this.listWorkspaceRuntimeMembers(owner, listed);
+        if (
+          runtimeMembers.some(
+            (member) => entryContext.confirmedMembers?.get(member.id) !== memberRuntimeKey(member),
+          )
+        ) {
+          skip();
+          return;
+        }
+        for (const member of runtimeMembers) {
           const sample = await this.sampleMemberRuntime(member, true);
           if (sample === "live" || sample === "unknown") {
             skip();

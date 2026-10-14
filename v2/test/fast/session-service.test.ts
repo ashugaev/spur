@@ -33128,6 +33128,7 @@ describe("SessionService", () => {
       type ReapContext = {
         identity: { pid: number; pgid: number; starttime: number } | undefined;
         workspaceRuntime: "live" | "dead" | "unknown" | undefined;
+        confirmedMembers?: Map<string, string>;
       };
       type ReapInternals = {
         reapDeadSessionSidecars(): Promise<void>;
@@ -33172,10 +33173,17 @@ describe("SessionService", () => {
         };
       }
 
+      // Store of the running test: contextOf snapshots the plan-time member
+      // set from it, as the collector does for a confirmed-dead verdict.
+      let planSessions: Map<string, SessionRecord> | undefined;
+      const runtimeKeyOf = (m: SessionRecord) =>
+        [m.tmuxSession, m.agent, m.launchCommand, m.agentSessionId ?? ""].join("\u0000");
+
       async function setup(config: unknown = portlessConfig()) {
         loadConfigMock.mockReturnValue(config);
         timerPromisesSleepMock.mockResolvedValue(undefined);
         const sessions = createSessionStore();
+        planSessions = sessions;
         const service = (await createDisposedSessionService()) as unknown as ReapInternals;
         return { sessions, service };
       }
@@ -33242,8 +33250,20 @@ describe("SessionService", () => {
         keep: [] as [],
         warn: [] as [],
       });
-      const contextOf = (id: string, ctx: ReapContext) =>
-        new Map<string, ReapContext>([[`${id}--${SIDECAR}`, ctx]]);
+      const contextOf = (id: string, ctx: ReapContext) => {
+        const confirmedMembers =
+          ctx.confirmedMembers ??
+          (ctx.workspaceRuntime === "dead" && planSessions
+            ? new Map(
+                [...planSessions.values()]
+                  .filter((m) => m.id === id || m.deskId === id)
+                  .map((m) => [m.id, runtimeKeyOf(m)] as const),
+              )
+            : undefined);
+        return new Map<string, ReapContext>([
+          [`${id}--${SIDECAR}`, { ...ctx, ...(confirmedMembers ? { confirmedMembers } : {}) }],
+        ]);
+      };
 
       it("reaps a desk sidecar when every member is completed (workspace_not_running)", async () => {
         const { sessions, service } = await setup();
@@ -34051,6 +34071,72 @@ describe("SessionService", () => {
 
         expect(killTmuxSessionMock).not.toHaveBeenCalled();
         expect(reapedEvents()).toEqual([]);
+      });
+
+      async function executeWhileHeld(
+        service: ReapInternals,
+        mutate: () => void,
+        ctx: ReapContext = { identity: identityOf(2_000_000_000), workspaceRuntime: "dead" },
+      ) {
+        let release!: () => void;
+        const held = service.withWorkspaceLifecycleLocks(
+          "api-1",
+          () => new Promise<void>((resolve) => (release = resolve)),
+        );
+        const run = service.executeSidecarReapPlan(planOf("api-1"), contextOf("api-1", ctx));
+        await flush();
+        mutate();
+        release();
+        await Promise.all([held, run]);
+      }
+
+      it("held lock: a killed member listed after the plan keeps the sidecar until the next pass confirms it", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, false);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+
+        await executeWhileHeld(service, () => addKilledSibling(sessions));
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+        // No probe and no sleep for the unconfirmed member.
+        expect(freshReads("api-4")).toBe(0);
+        expect(confirmSleeps()).toBe(0);
+      });
+
+      it("held lock: a member whose runtime identity changed after the plan keeps the sidecar", async () => {
+        const { sessions, service } = await setup();
+        sessions.set("api-1", exitedSolo("api-1"));
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+
+        await executeWhileHeld(service, () => {
+          const current = sessions.get("api-1");
+          if (!current) throw new Error("fixture record missing");
+          sessions.set("api-1", { ...current, launchCommand: "claude --resume relaunched" });
+        });
+
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+        expect(freshReads("api-1")).toBe(0);
+      });
+
+      it("execute reaps a confirmed-dead desk whose member set and runtimes are unchanged", async () => {
+        const { sessions, service } = await setup();
+        retainedDesk(sessions, true);
+        addKilledSibling(sessions);
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+
+        await service.executeSidecarReapPlan(
+          planOf("api-1"),
+          contextOf("api-1", { identity: identityOf(2_000_000_000), workspaceRuntime: "dead" }),
+        );
+
+        expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(reapedEvents()).toHaveLength(1);
+        expect(confirmSleeps()).toBe(0);
       });
 
       it("execute keeps owner_missing behavior when the owner record is gone", async () => {
