@@ -460,6 +460,30 @@ describe("summarizeFailingCi", () => {
     ).toBe(FAILING);
   });
 
+  it("is not superseded by a later suite that did not re-execute the check", () => {
+    for (const state of ["SKIPPED", "NEUTRAL", "STALE"]) {
+      expect(summarizeFailingCi([cr("FAILURE", 10, T0), cr(state, 11, T1)])).toBe(FAILING);
+    }
+  });
+
+  it("is superseded by a later suite that is still running", () => {
+    expect(summarizeFailingCi([cr("FAILURE", 10, T0), cr("IN_PROGRESS", 11, T1)])).toBeNull();
+    expect(summarizeFailingCi([cr("FAILURE", 10, T0), cr("QUEUED", 11, T1)])).toBeNull();
+  });
+
+  it("flags a later failing conclusion over an earlier success", () => {
+    expect(summarizeFailingCi([cr("SUCCESS", 10, T0), cr("TIMED_OUT", 11, T1)])).toBe(FAILING);
+  });
+
+  it("keeps both runs when different suites share a createdAt", () => {
+    expect(summarizeFailingCi([cr("FAILURE", 10, T0), cr("SUCCESS", 11, T0)])).toBe(FAILING);
+    expect(summarizeFailingCi([cr("SUCCESS", 11, T0), cr("FAILURE", 10, T0)])).toBe(FAILING);
+  });
+
+  it("requires a different suite id to supersede", () => {
+    expect(summarizeFailingCi([cr("FAILURE", 10, T0), cr("SUCCESS", 10, T1)])).toBe(FAILING);
+  });
+
   it("keeps distinct names independent", () => {
     const checks = [cr("FAILURE", 10, T0, { name: "a" }), cr("SUCCESS", 11, T1, { name: "b" })];
     expect(summarizeFailingCi(checks)).toBe("CI is failing: a.");
@@ -587,37 +611,56 @@ describe("summarizeFailingCi", () => {
       expect(summarizeFailingCi(checksFromPrNode(node))).toBe(FAIL);
     });
 
-    it("dedupes StatusContext by createdAt and keys it apart from CheckRun", () => {
-      const status = (state: string, createdAt: string): unknown => ({
+    describe("StatusContext", () => {
+      const status = (state: string, createdAt: string, creator: string | null): unknown => ({
         context: "Labeler",
         state,
         createdAt,
+        ...(creator === null ? {} : { creator: { login: creator } }),
       });
-      expect(
-        summarizeFailingCi(
-          checksFromPrNode(
-            prNode([
-              status("ERROR", "2026-01-01T00:00:00Z"),
-              status("SUCCESS", "2026-01-01T00:05:00Z"),
-            ]),
-          ),
-        ),
-      ).toBeNull();
-      expect(
-        summarizeFailingCi(
-          checksFromPrNode(
-            prNode([
-              status("ERROR", "2026-01-01T00:00:00Z"),
-              {
-                name: "Labeler",
-                conclusion: "SUCCESS",
-                status: "COMPLETED",
-                checkSuite: { databaseId: 2, createdAt: T1 },
-              },
-            ]),
-          ),
-        ),
-      ).toBe("CI is failing: Labeler.");
+      const failing = (...nodes: unknown[]): string | null =>
+        summarizeFailingCi(checksFromPrNode(prNode(nodes)));
+
+      it("is superseded by a later status of the same creator", () => {
+        expect(failing(status("ERROR", T0, "ci-a"), status("SUCCESS", T1, "ci-a"))).toBeNull();
+      });
+
+      it("keeps a failure when a later success comes from another creator", () => {
+        expect(failing(status("ERROR", T0, "ci-a"), status("SUCCESS", T1, "ci-b"))).toBe(FAIL);
+      });
+
+      it("keeps statuses without a creator", () => {
+        expect(failing(status("ERROR", T0, null), status("SUCCESS", T1, null))).toBe(FAIL);
+        expect(failing(status("ERROR", T0, "ci-a"), status("SUCCESS", T1, null))).toBe(FAIL);
+      });
+
+      it("is not superseded by a later proven CheckRun of the same name", () => {
+        const checkRun = run("SUCCESS", { id: 2, createdAt: T1, app: 5, workflow: null });
+        expect(failing(status("ERROR", T0, "ci-a"), checkRun)).toBe(FAIL);
+      });
+    });
+
+    it("keeps a proven failure when the later success has an unproven producer", () => {
+      const failure = run("FAILURE", { id: 1, createdAt: T0, app: 5, workflow: null });
+      const success = rawRun("SUCCESS", {
+        databaseId: 2,
+        createdAt: T1,
+        app: null,
+        workflowRun: null,
+      });
+      expect(summarizeFailingCi(checksFromPrNode(prNode([failure, success])))).toBe(FAIL);
+      expect(summarizeFailingCi(checksFromPrNode(prNode([success, failure])))).toBe(FAIL);
+    });
+
+    it("treats workflowRun with a null workflow as unproven", () => {
+      const suite = (id: number, createdAt: string): unknown => ({
+        databaseId: id,
+        createdAt,
+        app: { databaseId: 5 },
+        workflowRun: { event: "push", workflow: null },
+      });
+      const node = prNode([rawRun("FAILURE", suite(1, T0)), rawRun("SUCCESS", suite(2, T1))]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBe(FAIL);
     });
   });
 
