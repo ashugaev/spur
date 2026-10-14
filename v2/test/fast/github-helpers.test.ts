@@ -370,78 +370,126 @@ describe("summarizeFailingCi", () => {
     }
   });
 
-  it("ignores a cancelled run superseded by a later success of the same name", () => {
-    const checks: GitHubRunCheck[] = [
-      { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:00:00Z" },
-      { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
-    ];
-    expect(summarizeFailingCi(checks)).toBeNull();
+  const T0 = "2026-01-01T00:00:00Z";
+  const T1 = "2026-01-01T00:05:00Z";
+  const cr = (
+    state: string,
+    suiteId: number | undefined,
+    createdAt: string,
+    ids: { appId?: number; workflowId?: number; name?: string } = {},
+  ): GitHubRunCheck => ({
+    name: ids.name ?? "build",
+    state,
+    kind: "check_run",
+    ...(ids.appId !== undefined ? { appId: ids.appId } : {}),
+    ...(ids.workflowId !== undefined ? { workflowId: ids.workflowId } : {}),
+    ...(suiteId !== undefined ? { suiteId } : {}),
+    createdAt,
+  });
+  const FAILING = "CI is failing: build.";
+
+  it("ignores a cancelled run in an earlier suite of the same app and workflow", () => {
+    const ids = { appId: 1, workflowId: 7 };
+    expect(
+      summarizeFailingCi([cr("CANCELLED", 10, T0, ids), cr("SUCCESS", 11, T1, ids)]),
+    ).toBeNull();
   });
 
-  it("keeps an earlier failure when a later success of the same job name is in another workflow", () => {
-    const checks: GitHubRunCheck[] = [
-      {
-        name: "test",
-        state: "FAILURE",
-        kind: "check_run",
-        workflowId: 1,
-        startedAt: "2026-01-01T00:00:00Z",
-      },
-      {
-        name: "test",
-        state: "SUCCESS",
-        kind: "check_run",
-        workflowId: 2,
-        startedAt: "2026-01-01T00:05:00Z",
-      },
+  it("keeps an earlier failure when the later success is in another workflow", () => {
+    const checks = [
+      cr("FAILURE", 10, T0, { appId: 1, workflowId: 1 }),
+      cr("SUCCESS", 11, T1, { appId: 1, workflowId: 2 }),
     ];
-    expect(summarizeFailingCi(checks)).toBe("CI is failing: test.");
+    expect(summarizeFailingCi(checks)).toBe(FAILING);
   });
 
-  it("flags a cancelled run later than a success of the same name", () => {
-    const checks: GitHubRunCheck[] = [
-      { name: "Labeler", state: "SUCCESS", startedAt: "2026-01-01T00:00:00Z" },
-      { name: "Labeler", state: "CANCELLED", startedAt: "2026-01-01T00:05:00Z" },
-    ];
-    expect(summarizeFailingCi(checks)).toBe("CI is failing: Labeler.");
+  it("keeps a failure from one app when another app publishes the same name later (null workflow)", () => {
+    const failure = cr("FAILURE", 10, T0, { appId: 1 });
+    const success = cr("SUCCESS", 11, T1, { appId: 2 });
+    expect(summarizeFailingCi([failure, success])).toBe(FAILING);
+    expect(summarizeFailingCi([success, failure])).toBe(FAILING);
   });
 
-  it("keeps distinct names and untimestamped checks independent", () => {
-    const checks: GitHubRunCheck[] = [
-      { name: "a", state: "FAILURE", startedAt: "2026-01-01T00:00:00Z" },
-      { name: "b", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
-      { name: "c", state: "CANCELLED" },
-      { name: "c", state: "SUCCESS", startedAt: "2026-01-01T00:05:00Z" },
-    ];
-    expect(summarizeFailingCi(checks)).toBe("CI is failing: a, c.");
+  it("never drops sibling runs of one suite against each other", () => {
+    const ids = { appId: 1, workflowId: 7 };
+    // same suite id, sibling timestamps deliberately inconsistent
+    const checks = [cr("FAILURE", 10, T0, ids), cr("SUCCESS", 10, T1, ids)];
+    expect(summarizeFailingCi(checks)).toBe(FAILING);
+    expect(summarizeFailingCi([...checks].reverse())).toBe(FAILING);
+  });
+
+  it("flags a cancelled run in a later suite than a success of the same key", () => {
+    const ids = { appId: 1, workflowId: 7 };
+    expect(summarizeFailingCi([cr("SUCCESS", 10, T0, ids), cr("CANCELLED", 11, T1, ids)])).toBe(
+      FAILING,
+    );
+  });
+
+  it("keeps checks without a suite id or timestamp", () => {
+    const ids = { appId: 1, workflowId: 7 };
+    expect(
+      summarizeFailingCi([cr("FAILURE", undefined, T0, ids), cr("SUCCESS", 11, T1, ids)]),
+    ).toBe(FAILING);
+    expect(
+      summarizeFailingCi([
+        { name: "build", state: "FAILURE", kind: "check_run", suiteId: 10 },
+        cr("SUCCESS", 11, T1),
+      ]),
+    ).toBe(FAILING);
+  });
+
+  it("keeps distinct names independent", () => {
+    const checks = [cr("FAILURE", 10, T0, { name: "a" }), cr("SUCCESS", 11, T1, { name: "b" })];
+    expect(summarizeFailingCi(checks)).toBe("CI is failing: a.");
   });
 
   describe("through the GraphQL node", () => {
     const prNode = (contexts: unknown[]): Record<string, unknown> => ({
       commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: contexts } } } }] },
     });
-    const run = (conclusion: string, startedAt: string, workflowId: number): unknown => ({
+    const run = (
+      conclusion: string,
+      suite: { id: number; createdAt: string; app: number; workflow: number | null },
+    ): unknown => ({
       name: "Labeler",
       conclusion,
       status: "COMPLETED",
-      startedAt,
-      checkSuite: { workflowRun: { workflow: { databaseId: workflowId } } },
+      checkSuite: {
+        databaseId: suite.id,
+        createdAt: suite.createdAt,
+        app: { databaseId: suite.app },
+        workflowRun: suite.workflow === null ? null : { workflow: { databaseId: suite.workflow } },
+      },
     });
+    const FAIL = "CI is failing: Labeler.";
 
-    it("ignores a cancelled CheckRun superseded by a later success in the same workflow", () => {
+    it("ignores a cancelled CheckRun in an earlier suite of the same app and workflow", () => {
       const node = prNode([
-        run("CANCELLED", "2026-01-01T00:00:00Z", 7),
-        run("SUCCESS", "2026-01-01T00:05:00Z", 7),
+        run("CANCELLED", { id: 1, createdAt: T0, app: 5, workflow: 7 }),
+        run("SUCCESS", { id: 2, createdAt: T1, app: 5, workflow: 7 }),
       ]);
       expect(summarizeFailingCi(checksFromPrNode(node))).toBeNull();
     });
 
     it("keeps a failure when the later success belongs to another workflow", () => {
       const node = prNode([
-        run("FAILURE", "2026-01-01T00:00:00Z", 7),
-        run("SUCCESS", "2026-01-01T00:05:00Z", 8),
+        run("FAILURE", { id: 1, createdAt: T0, app: 5, workflow: 7 }),
+        run("SUCCESS", { id: 2, createdAt: T1, app: 5, workflow: 8 }),
       ]);
-      expect(summarizeFailingCi(checksFromPrNode(node))).toBe("CI is failing: Labeler.");
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBe(FAIL);
+    });
+
+    it("keeps a failure when another app publishes the same name later with no workflow", () => {
+      const failure = run("FAILURE", { id: 1, createdAt: T0, app: 5, workflow: null });
+      const success = run("SUCCESS", { id: 2, createdAt: T1, app: 6, workflow: null });
+      expect(summarizeFailingCi(checksFromPrNode(prNode([failure, success])))).toBe(FAIL);
+      expect(summarizeFailingCi(checksFromPrNode(prNode([success, failure])))).toBe(FAIL);
+    });
+
+    it("keeps a failure next to a sibling success in the same suite", () => {
+      const suite = { id: 1, createdAt: T0, app: 5, workflow: 7 };
+      const node = prNode([run("FAILURE", suite), run("SUCCESS", suite)]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBe(FAIL);
     });
 
     it("dedupes StatusContext by createdAt and keys it apart from CheckRun", () => {
@@ -469,7 +517,7 @@ describe("summarizeFailingCi", () => {
                 name: "Labeler",
                 conclusion: "SUCCESS",
                 status: "COMPLETED",
-                startedAt: "2026-01-01T00:05:00Z",
+                checkSuite: { databaseId: 2, createdAt: T1 },
               },
             ]),
           ),

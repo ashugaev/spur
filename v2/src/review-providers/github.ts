@@ -381,32 +381,44 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
 }
 
 // A re-run (e.g. draft->ready) leaves the superseded run on the same head commit.
-// Only the latest run per (kind, workflow, name) counts; a missing/unparseable
-// timestamp is kept.
+// Runs are superseded per check suite, never per run: within one (kind, app,
+// workflow, name) key a run is dropped only when a different suite of that key
+// was created strictly later. Runs of one suite are siblings. A missing suite id
+// or unparseable timestamp keeps the check. StatusContext: latest createdAt wins.
 export interface GitHubRunCheck extends GitHubCheck {
   kind?: "check_run" | "status_context";
+  appId?: number;
   workflowId?: number;
-  startedAt?: string;
+  suiteId?: number;
+  // CheckRun: check suite createdAt. StatusContext: context createdAt.
+  createdAt?: string;
 }
 
 function checkRunKey(check: GitHubRunCheck): string {
-  return JSON.stringify([check.kind ?? null, check.workflowId ?? null, check.name]);
+  return JSON.stringify([
+    check.kind ?? null,
+    check.appId ?? null,
+    check.workflowId ?? null,
+    check.name,
+  ]);
+}
+
+function checkTime(check: GitHubRunCheck): number {
+  if (check.kind === "check_run" && check.suiteId === undefined) return Number.NaN;
+  return check.createdAt ? Date.parse(check.createdAt) : Number.NaN;
 }
 
 function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
-  const latest = new Map<string, number>();
-  const time = (check: GitHubRunCheck): number =>
-    check.startedAt ? Date.parse(check.startedAt) : Number.NaN;
-  for (const check of checks) {
-    const at = time(check);
-    const key = checkRunKey(check);
-    if (!Number.isNaN(at) && at > (latest.get(key) ?? Number.NEGATIVE_INFINITY)) {
-      latest.set(key, at);
-    }
-  }
   return checks.filter((check) => {
-    const at = time(check);
-    return Number.isNaN(at) || at >= (latest.get(checkRunKey(check)) ?? at);
+    const at = checkTime(check);
+    if (Number.isNaN(at)) return true;
+    const key = checkRunKey(check);
+    return !checks.some(
+      (other) =>
+        checkRunKey(other) === key &&
+        (other.suiteId === undefined || other.suiteId !== check.suiteId) &&
+        checkTime(other) > at,
+    );
   });
 }
 
@@ -471,7 +483,7 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
-    ... on CheckRun{name conclusion status startedAt checkSuite{workflowRun{workflow{databaseId}}}}
+    ... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{workflow{databaseId}}}}
     ... on StatusContext{context state createdAt}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
@@ -526,8 +538,11 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
       const name = checkName ?? readString(raw.context);
       const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
       if (!name || !state) return [];
-      const startedAt = readString(raw.startedAt) ?? readString(raw.createdAt);
       const suite = isRecord(raw.checkSuite) ? raw.checkSuite : null;
+      const createdAt = readString(suite ? suite.createdAt : raw.createdAt);
+      const suiteId = suite ? readNumber(suite.databaseId) : null;
+      const app = suite && isRecord(suite.app) ? suite.app : null;
+      const appId = app ? readNumber(app.databaseId) : null;
       const run = suite && isRecord(suite.workflowRun) ? suite.workflowRun : null;
       const workflow = run && isRecord(run.workflow) ? run.workflow : null;
       const workflowId = workflow ? readNumber(workflow.databaseId) : null;
@@ -536,8 +551,10 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
           name,
           state,
           kind: checkName ? "check_run" : "status_context",
+          ...(appId !== null ? { appId } : {}),
           ...(workflowId !== null ? { workflowId } : {}),
-          ...(startedAt ? { startedAt } : {}),
+          ...(suiteId !== null ? { suiteId } : {}),
+          ...(createdAt ? { createdAt } : {}),
         },
       ];
     },
@@ -1568,7 +1585,7 @@ function signalPageToFetch(
 function signalPageField(index: number, page: PullRequestSignalPage): string {
   const connection =
     page.kind === "checks"
-      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status startedAt checkSuite{workflowRun{workflow{databaseId}}}} ... on StatusContext{context state createdAt}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{workflow{databaseId}}}} ... on StatusContext{context state createdAt}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
         : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
