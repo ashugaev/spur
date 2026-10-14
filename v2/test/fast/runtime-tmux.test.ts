@@ -25,7 +25,7 @@ import { createTempDir } from "../helpers/common.js";
 type ExecFileAsync = (
   file: string,
   args: string[],
-  options?: { timeout?: number; maxBuffer?: number },
+  options?: { timeout?: number; maxBuffer?: number; signal?: AbortSignal },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
@@ -186,10 +186,10 @@ describe("runtime-tmux", () => {
     await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
   });
 
-  // AC1: every fork issued through the file-local tmux() chokepoint carries
-  // the timeout option — capture-pane and send-keys cover the swallowed-error
-  // path and the propagating path respectively.
-  it("AC1: forks capture-pane with a 5s timeout", async () => {
+  // AC1: read probes (capture-pane) carry a deadline signal, writes
+  // (send-keys) keep the execFile timeout — capture-pane and send-keys cover
+  // the swallowed-error path and the propagating path respectively.
+  it("AC1: forks capture-pane with a deadline signal, not a timeout", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "pane text", stderr: "" });
 
     const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
@@ -199,7 +199,8 @@ describe("runtime-tmux", () => {
     const call = execFileAsyncMock.mock.calls.find(
       ([file, args]) => file === "tmux" && args[0] === "capture-pane",
     );
-    expect(call?.[2]).toEqual({ timeout: 5_000 });
+    expect(call?.[2]?.signal).toBeInstanceOf(AbortSignal);
+    expect(call?.[2]).not.toHaveProperty("timeout");
   });
 
   it("AC1: forks send-keys with a 5s timeout", async () => {
@@ -1094,6 +1095,16 @@ describe("runtime-tmux", () => {
     expect(JSON.stringify(execFileAsyncMock.mock.calls)).not.toContain(sentinel);
     expect(JSON.stringify(spawnCalls.map(({ args }) => args))).not.toContain(sentinel);
     expect(buffers.size).toBe(0);
+    // T8: the list-buffers read carries a deadline signal; the delete write keeps its timeout.
+    const listBuffersCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "list-buffers",
+    );
+    expect(listBuffersCall?.[2]?.signal).toBeInstanceOf(AbortSignal);
+    expect(listBuffersCall?.[2]).not.toHaveProperty("timeout");
+    const deleteBufferCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "delete-buffer",
+    );
+    expect(deleteBufferCall?.[2]).toEqual({ timeout: 5_000 });
   });
 
   it("does not treat a vanished target session as server-wide buffer absence", async () => {
@@ -1765,7 +1776,8 @@ describe("runtime-tmux", () => {
     }
     const [, , options] = psCall;
     expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
-    expect(options?.timeout).toBe(5_000);
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+    expect(options).not.toHaveProperty("timeout");
   });
 
   it("reads a wrapper-launched agent as alive once the canonical binary name is a matcher (issue #800)", async () => {
@@ -2195,5 +2207,85 @@ describe("runtime-tmux", () => {
     await expect(
       isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).rejects.toThrow("malformed process table output");
+  });
+
+  function installPsTable(stdout: string): void {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout, stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+  }
+
+  it("T4: a truncated final ps line fails the whole snapshot with a redacted shape diagnostic", async () => {
+    const table =
+      "100 1 100 100 pts/1 4200 -zsh\n101 100 100 100 pts/1 2048 codex SECRET-ARG\n4123 1 41";
+    installPsTable(table);
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    const error = await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(table.length).toBe(83);
+    expect(message).toBe(
+      "ps failed: malformed process table output (line 3/3, 3 columns, shape N N N, 83 bytes, no trailing newline)",
+    );
+    expect(message).not.toContain("SECRET-ARG");
+    expect(message).not.toContain("codex");
+  });
+
+  it("T5: a non-numeric id column fails the whole snapshot with shape only", async () => {
+    installPsTable("100 1 100 100 pts/1 4200 -zsh\n101 100 abc 100 pts/1 2048 SECRET-ARG\n");
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    const error = await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((e: unknown) => e);
+
+    const message = (error as Error).message;
+    expect(message).toContain("line 2/3, 7 columns, shape N N T N T N");
+    expect(message).toContain(", trailing newline)");
+    expect(message).not.toContain("abc");
+    expect(message).not.toContain("SECRET-ARG");
+  });
+
+  it("T6: real procps row shapes parse without a diagnostic", async () => {
+    installPsTable(
+      [
+        "100 1 100 100 pts/1 4200 -zsh",
+        "102 100 100 100 pts/1 0 [codex] <defunct>",
+        "103 100 100 100 pts/1 1540 ?",
+        "104 100 100 100 pts/1 1544  ",
+        "2 0 0 -1 ? 0 [kthreadd]",
+      ].join("\n"),
+    );
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+    });
+  });
+
+  it.each([
+    ["empty stdout", ""],
+    ["header-only", "    PID    PPID    PGID   TPGID TT          RSS COMMAND\n"],
+  ])("T7: %s fails closed as unknown, never as an empty healthy table", async (_label, stdout) => {
+    installPsTable(stdout);
+    const { isProcessRunningInTmux, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toMatchObject({
+      name: "TmuxProbeUnknownError",
+      message: expect.stringContaining("malformed process table output (no data rows"),
+    });
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toMatchObject({
+      alive: false,
+      diagnostic: expect.stringContaining("ps failed: malformed process table output"),
+    });
   });
 });
