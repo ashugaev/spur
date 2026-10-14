@@ -742,6 +742,8 @@ const SIDECAR_START_CONFLICT_BACKOFF_BASE_MS = 60_000;
 const SIDECAR_START_CONFLICT_BACKOFF_MAX_MS = 900_000;
 const SIDECAR_START_CONFLICT_DEADLINE_MS = 1_800_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+const LIFECYCLE_REBUILD_PASSES = 3;
+const LIFECYCLE_ASSEMBLY_BUDGET_MS = 5_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
 // activity, so they don't need every-tick re-enrichment — a small bounded
@@ -6018,20 +6020,22 @@ export class SessionService {
     );
   }
 
-  private lifecycleSource(record: SessionRecord): SessionRecord {
-    if (this.lifecycle.snapshot(record.id).revision === 0) return record;
-    const current = listSessions(this.config.dataDir).find((session) => session.id === record.id);
-    return current && isDeepStrictEqual(current, record) ? current : record;
-  }
-
   private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
-    rows: { view: T; source: SessionRecord | null; revision: number }[],
-    rebuild: (record: SessionRecord) => Promise<{ view: T; source: SessionRecord } | undefined>,
-    includePending = false,
+    rows: {
+      view: T;
+      source: SessionRecord | null;
+      revision: number;
+      identity?: boolean;
+    }[],
+    rebuild: (
+      record: SessionRecord,
+      listing: SessionRecord[] | undefined,
+    ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
+    options: { includePending: boolean; signal?: AbortSignal | undefined },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
-    const rebuildExisting = async (record: SessionRecord) => {
+    const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
-        const rebuilt = await rebuild(record);
+        const rebuilt = await rebuild(record, listing);
         if (!rebuilt && readSession(this.config.dataDir, record.id))
           throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         return rebuilt;
@@ -6044,66 +6048,110 @@ export class SessionService {
         throw error;
       }
     };
-    const missingPending = () =>
-      listSessions(this.config.dataDir).filter((record) => {
-        const operation = this.lifecycle.snapshot(record.id).operation;
-        return (
-          operation?.phase === "pending" &&
-          operation.action !== "complete" &&
-          !rows.some((row) => row.view.id === record.id)
-        );
-      });
-    if (includePending) {
-      for (const record of missingPending()) {
-        const revision = this.lifecycle.snapshot(record.id).revision;
-        const rebuilt = await rebuildExisting(record);
-        if (rebuilt) rows.push({ ...rebuilt, revision });
-      }
-    }
-    const changed = (row: (typeof rows)[number]) => {
-      const receipt = this.lifecycle.snapshot(row.view.id);
-      if (!readSession(this.config.dataDir, row.view.id)) return true;
+    // Pure: every input is the store read of the current pass, never a fresh read.
+    const changed = (
+      row: (typeof rows)[number],
+      record: SessionRecord,
+      receipt: SessionLifecycleSnapshot,
+    ) => {
       if (receipt.revision === 0 && row.revision === 0) return false;
-      const current = listSessions(this.config.dataDir).find(
-        (session) => session.id === row.view.id,
-      );
-      if (!current) return true;
       return (
-        current !== row.source ||
         receipt.revision !== row.revision ||
+        (record !== row.source &&
+          (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
           row.view.slots,
           this.projectSidecarSlots(
-            current,
-            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, current)),
+            record,
+            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, record)),
           ),
         )
       );
     };
-    const rebuiltRows = await Promise.all(
-      rows.map(async (row) => {
-        if (!changed(row)) return row;
-        const current = readSession(this.config.dataDir, row.view.id);
-        if (!current) return undefined;
-        const revision = this.lifecycle.snapshot(current.id).revision;
-        const rebuilt = await rebuildExisting(current);
-        if (!rebuilt) return undefined;
-        row.view = rebuilt.view;
-        row.source = rebuilt.source;
-        row.revision = revision;
-        return row;
-      }),
-    );
-    if (includePending) {
-      const missing = missingPending()[0];
-      if (missing) throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(missing.id));
+    let live = [...rows];
+    const startedAt = Date.now();
+    for (let pass = 0; ; pass += 1) {
+      options.signal?.throwIfAborted();
+      // One synchronous span: capture receipts, then read the store, then compare.
+      const receipts = new Map(
+        live.map((row) => [row.view.id, this.lifecycle.snapshot(row.view.id)]),
+      );
+      const listing = options.includePending ? listSessions(this.config.dataDir) : undefined;
+      const current = new Map<string, SessionRecord>();
+      if (listing) {
+        for (const record of listing) if (!current.has(record.id)) current.set(record.id, record);
+      } else {
+        for (const row of live) {
+          const record = readSession(this.config.dataDir, row.view.id);
+          if (record) current.set(record.id, record);
+        }
+      }
+      live = live.filter((row) => current.has(row.view.id));
+      const liveIds = new Set(live.map((row) => row.view.id));
+      const pickup = listing
+        ? [...current.values()].filter((record) => {
+            const operation = this.lifecycle.snapshot(record.id).operation;
+            return (
+              operation?.phase === "pending" &&
+              operation.action !== "complete" &&
+              !liveIds.has(record.id)
+            );
+          })
+        : [];
+      for (const record of pickup) receipts.set(record.id, this.lifecycle.snapshot(record.id));
+      const stale = live.filter((row) =>
+        changed(
+          row,
+          current.get(row.view.id) as SessionRecord,
+          receipts.get(row.view.id) as SessionLifecycleSnapshot,
+        ),
+      );
+      if (stale.length === 0 && pickup.length === 0) {
+        return live.map((row) => ({
+          ...row.view,
+          lifecycle: receipts.get(row.view.id) as SessionLifecycleSnapshot,
+        }));
+      }
+      if (
+        pass === LIFECYCLE_REBUILD_PASSES ||
+        (pass > 0 && Date.now() - startedAt >= LIFECYCLE_ASSEMBLY_BUDGET_MS)
+      ) {
+        const refused = pickup[0]?.id ?? (stale[0] as (typeof stale)[number]).view.id;
+        throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(refused));
+      }
+      options.signal?.throwIfAborted();
+      const dropped = new Set<string>();
+      const [, added] = await Promise.all([
+        Promise.all(
+          stale.map(async (row) => {
+            const id = row.view.id;
+            const rebuilt = await rebuildExisting(current.get(id) as SessionRecord, listing);
+            if (!rebuilt) {
+              dropped.add(id);
+              return;
+            }
+            row.view = rebuilt.view;
+            row.source = rebuilt.source;
+            row.revision = (receipts.get(id) as SessionLifecycleSnapshot).revision;
+            row.identity = false;
+          }),
+        ),
+        Promise.all(
+          pickup.map(async (record) => {
+            const rebuilt = await rebuildExisting(record, listing);
+            return rebuilt
+              ? {
+                  ...rebuilt,
+                  revision: (receipts.get(record.id) as SessionLifecycleSnapshot).revision,
+                  identity: false,
+                }
+              : undefined;
+          }),
+        ),
+      ]);
+      live = live.filter((row) => !dropped.has(row.view.id));
+      for (const row of added) if (row) live.push(row);
     }
-    return rebuiltRows.flatMap((row) => {
-      if (!row || !readSession(this.config.dataDir, row.view.id)) return [];
-      const lifecycle = this.lifecycle.snapshot(row.view.id);
-      if (changed(row)) throw this.lifecycleSnapshotChanged(lifecycle);
-      return [{ ...row.view, lifecycle }];
-    });
   }
 
   private logEvent(
@@ -10339,6 +10387,7 @@ export class SessionService {
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
+    signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
     this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
@@ -10359,14 +10408,17 @@ export class SessionService {
           view,
           source: this.dashboardEnrichedRecords.get(view.id) ?? null,
           revision: this.lifecycle.snapshot(view.id).revision,
+          identity: true,
         }));
-      for (const record of allSessions) {
-        if (this.dashboardCache.has(record.id) || this.lifecycle.snapshot(record.id).revision === 0)
-          continue;
-        const revision = this.lifecycle.snapshot(record.id).revision;
+      for (const { id } of allSessions) {
+        // One synchronous span: capture the revision, then read the record.
+        const revision = this.lifecycle.snapshot(id).revision;
+        if (this.dashboardCache.has(id) || revision === 0) continue;
+        const record = readSession(this.config.dataDir, id);
+        if (!record) continue;
         try {
           const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, revision });
+          if (assembled) rows.push({ ...assembled, revision, identity: false });
           else if (readSession(this.config.dataDir, record.id))
             throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         } catch (error) {
@@ -10381,7 +10433,7 @@ export class SessionService {
       const views = await this.finalizeLifecycleRows(
         rows,
         (record) => this.assembleDashboard(record),
-        true,
+        { includePending: true, signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
       return views.filter(included);
@@ -10412,8 +10464,8 @@ export class SessionService {
     );
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
-      (record) => this.enrichWithClassified(record),
-      true,
+      (record, listing) => this.enrichWithClassified(record, undefined, listing),
+      { includePending: true, signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter(included);
@@ -22718,7 +22770,9 @@ export class SessionService {
 
   private async assembleDashboard(
     session: SessionRecord,
-  ): Promise<{ view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord } | undefined> {
+  ): Promise<
+    { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
+  > {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -22727,7 +22781,6 @@ export class SessionService {
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
-    const source = this.lifecycleSource(session);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const displaySlots = this.projectSidecarSlots(
@@ -22738,7 +22791,9 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
+    const persistedSession = session;
     session = this.withReportingError(session);
+    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -22817,9 +22872,10 @@ export class SessionService {
     if (!tokenUsage || JSON.stringify(tokenUsage) === JSON.stringify(current.tokenUsage)) {
       return { status: "present", session: current };
     }
-    const updated = { ...current, tokenUsage };
-    writeSession(this.config.dataDir, updated);
-    return { status: "present", session: updated };
+    writeSession(this.config.dataDir, { ...current, tokenUsage });
+    // Re-read so downstream sources deep-equal the stored (normalized) record.
+    const written = readSession(this.config.dataDir, session.id);
+    return written ? { status: "present", session: written } : { status: "missing" };
   }
 
   private reconcileClassifiedTokenUsage(
@@ -22983,6 +23039,7 @@ export class SessionService {
           source: rebuilt.source,
         };
       },
+      { includePending: false },
     );
     const result = rows[0];
     if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -23034,7 +23091,7 @@ export class SessionService {
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
-    source: SessionRecord;
+    source: SessionRecord | null;
     detectionOnlyError: boolean;
   }> {
     const hasIndependentError = (record: SessionRecord): boolean =>
@@ -23048,7 +23105,6 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
     session = persisted.session;
-    const source = this.lifecycleSource(session);
     const preReportHasIndependentError =
       hasIndependentError(session) ||
       (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
@@ -23072,7 +23128,9 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
+    const persistedSession = session;
     session = this.withReportingError(session);
+    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);

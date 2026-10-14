@@ -27619,7 +27619,7 @@ describe("SessionService", () => {
 
     const listed = await service.list();
 
-    expect(listSessionsMock).toHaveBeenCalledTimes(3);
+    expect(listSessionsMock).toHaveBeenCalledTimes(2);
     expect(listed).toHaveLength(1_000);
     expect(listed.map((session) => session.id)).toEqual(expectedIds);
     expect(listed.find((session) => session.id === "api-1")?.deskGroupMembers).toEqual([
@@ -45819,12 +45819,19 @@ describe("SessionService", () => {
       lifecycle: SessionLifecycleRegister;
       assembleDashboard(record: SessionRecord): Promise<{
         view: Omit<DashboardSessionView, "lifecycle">;
-        source: SessionRecord;
+        source: SessionRecord | null;
       }>;
-      enrichWithClassified(record: SessionRecord): Promise<{
+      enrichWithClassified(
+        record: SessionRecord,
+        claudeAccounts?: unknown,
+        listing?: SessionRecord[],
+      ): Promise<{
         view: Omit<SessionListItemView, "lifecycle">;
-        source: SessionRecord;
+        source: SessionRecord | null;
       }>;
+      withReportingError(record: SessionRecord): SessionRecord;
+      guardSidecarViews(id: string, sidecars: unknown): void;
+      runDashboardCacheTick(): Promise<void>;
     };
 
     it.each(["complete", "restore", "reopen"] as const)(
@@ -46116,40 +46123,638 @@ describe("SessionService", () => {
       },
     );
 
-    it("returns retryable 503 after one rebuild instead of decorating a second changed source", async () => {
-      const records = seed();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = service as unknown as LifecycleInternals;
-      const owner = internals.lifecycle.begin("complete", ["api-1"], "coherent");
-      internals.lifecycle.settle(
-        owner,
-        true,
-        () => "succeeded",
-        () => true,
-      );
-      const original = internals.enrichWithClassified.bind(internals);
-      let changes = 0;
-      const rebuild = vi
-        .spyOn(internals, "enrichWithClassified")
-        .mockImplementation(async (record) => {
-          const row = await original(record);
-          if (record.id === "api-1") {
-            const current = records.get(record.id);
-            if (!current) throw new Error("Missing fixture");
-            records.set(record.id, { ...current, prompt: `changed ${++changes}` });
+    describe("bounded snapshot rebuild passes", () => {
+      const startedAt = "2026-03-18T10:00:00.000Z";
+      let operations = 0;
+
+      function plainSeed() {
+        const records = seed();
+        for (const [id, record] of records) records.set(id, { ...record, workspaceId: id });
+        return records;
+      }
+
+      function rewrite(
+        records: Map<string, SessionRecord>,
+        id: string,
+        patch: Partial<SessionRecord>,
+      ) {
+        const current = records.get(id);
+        if (!current) throw new Error(`Missing fixture ${id}`);
+        records.set(id, { ...current, ...patch });
+      }
+
+      async function setup() {
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", startedAt, {
+          deferBackgroundLoops: true,
+        });
+        return { service, internals: service as unknown as LifecycleInternals };
+      }
+
+      function settleOp(internals: LifecycleInternals, id: string) {
+        const owner = internals.lifecycle.begin("complete", [id], `settled-${++operations}`);
+        internals.lifecycle.settle(
+          owner,
+          true,
+          () => "succeeded",
+          () => true,
+        );
+      }
+
+      function watchBuilds(
+        internals: LifecycleInternals,
+        hook: (id: string, build: number) => void = () => undefined,
+      ) {
+        const original = internals.enrichWithClassified.bind(internals);
+        const counts = new Map<string, number>();
+        const state = { depth: 0 };
+        // The post-finalize sidecar guard reads each returned row once; it is not
+        // part of the finalize pass, so it counts as builder-side IO here.
+        const guard = internals.guardSidecarViews.bind(internals);
+        vi.spyOn(internals, "guardSidecarViews").mockImplementation((id, sidecars) => {
+          state.depth += 1;
+          try {
+            guard(id, sidecars);
+          } finally {
+            state.depth -= 1;
           }
+        });
+        const spy = vi
+          .spyOn(internals, "enrichWithClassified")
+          .mockImplementation(async (record, accounts, listing) => {
+            state.depth += 1;
+            let row;
+            try {
+              row = await original(record, accounts, listing);
+            } finally {
+              state.depth -= 1;
+            }
+            const build = (counts.get(record.id) ?? 0) + 1;
+            counts.set(record.id, build);
+            hook(record.id, build);
+            return row;
+          });
+        return {
+          spy,
+          state,
+          builds: (id: string) => spy.mock.calls.filter(([record]) => record.id === id).length,
+        };
+      }
+
+      function watchDashboardBuilds(
+        internals: LifecycleInternals,
+        hook: (id: string, build: number) => void = () => undefined,
+      ) {
+        const original = internals.assembleDashboard.bind(internals);
+        const counts = new Map<string, number>();
+        const spy = vi.spyOn(internals, "assembleDashboard").mockImplementation(async (record) => {
+          const row = await original(record);
+          const build = (counts.get(record.id) ?? 0) + 1;
+          counts.set(record.id, build);
+          hook(record.id, build);
           return row;
         });
-      try {
-        await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
-          statusCode: 503,
-          payload: { code: "session_lifecycle_snapshot_changed" },
-        });
-        expect(rebuild.mock.calls.filter(([record]) => record.id === "api-1")).toHaveLength(2);
-      } finally {
-        service.dispose();
+        return {
+          spy,
+          builds: (id: string) => spy.mock.calls.filter(([record]) => record.id === id).length,
+        };
       }
+
+      const snapshotChanged = {
+        statusCode: 503,
+        payload: { code: "session_lifecycle_snapshot_changed" },
+      };
+
+      it("builds static rows once and reads the store once per pass", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const full = watchBuilds(internals);
+          listSessionsMock.mockClear();
+          const first = await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(2);
+          const second = await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(4);
+          expect(second).toEqual(first);
+          expect(full.builds("api-1")).toBe(2);
+          expect(full.builds("api-2")).toBe(2);
+
+          await internals.runDashboardCacheTick();
+          const dashboard = watchDashboardBuilds(internals);
+          listSessionsMock.mockClear();
+          const dashFirst = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(3);
+          const dashSecond = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(6);
+          expect(dashFirst.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(dashSecond).toEqual(dashFirst);
+          expect(dashboard.spy).not.toHaveBeenCalled();
+          expect(records.size).toBe(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each(["list", "get"] as const)(
+        "returns retryable 503 after bounded rebuilds when %s sees churn on every build",
+        async (route) => {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            let changes = 0;
+            const watch = watchBuilds(internals, (id) => {
+              if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+            });
+            listSessionsMock.mockClear();
+            const call =
+              route === "list" ? service.list({ includeCompleted: true }) : service.get("api-1");
+            await expect(call).rejects.toMatchObject(snapshotChanged);
+            expect(watch.builds("api-1")).toBe(4);
+            if (route === "list") expect(listSessionsMock).toHaveBeenCalledTimes(5);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each([
+        { churnBuilds: 3, builds: 4 },
+        { churnBuilds: 2, builds: 3 },
+      ])(
+        "returns the latest row when churn stops after $churnBuilds builds",
+        async ({ churnBuilds, builds }) => {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            const revision = internals.lifecycle.snapshot("api-1").revision;
+            const watch = watchBuilds(internals, (id, build) => {
+              if (id === "api-1" && build <= churnBuilds)
+                rewrite(records, id, { branch: `changed ${build}` });
+            });
+            const rows = await service.list({ includeCompleted: true });
+            const row = rows.find((candidate) => candidate.id === "api-1");
+            expect(watch.builds("api-1")).toBe(builds);
+            expect(row?.branch).toBe(`changed ${churnBuilds}`);
+            expect(row?.lifecycle.revision).toBe(revision);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it("does not rebuild revision-0 rows that churn", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let churn = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-2") rewrite(records, id, { branch: `churn ${++churn}` });
+          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(watch.builds("api-2")).toBe(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("returns 503 after bounded rebuilds when the lifecycle revision moves every pass", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") settleOp(internals, id);
+          });
+          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject(
+            snapshotChanged,
+          );
+          expect(watch.builds("api-1")).toBe(4);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("drops rows deleted while rebuilding instead of refusing", async () => {
+        for (const victim of ["api-2", "api-1"]) {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1") return;
+              if (build === 1) rewrite(records, id, { branch: "rewritten" });
+              if (build === 2) records.delete(victim);
+            });
+            const rows = await service.list({ includeCompleted: true });
+            expect(rows.map((row) => row.id)).toEqual(victim === "api-2" ? ["api-1"] : ["api-2"]);
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it("excludes a created idle session but picks up a created pending one", async () => {
+        for (const pending of [false, true]) {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1") return;
+              if (build === 1) rewrite(records, id, { branch: "rewritten" });
+              if (build !== 2) return;
+              const base = records.get("api-1");
+              if (!base) throw new Error("Missing fixture");
+              records.set("api-3", {
+                ...base,
+                id: "api-3",
+                workspaceId: "api-3",
+                branch: "api-3",
+                tmuxSession: "api-3",
+                status: pending ? "completed" : "running",
+              });
+              if (pending) internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+            });
+            const rows = await service.list({ includeCompleted: true });
+            const ids = rows.map((row) => row.id).sort();
+            if (!pending) expect(ids).toEqual(["api-1", "api-2"]);
+            else {
+              expect(ids).toEqual(["api-1", "api-2", "api-3"]);
+              expect(rows.find((row) => row.id === "api-3")?.lifecycle.operation?.phase).toBe(
+                "pending",
+              );
+            }
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it("rebuilds desk rows when workspace slots or membership move mid-pass", async () => {
+        const { writeWorkspaceState } = await loadWorkspaceStoreModule();
+        for (const scenario of ["slots", "membership"] as const) {
+          const records = seed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            settleOp(internals, "api-2");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1" || build !== 1) return;
+              if (scenario === "slots")
+                writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+                  slots: { title: "moved", links: [] },
+                });
+              else rewrite(records, "api-2", { workspaceId: "api-2" });
+            });
+            const rows = await service.list({ includeCompleted: true });
+            if (scenario === "slots")
+              for (const row of rows) expect(row.slots?.title).toBe("moved");
+            else expect(rows.find((row) => row.id === "api-2")?.workspaceId).toBe("api-2");
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it.each([2, 8])("reads the store O(1) per pass for %i settled rows", async (count) => {
+        const records = plainSeed();
+        const base = records.get("api-1");
+        if (!base) throw new Error("Missing fixture");
+        for (let index = 3; index <= count; index += 1)
+          records.set(`api-${index}`, {
+            ...base,
+            id: `api-${index}`,
+            workspaceId: `api-${index}`,
+            branch: `api-${index}`,
+            tmuxSession: `api-${index}`,
+          });
+        const { service, internals } = await setup();
+        try {
+          for (const id of records.keys()) settleOp(internals, id);
+          const watch = watchBuilds(internals, (id, build) => {
+            if (build === 1) rewrite(records, id, { branch: `${id} rewritten` });
+          });
+          const readSession = readSessionMock.getMockImplementation();
+          if (!readSession) throw new Error("Missing store mock");
+          let outside = 0;
+          readSessionMock.mockImplementation((...args: Parameters<typeof readSession>) => {
+            if (watch.state.depth === 0) outside += 1;
+            return readSession(...args);
+          });
+          listSessionsMock.mockClear();
+          outside = 0;
+          await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(3);
+          expect(watch.spy).toHaveBeenCalledTimes(2 * count);
+          expect(outside).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("reads the store once per pass in single-session mode", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          let churning = false;
+          const watch = watchBuilds(internals, (id) => {
+            if (churning) rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          const readSession = readSessionMock.getMockImplementation();
+          if (!readSession) throw new Error("Missing store mock");
+          let outside = 0;
+          readSessionMock.mockImplementation((...args: Parameters<typeof readSession>) => {
+            if (watch.state.depth === 0) outside += 1;
+            return readSession(...args);
+          });
+          await service.get("api-1");
+          expect(outside).toBe(2);
+          watch.spy.mockClear();
+          outside = 0;
+          churning = true;
+          await expect(service.get("api-1")).rejects.toMatchObject(snapshotChanged);
+          expect(watch.builds("api-1")).toBe(4);
+          expect(outside).toBe(5);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each([
+        { label: "plain samples", extraKey: false },
+        { label: "samples carrying a key the store drops", extraKey: true },
+      ])("does not treat its own token write as churn for $label", async ({ extraKey }) => {
+        const records = plainSeed();
+        rewrite(records, "api-1", {
+          agent: "codex",
+          agentSessionId: "root-thread",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        });
+        if (extraKey)
+          writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+            const usage = session.tokenUsage;
+            const stored = usage
+              ? {
+                  ...session,
+                  tokenUsage: {
+                    ...usage,
+                    generations: Object.fromEntries(
+                      Object.entries(usage.generations).map(([key, generation]) => [
+                        key,
+                        {
+                          inputTokens: generation.inputTokens,
+                          outputTokens: generation.outputTokens,
+                          totalTokens: generation.totalTokens,
+                        },
+                      ]),
+                    ),
+                  },
+                }
+              : session;
+            records.set(session.id, normalizeSessionPrBinding(clone(stored)));
+          });
+        let total = 100;
+        readCodexRolloutStateMock.mockImplementation(async () => {
+          total += 10;
+          const sample = {
+            provider: "codex",
+            generationId: "codex:root-thread",
+            inputTokens: total - 10,
+            outputTokens: 10,
+            totalTokens: total,
+            ...(extraKey ? { model: "x" } : {}),
+          };
+          return { rollout: null, rateLimit: null, tokenUsage: sample, tokenUsages: [sample] };
+        });
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals);
+          writeSessionMock.mockClear();
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.some((row) => row.id === "api-1")).toBe(true);
+          expect(watch.builds("api-1")).toBe(1);
+          expect(
+            writeSessionMock.mock.calls.filter(([, session]) => session.id === "api-1").length,
+          ).toBeGreaterThanOrEqual(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("captures the lifecycle receipt before the store read", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            if (build === 1) {
+              rewrite(records, id, { branch: "rewritten" });
+              const read = listSessionsMock.getMockImplementation();
+              if (!read) throw new Error("Missing store mock");
+              listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                const listing = read(...args);
+                rewrite(records, "api-1", { branch: "restored" });
+                const owner = internals.lifecycle.begin("restore", ["api-1"], "restore-op");
+                internals.lifecycle.settle(
+                  owner,
+                  true,
+                  () => "succeeded",
+                  () => true,
+                );
+                return listing;
+              });
+            }
+          });
+          const rows = await service.list({ includeCompleted: true });
+          const row = rows.find((candidate) => candidate.id === "api-1");
+          expect(watch.builds("api-1")).toBe(3);
+          expect(
+            watch.spy.mock.calls.filter(([record]) => record.id === "api-1").at(-1)?.[0],
+          ).toMatchObject({
+            branch: "restored",
+          });
+          expect(row?.branch).toBe("restored");
+          expect(row?.lifecycle.revision).toBe(internals.lifecycle.snapshot("api-1").revision);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("reads a cache-miss dashboard record after the earlier builds", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          settleOp(internals, "api-2");
+          const watch = watchDashboardBuilds(internals, (id) => {
+            if (id !== "api-1") return;
+            rewrite(records, "api-2", { branch: "restored" });
+            settleOp(internals, "api-2");
+          });
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          const row = rows.find((candidate) => candidate.id === "api-2");
+          const calls = watch.spy.mock.calls.filter(([record]) => record.id === "api-2");
+          expect(calls).toHaveLength(1);
+          expect(calls[0]?.[0].branch).toBe("restored");
+          expect(row?.branch).toBe("restored");
+          expect(row?.lifecycle.revision).toBe(internals.lifecycle.snapshot("api-2").revision);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      describe("deadline and abort", () => {
+        it("refuses after the budget once a rebuild pass ran, never before the first", async () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          try {
+            for (const churnAlways of [true, false]) {
+              const records = plainSeed();
+              const { service, internals } = await setup();
+              try {
+                settleOp(internals, "api-1");
+                const watch = watchBuilds(internals, (id, build) => {
+                  if (id !== "api-1") return;
+                  if (build === 1 || churnAlways)
+                    rewrite(records, id, { branch: `changed ${build}` });
+                  if (build === 2) vi.setSystemTime(Date.now() + 60_000);
+                });
+                const listed = service.list({ includeCompleted: true });
+                if (churnAlways) await expect(listed).rejects.toMatchObject(snapshotChanged);
+                else await expect(listed).resolves.toHaveLength(2);
+                expect(watch.builds("api-1")).toBe(2);
+              } finally {
+                service.dispose();
+              }
+            }
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it("does not refuse at the first pass when the budget lapses during the pass-0 read", async () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            let callsWhenClockJumped = 0;
+            const watch = watchBuilds(internals, (id, build) => {
+              if (id !== "api-1" || build !== 1) return;
+              rewrite(records, id, { branch: "changed 1" });
+              const read = listSessionsMock.getMockImplementation();
+              if (!read) throw new Error("Missing store mock");
+              listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                callsWhenClockJumped = listSessionsMock.mock.calls.length;
+                vi.setSystemTime(Date.now() + 60_000);
+                return read(...args);
+              });
+            });
+            listSessionsMock.mockClear();
+            await expect(service.list({ includeCompleted: true })).resolves.toHaveLength(2);
+            expect(callsWhenClockJumped).toBe(2);
+            expect(watch.builds("api-1")).toBe(2);
+          } finally {
+            service.dispose();
+            vi.useRealTimers();
+          }
+        });
+
+        it.each(["during rebuild", "during the next read"] as const)(
+          "stops starting passes after an abort %s",
+          async (when) => {
+            const records = plainSeed();
+            const { service, internals } = await setup();
+            try {
+              settleOp(internals, "api-1");
+              const controller = new AbortController();
+              const watch = watchBuilds(internals, (id, build) => {
+                if (id !== "api-1") return;
+                rewrite(records, id, { branch: `changed ${build}` });
+                if (build !== 2) return;
+                if (when === "during rebuild") {
+                  controller.abort();
+                  return;
+                }
+                const read = listSessionsMock.getMockImplementation();
+                if (!read) throw new Error("Missing store mock");
+                listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                  controller.abort();
+                  return read(...args);
+                });
+              });
+              listSessionsMock.mockClear();
+              await expect(
+                service.list({ includeCompleted: true, signal: controller.signal }),
+              ).rejects.toMatchObject({ name: "AbortError" });
+              expect(watch.builds("api-1")).toBe(2);
+              expect(listSessionsMock).toHaveBeenCalledTimes(when === "during rebuild" ? 2 : 3);
+            } finally {
+              service.dispose();
+            }
+          },
+        );
+      });
+
+      it("rebuilds a row whose build re-read saw an intermediate version", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          const watch = watchBuilds(internals);
+          const rows = await service.list({ includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(2);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("compares dashboard-cached sources by identity", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            listSessionsMock(TEST_DATA_DIR);
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          await internals.runDashboardCacheTick();
+          const watch = watchDashboardBuilds(internals);
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(1);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
     });
 
     it("settles execution once and preserves its receipt when a newer owner interrupts response delivery", async () => {

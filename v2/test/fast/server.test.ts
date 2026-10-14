@@ -5036,3 +5036,111 @@ describe("startServer", () => {
     expect(registryWarnings).toHaveLength(2);
   });
 });
+
+describe("GET /sessions abort", () => {
+  async function startFixture() {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-abort-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    await mkdir(repoDir);
+    const port = await findFreePort();
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+    );
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    return { server, port, dataDir };
+  }
+
+  const macrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+  const failedRequests = (dataDir: string) =>
+    readEventLog(dataDir).filter(
+      (entry) => entry.event === "http.request.failed" && entry.path === "/sessions",
+    );
+
+  type ListOptions = Parameters<SessionService["list"]>[0];
+
+  function holdList(server: StartedServer) {
+    let signal: AbortSignal | undefined;
+    let settle: (action: "resolve" | "reject") => void = () => undefined;
+    const spy = vi.spyOn(server, "list").mockImplementation((options: ListOptions) => {
+      signal = options?.signal;
+      return new Promise((resolve, reject) => {
+        settle = (action) => (action === "resolve" ? resolve([]) : reject(signal?.reason));
+      });
+    });
+    return { spy, signal: () => signal, settle: (action: "resolve" | "reject") => settle(action) };
+  }
+
+  it("logs and writes nothing when list rejects after the client disconnects", async () => {
+    const { server, port, dataDir } = await startFixture();
+    const held = holdList(server);
+    try {
+      const client = new AbortController();
+      const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
+      const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      client.abort();
+      await vi.waitFor(() => expect(held.signal()?.aborted).toBe(true));
+      held.settle("reject");
+      await macrotask();
+      await rejected;
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+    }
+    expect(failedRequests(dataDir)).toHaveLength(0);
+  });
+
+  it("sends nothing when list resolves after the client disconnects", async () => {
+    const { server, port, dataDir } = await startFixture();
+    const held = holdList(server);
+    try {
+      const client = new AbortController();
+      const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
+      const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      client.abort();
+      await vi.waitFor(() => expect(held.signal()?.aborted).toBe(true));
+      const info = vi.spyOn(server, "info");
+      info.mockClear();
+      held.settle("resolve");
+      await macrotask();
+      await rejected;
+      expect(info).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+    }
+    expect(failedRequests(dataDir)).toHaveLength(0);
+  });
+
+  it("does not abort a request that completes normally", async () => {
+    const { server, port } = await startFixture();
+    const held = holdList(server);
+    try {
+      const request = fetch(`http://127.0.0.1:${port}/sessions`);
+      await vi.waitFor(() => expect(held.spy).toHaveBeenCalledTimes(1));
+      held.settle("resolve");
+      const response = await request;
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual([]);
+      await macrotask();
+      expect(held.signal()?.aborted).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      await server.stop();
+    }
+  });
+});
