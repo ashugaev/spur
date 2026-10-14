@@ -380,8 +380,71 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
   };
 }
 
-export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
-  const failing = checks.filter((check) => {
+// A re-run (e.g. draft->ready) leaves the superseded run on the same head commit.
+// Runs are superseded per check suite, never per run: within one (kind, app,
+// workflow, trigger event, name) key a run is dropped only when a suite of that
+// key was created strictly later; siblings of one suite share a createdAt, so
+// they are kept. Fail closed: a check whose producer identity is not fully
+// proven (no `producer`), or without a parseable timestamp, is kept and never
+// takes part in supersession. A later run that did not re-execute the check
+// (SKIPPED, NEUTRAL, STALE) supersedes nothing. StatusContext: keyed by context
+// and creator; the latest createdAt wins.
+export type GitHubRunProducer =
+  | {
+      kind: "check_run";
+      appId: number;
+      // null: non-Actions check (workflowRun absent). Present: both ids proven.
+      workflow: { id: number; event: string } | null;
+      suiteId: number;
+    }
+  | { kind: "status_context"; creator: string };
+
+export interface GitHubRunCheck extends GitHubCheck {
+  producer?: GitHubRunProducer;
+  // CheckRun: check suite createdAt. StatusContext: context createdAt.
+  createdAt?: string;
+}
+
+function checkRunKey(check: GitHubRunCheck, producer: GitHubRunProducer): string {
+  return producer.kind === "status_context"
+    ? JSON.stringify([producer.kind, producer.creator, check.name])
+    : JSON.stringify([
+        producer.kind,
+        producer.appId,
+        producer.workflow?.id ?? null,
+        producer.workflow?.event ?? null,
+        check.name,
+      ]);
+}
+
+function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
+  const entries = checks.map((check) => ({
+    check,
+    key: check.producer ? checkRunKey(check, check.producer) : null,
+    at: check.createdAt ? Date.parse(check.createdAt) : Number.NaN,
+  }));
+  const decisive = new Map<string, { at: number; suiteId: number | undefined }[]>();
+  for (const { check, key, at } of entries) {
+    if (key === null || Number.isNaN(at)) continue;
+    if (IGNORED_GITHUB_CI_STATES.has(normalizeReviewState(check.conclusion ?? check.state))) {
+      continue;
+    }
+    const suiteId = check.producer?.kind === "check_run" ? check.producer.suiteId : undefined;
+    decisive.set(key, [...(decisive.get(key) ?? []), { at, suiteId }]);
+  }
+  return entries
+    .filter(({ check, key, at }) => {
+      if (key === null || Number.isNaN(at)) return true;
+      const suiteId = check.producer?.kind === "check_run" ? check.producer.suiteId : undefined;
+      return !decisive
+        .get(key)
+        ?.some((later) => later.at > at && (suiteId === undefined || later.suiteId !== suiteId));
+    })
+    .map(({ check }) => check);
+}
+
+export function summarizeFailingCi(checks: GitHubRunCheck[]): string | null {
+  const failing = latestChecksByName(checks).filter((check) => {
     const state = normalizeReviewState(check.conclusion ?? check.state);
     return FAILING_GITHUB_CI_STATES.has(state);
   });
@@ -439,10 +502,10 @@ function selectPrSummary(prs: GitHubPrStatusSummary[]): GitHubPrStatusSummary | 
 }
 
 const GITHUB_REVIEW_THREAD_FIELDS = `id isResolved comments(last:100){nodes{databaseId body path line author{login}} pageInfo{hasPreviousPage startCursor}}`;
+const GITHUB_CHECK_CONTEXT_FIELDS = `... on CheckRun{name conclusion status checkSuite{databaseId createdAt app{databaseId} workflowRun{event workflow{databaseId}}}} ... on StatusContext{context state createdAt creator{login}}`;
 const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepository{nameWithOwner} author{login} reviewDecision mergeable mergeStateStatus isDraft state
   commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{
-    ... on CheckRun{name conclusion status}
-    ... on StatusContext{context state}
+    ${GITHUB_CHECK_CONTEXT_FIELDS}
   } pageInfo{hasPreviousPage startCursor}}}}}}
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
@@ -484,17 +547,54 @@ function buildGitHubReviewBatchQuery(targets: GitHubBatchTarget[]): {
   };
 }
 
-function checksFromPrNode(value: Record<string, unknown>): GitHubCheck[] {
+export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck[] {
   const commit = connectionNodes(value.commits).at(-1);
   if (!isRecord(commit) || !isRecord(commit.commit) || !isRecord(commit.commit.statusCheckRollup)) {
     return [];
   }
-  return connectionNodes(commit.commit.statusCheckRollup.contexts).flatMap((raw): GitHubCheck[] => {
-    if (!isRecord(raw)) return [];
-    const name = readString(raw.name) ?? readString(raw.context);
-    const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
-    return name && state ? [{ name, state }] : [];
-  });
+  return connectionNodes(commit.commit.statusCheckRollup.contexts).flatMap(
+    (raw): GitHubRunCheck[] => {
+      if (!isRecord(raw)) return [];
+      const checkName = readString(raw.name);
+      const name = checkName ?? readString(raw.context);
+      const state = readString(raw.conclusion) ?? readString(raw.state) ?? readString(raw.status);
+      if (!name || !state) return [];
+      const suite = isRecord(raw.checkSuite) ? raw.checkSuite : null;
+      const createdAt = readString(suite ? suite.createdAt : raw.createdAt);
+      const creator = isRecord(raw.creator) ? readString(raw.creator.login) : null;
+      const producer = checkName
+        ? checkRunProducer(suite)
+        : creator !== null
+          ? ({ kind: "status_context", creator } as const)
+          : null;
+      return [
+        {
+          name,
+          state,
+          ...(producer ? { producer } : {}),
+          ...(createdAt ? { createdAt } : {}),
+        },
+      ];
+    },
+  );
+}
+
+// Proven only with suite id, app id, and either workflowRun null (non-Actions)
+// or workflowRun with both workflow id and event. Anything else is unproven.
+function checkRunProducer(suite: Record<string, unknown> | null): GitHubRunProducer | null {
+  if (!suite) return null;
+  const suiteId = readNumber(suite.databaseId);
+  const appId = isRecord(suite.app) ? readNumber(suite.app.databaseId) : null;
+  if (suiteId === null || appId === null) return null;
+  if (suite.workflowRun === null) return { kind: "check_run", appId, workflow: null, suiteId };
+  if (!isRecord(suite.workflowRun)) return null;
+  const id = isRecord(suite.workflowRun.workflow)
+    ? readNumber(suite.workflowRun.workflow.databaseId)
+    : null;
+  const event = readString(suite.workflowRun.event);
+  return id !== null && event !== null
+    ? { kind: "check_run", appId, workflow: { id, event }, suiteId }
+    : null;
 }
 
 function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestReviewComment[] {
@@ -1521,7 +1621,7 @@ function signalPageToFetch(
 function signalPageField(index: number, page: PullRequestSignalPage): string {
   const connection =
     page.kind === "checks"
-      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{... on CheckRun{name conclusion status} ... on StatusContext{context state}} pageInfo{hasPreviousPage startCursor}}}}}}`
+      ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{${GITHUB_CHECK_CONTEXT_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
         : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
