@@ -19,8 +19,6 @@ export interface CursorSubmitBaseline {
   // rotation is observed, so callers that build a baseline literal (tests)
   // need not know about it up front.
   rotationOffsets?: Map<string, number>;
-  // Retained in persisted baselines; file birth relative to this stamp cannot prove submission.
-  writeStartedAtMs?: number;
 }
 
 // Persisted form (queuedMessageTyped.ackBaseline): the rotated chat file's
@@ -29,8 +27,6 @@ export interface CursorPersistedSubmitBaseline {
   file: string;
   size: number;
   rotated?: { file: string; size: number };
-  // Date.now() just before the pane write; see CursorSubmitBaseline.writeStartedAtMs.
-  writeStartedAtMs?: number;
 }
 
 export function persistCursorSubmitBaseline(
@@ -41,9 +37,6 @@ export function persistCursorSubmitBaseline(
     file: baseline.file,
     size: baseline.size,
     ...(rotated ? { rotated: { file: rotated[0], size: rotated[1] } } : {}),
-    ...(baseline.writeStartedAtMs !== undefined
-      ? { writeStartedAtMs: baseline.writeStartedAtMs }
-      : {}),
   };
 }
 
@@ -55,9 +48,6 @@ export function restoreCursorSubmitBaseline(
     size: persisted.size,
     ...(persisted.rotated
       ? { rotationOffsets: new Map([[persisted.rotated.file, persisted.rotated.size]]) }
-      : {}),
-    ...(persisted.writeStartedAtMs !== undefined
-      ? { writeStartedAtMs: persisted.writeStartedAtMs }
       : {}),
   };
 }
@@ -114,20 +104,15 @@ async function seedRotationOffset(
   return offset;
 }
 
-// Called once per send, right before the pane write. Stamps the write start on
-// the live baseline and its persisted twin (both mutated in place, never
-// copied), and refreshes pinned/current rotated floors so a restart or hold
-// resume excludes complete records already present before this hook.
+// Called once per send, right before the pane write. Refreshes pinned/current
+// rotated floors on the live baseline and persisted twin, both mutated in place.
 export async function markCursorWriteStart(
   baseline: CursorSubmitBaseline,
   persisted: CursorPersistedSubmitBaseline,
-  atMs: number,
   worktreePath: string,
   agentSessionId?: string,
   options?: { cursorConfigDir?: string },
 ): Promise<void> {
-  baseline.writeStartedAtMs = atMs;
-  persisted.writeStartedAtMs = atMs;
   baseline.size = await readSubmitFloor(baseline.file, baseline.size);
   persisted.size = baseline.size;
   if (!agentSessionId || !options?.cursorConfigDir) return;

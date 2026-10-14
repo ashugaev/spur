@@ -15718,7 +15718,7 @@ export class SessionService {
           })
         : null;
       const writeStartedAt = Date.now();
-      await binding?.markWriteStart?.(writeStartedAt);
+      await binding?.markWriteStart?.();
       await sendSensitiveMessageToTmux(session.tmuxSession, message, { agent: session.agent });
       this.recordPaneWrite(session, writeStartedAt);
       if (!binding) return "submitted" as const;
@@ -15888,7 +15888,7 @@ export class SessionService {
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
     const send = async () => {
-      await binding?.markWriteStart?.(Date.now());
+      await binding?.markWriteStart?.();
       await sendMessageToTmux(session.tmuxSession, message, {
         agent: session.agent,
         ...(session.agent === "codex" && options?.interrupt === false

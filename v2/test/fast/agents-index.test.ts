@@ -614,7 +614,7 @@ describe("createAgentSubmitAckBinding", () => {
     expect(result).toEqual({ found: true, lastScannedFile: "/rotated/chat.jsonl" });
   });
 
-  it("stamps the write start on both the persisted baseline and the live scan baseline (#982)", async () => {
+  it("refreshes both the persisted baseline and the live scan baseline", async () => {
     const live: CursorSubmitAckModule.CursorSubmitBaseline = {
       file: "/some/chat.jsonl",
       size: 7,
@@ -637,7 +637,7 @@ describe("createAgentSubmitAckBinding", () => {
       cursorConfigDir: "/tmp/cursor-config",
     });
     const persisted = binding?.baseline;
-    await binding?.markWriteStart?.(123);
+    await binding?.markWriteStart?.();
     await binding?.scan("hello");
 
     expect(binding?.baseline).toBe(persisted);
@@ -645,11 +645,9 @@ describe("createAgentSubmitAckBinding", () => {
       agent: "cursor",
       size: 70,
       rotated: { file: "/rotated/chat.jsonl", size: 90 },
-      writeStartedAtMs: 123,
     });
     expect(live.size).toBe(70);
     expect(live.rotationOffsets?.get("/rotated/chat.jsonl")).toBe(90);
-    expect(live.writeStartedAtMs).toBe(123);
     expect(scanCursorJsonlForMessageMock.mock.calls[0]?.[0]).toBe(live);
   });
 

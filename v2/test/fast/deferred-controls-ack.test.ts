@@ -1587,7 +1587,7 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("D1 (#982): stamps the ack baseline once, before the sensitive pane write and never on an Enter resend", async () => {
+    it("D1: refreshes the ack baseline once, before the sensitive pane write and never on an Enter resend", async () => {
       const baseline: {
         agent: "cursor";
         file: string;
@@ -1621,6 +1621,7 @@ describe("SessionService", () => {
       );
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(markWriteStart).toHaveBeenCalledWith();
       expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
       const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
       // After the binding is built (this path has no alive probe), before the paste.

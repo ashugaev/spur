@@ -180,7 +180,7 @@ export interface SubmitAckBinding {
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
   /** Called once per send right before the pane write; mutates `baseline` in place. Cursor only. */
-  markWriteStart?(atMs: number): Promise<void>;
+  markWriteStart?(): Promise<void>;
 }
 
 export interface ConversationReadContext {
@@ -679,11 +679,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
           );
           return { found: result.found, lastScannedFile: result.scannedFile };
         },
-        markWriteStart: (atMs) =>
+        markWriteStart: () =>
           markCursorWriteStart(
             baseline,
             persistedBaseline,
-            atMs,
             ctx.worktreePath,
             ctx.agentSessionId,
             cursorOptions,

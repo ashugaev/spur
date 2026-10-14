@@ -2078,13 +2078,6 @@ describe("session metadata PR migration", () => {
       { agent: "claude", file: "/c.jsonl", size: 7 },
       { agent: "cursor", file: "/k.jsonl", size: 9 },
       { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
-      {
-        agent: "cursor",
-        file: "/k.jsonl",
-        size: 9,
-        rotated: { file: "/r.jsonl", size: 40 },
-        writeStartedAtMs: 1_700_000_000_000,
-      },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },
     ];
@@ -2125,34 +2118,6 @@ describe("session metadata PR migration", () => {
       file: "/k.jsonl",
       size: 9,
     });
-    // A malformed capture stamp drops alone; file, size and rotation survive.
-    const survivors = {
-      agent: "cursor",
-      file: "/k.jsonl",
-      size: 9,
-      rotated: { file: "/r.jsonl", size: 40 },
-    };
-    const badStamp = { ...survivors, writeStartedAtMs: "x" } as unknown as SubmitAckBaseline;
-    writeSession(dataDir, {
-      ...base,
-      queuedMessageTyped: { message: "m", typedAt, ackBaseline: badStamp },
-    });
-    expect(readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline).toEqual(survivors);
-    // JSON can carry a number that parses to Infinity (1e999); it drops alone too.
-    writeSession(dataDir, {
-      ...base,
-      queuedMessageTyped: {
-        message: "m",
-        typedAt,
-        ackBaseline: { ...survivors, writeStartedAtMs: 1_700_000_000_000 } as SubmitAckBaseline,
-      },
-    });
-    const sessionPath = join(dataDir, "sessions", "api", "api-1.json");
-    writeFileSync(
-      sessionPath,
-      readFileSync(sessionPath, "utf-8").replace("1700000000000", "1e999"),
-    );
-    expect(readSession(dataDir, "api-1")?.queuedMessageTyped?.ackBaseline).toEqual(survivors);
   });
 });
 

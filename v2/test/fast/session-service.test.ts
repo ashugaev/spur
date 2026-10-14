@@ -11496,7 +11496,8 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1");
+        if (!record) throw new Error("expected session fixture api-1");
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
@@ -15112,10 +15113,7 @@ describe("SessionService", () => {
       });
     });
 
-    // #982: the write-start stamp is taken inside the input lock, right before
-    // the pane write, and rides the persisted marker; an Enter resend never
-    // re-stamps.
-    it("stamps the ack baseline once, right before the pane write", async () => {
+    it("refreshes the ack baseline once, right before the pane write", async () => {
       mockClaudeJsonlState("waiting");
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
@@ -15124,12 +15122,10 @@ describe("SessionService", () => {
         agent: "cursor";
         file: string;
         size: number;
-        writeStartedAtMs?: number;
         rotated?: { file: string; size: number };
       };
-      const markWriteStart = vi.fn(async (atMs: number) => {
+      const markWriteStart = vi.fn(async () => {
         await Promise.resolve();
-        ackBaseline.writeStartedAtMs = atMs;
         ackBaseline.size = 70;
         ackBaseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
       });
@@ -15172,13 +15168,11 @@ describe("SessionService", () => {
       expect(lastProbeBeforePaste).toBeGreaterThan(0);
       expect(lastProbeBeforePaste).toBeLessThan(hookOrder);
       expect(hookOrder).toBeLessThan(pasteOrder);
-      const stamp = markWriteStart.mock.calls[0]?.[0];
-      expect(stamp).toEqual(expect.any(Number));
+      expect(markWriteStart).toHaveBeenCalledWith();
       expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
         ...ackBaseline,
         size: 70,
         rotated: { file: "/t/rotated.jsonl", size: 90 },
-        writeStartedAtMs: stamp,
       });
       releaseAck();
       await sent;
