@@ -614,6 +614,61 @@ describe("runtime-tmux", () => {
       expect(respawnCommand().startsWith(`exec sh '${envFile}' env -u `)).toBe(true);
     });
 
+    it("exports DISABLE_AUTO_UPDATE=true in the agent pane env unless the per-call env sets it", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const defaultDir = mkdtempSync(join(tmpdir(), "spur-launch-omz-default-"));
+      const overrideDir = mkdtempSync(join(tmpdir(), "spur-launch-omz-override-"));
+      const readEnvFile = (dir: string): string =>
+        readFileSync(join(dir, paneEnvFiles(dir)[0] ?? "missing"), "utf8");
+      const saved = process.env["DISABLE_AUTO_UPDATE"];
+      Reflect.deleteProperty(process.env, "DISABLE_AUTO_UPDATE");
+      try {
+        await createTmuxSession({
+          sessionName: "api-1",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir: defaultDir,
+        });
+        await createTmuxSession({
+          sessionName: "api-2",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir: overrideDir,
+          env: { DISABLE_AUTO_UPDATE: "false" },
+        });
+      } finally {
+        if (saved !== undefined) process.env["DISABLE_AUTO_UPDATE"] = saved;
+      }
+
+      expect(readEnvFile(defaultDir)).toContain("command export DISABLE_AUTO_UPDATE='true'");
+      const overridden = readEnvFile(overrideDir);
+      expect(overridden).toContain("command export DISABLE_AUTO_UPDATE='false'");
+      expect(overridden).not.toContain("DISABLE_AUTO_UPDATE='true'");
+    });
+
+    it("does not add DISABLE_AUTO_UPDATE to command pane env", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+      const saved = process.env["DISABLE_AUTO_UPDATE"];
+      Reflect.deleteProperty(process.env, "DISABLE_AUTO_UPDATE");
+      try {
+        await createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand: "pnpm dev",
+        });
+      } finally {
+        if (saved !== undefined) process.env["DISABLE_AUTO_UPDATE"] = saved;
+      }
+
+      const files = paneEnvFiles(TEST_TMP_DIR);
+      expect(files).toHaveLength(1);
+      expect(readFileSync(join(TEST_TMP_DIR, files[0] ?? "missing"), "utf8")).not.toContain(
+        "DISABLE_AUTO_UPDATE",
+      );
+    });
+
     it("delivers the agent pane env exactly, keeps tmux's SHELL, and drops identity, tmux-managed, and invalid keys", async () => {
       execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
       const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
