@@ -10,6 +10,7 @@ import {
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
 import { StopSquareIcon, VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
@@ -344,6 +345,7 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
+  useScreenWakeLock(true);
   const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 

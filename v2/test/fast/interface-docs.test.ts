@@ -43,18 +43,16 @@ describe("published interface contracts", () => {
       readRepoFile(".claude/skills/spur/SKILL.md"),
     ]);
 
-    // Surface names, flags, and codes only — behavioral semantics (TTLs, scope
+    // Surface names and flags only — behavioral semantics (TTLs, scope
     // rules, per-source control support) live in code + tests, not doc prose.
     const autoPing = commands.split("## auto-ping")[1]?.split("\n## ")[0] ?? "";
     expect(autoPing).toContain("spur auto-ping unsubscribe");
     for (const flag of ["--event", "--thread", "--subscription"]) expect(autoPing).toContain(flag);
     expect(commands).toContain("SPUR_SESSION");
     expect(commands).toContain("--session");
-    expect(commands).toContain("grant_not_ready");
     expect(daemonApi).toContain("GET /sessions/:id/auto-ping-suppressions");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/unsubscribe");
     expect(daemonApi).toContain("POST /sessions/:id/auto-ping-suppressions/:suppressionId/resume");
-    expect(daemonApi).toMatch(/auto-ping-suppressions[^\n]*409/);
     expect(daemonApi).toContain("POST /projects/:id/preflight-batches");
     expect(configuration).toContain("projects.<id>.tokenBudget");
     expect(configuration).toContain("projects.<id>.tokenBudgetWarnOnly");

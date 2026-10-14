@@ -88,6 +88,10 @@ log "clearing run artifacts"
 rm -f /tmp/agent-run.jsonl /tmp/agent-run.done /tmp/prompt.txt
 rm -rf "$HOME/.cursor/projects" "$HOME/.claude/projects" "$HOME/.claude/todos"
 rm -rf "$HOME/spur-docs"
+# npm cache grows ~8 GB across runs and trips spur doctor's 10 GB free-space
+# floor; the tested agent then spends a turn and a TODO line on a cache a fresh
+# box never has.
+rm -rf "$HOME/.npm"
 
 # The source-install deploy mode leaves a repo clone and its bare mirror here.
 # A tested agent finds that checkout's maintainer spur.yaml — real GitHub and

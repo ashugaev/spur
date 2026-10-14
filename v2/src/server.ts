@@ -59,6 +59,7 @@ import {
   LaunchPromptPendingError,
   OpenPrActionRequiredError,
   PreflightPreviewError,
+  isListedSessionView,
   QueueDeliveryInFlightError,
   SessionAdmissionDeniedError,
   SessionEndedError,
@@ -110,6 +111,7 @@ import {
   type TodoActor,
   type TodoMutationRequest,
   type SessionListView,
+  type SessionView,
 } from "./types.js";
 import {
   InvalidTodoRequestError,
@@ -158,6 +160,35 @@ export function projectSourceSession(session: SessionListView): SourceWorkSessio
     ...(dropsQueuedSend(session) ? { inactive: true } : {}),
     ...(prUrl ? { prUrl } : {}),
   };
+}
+
+function isSnapshotChanged(error: unknown): boolean {
+  return (
+    error instanceof SessionLifecycleError &&
+    error.payload.code === "session_lifecycle_snapshot_changed"
+  );
+}
+
+/** One session by id with the same inclusion as `service.list({ view: "dashboard" })`. */
+export async function sourceSessionById(
+  service: Pick<SessionService, "get">,
+  sessionId: string,
+): Promise<SourceWorkSessionItem | null> {
+  try {
+    let view: SessionView;
+    try {
+      view = await service.get(sessionId);
+    } catch (error) {
+      if (!isSnapshotChanged(error)) throw error;
+      view = await service.get(sessionId);
+    }
+    return isListedSessionView(view, view.lifecycle.operation, false)
+      ? projectSourceSession(view)
+      : null;
+  } catch (error) {
+    if (error instanceof SessionResourceNotFoundError) return null;
+    throw error;
+  }
 }
 
 export function createSourceWorkbench(
@@ -851,6 +882,7 @@ export async function startServer(
         },
         listSessions: async () =>
           (await service.list({ view: "dashboard" })).map(projectSourceSession),
+        getSession: (sessionId) => sourceSessionById(service, sessionId),
         workbench: createSourceWorkbench(service),
         spawnSession: async (request) => {
           const { telegramOrigin, ...spawnRequest } = request;

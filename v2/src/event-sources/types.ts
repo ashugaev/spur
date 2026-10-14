@@ -87,6 +87,8 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   config: TConfig;
   deferInitialSync?: boolean;
   listSessions?(): Promise<SourceSessionListItem[]>;
+  /** One session by id, same inclusion as listSessions. */
+  getSession?(sessionId: string): Promise<SourceSessionListItem | null>;
   workbench?: SourceWorkbench;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
