@@ -49672,6 +49672,8 @@ describe("SessionService", () => {
           expect(logged[0]).toMatchObject({
             event: "session.wake.interval_deferred",
             sessionId: "api-1",
+            level: "error",
+            details: { reason: "admission_check_failed" },
           });
           expect(logged[0]?.message).toContain("host memory read blew up");
           expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:59.000Z");
@@ -49707,6 +49709,8 @@ describe("SessionService", () => {
           expect(logged[0]).toMatchObject({
             event: "session.wake.daily_deferred",
             sessionId: "api-1",
+            level: "error",
+            details: { reason: "admission_check_failed" },
           });
           expect(logged[0]?.message).toContain("host memory read blew up");
           expect(sessions.get("api-1")?.dailyWake?.admissionDeferredOccurrence).toBe(

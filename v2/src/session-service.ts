@@ -1412,6 +1412,16 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
 }
 
+type WakeAdmissionDenial = { kind: "denied" | "check_failed"; error: Error };
+
+function wakeAdmissionReason(denial: WakeAdmissionDenial): string {
+  return denial.kind === "denied" ? "admission" : "admission_check_failed";
+}
+
+function wakeAdmissionLogLevel(denial: WakeAdmissionDenial): "warn" | "error" {
+  return denial.kind === "denied" ? "warn" : "error";
+}
+
 // Interval or daily wake relaunch of a stopped or paused session. Stale-parked
 // and memory-shed sessions keep their own gate inside ensureSessionReadyForSend.
 function wakeRelaunchNeedsAdmission(
@@ -5599,16 +5609,16 @@ export class SessionService {
   // Runs after the occurrence claim: a denial before it would leave the wake
   // due and retry every tick. An unexpected check failure denies only this
   // record: rethrowing would abort the wake loop for every later session.
-  private wakeAdmissionDenial(sessionId: string): Error | null {
+  private wakeAdmissionDenial(sessionId: string): WakeAdmissionDenial | null {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current || !wakeRelaunchNeedsAdmission(current)) return null;
     try {
       this.assertAdmissible(current.project, "wake");
       return null;
     } catch (error) {
-      if (error instanceof SessionAdmissionDeniedError) return error;
+      if (error instanceof SessionAdmissionDeniedError) return { kind: "denied", error };
       const message = error instanceof Error ? error.message : String(error);
-      return new Error(`admission check failed: ${message}`);
+      return { kind: "check_failed", error: new Error(`admission check failed: ${message}`) };
     }
   }
 
@@ -5622,11 +5632,15 @@ export class SessionService {
     const denial = this.wakeAdmissionDenial(session.id);
     if (!denial) return false;
     this.logEvent("session.wake.interval_deferred", {
-      level: "warn",
+      level: wakeAdmissionLogLevel(denial),
       sessionId: session.id,
       projectId: session.project,
-      message: `Deferred interval wake for ${session.id}: ${denial.message}`,
-      details: { nextDueAt, intervalMs: intervalWake.intervalMs, reason: "admission" },
+      message: `Deferred interval wake for ${session.id}: ${denial.error.message}`,
+      details: {
+        nextDueAt,
+        intervalMs: intervalWake.intervalMs,
+        reason: wakeAdmissionReason(denial),
+      },
     });
     return true;
   }
@@ -5638,7 +5652,7 @@ export class SessionService {
     session: SessionRecord,
     dailyWake: SessionDailyWakeState,
     claimedNextDueAt: string,
-    denial: Error,
+    denial: WakeAdmissionDenial,
     now: number,
   ): Promise<void> {
     const occurrence = dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt;
@@ -5649,7 +5663,7 @@ export class SessionService {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
-        message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.message}`,
+        message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.error.message}`,
         details: { occurrence, nextDueAt: claimedNextDueAt, dailyAt: dailyWake.dailyAt },
       });
       return;
@@ -5671,11 +5685,16 @@ export class SessionService {
     });
     if (!deferred || dailyWake.admissionDeferredOccurrence !== undefined) return;
     this.logEvent("session.wake.daily_deferred", {
-      level: "warn",
+      level: wakeAdmissionLogLevel(denial),
       sessionId: session.id,
       projectId: session.project,
-      message: `Deferred daily wake for ${session.id}: ${denial.message}`,
-      details: { reason: "admission", occurrence, retryAt, dailyAt: dailyWake.dailyAt },
+      message: `Deferred daily wake for ${session.id}: ${denial.error.message}`,
+      details: {
+        reason: wakeAdmissionReason(denial),
+        occurrence,
+        retryAt,
+        dailyAt: dailyWake.dailyAt,
+      },
     });
   }
 
