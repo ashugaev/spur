@@ -49481,6 +49481,352 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    describe("wake relaunch admission", () => {
+      type WakeInternals = { processScheduledWakes(): Promise<void> };
+
+      function capAt(maxLiveSessions: number): void {
+        loadConfigMock.mockReturnValue({
+          ...baseConfig(),
+          admission: { ...baseConfig().admission, maxLiveSessions },
+        });
+      }
+
+      // Per-pane runtime: a pane exists and runs its agent once it is live or
+      // relaunched; everything else answers dead.
+      function trackRuntimes(live: string[]): Set<string> {
+        const panes = new Set(live);
+        createTmuxSessionMock.mockImplementation(
+          async ({ sessionName }: { sessionName: string }) => {
+            panes.add(sessionName);
+          },
+        );
+        tmuxSessionExistsMock.mockImplementation(async (name: string) => panes.has(name));
+        isProcessRunningInTmuxMock.mockImplementation(async (name: string) => panes.has(name));
+        return panes;
+      }
+
+      function stoppedRecord(id: string, overrides: Partial<SessionRecord> = {}): SessionRecord {
+        return runningSession({
+          id,
+          status: "stopped",
+          agentSessionId: `native-${id}`,
+          ...overrides,
+        });
+      }
+
+      function events(event: string, sessionId?: string) {
+        return logSpurEventMock.mock.calls
+          .map(([, entry]) => entry)
+          .filter(
+            (entry) =>
+              entry.event === event && (sessionId === undefined || entry.sessionId === sessionId),
+          );
+      }
+
+      function wakeSends(text: string): number {
+        return sendMessageToTmuxMock.mock.calls.filter(
+          ([, message]) => typeof message === "string" && message.includes(text),
+        ).length;
+      }
+
+      async function tick(service: unknown, atMs?: number): Promise<void> {
+        if (atMs !== undefined) vi.setSystemTime(atMs);
+        await (service as WakeInternals).processScheduledWakes();
+      }
+
+      async function idleTicks(service: unknown, count: number): Promise<void> {
+        for (let i = 0; i < count; i += 1) {
+          vi.setSystemTime(Date.now() + 1_000);
+          await tick(service);
+        }
+      }
+
+      const WATCHED = [
+        "session.wake.interval_deferred",
+        "session.wake.interval_sent",
+        "session.wake.daily_deferred",
+        "session.wake.daily_exhausted",
+        "session.wake.daily_sent",
+        "session.recover.completed",
+        "session.admission.denied",
+      ];
+      function watchedCount(): number {
+        return WATCHED.reduce((total, event) => total + events(event).length, 0);
+      }
+
+      describe("interval", () => {
+        const DUE = "2026-03-18T10:04:59.000Z";
+        const ids = ["api-1", "api-2", "api-3", "api-4"];
+
+        function intervalWake(id: string) {
+          return {
+            nextDueAt: DUE,
+            intervalMs: 60_000,
+            message: `interval-${id}`,
+            stopCondition: "Stop condition",
+          };
+        }
+
+        it("relaunches only up to the cap and consumes denied occurrences", async () => {
+          capAt(2);
+          trackRuntimes([]);
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore(
+            ...ids.map((id) => stoppedRecord(id, { intervalWake: intervalWake(id) })),
+          );
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          expect(events("session.recover.completed")).toHaveLength(2);
+          await waitForRealTime(() => {
+            expect(wakeSends("interval-api-1")).toBe(1);
+            expect(wakeSends("interval-api-2")).toBe(1);
+          });
+          expect(wakeSends("interval-api-3")).toBe(0);
+          expect(wakeSends("interval-api-4")).toBe(0);
+          const deferred = events("session.wake.interval_deferred");
+          expect(deferred.map((entry) => entry.sessionId)).toEqual(["api-3", "api-4"]);
+          expect(deferred.map((entry) => entry.details?.["reason"])).toEqual([
+            "admission",
+            "admission",
+          ]);
+          expect(events("session.wake.interval_failed")).toHaveLength(0);
+          expect(sessions.get("api-3")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:59.000Z");
+          expect(sessions.get("api-4")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:59.000Z");
+
+          const settled = watchedCount();
+          await idleTicks(service, 9);
+          expect(watchedCount()).toBe(settled);
+
+          service.dispose();
+          const restarted = await createDisposedSessionService();
+          await idleTicks(restarted, 5);
+          expect(watchedCount()).toBe(settled);
+
+          await tick(restarted, Date.parse("2026-03-18T10:06:00.000Z"));
+          expect(events("session.wake.interval_deferred", "api-3")).toHaveLength(2);
+          expect(events("session.wake.interval_deferred", "api-4")).toHaveLength(2);
+          await waitForRealTime(() => {
+            expect(wakeSends("interval-api-1")).toBe(2);
+            expect(wakeSends("interval-api-2")).toBe(2);
+          });
+          expect(events("session.recover.completed")).toHaveLength(2);
+          restarted.dispose();
+        });
+
+        it("keeps the parked rollback for a stale-parked record", async () => {
+          capAt(1);
+          trackRuntimes(["occupier"]);
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore(
+            runningSession({ id: "occupier" }),
+            stoppedRecord("api-1", {
+              stopReason: "stale_timeout",
+              intervalWake: intervalWake("api-1"),
+            }),
+          );
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe(DUE);
+          const deferred = events("session.wake.interval_deferred", "api-1");
+          expect(deferred).toHaveLength(1);
+          expect(deferred[0]?.details).not.toHaveProperty("reason");
+          service.dispose();
+        });
+
+        it("gates every stopped and paused wake, healed or not", async () => {
+          capAt(1);
+          trackRuntimes(["occupier"]);
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore(
+            runningSession({ id: "occupier" }),
+            stoppedRecord("api-1", { intervalWake: intervalWake("api-1") }),
+            stoppedRecord("api-2", { status: "paused", intervalWake: intervalWake("api-2") }),
+            stoppedRecord("api-3", {
+              status: "budget_limited",
+              intervalWake: intervalWake("api-3"),
+            }),
+          );
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          for (const id of ["api-1", "api-2"]) {
+            expect(sessions.get(id)?.intervalWake?.nextDueAt).toBe("2026-03-18T10:05:59.000Z");
+            expect(
+              events("session.wake.interval_deferred", id).map((e) => e.details?.["reason"]),
+            ).toEqual(["admission"]);
+          }
+          expect(events("session.admission.denied")).toHaveLength(2);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          service.dispose();
+        });
+      });
+
+      describe("daily", () => {
+        // Local slots on the day after the fixture records, in any time zone.
+        const at = (hours: number, minutes: number, seconds = 0) =>
+          new Date(2026, 2, 19, hours, minutes, seconds).getTime();
+        const iso = (ms: number) => new Date(ms).toISOString();
+
+        function seedDaily(overrides: Partial<SessionRecord["dailyWake"]> = {}) {
+          capAt(1);
+          const panes = trackRuntimes(["occupier"]);
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore(
+            runningSession({ id: "occupier" }),
+            stoppedRecord("api-1", {
+              dailyWake: {
+                dailyAt: ["09:00", "09:40"],
+                nextDueAt: iso(at(9, 0)),
+                message: "daily-api-1",
+                stopCondition: "Stop condition",
+                ...overrides,
+              },
+            }),
+          );
+          const freeSlot = () => {
+            const occupier = sessions.get("occupier");
+            if (occupier) sessions.set("occupier", { ...occupier, status: "stopped" });
+            panes.delete("occupier");
+          };
+          const takeSlot = () => {
+            const occupier = sessions.get("occupier");
+            if (occupier) sessions.set("occupier", { ...occupier, status: "running" });
+            panes.add("occupier");
+          };
+          return { sessions, panes, freeSlot, takeSlot };
+        }
+
+        it("retries a denied occurrence until admitted, then sends it once", async () => {
+          const { sessions, freeSlot } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          expect(events("session.admission.denied")).toHaveLength(1);
+          const deferred = events("session.wake.daily_deferred");
+          expect(deferred).toHaveLength(1);
+          expect(deferred[0]?.details?.["reason"]).toBe("admission");
+          expect(wakeSends("daily-api-1")).toBe(0);
+          expect(sessions.get("api-1")?.dailyWake).toMatchObject({
+            nextDueAt: iso(at(9, 15, 1)),
+            admissionDeferredOccurrence: iso(at(9, 0)),
+          });
+          const settled = watchedCount();
+          await idleTicks(service, 10);
+          expect(watchedCount()).toBe(settled);
+
+          freeSlot();
+          await tick(service, at(9, 15, 2));
+          await waitForRealTime(() => expect(wakeSends("daily-api-1")).toBe(1));
+          expect(events("session.wake.daily_sent")).toHaveLength(1);
+          expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe(iso(at(9, 40)));
+          expect(sessions.get("api-1")?.dailyWake).not.toHaveProperty(
+            "admissionDeferredOccurrence",
+          );
+          await idleTicks(service, 10);
+          expect(wakeSends("daily-api-1")).toBe(1);
+          service.dispose();
+        });
+
+        it("skips the occurrence once its retry window reaches the next slot", async () => {
+          const { sessions } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+          await idleTicks(service, 10);
+          await tick(service, at(9, 15, 2));
+          await idleTicks(service, 10);
+          await tick(service, at(9, 30, 3));
+          const settled = watchedCount();
+          await idleTicks(service, 10);
+          expect(watchedCount()).toBe(settled);
+
+          expect(wakeSends("daily-api-1")).toBe(0);
+          expect(events("session.admission.denied")).toHaveLength(3);
+          expect(events("session.wake.daily_deferred")).toHaveLength(1);
+          const exhausted = events("session.wake.daily_exhausted");
+          expect(exhausted).toHaveLength(1);
+          expect(exhausted[0]?.details?.["occurrence"]).toBe(iso(at(9, 0)));
+          expect(sessions.get("api-1")?.dailyWake?.nextDueAt).toBe(iso(at(9, 40)));
+          expect(sessions.get("api-1")?.dailyWake).not.toHaveProperty(
+            "admissionDeferredOccurrence",
+          );
+          service.dispose();
+        });
+
+        it("keeps the retry occurrence and budget across a restart", async () => {
+          const { sessions, freeSlot } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const first = await createDisposedSessionService();
+          await tick(first);
+          first.dispose();
+
+          const restarted = await createDisposedSessionService();
+          const settled = watchedCount();
+          await idleTicks(restarted, 5);
+          expect(watchedCount()).toBe(settled);
+
+          await tick(restarted, at(9, 15, 2));
+          expect(events("session.admission.denied")).toHaveLength(2);
+          expect(events("session.wake.daily_deferred")).toHaveLength(1);
+          expect(sessions.get("api-1")?.dailyWake?.admissionDeferredOccurrence).toBe(iso(at(9, 0)));
+
+          freeSlot();
+          await tick(restarted, at(9, 30, 3));
+          await waitForRealTime(() => expect(wakeSends("daily-api-1")).toBe(1));
+          await idleTicks(restarted, 5);
+          expect(wakeSends("daily-api-1")).toBe(1);
+          restarted.dispose();
+        });
+
+        it("starts a fresh retry budget for the next occurrence", async () => {
+          const { sessions, panes, freeSlot, takeSlot } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+          await tick(service);
+          freeSlot();
+          await tick(service, at(9, 15, 2));
+          await waitForRealTime(() => expect(wakeSends("daily-api-1")).toBe(1));
+
+          const woken = sessions.get("api-1");
+          if (woken) sessions.set("api-1", { ...woken, status: "stopped" });
+          panes.delete("api-1");
+          takeSlot();
+          await tick(service, at(9, 40, 1));
+
+          const deferred = events("session.wake.daily_deferred");
+          expect(deferred).toHaveLength(2);
+          expect(deferred[1]?.details?.["occurrence"]).toBe(iso(at(9, 40)));
+          service.dispose();
+        });
+
+        it("drops the retry marker on a manual daily dispatch", async () => {
+          const { sessions, freeSlot } = seedDaily({
+            nextDueAt: iso(at(9, 15, 1)),
+            admissionDeferredOccurrence: iso(at(9, 0)),
+          });
+          freeSlot();
+          vi.setSystemTime(at(9, 5));
+          const service = await createDisposedSessionService();
+
+          await service.dispatchWake("api-1", { target: "daily", dispatch: true });
+
+          expect(sessions.get("api-1")?.dailyWake).not.toHaveProperty(
+            "admissionDeferredOccurrence",
+          );
+          service.dispose();
+        });
+      });
+    });
+
     it("fires a far-past-due daily wake once and jumps to the next occurrence", async () => {
       const sessions = seedShepherdSession({
         dailyWake: {

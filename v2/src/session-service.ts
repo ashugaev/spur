@@ -508,6 +508,8 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type SessionDailyWakeState,
+  type SessionIntervalWakeState,
   type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
@@ -647,6 +649,7 @@ const CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT =
 const CLAUDE_SERVER_ERROR_REACTIVATION_MS = 30 * 60 * 1000;
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const SCHEDULED_WAKE_POLL_INTERVAL_MS = 1_000;
+const DAILY_WAKE_ADMISSION_RETRY_MS = 15 * 60_000;
 const SIDECAR_REAPER_INTERVAL_MS = 60_000;
 const MEMORY_SHED_INTERVAL_MS = 1_000;
 // Consecutive 1s ticks above the restore floor plus margin required before
@@ -1400,6 +1403,17 @@ export function isListedSessionView(
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "stopped" || status === "paused";
+}
+
+// Interval or daily wake relaunch of a stopped or paused session. Stale-parked
+// and memory-shed sessions keep their own gate inside ensureSessionReadyForSend.
+function wakeRelaunchNeedsAdmission(
+  session: Pick<SessionRecord, "status" | "stopReason">,
+): boolean {
+  if (session.status === "paused") return true;
+  return (
+    session.status === "stopped" && session.stopReason !== "memory_shed" && !isStaleParked(session)
+  );
 }
 
 // A launch or Send now whose submit never confirmed: the prompt may still sit
@@ -5108,7 +5122,10 @@ export class SessionService {
               return null;
             },
           );
-          if (claimedNextDueAt !== null) {
+          if (
+            claimedNextDueAt !== null &&
+            !this.deferIntervalWakeForAdmission(session, intervalWake, claimedNextDueAt)
+          ) {
             const nextDueAt = claimedNextDueAt;
             try {
               await this.send(session.id, {
@@ -5412,6 +5429,9 @@ export class SessionService {
         ) {
           continue;
         }
+        // Every claim write drops the admission retry marker: the claimed
+        // occurrence is the one now in flight.
+        const { admissionDeferredOccurrence: _deferredOccurrence, ...dailySchedule } = dailyWake;
         const claimedDailyNextDueAt = await this.withWorkspaceLifecycleLocks(
           session.id,
           async (): Promise<string | null> => {
@@ -5460,7 +5480,7 @@ export class SessionService {
                 const skipped: SessionRecord = {
                   ...currentDailyWakeSession,
                   dailyWake: {
-                    ...dailyWake,
+                    ...dailySchedule,
                     nextDueAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
                   },
                   updatedAt: nowIso(),
@@ -5481,7 +5501,7 @@ export class SessionService {
               const updated: SessionRecord = {
                 ...currentDailyWakeSession,
                 dailyWake: {
-                  ...dailyWake,
+                  ...dailySchedule,
                   nextDueAt: nextDueAt.toISOString(),
                 },
                 updatedAt: nowIso(),
@@ -5493,6 +5513,17 @@ export class SessionService {
           },
         );
         if (claimedDailyNextDueAt !== null) {
+          const admissionDenial = this.wakeAdmissionDenial(session.id);
+          if (admissionDenial) {
+            await this.deferDailyWakeForAdmission(
+              session,
+              dailyWake,
+              claimedDailyNextDueAt,
+              admissionDenial,
+              now,
+            );
+            continue;
+          }
           try {
             await this.send(session.id, {
               message: this.formatDailyWakeMessage(
@@ -5558,6 +5589,87 @@ export class SessionService {
     } finally {
       this.scheduledWakeMonitorRunning = false;
     }
+  }
+
+  // Runs after the occurrence claim: a denial before it would leave the wake
+  // due and retry every tick.
+  private wakeAdmissionDenial(sessionId: string): SessionAdmissionDeniedError | null {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current || !wakeRelaunchNeedsAdmission(current)) return null;
+    try {
+      this.assertAdmissible(current.project, "wake");
+      return null;
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) return error;
+      throw error;
+    }
+  }
+
+  // Denied interval occurrence stays consumed: the claim already advanced
+  // nextDueAt to the next interval.
+  private deferIntervalWakeForAdmission(
+    session: SessionRecord,
+    intervalWake: SessionIntervalWakeState,
+    nextDueAt: string,
+  ): boolean {
+    const denial = this.wakeAdmissionDenial(session.id);
+    if (!denial) return false;
+    this.logEvent("session.wake.interval_deferred", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Deferred interval wake for ${session.id}: ${denial.message}`,
+      details: { nextDueAt, intervalMs: intervalWake.intervalMs, reason: "admission" },
+    });
+    return true;
+  }
+
+  // Denied daily occurrence retries every DAILY_WAKE_ADMISSION_RETRY_MS until
+  // its next scheduled slot, where the claim already points; past that it is
+  // skipped. The occurrence is persisted so a restart keeps the window.
+  private async deferDailyWakeForAdmission(
+    session: SessionRecord,
+    dailyWake: SessionDailyWakeState,
+    claimedNextDueAt: string,
+    denial: SessionAdmissionDeniedError,
+    now: number,
+  ): Promise<void> {
+    const occurrence = dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt;
+    const windowEndMs = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(occurrence)).getTime();
+    const retryAtMs = now + DAILY_WAKE_ADMISSION_RETRY_MS;
+    if (retryAtMs >= windowEndMs) {
+      this.logEvent("session.wake.daily_exhausted", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.message}`,
+        details: { occurrence, nextDueAt: claimedNextDueAt, dailyAt: dailyWake.dailyAt },
+      });
+      return;
+    }
+    const retryAt = new Date(retryAtMs).toISOString();
+    const deferred = await this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const afterDenial = readSession(this.config.dataDir, session.id);
+      if (afterDenial?.dailyWake?.nextDueAt !== claimedNextDueAt) return false;
+      writeSession(this.config.dataDir, {
+        ...afterDenial,
+        dailyWake: {
+          ...afterDenial.dailyWake,
+          nextDueAt: retryAt,
+          admissionDeferredOccurrence: occurrence,
+        },
+        updatedAt: nowIso(),
+      });
+      return true;
+    });
+    if (!deferred || dailyWake.admissionDeferredOccurrence !== undefined) return;
+    this.logEvent("session.wake.daily_deferred", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Deferred daily wake for ${session.id}: ${denial.message}`,
+      details: { reason: "admission", occurrence, retryAt, dailyAt: dailyWake.dailyAt },
+    });
   }
 
   previewConfigConnect(configPath: string): {
@@ -13955,9 +14067,10 @@ export class SessionService {
           cause: error,
         });
       }
+      const { admissionDeferredOccurrence: _deferredOccurrence, ...dailySchedule } = dailyWake;
       writeSession(this.config.dataDir, {
         ...current,
-        dailyWake: { ...dailyWake, nextDueAt: nextDueAt.toISOString() },
+        dailyWake: { ...dailySchedule, nextDueAt: nextDueAt.toISOString() },
         updatedAt: nowIso(),
       });
       claimedNextDueAt = nextDueAt.toISOString();
