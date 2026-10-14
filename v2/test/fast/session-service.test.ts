@@ -15118,10 +15118,12 @@ describe("SessionService", () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
       const service = await liveService();
-      const ackBaseline = { agent: "cursor", file: "/t/c.jsonl", size: 7 } as {
+      const deliveryId = "a1111111-1111-4111-8111-111111111111";
+      const ackBaseline = { agent: "cursor", file: "/t/c.jsonl", size: 7, deliveryId } as {
         agent: "cursor";
         file: string;
         size: number;
+        deliveryId: string;
         rotated?: { file: string; size: number };
       };
       const markWriteStart = vi.fn(async () => {
@@ -15145,7 +15147,8 @@ describe("SessionService", () => {
       const gate = new Promise<void>((resolve) => {
         releaseAck = resolve;
       });
-      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      const waitForAck = vi
+        .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
         .mockResolvedValueOnce({ found: false, lastScannedFile: null })
         .mockImplementation(async () => {
           await gate;
@@ -15181,8 +15184,11 @@ describe("SessionService", () => {
         size: 70,
         rotated: { file: "/t/rotated.jsonl", size: 90 },
       });
+      expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toMatchObject({ deliveryId });
       releaseAck();
       await sent;
+      expect(waitForAck.mock.calls.length).toBeGreaterThan(0);
+      expect(waitForAck.mock.calls.every((call) => call[1] === "first")).toBe(true);
     });
 
     const restartBaseline = { agent: "claude", file: "/t/claude.jsonl", size: 42 } as const;

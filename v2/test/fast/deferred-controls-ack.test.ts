@@ -1588,21 +1588,24 @@ describe("SessionService", () => {
     });
 
     it("Q4b: sensitive stdin paste carries delivery identity before Enter-only retry", async () => {
+      const deliveryId = "a1111111-1111-4111-8111-111111111111";
       const baseline: {
         agent: "cursor";
         file: string;
         size: number;
+        deliveryId: string;
         rotated?: { file: string; size: number };
-      } = { agent: "cursor", file: "/t/c.jsonl", size: 7 };
+      } = { agent: "cursor", file: "/t/c.jsonl", size: 7, deliveryId };
       const markWriteStart = vi.fn(async () => {
         await Promise.resolve();
         baseline.size = 70;
         baseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
       });
+      const scan = vi.fn().mockResolvedValue({ found: false, lastScannedFile: null });
       createAgentSubmitAckBindingMock.mockResolvedValue({
         baseline,
         inputText: "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nsensitive controls",
-        scan: vi.fn().mockResolvedValue({ found: false, lastScannedFile: null }),
+        scan,
         markWriteStart,
       });
       sendSensitiveMessageToTmuxMock.mockImplementationOnce(async () => {
@@ -1637,6 +1640,9 @@ describe("SessionService", () => {
         sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
       );
       expect(sendSubmitKeyToTmuxMock.mock.calls.length).toBeGreaterThan(0);
+      expect(baseline.deliveryId).toBe(deliveryId);
+      expect(scan).toHaveBeenCalledWith(controlsMessage());
+      expect(scan.mock.calls.every((call) => call[0] === controlsMessage())).toBe(true);
       service.dispose();
     });
 
