@@ -663,19 +663,19 @@ describe("rotated chat created by the send (#982)", () => {
       size: (await stat(rotatedFile)).size,
     });
 
+    // Persisted state as stored at write time, before the new turn lands.
+    const stored = structuredClone(persisted);
+    const beforeAppend = restoreCursorSubmitBaseline(stored);
+    // Without the new turn the old query alone does not ack after restore.
+    expect((await scan(beforeAppend, "continue")).found).toBe(false);
+
     await appendJsonl(rotatedFile, [userTurn("continue")]);
     expect((await scan(live, "continue")).found).toBe(true);
 
     const restored = restoreCursorSubmitBaseline(
-      JSON.parse(JSON.stringify(persisted)) as typeof persisted,
+      JSON.parse(JSON.stringify(stored)) as typeof stored,
     );
     expect(await scan(restored, "continue")).toEqual({ found: true, scannedFile: rotatedFile });
-    // Without the new turn the old query alone does not ack after restore.
-    const beforeAppend = restoreCursorSubmitBaseline({
-      ...persisted,
-      rotated: { file: rotatedFile, size: (await stat(rotatedFile)).size },
-    });
-    expect((await scan(beforeAppend, "continue")).found).toBe(false);
   });
 
   it("survives capture, write start, persist, JSON, session storage and restore", async () => {

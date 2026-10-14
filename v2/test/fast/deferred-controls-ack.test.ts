@@ -1604,7 +1604,10 @@ describe("SessionService", () => {
       );
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
-      expect(markWriteStart.mock.invocationCallOrder[0]).toBeLessThan(
+      const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
+      // After the binding is built (this path has no alive probe), before the paste.
+      expect(createAgentSubmitAckBindingMock.mock.invocationCallOrder[0]).toBeLessThan(hookOrder);
+      expect(hookOrder).toBeLessThan(
         sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
       );
       expect(sendSubmitKeyToTmuxMock.mock.calls.length).toBeGreaterThan(0);

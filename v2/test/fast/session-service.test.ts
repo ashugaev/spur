@@ -15145,20 +15145,28 @@ describe("SessionService", () => {
           return { found: true, lastScannedFile: "/x.jsonl" };
         });
 
+      isProcessRunningInTmuxMock.mockClear();
       const sent = service.send("api-1", { message: "first" });
       await waitForRealTime(() => {
         expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
       });
 
       expect(markWriteStart).toHaveBeenCalledTimes(1);
-      expect(markWriteStart.mock.invocationCallOrder[0]).toBeLessThan(
-        sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
+      const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
+      // After the last alive probe before the paste, then the paste.
+      const pasteOrder = sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0;
+      const lastProbeBeforePaste = Math.max(
+        ...isProcessRunningInTmuxMock.mock.invocationCallOrder.filter((n) => n < pasteOrder),
       );
+      expect(lastProbeBeforePaste).toBeGreaterThan(0);
+      expect(lastProbeBeforePaste).toBeLessThan(hookOrder);
+      expect(hookOrder).toBeLessThan(pasteOrder);
+      const stamp = markWriteStart.mock.calls[0]?.[0];
+      expect(stamp).toEqual(expect.any(Number));
       expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
         ...ackBaseline,
-        writeStartedAtMs: expect.any(Number),
+        writeStartedAtMs: stamp,
       });
-      expect(markWriteStart).toHaveBeenCalledTimes(1);
       releaseAck();
       await sent;
     });
