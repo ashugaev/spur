@@ -20246,6 +20246,154 @@ describe("SessionService", () => {
       expect(queue.admissionReservations.size).toBe(0);
     });
 
+    it.each([
+      { failure: "dirty", granted: false },
+      { failure: "dirty", granted: true },
+      { failure: "open-pr", granted: false },
+      { failure: "open-pr", granted: true },
+    ])(
+      "retains queued work after rejected $failure kill (grant: $granted)",
+      async ({ failure, granted }) => {
+        mockClaudeJsonlState("waiting");
+        loadConfigMock.mockReturnValue(queueConfig());
+        const anchor = sessionRecord({ id: "api-anchor", worktree: true });
+        const sessions = createSessionStore(anchor);
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 7_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const queue = service as unknown as QueueService;
+        const accepted = await service.spawnInBackground({
+          project: "api",
+          prompt: "retain task",
+          reuseWorkspaceSessionId: anchor.id,
+        });
+        if (failure === "dirty") {
+          hasUncommittedChangesMock.mockResolvedValue(true);
+        } else {
+          const queued = sessions.get(accepted.id);
+          if (!queued) throw new Error("missing queued identity");
+          sessions.set(accepted.id, {
+            ...queued,
+            pr: { number: 42, repo: "acme/api", url: "https://github.com/acme/api/pull/42" },
+          });
+          ghMock.mockResolvedValue(
+            JSON.stringify({
+              number: 42,
+              state: "OPEN",
+              title: "Queued task",
+              url: "https://github.com/acme/api/pull/42",
+            }),
+          );
+        }
+        if (granted) {
+          recoverMemory();
+          queue.drainSpawnAdmissions();
+        }
+
+        await expect(service.kill(accepted.id)).rejects.toThrow(
+          failure === "dirty" ? /Kill confirmation required/ : /Open pull request action required/,
+        );
+        if (!granted) {
+          expect(sessions.get(accepted.id)?.status).toBe("spawning");
+          expect(queue.pendingSpawnIds.has(accepted.id)).toBe(true);
+          expect(queue.spawnAdmissionWaiters.size).toBe(1);
+        }
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+
+        recoverMemory();
+        await queue.runMemoryShedTick();
+        await service.settleBackgroundSpawns();
+        expect(sessions.get(accepted.id)?.status).toBe("running");
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(queue.pendingSpawnIds.size).toBe(0);
+        expect(queue.spawnAdmissionWaiters.size).toBe(0);
+        expect(queue.admissionReservations.size).toBe(0);
+      },
+    );
+
+    it.each(["background", "foreground HTTP"] as const)(
+      "preserves selected Claude account through %s resource acceptance and launch",
+      async (caller) => {
+        mockClaudeJsonlState("waiting");
+        loadConfigMock.mockReturnValue(queueConfig());
+        const sessions = createSessionStore();
+        testAccounts = [
+          {
+            id: "selected",
+            configDir: "/abs/selected",
+            createdAt: "2026-03-18T09:00:00.000Z",
+            authenticated: true,
+          },
+        ];
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 7_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const request = { project: "api", prompt: "selected task", claudeAccountId: "selected" };
+        const accepted =
+          caller === "background"
+            ? await service.spawnInBackground(request)
+            : await service.spawn(request, { acceptQueued: true });
+        expect(accepted).toMatchObject({ status: "spawning", claudeAccountId: "selected" });
+        expect(seedSessionHomeMock).not.toHaveBeenCalled();
+        recoverMemory();
+        await (service as unknown as QueueService).runMemoryShedTick();
+        await service.settleBackgroundSpawns();
+        expect(sessions.get(accepted.id)).toMatchObject({
+          status: "running",
+          claudeAccountId: "selected",
+        });
+        expect(buildAgentLaunchPlanMock.mock.calls.at(-1)?.[2]).toMatchObject({
+          claudeConfigDir: `${TEST_DATA_DIR}/session-tools/${accepted.id}/claude-home`,
+        });
+        expect(seedSessionHomeMock).toHaveBeenCalledWith(
+          `${TEST_DATA_DIR}/session-tools/${accepted.id}/claude-home`,
+          testAccounts[0],
+        );
+      },
+    );
+
+    it.each(["unknown", "unready"] as const)(
+      "rejects %s selected Claude account before accepting resource wait",
+      async (readiness) => {
+        loadConfigMock.mockReturnValue(queueConfig());
+        createSessionStore();
+        if (readiness === "unready") {
+          testAccounts = [
+            {
+              id: "selected",
+              configDir: "/abs/selected",
+              createdAt: "2026-03-18T09:00:00.000Z",
+              authenticated: false,
+            },
+          ];
+        }
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 7_000_000_000,
+          swapTotalBytes: 0,
+          swapFreeBytes: 0,
+        });
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const request = { project: "api", prompt: "invalid", claudeAccountId: "selected" };
+        await expect(service.spawn(request, { acceptQueued: true })).rejects.toThrow(/not ready/);
+        await expect(service.spawnInBackground(request)).rejects.toThrow(/not ready/);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect((service as unknown as QueueService).spawnAdmissionWaiters.size).toBe(0);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
     it("stops accepted records on dispose and settles background waits", async () => {
       loadConfigMock.mockReturnValue(queueConfig());
       createSessionStore();

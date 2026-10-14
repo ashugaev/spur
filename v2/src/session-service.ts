@@ -11787,6 +11787,16 @@ export class SessionService {
     return carried;
   }
 
+  private assertSpawnAccountReady(accountId?: string): void {
+    if (!accountId) return;
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account || !isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
+    }
+  }
+
   async spawn(
     request: SpawnSessionRequest,
     options?: {
@@ -11865,6 +11875,7 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       if (request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -12211,14 +12222,7 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      if (request.claudeAccountId) {
-        const account = findAccount(this.config.dataDir, request.claudeAccountId);
-        if (!account || !isAccountReady(account)) {
-          throw new Error(
-            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
-          );
-        }
-      }
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
@@ -12981,6 +12985,7 @@ export class SessionService {
         this.config.models.codexHome,
       );
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       if (worktree && request.branch && !reuseCtx) {
         await resolveSpawnBranch({
           repoPath: project.path,
@@ -13038,6 +13043,7 @@ export class SessionService {
         project: request.project,
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -13438,11 +13444,13 @@ export class SessionService {
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
           { planMode, restrictWrites },
         ),
+        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -13738,12 +13746,14 @@ export class SessionService {
               sessionId: prepared.sessionId,
             });
             try {
-              this.consumeSpawnAdmission(reservation);
-              const current = readSession(this.config.dataDir, prepared.sessionId);
-              if (!current || current.status !== "spawning") {
-                throw new SpawnAdmissionCancelledError("killed");
-              }
-              this.pendingSpawnIds.delete(prepared.sessionId);
+              await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
+                this.consumeSpawnAdmission(reservation);
+                const current = readSession(this.config.dataDir, prepared.sessionId);
+                if (!current || current.status !== "spawning") {
+                  throw new SpawnAdmissionCancelledError("killed");
+                }
+                this.pendingSpawnIds.delete(prepared.sessionId);
+              });
             } finally {
               this.admissionReservations.delete(reservation);
             }
@@ -17534,12 +17544,6 @@ export class SessionService {
   }
 
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
-    this.cancelWaitingHandoff(sessionId);
-    if (this.pendingSpawnIds.has(sessionId)) {
-      for (const waiter of this.spawnAdmissionWaiters) {
-        if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
-      }
-    }
     return this.withWorkspaceLifecycleLocks(sessionId, () => this.killLocked(sessionId, request));
   }
 
@@ -17566,6 +17570,12 @@ export class SessionService {
           });
         } else {
           session = await this.applyOpenPrAction(session, request.prAction);
+        }
+      }
+      this.cancelWaitingHandoff(sessionId);
+      if (this.pendingSpawnIds.has(sessionId)) {
+        for (const waiter of this.spawnAdmissionWaiters) {
+          if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
         }
       }
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
