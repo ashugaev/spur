@@ -242,6 +242,41 @@ function changeEquivalent(snapshot: GateSnapshot, mode: string) {
     snapshot.ciAnchors[1] = { runId: 3, merge: "e".repeat(40), parents: ["f".repeat(40), B] };
   }
 }
+test("blocked fingerprint covers reason, head and base only", () => {
+  const blockedFixture = () => ({ ...fixture(), unresolved: 1 });
+  const first = evaluateSnapshot(policy, 5, blockedFixture());
+  expect(first.status).toBe("BLOCKED");
+  const volatile = blockedFixture();
+  volatile.pr.updated_at = "2026-10-06T12:00:00Z";
+  volatile.pr.open_issues_count = 7;
+  volatile.pr.mergeable_state = "blocked";
+  const volatileBase = volatile.pr.base as { repo: object };
+  volatile.pr.base = {
+    ...volatileBase,
+    repo: {
+      ...volatileBase.repo,
+      pushed_at: "2026-10-06T12:00:00Z",
+      updated_at: "2026-10-06T12:00:00Z",
+    },
+  };
+  const churned = evaluateSnapshot(policy, 5, volatile);
+  expect(churned.reason).toBe(first.reason);
+  expect(churned.fingerprint).toBe(first.fingerprint);
+  const otherReason = { ...fixture(), reviews: [] };
+  const reason = evaluateSnapshot(policy, 5, otherReason);
+  expect(reason.status).toBe("BLOCKED");
+  expect(reason.reason).not.toBe(first.reason);
+  expect(reason.fingerprint).not.toBe(first.fingerprint);
+  const head = blockedFixture();
+  head.pr.head = { ...(head.pr.head as object), sha: "f".repeat(40) };
+  expect(evaluateSnapshot(policy, 5, head).fingerprint).not.toBe(first.fingerprint);
+  const base = blockedFixture();
+  base.pr.base = { ...(base.pr.base as object), sha: "f".repeat(40) };
+  expect(evaluateSnapshot(policy, 5, base).fingerprint).not.toBe(first.fingerprint);
+  const approved = evaluateSnapshot(policy, 5, fixture());
+  expect(approved.status).toBe("APPROVED");
+  expect(approved.fingerprint).not.toBe(first.fingerprint);
+});
 test.each(equivalentChanges)(
   "approved evidence ignores %s without changing source arrays",
   (mode) => {
@@ -881,6 +916,7 @@ test.each([
   "native-malformed",
   "native-type",
   "lane-blocked",
+  "lane-blocked-churn",
   "positive-outsider",
   "positive-threads",
   "merge-head",
@@ -892,6 +928,8 @@ test.each([
   "unlisted-churn",
   "corrupt-unlisted",
   "moved",
+  "base-moved",
+  "reason-changed",
   "read-denied",
   "abort-read",
   "abort-before-write",
@@ -923,7 +961,7 @@ test.each([
         ...snapshot.reviews[0],
         user: { id: policy.codeActor, type: "User" },
       };
-    if (mode === "lane-blocked")
+    if (mode === "lane-blocked" || mode === "lane-blocked-churn")
       snapshot.comments[0] = {
         ...snapshot.comments[0],
         body: stateBody({
@@ -931,6 +969,7 @@ test.each([
           status: "BLOCKED",
         }),
       };
+    if (mode === "reason-changed") snapshot.unresolved = 1;
     if (mode === "negative-outsider" || mode === "positive-outsider")
       snapshot.reviews.push({
         id: 50,
@@ -1026,8 +1065,18 @@ test.each([
         prNumbers.push(Number(path.split("/").at(-1)));
         reads++;
         if (reads === 3) {
-          changeEquivalent(snapshot, mode);
+          changeEquivalent(snapshot, mode === "lane-blocked-churn" ? "updated-at" : mode);
           if (mode === "unlisted-churn") snapshot.jobs.pop();
+          if (mode === "reason-changed") {
+            snapshot.unresolved = 0;
+            snapshot.comments[0] = {
+              ...snapshot.comments[0],
+              body: stateBody({
+                ...readStateBody(String(snapshot.comments[0]?.body)),
+                status: "BLOCKED",
+              }),
+            };
+          }
           if (mode === "corrupt-unlisted") {
             const extra = snapshot.jobs.at(-1);
             if (!extra) throw new Error("missing fixture job");
@@ -1049,7 +1098,9 @@ test.each([
         return Response.json(
           mode === "moved" && reads > 2
             ? { ...snapshot.pr, head: { ...(snapshot.pr.head as object), sha: "d".repeat(40) } }
-            : snapshot.pr,
+            : mode === "base-moved" && reads > 2
+              ? { ...snapshot.pr, base: { ...(snapshot.pr.base as object), sha: "c".repeat(40) } }
+              : snapshot.pr,
         );
       }
       if (path.endsWith("/reviews")) {
@@ -1135,6 +1186,7 @@ test.each([
             "native-malformed",
             "native-type",
             "lane-blocked",
+            "lane-blocked-churn",
             "positive-outsider",
             "positive-threads",
             "merge-head",
@@ -1143,13 +1195,15 @@ test.each([
           expect(jobReads).toBe(2);
           expect(reviewRequests).toBe(3);
         }
+        if (["moved", "base-moved", "reason-changed"].includes(mode))
+          expect(writes.at(-1)?.output?.summary).toBe("Evidence changed during evaluation");
         if (mode === "native-malformed")
           expect(writes.at(-1)?.output?.summary).toBe("malformed-evidence");
         if (mode === "positive-outsider")
           expect(writes.at(-1)?.output?.summary).toBe("changes-requested");
         if (mode === "positive-threads")
           expect(writes.at(-1)?.output?.summary).toBe("unresolved-threads");
-        if (mode === "lane-blocked")
+        if (mode === "lane-blocked" || mode === "lane-blocked-churn")
           expect(writes.at(-1)?.output?.summary).toBe("lane-state-not-approved");
       }
     } finally {
