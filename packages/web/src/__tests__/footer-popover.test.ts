@@ -57,6 +57,32 @@ describe("useFooterPopover", () => {
     expect(result.current.open).toBe(false);
   });
 
+  it("dismiss cancels an in-flight hover timer so a later mouseenter waits for the delay", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useFooterPopover());
+    act(() => result.current.onMouseEnter());
+    act(() => result.current.dismiss());
+    act(() => vi.advanceTimersByTime(100));
+    act(() => result.current.onMouseEnter());
+    expect(result.current.open).toBe(false);
+  });
+
+  it("dismiss clears settled hover state so a later mouseenter waits for the delay", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useFooterPopover());
+    act(() => {
+      result.current.onMouseEnter();
+      vi.runAllTimers();
+    });
+    expect(result.current.open).toBe(true);
+    act(() => result.current.dismiss());
+    expect(result.current.open).toBe(false);
+    act(() => result.current.onMouseEnter());
+    expect(result.current.open).toBe(false);
+    act(() => vi.advanceTimersByTime(100));
+    expect(result.current.open).toBe(true);
+  });
+
   it("blur closes a pinned popover and blocks a hover timer already in flight", () => {
     vi.useFakeTimers();
     const { result } = renderHook(() => useFooterPopover());
@@ -67,6 +93,21 @@ describe("useFooterPopover", () => {
     expect(result.current.open).toBe(false);
     act(() => vi.runAllTimers());
     expect(result.current.open).toBe(false);
+  });
+
+  it("blur after the hover timer fired closes the popover and a later mouseenter waits for the delay", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useFooterPopover());
+    act(() => result.current.toggle());
+    act(() => result.current.onMouseEnter());
+    act(() => vi.advanceTimersByTime(100));
+    expect(result.current.open).toBe(true);
+    act(() => result.current.onBlur(blurOutEvent()));
+    expect(result.current.open).toBe(false);
+    act(() => result.current.onMouseEnter());
+    expect(result.current.open).toBe(false);
+    act(() => vi.advanceTimersByTime(100));
+    expect(result.current.open).toBe(true);
   });
 
   it("a genuine mouseenter after blur still reopens the popover", () => {
