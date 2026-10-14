@@ -384,47 +384,51 @@ function readPrStatusSummary(value: unknown): GitHubPrStatusSummary | null {
 // Runs are superseded per check suite, never per run: within one (kind, app,
 // workflow, trigger event, name) key a run is dropped only when a suite of that
 // key was created strictly later; siblings of one suite share a createdAt, so
-// they are kept. A missing suite id or unparseable timestamp keeps the check.
-// StatusContext: latest createdAt wins.
+// they are kept. Fail closed: a check whose producer identity is not fully
+// proven (no `producer`), or without a parseable timestamp, is kept and never
+// takes part in supersession. StatusContext: latest createdAt wins.
+export type GitHubRunProducer =
+  | {
+      kind: "check_run";
+      appId: number;
+      // null: non-Actions check (workflowRun absent). Present: both ids proven.
+      workflow: { id: number; event: string } | null;
+      suiteId: number;
+    }
+  | { kind: "status_context" };
+
 export interface GitHubRunCheck extends GitHubCheck {
-  kind?: "check_run" | "status_context";
-  appId?: number;
-  workflowId?: number;
-  event?: string;
-  suiteId?: number;
+  producer?: GitHubRunProducer;
   // CheckRun: check suite createdAt. StatusContext: context createdAt.
   createdAt?: string;
 }
 
-function checkRunKey(check: GitHubRunCheck): string {
-  return JSON.stringify([
-    check.kind ?? null,
-    check.appId ?? null,
-    check.workflowId ?? null,
-    check.event ?? null,
-    check.name,
-  ]);
-}
-
-function checkTime(check: GitHubRunCheck): number {
-  if (check.kind === "check_run" && check.suiteId === undefined) return Number.NaN;
-  return check.createdAt ? Date.parse(check.createdAt) : Number.NaN;
+function checkRunKey(check: GitHubRunCheck, producer: GitHubRunProducer): string {
+  return producer.kind === "status_context"
+    ? JSON.stringify([producer.kind, check.name])
+    : JSON.stringify([
+        producer.kind,
+        producer.appId,
+        producer.workflow?.id ?? null,
+        producer.workflow?.event ?? null,
+        check.name,
+      ]);
 }
 
 function latestChecksByName(checks: GitHubRunCheck[]): GitHubRunCheck[] {
   const entries = checks.map((check) => ({
     check,
-    key: checkRunKey(check),
-    at: checkTime(check),
+    key: check.producer ? checkRunKey(check, check.producer) : null,
+    at: check.createdAt ? Date.parse(check.createdAt) : Number.NaN,
   }));
   const latest = new Map<string, number>();
   for (const { key, at } of entries) {
-    if (!Number.isNaN(at) && at > (latest.get(key) ?? Number.NEGATIVE_INFINITY)) {
+    if (key !== null && !Number.isNaN(at) && at > (latest.get(key) ?? Number.NEGATIVE_INFINITY)) {
       latest.set(key, at);
     }
   }
   return entries
-    .filter(({ key, at }) => Number.isNaN(at) || at >= (latest.get(key) ?? at))
+    .filter(({ key, at }) => key === null || Number.isNaN(at) || at >= (latest.get(key) ?? at))
     .map(({ check }) => check);
 }
 
@@ -546,27 +550,35 @@ export function checksFromPrNode(value: Record<string, unknown>): GitHubRunCheck
       if (!name || !state) return [];
       const suite = isRecord(raw.checkSuite) ? raw.checkSuite : null;
       const createdAt = readString(suite ? suite.createdAt : raw.createdAt);
-      const suiteId = suite ? readNumber(suite.databaseId) : null;
-      const app = suite && isRecord(suite.app) ? suite.app : null;
-      const appId = app ? readNumber(app.databaseId) : null;
-      const run = suite && isRecord(suite.workflowRun) ? suite.workflowRun : null;
-      const workflow = run && isRecord(run.workflow) ? run.workflow : null;
-      const workflowId = workflow ? readNumber(workflow.databaseId) : null;
-      const event = run ? readString(run.event) : null;
+      const producer = checkName ? checkRunProducer(suite) : ({ kind: "status_context" } as const);
       return [
         {
           name,
           state,
-          kind: checkName ? "check_run" : "status_context",
-          ...(appId !== null ? { appId } : {}),
-          ...(workflowId !== null ? { workflowId } : {}),
-          ...(event ? { event } : {}),
-          ...(suiteId !== null ? { suiteId } : {}),
+          ...(producer ? { producer } : {}),
           ...(createdAt ? { createdAt } : {}),
         },
       ];
     },
   );
+}
+
+// Proven only with suite id, app id, and either workflowRun null (non-Actions)
+// or workflowRun with both workflow id and event. Anything else is unproven.
+function checkRunProducer(suite: Record<string, unknown> | null): GitHubRunProducer | null {
+  if (!suite) return null;
+  const suiteId = readNumber(suite.databaseId);
+  const appId = isRecord(suite.app) ? readNumber(suite.app.databaseId) : null;
+  if (suiteId === null || appId === null) return null;
+  if (suite.workflowRun === null) return { kind: "check_run", appId, workflow: null, suiteId };
+  if (!isRecord(suite.workflowRun)) return null;
+  const id = isRecord(suite.workflowRun.workflow)
+    ? readNumber(suite.workflowRun.workflow.databaseId)
+    : null;
+  const event = readString(suite.workflowRun.event);
+  return id !== null && event !== null
+    ? { kind: "check_run", appId, workflow: { id, event }, suiteId }
+    : null;
 }
 
 function reviewCommentsFromPrNode(value: Record<string, unknown>): PullRequestReviewComment[] {

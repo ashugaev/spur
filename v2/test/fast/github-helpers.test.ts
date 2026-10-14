@@ -380,11 +380,19 @@ describe("summarizeFailingCi", () => {
   ): GitHubRunCheck => ({
     name: ids.name ?? "build",
     state,
-    kind: "check_run",
-    ...(ids.appId !== undefined ? { appId: ids.appId } : {}),
-    ...(ids.workflowId !== undefined ? { workflowId: ids.workflowId } : {}),
-    ...(ids.event !== undefined ? { event: ids.event } : {}),
-    ...(suiteId !== undefined ? { suiteId } : {}),
+    ...(suiteId !== undefined
+      ? {
+          producer: {
+            kind: "check_run" as const,
+            appId: ids.appId ?? 1,
+            workflow:
+              ids.workflowId === undefined
+                ? null
+                : { id: ids.workflowId, event: ids.event ?? "pull_request" },
+            suiteId,
+          },
+        }
+      : {}),
     createdAt,
   });
   const FAILING = "CI is failing: build.";
@@ -442,7 +450,11 @@ describe("summarizeFailingCi", () => {
     ).toBe(FAILING);
     expect(
       summarizeFailingCi([
-        { name: "build", state: "FAILURE", kind: "check_run", suiteId: 10 },
+        {
+          name: "build",
+          state: "FAILURE",
+          producer: { kind: "check_run", appId: 1, workflow: null, suiteId: 10 },
+        },
         cr("SUCCESS", 11, T1),
       ]),
     ).toBe(FAILING);
@@ -477,10 +489,66 @@ describe("summarizeFailingCi", () => {
         workflowRun:
           suite.workflow === null
             ? null
-            : { event: suite.event, workflow: { databaseId: suite.workflow } },
+            : { event: suite.event ?? "pull_request", workflow: { databaseId: suite.workflow } },
       },
     });
+    const rawRun = (conclusion: string, checkSuite: unknown): unknown => ({
+      name: "Labeler",
+      conclusion,
+      status: "COMPLETED",
+      checkSuite,
+    });
     const FAIL = "CI is failing: Labeler.";
+
+    it("supersedes a cancelled non-Actions CheckRun of the same known app", () => {
+      const node = prNode([
+        run("CANCELLED", { id: 1, createdAt: T0, app: 5, workflow: null }),
+        run("SUCCESS", { id: 2, createdAt: T1, app: 5, workflow: null }),
+      ]);
+      expect(summarizeFailingCi(checksFromPrNode(node))).toBeNull();
+    });
+
+    describe("fails closed on unproven producer identity", () => {
+      const suites: Record<string, (id: number, createdAt: string) => unknown> = {
+        "app null": (id, createdAt) => ({
+          databaseId: id,
+          createdAt,
+          app: null,
+          workflowRun: null,
+        }),
+        "app.databaseId null": (id, createdAt) => ({
+          databaseId: id,
+          createdAt,
+          app: { databaseId: null },
+          workflowRun: null,
+        }),
+        "workflow.databaseId null": (id, createdAt) => ({
+          databaseId: id,
+          createdAt,
+          app: { databaseId: 5 },
+          workflowRun: { event: "push", workflow: { databaseId: null } },
+        }),
+        "event null": (id, createdAt) => ({
+          databaseId: id,
+          createdAt,
+          app: { databaseId: 5 },
+          workflowRun: { event: null, workflow: { databaseId: 7 } },
+        }),
+        "workflowRun absent": (id, createdAt) => ({
+          databaseId: id,
+          createdAt,
+          app: { databaseId: 5 },
+        }),
+      };
+      for (const [label, suite] of Object.entries(suites)) {
+        it(`keeps a failure with a later success: ${label}`, () => {
+          const failure = rawRun("FAILURE", suite(1, T0));
+          const success = rawRun("SUCCESS", suite(2, T1));
+          expect(summarizeFailingCi(checksFromPrNode(prNode([failure, success])))).toBe(FAIL);
+          expect(summarizeFailingCi(checksFromPrNode(prNode([success, failure])))).toBe(FAIL);
+        });
+      }
+    });
 
     it("ignores a cancelled CheckRun in an earlier suite of the same app and workflow", () => {
       const node = prNode([
