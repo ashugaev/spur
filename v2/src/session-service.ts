@@ -604,6 +604,12 @@ const LEGACY_RUNTIME_DIAGNOSTICS = [
   "tmux process failed:",
 ];
 
+// Status whose record claims a live agent runtime. Only these carry a runtime
+// probe failure as a session error; any other status ignores it.
+function expectsLiveRuntime(status: SessionStatus): boolean {
+  return status === "running" || status === "spawning";
+}
+
 function recoverableRuntimeError(session: SessionRecord): boolean {
   if (session.error === INFERRED_RUNTIME_EXIT_ERROR) {
     return (
@@ -611,6 +617,12 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
       (session.errorSource === undefined && session.launchCommand !== "")
     );
   }
+  return isRuntimeProbeError(session);
+}
+
+// Retained error that only records a failed runtime probe (runtime_probe
+// source, or a legacy unsourced tmux/ps diagnostic): void once a probe answers.
+function isRuntimeProbeError(session: SessionRecord): boolean {
   if (
     !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
     session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
@@ -11105,6 +11117,10 @@ export class SessionService {
     const driftedSessions: { id: string; project: string }[] = [];
 
     for (const session of candidates) {
+      // A record that carried a probe error is stopped at boot but never
+      // reboot-restored. Read from the listed snapshot: a concurrent heal
+      // between list and read must not turn it into a plain drifted record.
+      const healedProbeError = this.probeErrorHealable(session);
       const runtime = await this.readRuntimeSnapshot(session);
       const current = readSession(this.config.dataDir, session.id);
       if (!current) continue;
@@ -11138,7 +11154,7 @@ export class SessionService {
           if (persisted.status === "missing") continue;
         }
         drifted += 1;
-        if (reconciled.session.status === "stopped") {
+        if (reconciled.session.status === "stopped" && !healedProbeError) {
           driftedSessions.push({ id: session.id, project: session.project });
         }
       } else {
@@ -21643,7 +21659,8 @@ export class SessionService {
       };
     }
     if (
-      hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) ||
+      (hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) &&
+        !this.probeErrorHealable(session)) ||
       session.serverErrorAt
     )
       return { session, runtime };
@@ -21734,7 +21751,8 @@ export class SessionService {
     if (latest.status !== session.status) {
       return { session: latest, runtime };
     }
-    if (hasRetainedSessionError(latest)) return { session: latest, runtime: confirmedRuntime };
+    if (hasRetainedSessionError(latest) && !this.probeErrorHealable(latest))
+      return { session: latest, runtime: confirmedRuntime };
 
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
@@ -21936,6 +21954,12 @@ export class SessionService {
     );
   }
 
+  // A retained runtime-probe error does not block reconciling a runtime that
+  // answers dead: the stop/errored write replaces it in one write.
+  private probeErrorHealable(record: SessionRecord): boolean {
+    return isRuntimeProbeError(record) && !this.restoreOwnsRuntimeRecovery(record.id);
+  }
+
   private async readFinalTokenUsage(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
@@ -22008,7 +22032,7 @@ export class SessionService {
         probeUnresponsive: true,
         diagnostic,
       },
-      state: "error",
+      state: expectsLiveRuntime(retained.status) ? "error" : statusFallbackState(retained),
       source: "status",
       workspacePresent: false,
       serverError: false,
@@ -22023,8 +22047,14 @@ export class SessionService {
   ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
-    if (isTerminalSessionStatus(latest.status)) return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
+    // Resource readout keeps stamping any non-terminal owner: it has its own
+    // clear path and its retained error protects sidecars from the reaper.
+    if (
+      isTerminalSessionStatus(latest.status) ||
+      (!expectsLiveRuntime(latest.status) && !message.startsWith(REPORTING_DETECTION_ERROR_PREFIX))
+    )
+      return latest;
     if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
     if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) && !recoverableRuntimeError(latest))
       return latest;
@@ -22145,7 +22175,17 @@ export class SessionService {
     const workspace = probeWorkspace(session.worktreePath);
     let effectiveSession = session;
     let runtimeOwnerChanged = false;
-    if (runtime.probeUnresponsive || workspace.diagnostic) {
+    const probeFailed = runtime.probeUnresponsive || workspace.diagnostic !== undefined;
+    const runtimeLive =
+      workspace.exists && runtime.runtimeAlive && runtime.paneUsable && runtime.processAlive;
+    // A live runtime voids any recoverable error. A dead one voids a probe
+    // error only off running/spawning: a dead running record heals inside
+    // reconcileUnexpectedStop, in the same write that stops it.
+    const clearableError = (record: SessionRecord): boolean =>
+      runtimeLive
+        ? recoverableRuntimeError(record)
+        : !expectsLiveRuntime(record.status) && isRuntimeProbeError(record);
+    if (probeFailed && expectsLiveRuntime(session.status)) {
       effectiveSession = this.retainDetectionError(
         session,
         runtime.diagnostic ??
@@ -22156,13 +22196,10 @@ export class SessionService {
           : "other",
       );
     } else if (
+      !probeFailed &&
       session.status !== "errored" &&
-      workspace.exists &&
-      runtime.runtimeAlive &&
-      runtime.paneUsable &&
-      runtime.processAlive &&
       !session.serverErrorAt &&
-      recoverableRuntimeError(session)
+      clearableError(session)
     ) {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -22171,11 +22208,12 @@ export class SessionService {
         !sameSessionRuntimeOwner(latest, session) || latest.agentLaunchId !== session.agentLaunchId;
       if (
         !isTerminalSessionStatus(latest.status) &&
+        latest.status !== "errored" &&
         !runtimeOwnerChanged &&
         latest.error === session.error &&
         latest.errorSource === session.errorSource &&
         !latest.serverErrorAt &&
-        recoverableRuntimeError(latest) &&
+        clearableError(latest) &&
         !this.restoreOwnsRuntimeRecovery(session.id)
       ) {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
@@ -22240,8 +22278,7 @@ export class SessionService {
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
     if (
-      runtime.probeUnresponsive ||
-      workspace.diagnostic ||
+      (probeFailed && expectsLiveRuntime(effectiveSession.status)) ||
       hasRetainedSessionError(effectiveSession)
     ) {
       state = "error";

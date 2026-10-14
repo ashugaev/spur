@@ -19596,6 +19596,78 @@ describe("SessionService", () => {
     expect(result.driftedSessions).toEqual([]);
   });
 
+  describe("boot heal of a runtime-probe error", () => {
+    const PROBE_ERROR = "Session status detection failed: tmux list-windows failed: ";
+
+    function seedRestoreAfterRebootFleet() {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            path: "/repo/api",
+            defaultBranch: "main",
+            sessionPrefix: "api",
+            worktree: true,
+            restoreAfterReboot: true,
+            symlinks: [],
+            sidecars: {},
+            sources: {},
+            triggers: {},
+          },
+        },
+      });
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({ id: "api-1", error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      sessions.set("api-2", runningSession({ id: "api-2" }));
+      return sessions;
+    }
+
+    it("stops a probe-error record at boot without handing it to reboot restore", async () => {
+      const sessions = seedRestoreAfterRebootFleet();
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+      const service = await createDisposedSessionService();
+
+      const pending = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")).not.toHaveProperty("error");
+      expect(sessions.get("api-1")).not.toHaveProperty("errorSource");
+      expect(sessions.get("api-2")?.status).toBe("stopped");
+      expect(result.drifted).toBe(2);
+      expect(result.driftedSessions).toEqual([{ id: "api-2", project: "api" }]);
+
+      const restoreSpy = vi.spyOn(service, "restore").mockResolvedValue({} as never);
+      await service.restoreRebootedSessions(result.driftedSessions);
+      expect(restoreSpy).toHaveBeenCalledTimes(1);
+      expect(restoreSpy).toHaveBeenCalledWith("api-2");
+      expect(restoreSpy).not.toHaveBeenCalledWith("api-1");
+    });
+
+    it("keeps a record healed between list and read out of reboot restore", async () => {
+      const sessions = seedRestoreAfterRebootFleet();
+      getTmuxSessionPresenceMock.mockImplementation(async (name: string) => {
+        const listed = sessions.get("api-1");
+        if (name === "api-1" && listed?.error) {
+          const { error: _error, errorSource: _errorSource, ...healed } = listed;
+          sessions.set("api-1", { ...healed, status: "stopped" });
+        }
+        return { present: false, unresponsive: false };
+      });
+      const service = await createDisposedSessionService();
+
+      const pending = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+
+      expect(result.driftedSessions).toEqual([{ id: "api-2", project: "api" }]);
+    });
+  });
+
   it.each(["claude", "codex", "opencode", "cursor"] as const)(
     "retains final %s usage when boot reconciliation runs before the first get",
     async (agent) => {
@@ -26605,6 +26677,336 @@ describe("SessionService", () => {
     expect("errorSource" in result).toBe(false);
     expect(sessions.get(record.id)?.error).toBe(patch.error);
     expect(sessions.get(record.id)?.errorSource).toBe(patch.errorSource);
+  });
+
+  describe("runtime probe errors on non-running and dead records", () => {
+    const PROBE_ERROR = "Session status detection failed: tmux list-windows failed: ";
+
+    function failProbe(): void {
+      getTmuxSessionPresenceMock.mockResolvedValue({
+        present: false,
+        unresponsive: true,
+        diagnostic: "tmux list-windows failed: ",
+      });
+    }
+
+    function answerDead(): void {
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+    }
+
+    async function getSettled(service: { get(id: string): Promise<SessionView> }, id: string) {
+      const pending = service.get(id);
+      await vi.advanceTimersByTimeAsync(1_000);
+      return pending;
+    }
+
+    function spyNotify(service: unknown) {
+      return vi
+        .spyOn(
+          service as { notifyAttention(view: SessionView, state: "error"): Promise<void> },
+          "notifyAttention",
+        )
+        .mockResolvedValue();
+    }
+
+    it.each([
+      { status: "stopped" as const, state: "stopped" },
+      { status: "paused" as const, state: "stopped" },
+      { status: "budget_limited" as const, state: "stopped" },
+      {
+        status: "errored" as const,
+        state: "error",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "inferred_runtime_exit" as const,
+      },
+    ])("leaves a $status record untouched on a failed probe", async ({ state, ...patch }) => {
+      const sessions = createSessionStore(runningSession(patch));
+      const before = clone(sessions.get("api-1"));
+      failProbe();
+      const service = await createDisposedSessionService();
+
+      const result = await service.get("api-1");
+
+      expect(result.state).toBe(state);
+      expect(sessions.get("api-1")).toEqual(before);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("leaves a stopped record untouched when the runtime probe throws", async () => {
+      const sessions = createSessionStore(runningSession({ status: "stopped" }));
+      const before = clone(sessions.get("api-1"));
+      tmuxSessionExistsMock.mockRejectedValue(new Error("boom"));
+      const service = await createDisposedSessionService();
+
+      expect((await service.get("api-1")).state).toBe("stopped");
+      expect(sessions.get("api-1")).toEqual(before);
+      expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("fires no attention notification for a stopped record under a failed probe", async () => {
+      createSessionStore(runningSession({ status: "stopped" }));
+      failProbe();
+      const service = await createDisposedSessionService();
+      const notify = spyNotify(service);
+      const internals = sessionServiceInternals(service);
+
+      await internals.pollAttentionStates(false);
+      await internals.pollAttentionStates(false);
+
+      expect(notify).not.toHaveBeenCalled();
+      expect(internals.attentionStates.has("api-1")).toBe(false);
+    });
+
+    it("still stamps a running record on a failed probe", async () => {
+      const sessions = createSessionStore(runningSession());
+      failProbe();
+      const service = await createDisposedSessionService();
+
+      expect((await service.get("api-1")).state).toBe("error");
+      expect(sessions.get("api-1")?.error).toBe(PROBE_ERROR);
+      expect(sessions.get("api-1")?.errorSource).toBe("runtime_probe");
+    });
+
+    it("stops a dead running record and drops its probe error in one write", async () => {
+      const sessions = createSessionStore(runningSession());
+      failProbe();
+      const service = await createDisposedSessionService();
+      const notify = spyNotify(service);
+      expect((await service.get("api-1")).state).toBe("error");
+      expect(sessions.get("api-1")?.errorSource).toBe("runtime_probe");
+      writeSessionMock.mockClear();
+
+      answerDead();
+      const result = await getSettled(service, "api-1");
+
+      expect(result.state).toBe("stopped");
+      expect(result.status).toBe("stopped");
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+      expect(sessions.get("api-1")?.errorSource).toBeUndefined();
+      const intermediate = writeSessionMock.mock.calls
+        .map((call) => call[1] as SessionRecord)
+        .filter(
+          (record) =>
+            record.id === "api-1" && record.status === "running" && record.error === undefined,
+        );
+      expect(intermediate).toEqual([]);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      const internals = sessionServiceInternals(service);
+      await internals.pollAttentionStates(false);
+      expect(notify).not.toHaveBeenCalled();
+      expect(sendDesktopNotificationMock).not.toHaveBeenCalled();
+    });
+
+    it("errors a running probe-error record whose pane lives but agent process died", async () => {
+      const sessions = createSessionStore(
+        runningSession({ error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      tmuxPaneDeadMock.mockResolvedValue(false);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
+      const service = await createDisposedSessionService();
+      const notify = spyNotify(service);
+
+      await getSettled(service, "api-1");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "inferred_runtime_exit",
+      });
+      const internals = sessionServiceInternals(service);
+      await internals.pollAttentionStates(false);
+      await internals.pollAttentionStates(false);
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ state: "error" }), "error");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("errors a running probe-error record whose worktree is missing", async () => {
+      const sessions = createSessionStore(
+        runningSession({ error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      answerDead();
+      probeWorkspaceMock.mockReturnValue({ exists: false, missing: true });
+      const service = await createDisposedSessionService();
+      const notify = spyNotify(service);
+
+      await service.get("api-1");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "errored",
+        error: "Agent worktree is missing.",
+        errorSource: "other",
+      });
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      const internals = sessionServiceInternals(service);
+      await internals.pollAttentionStates(false);
+      await internals.pollAttentionStates(false);
+      expect(notify).toHaveBeenCalledTimes(1);
+      const settled = clone(sessions.get("api-1"));
+      await service.get("api-1");
+      expect(sessions.get("api-1")).toEqual(settled);
+    });
+
+    it("leaves a dead probe-error record untouched without runtime reconcile", async () => {
+      const sessions = createSessionStore(
+        runningSession({ error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      const before = clone(sessions.get("api-1"));
+      answerDead();
+      const service = await createDisposedSessionService();
+      const classify = sessionServiceInternals(service).classifySessionRecord as (
+        session: SessionRecord,
+        options: { scanPane: boolean; reconcileRuntime: boolean },
+      ) => Promise<unknown>;
+
+      await classify.call(service, clone(before) as SessionRecord, {
+        scanPane: false,
+        reconcileRuntime: false,
+      });
+
+      expect(sessions.get("api-1")).toEqual(before);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { status: "stopped" as const, expected: "stopped" as const },
+      { status: "running" as const, expected: "stopped" as const },
+    ])("heals a legacy unsourced probe error on a $status record", async ({ status, expected }) => {
+      const sessions = createSessionStore(runningSession({ status, error: PROBE_ERROR }));
+      answerDead();
+      const service = await createDisposedSessionService();
+
+      const result = await getSettled(service, "api-1");
+
+      expect(result.state).toBe("stopped");
+      expect(sessions.get("api-1")?.status).toBe(expected);
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+    });
+
+    it.each([
+      {
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "inferred_runtime_exit" as const,
+      },
+      {
+        error: "Session status detection failed: workspace stat failed: permission denied",
+        errorSource: "other" as const,
+      },
+      { error: "Session status detection failed: classifier unavailable" },
+      { error: "Provider request failed" },
+      {
+        error: PROBE_ERROR,
+        errorSource: "runtime_probe" as const,
+        serverErrorAt: "2026-03-18T10:01:00.000Z",
+      },
+      { error: "Session status detection failed: Resource readout api-1--dev: x" },
+      { status: "errored" as const, error: PROBE_ERROR, errorSource: "runtime_probe" as const },
+    ])("keeps a real error on a dead record: $error ($status)", async (patch) => {
+      const sessions = createSessionStore(runningSession(patch));
+      const before = sessions.get("api-1");
+      answerDead();
+      const service = await createDisposedSessionService();
+
+      await getSettled(service, "api-1");
+
+      expect(sessions.get("api-1")?.status).toBe(before?.status);
+      expect(sessions.get("api-1")?.error).toBe(before?.error);
+      expect(sessions.get("api-1")?.errorSource).toBe(before?.errorSource);
+    });
+
+    it("never relaunches or delivers queued work while a dead probe-error record heals", async () => {
+      const sessions = createSessionStore(
+        runningSession({
+          error: PROBE_ERROR,
+          errorSource: "runtime_probe",
+          queuedMessages: { messages: ["held message"], awaitingPrompt: false },
+        }),
+      );
+      answerDead();
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service) as SessionServiceInternals & {
+        ensureDeliveryRunner(sessionId: string): void;
+      };
+
+      internals.ensureDeliveryRunner("api-1");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await getSettled(service, "api-1");
+      await waitForRealTime(() => expect(internals.deliveryRuns.has("api-1")).toBe(false));
+
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["held message"]);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      const events = logSpurEventMock.mock.calls.map(([, entry]) => entry.event);
+      expect(events).not.toContain("session.recover.completed");
+      expect(events).not.toContain("session.message.sent");
+    });
+
+    it("keeps a dead probe-error record while restore owns its recovery", async () => {
+      const sessions = createSessionStore(
+        runningSession({ error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      answerDead();
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      lifecycle.begin("restore", ["api-1"]);
+
+      await getSettled(service, "api-1");
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "running",
+        error: PROBE_ERROR,
+        errorSource: "runtime_probe",
+      });
+    });
+
+    it("keeps stamping a stopped owner on a Resource readout failure", async () => {
+      const sessions = createSessionStore(
+        runningSession({ status: "stopped", sidecarNames: ["dev"] }),
+      );
+      answerDead();
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+      sidecarTmuxAliveMock.mockRejectedValue(new TmuxProbeUnknownError("resource unavailable"));
+      const service = await createDisposedSessionService();
+
+      await service.get("api-1");
+
+      expect(sessions.get("api-1")?.error).toMatch(
+        /^Session status detection failed: Resource readout /,
+      );
+      expect(sessions.get("api-1")?.errorSource).toBe("other");
+    });
+
+    it("refuses a send to a stopped record under a failed probe without stamping it", async () => {
+      const sessions = createSessionStore(runningSession({ status: "stopped" }));
+      failProbe();
+      const service = await createDisposedSessionService();
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+
+      await expect(service.send("api-1", { message: "x" })).rejects.toBeInstanceOf(
+        TmuxProbeUnknownError,
+      );
+
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("heals a stopped probe-error record into the plain stopped record", async () => {
+      const plain = runningSession({ status: "stopped" });
+      const sessions = createSessionStore({
+        ...plain,
+        error: PROBE_ERROR,
+        errorSource: "runtime_probe",
+      });
+      answerDead();
+      const service = await createDisposedSessionService();
+
+      expect((await service.get("api-1")).state).toBe("stopped");
+
+      expect({ ...sessions.get("api-1"), updatedAt: plain.updatedAt }).toEqual(plain);
+    });
   });
 
   it("does not promote a stale errored record when the pane is dead", async () => {
