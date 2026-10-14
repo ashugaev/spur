@@ -645,7 +645,19 @@ function parseWorkItemMember(raw: unknown): WorkItemMember | null {
   const nextRetryAt = optionalString(raw.nextRetryAt);
   const error = optionalString(raw.error);
   const replacesSessionId = optionalString(raw.replacesSessionId);
+  if (
+    raw.previousTriggerIds !== undefined &&
+    (!Array.isArray(raw.previousTriggerIds) ||
+      !raw.previousTriggerIds.every((id: unknown) => typeof id === "string"))
+  ) {
+    return null;
+  }
   const previousTriggerId = optionalString(raw.previousTriggerId);
+  const previousTriggerIds = [
+    ...new Set<string>(
+      raw.previousTriggerIds ?? (previousTriggerId !== undefined ? [previousTriggerId] : []),
+    ),
+  ].filter((id) => id !== triggerId);
   const startedAt = optionalString(raw.startedAt);
   return {
     ...(triggerId !== undefined ? { triggerId } : {}),
@@ -658,7 +670,7 @@ function parseWorkItemMember(raw: unknown): WorkItemMember | null {
     ...(nextRetryAt !== undefined ? { nextRetryAt } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(replacesSessionId !== undefined ? { replacesSessionId } : {}),
-    ...(previousTriggerId !== undefined ? { previousTriggerId } : {}),
+    ...(previousTriggerIds.length > 0 ? { previousTriggerIds } : {}),
     ...(startedAt !== undefined ? { startedAt } : {}),
     ...(raw.endedReason === "anchor_not_live" ? { endedReason: raw.endedReason } : {}),
   };

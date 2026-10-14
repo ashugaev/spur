@@ -2,7 +2,15 @@ import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readSession, writeSession } from "../../src/metadata.js";
+import {
+  readSession,
+  writeSession,
+  readWorkItemLifecycles,
+  updateWorkItemMembers,
+} from "../../src/metadata.js";
+import { AutoPingService } from "../../src/auto-ping.js";
+import { EventBus } from "../../src/event-bus.js";
+import { startConfiguredTriggers } from "../../src/triggers.js";
 import { SessionService } from "../../src/session-service.js";
 import type { SessionRecord, WorkItemTriggerOrigin } from "../../src/types.js";
 import { createWorktree, deleteLocalBranch } from "../../src/workspace.js";
@@ -103,6 +111,101 @@ async function branches(fixture: Fixture, name: string): Promise<string> {
 }
 
 describe("discardFailedSpawn", () => {
+  it("cleans an intermediate retained namespace without touching an unrelated or launched owner", async () => {
+    const f = await createFixture();
+    const item = {
+      externalId: triggerOrigin.externalId,
+      url: "https://example.invalid/7",
+      number: 7,
+      title: "fixture",
+      repo: "acme/api",
+      autoComplete: false,
+      createdAt: new Date().toISOString(),
+    };
+    updateWorkItemMembers(f.dataDir, "api", "pr-watch", item, () => [
+      {
+        triggerId: "review",
+        previousTriggerIds: ["old-A", "middle-B"],
+        blockIndex: 0,
+        state: "failed",
+        claimedAt: "2026-05-11T10:00:00.000Z",
+        nextRetryAt: "2026-05-11T10:45:00.000Z",
+        attempts: 2,
+        deferrals: 0,
+      },
+    ]);
+    for (const [id, triggerId, launchCommand] of [
+      ["api-b", "middle-B", ""],
+      ["api-a", "old-A", "claude --resume"],
+      ["api-d", "unrelated-D", ""],
+    ] as const) {
+      await git(f.repoPath, "branch", id);
+      writeSession(
+        f.dataDir,
+        erroredRecord(id, { launchCommand, triggerOrigin: { ...triggerOrigin, triggerId } }),
+      );
+    }
+    const get = vi.fn().mockImplementation(async (id: string) => ({
+      ...readSession(f.dataDir, id),
+      state: "error",
+      workspaceExists: false,
+    }));
+    const spawn = vi.fn().mockResolvedValue({ id: "api-new" });
+    const discardFailedSpawn = vi.fn(f.discard);
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: f.dataDir,
+        projects: {
+          api: {
+            sources: { "pr-watch": { type: "github", query: "is:pr is:open" } },
+            triggers: {
+              review: {
+                source: "pr-watch",
+                event: "github:work_item.new",
+                spawn: { blocks: [{ prompt: "review {{url}}" }] },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      autoPing: new AutoPingService(f.dataDir),
+      sessionService: { get, spawn, discardFailedSpawn } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit({
+        occurrenceId: "chain-cleanup-fixture",
+        projectId: "api",
+        sourceId: "pr-watch",
+        name: "github:work_item.new",
+        data: item,
+      });
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      expect(discardFailedSpawn).toHaveBeenCalledWith("api-b");
+      expect(readSession(f.dataDir, "api-b")).toBeNull();
+      expect(existsSync(archivedPath(f, "api-b"))).toBe(true);
+      expect(await branches(f, "api-b")).toBe("");
+      expect(readSession(f.dataDir, "api-a")).not.toBeNull();
+      expect(await branches(f, "api-a")).toContain("api-a");
+      expect(get).not.toHaveBeenCalledWith("api-d");
+      expect(discardFailedSpawn).not.toHaveBeenCalledWith("api-d");
+      expect(readSession(f.dataDir, "api-d")).not.toBeNull();
+      expect(await branches(f, "api-d")).toContain("api-d");
+      await vi.waitFor(() =>
+        expect(
+          readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
+        ).toMatchObject({ state: "running", sessionId: "api-new" }),
+      );
+      expect(
+        readWorkItemLifecycles(f.dataDir, "api", "pr-watch").get(item.externalId)?.members[0],
+      ).not.toHaveProperty("previousTriggerIds");
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("archives the record and deletes its own branch", async () => {
     const f = await createFixture();
     await git(f.repoPath, "branch", "api-1");

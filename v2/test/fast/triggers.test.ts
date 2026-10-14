@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AutoPingService, autoPingRouteFingerprint } from "../../src/auto-ping.js";
 import type * as eventLogModule from "../../src/event-log.js";
+import type * as metadataModule from "../../src/metadata.js";
 import type * as githubProviderModule from "../../src/review-providers/github.js";
 import type {
   RefreshReviewSignalsInput,
@@ -5888,6 +5889,7 @@ describe("startConfiguredTriggers", () => {
             failedMember({ triggerId: "old-name", blockIndex: 1 }),
             workItemMember({
               triggerId: "old-name",
+              previousTriggerIds: ["oldest-name"],
               blockIndex: 2,
               state: "spawning",
               sessionId: undefined,
@@ -5895,7 +5897,7 @@ describe("startConfiguredTriggers", () => {
             }),
           ]),
         ]);
-        listSessionsMock.mockReturnValue([taggedBy("old-name", "api-old", 2)]);
+        listSessionsMock.mockReturnValue([taggedBy("oldest-name", "api-old", 2)]);
         const spawnMock = vi.fn().mockResolvedValue({ id: "api-2" });
         const getMock = vi.fn().mockImplementation(async (id: string) => ({ id, ...WORKING }));
         const { bus, controller } = await startTriggers(
@@ -5915,7 +5917,7 @@ describe("startConfiguredTriggers", () => {
           expect(memberOf(records, 2)).toMatchObject({
             triggerId: "pick-up",
             state: "spawning",
-            previousTriggerId: "old-name",
+            previousTriggerIds: ["oldest-name", "old-name"],
           });
 
           vi.setSystemTime(Date.now() + 46 * MINUTE);
@@ -5935,7 +5937,7 @@ describe("startConfiguredTriggers", () => {
           workItemLifecycle([
             workItemMember({
               triggerId: "pick-up",
-              previousTriggerId: "old-name",
+              previousTriggerIds: ["old-name"],
               state: "spawning",
               sessionId: undefined,
               claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
@@ -5943,9 +5945,9 @@ describe("startConfiguredTriggers", () => {
           ]),
         ]);
         listSessionsMock.mockReturnValue([]);
-        const claimed: Array<string | undefined> = [];
+        const claimed: Array<string[] | undefined> = [];
         const spawnMock = vi.fn().mockImplementation(async () => {
-          claimed.push(memberOf(records)?.previousTriggerId);
+          claimed.push(memberOf(records)?.previousTriggerIds);
           return { id: "api-new" };
         });
         const { bus, controller } = await startTriggers(workItemSpawnConfig(), {
@@ -5958,7 +5960,7 @@ describe("startConfiguredTriggers", () => {
           await vi.waitFor(() => {
             expect(spawnMock).toHaveBeenCalledTimes(1);
           });
-          expect(claimed).toEqual(["old-name"]);
+          expect(claimed).toEqual([["old-name"]]);
         } finally {
           await controller.stop();
         }
@@ -5997,7 +5999,7 @@ describe("startConfiguredTriggers", () => {
           workItemLifecycle([
             workItemMember({
               triggerId: "pick-up",
-              previousTriggerId: "old-name",
+              previousTriggerIds: ["old-name"],
               state: "spawning",
               sessionId: undefined,
               claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
@@ -6020,7 +6022,7 @@ describe("startConfiguredTriggers", () => {
           expect(spawnMock).not.toHaveBeenCalled();
           const member = memberOf(records);
           expect(member).toMatchObject({ state: "running", sessionId: "api-old" });
-          expect(member).not.toHaveProperty("previousTriggerId");
+          expect(member).not.toHaveProperty("previousTriggerIds");
         } finally {
           await second.controller.stop();
         }
@@ -6028,6 +6030,14 @@ describe("startConfiguredTriggers", () => {
 
       it("does not adopt a session tagged by another configured trigger", async () => {
         const records = lostOldNameRecords();
+        updateWorkItemMembersMock(
+          DATA_DIR,
+          "api",
+          "pr-watch",
+          WORK_ITEM_BASE,
+          (members: WorkItemMember[]) =>
+            members.map((member) => ({ ...member, previousTriggerIds: ["someone-else"] })),
+        );
         listSessionsMock.mockReturnValue([taggedBy("someone-else", "api-other")]);
         const base = workItemSpawnConfig();
         const config = {
@@ -6043,9 +6053,9 @@ describe("startConfiguredTriggers", () => {
           },
         };
         // The takeover claim persists the old trigger id until adoption.
-        const claimed: Array<string | undefined> = [];
+        const claimed: Array<string[] | undefined> = [];
         const spawnMock = vi.fn().mockImplementation(async () => {
-          claimed.push(memberOf(records)?.previousTriggerId);
+          claimed.push(memberOf(records)?.previousTriggerIds);
           return { id: "api-new" };
         });
         const getMock = vi.fn().mockResolvedValue({ id: "api-other", ...WORKING });
@@ -6058,12 +6068,306 @@ describe("startConfiguredTriggers", () => {
           });
           expect(getMock).not.toHaveBeenCalledWith("api-other");
           expect(eventsOf("trigger.spawn.adopted")).toHaveLength(0);
-          expect(claimed).toEqual(["old-name"]);
-          expect(memberOf(records)).not.toHaveProperty("previousTriggerId");
+          expect(claimed).toEqual([["someone-else", "old-name"]]);
+          expect(memberOf(records)).not.toHaveProperty("previousTriggerIds");
         } finally {
           await controller.stop();
         }
       });
+
+      it.each([
+        ["old-A", "running"],
+        ["middle-B", "running"],
+        ["middle-C", "running"],
+        ["old-A", "completed"],
+      ] as const)(
+        "retains chained namespaces through persisted claims and reload, adopting %s as %s without a duplicate",
+        async (survivorTriggerId, settledState) => {
+          const dataDir = mkdtempSync(join(tmpdir(), "spur-chain-metadata-"));
+          const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+          const lifecyclePath = join(
+            dataDir,
+            "source-state",
+            "work-item-lifecycle",
+            "api",
+            "pr-watch.json",
+          );
+          actual.updateWorkItemMembers(
+            dataDir,
+            "api",
+            "pr-watch",
+            {
+              ...WORK_ITEM_BASE,
+              createdAt: new Date().toISOString(),
+              autoComplete: false,
+            },
+            () => [
+              workItemMember({
+                triggerId: "middle-B",
+                previousTriggerIds: ["old-A"],
+                state: "spawning",
+                sessionId: undefined,
+                claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+              }),
+            ],
+          );
+          readWorkItemLifecyclesMock.mockImplementation(() =>
+            actual.readWorkItemLifecycles(dataDir, "api", "pr-watch"),
+          );
+          updateWorkItemMembersMock.mockImplementation(
+            (
+              _dir: string,
+              project: string,
+              source: string,
+              base: WorkItemRecordBase,
+              mutate: (members: WorkItemMember[]) => WorkItemMember[],
+            ) => actual.updateWorkItemMembers(dataDir, project, source, base, mutate),
+          );
+          const member = () =>
+            actual.readWorkItemLifecycles(dataDir, "api", "pr-watch").get(WORK_ITEM_BASE.externalId)
+              ?.members[0];
+          const base = workItemSpawnConfig({ autoComplete: false });
+          const firstConfig = {
+            ...base,
+            projects: {
+              api: {
+                ...base.projects.api,
+                triggers: { "middle-C": base.projects.api.triggers["pick-up"] },
+              },
+            },
+          };
+          let capturedClaim = "";
+          const interruptedSpawn = vi.fn().mockImplementation(async () => {
+            expect(member()).toMatchObject({
+              triggerId: "middle-C",
+              previousTriggerIds: ["old-A", "middle-B"],
+              attempts: 2,
+            });
+            capturedClaim = readFileSync(lifecyclePath, "utf8");
+            throw new Error("unit interrupted launch");
+          });
+          let controller: TriggerGroupController | undefined;
+          try {
+            const first = await startTriggers(firstConfig, { spawn: interruptedSpawn });
+            controller = first.controller;
+            first.bus.emit(workItemEvent());
+            await vi.waitFor(() =>
+              expect(eventsOf("trigger.spawn.retry_scheduled")).toHaveLength(1),
+            );
+            await controller.stop();
+            // Reload exact bytes captured from the real spawning claim; unit clock only.
+            writeFileSync(lifecyclePath, capturedClaim);
+            vi.setSystemTime(Date.now() + 46 * MINUTE);
+            const nativeOwner = {
+              id: "api-native",
+              agentSessionId: "native-original",
+              workspaceId: "desk-original",
+              worktreePath: "/fixture/desk",
+              ...WORKING,
+              status: settledState,
+            };
+            listSessionsMock.mockReturnValue([
+              taggedBy("unrelated-D", "api-other"),
+              taggedBy("middle-B", "api-failed"),
+              taggedBy(survivorTriggerId, nativeOwner.id),
+            ]);
+            const get = vi
+              .fn()
+              .mockImplementation(async (id: string) =>
+                id === "api-failed"
+                  ? { id, status: "errored", state: "error", workspaceExists: false }
+                  : nativeOwner,
+              );
+            const spawn = vi.fn();
+            const discardFailedSpawn = vi.fn();
+            const second = await startTriggers(base, { get, spawn, discardFailedSpawn });
+            controller = second.controller;
+            second.bus.emit(workItemEvent());
+            await vi.waitFor(() => expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1));
+            expect(member()).toMatchObject({
+              triggerId: "pick-up",
+              state: settledState,
+              sessionId: nativeOwner.id,
+              attempts: 3,
+              deferrals: 0,
+            });
+            expect(member()).not.toHaveProperty("previousTriggerIds");
+            expect(spawn).not.toHaveBeenCalled();
+            expect(discardFailedSpawn).not.toHaveBeenCalled();
+            expect(get).not.toHaveBeenCalledWith("api-other");
+            expect(nativeOwner).toMatchObject({
+              agentSessionId: "native-original",
+              workspaceId: "desk-original",
+              worktreePath: "/fixture/desk",
+            });
+          } finally {
+            await controller?.stop();
+            rmSync(dataDir, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it("deduplicates history on rename-back and same-trigger reclaim", async () => {
+        const records = useWorkItemLifecycleStore([
+          workItemLifecycle([
+            workItemMember({
+              triggerId: "middle-B",
+              previousTriggerIds: ["pick-up", "old-A", "old-A"],
+              state: "spawning",
+              sessionId: undefined,
+              claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            }),
+          ]),
+        ]);
+        const claims: (string[] | undefined)[] = [];
+        const spawn = vi.fn().mockImplementation(async () => {
+          claims.push(memberOf(records)?.previousTriggerIds);
+          throw new Error("unit launch failure");
+        });
+        const { bus, controller } = await startTriggers(
+          workItemSpawnConfig({ autoComplete: false }),
+          { spawn },
+        );
+        try {
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(claims).toHaveLength(1));
+          vi.setSystemTime(Date.now() + 46 * MINUTE);
+          bus.emit(workItemEvent());
+          await vi.waitFor(() => expect(claims).toHaveLength(2));
+          expect(claims).toEqual([
+            ["old-A", "middle-B"],
+            ["old-A", "middle-B"],
+          ]);
+        } finally {
+          await controller.stop();
+        }
+      });
+
+      it.each(["spawning", "running"] as const)(
+        "retains owner history after lookup rollback with an unplanned %s sibling",
+        async (siblingState) => {
+          const dataDir = mkdtempSync(join(tmpdir(), "spur-rollback-metadata-"));
+          const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+          const previous = workItemMember({
+            triggerId: "middle-B",
+            previousTriggerIds: ["old-A"],
+            state: "spawning",
+            sessionId: undefined,
+            claimedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+          });
+          const sibling = workItemMember({
+            triggerId: "middle-B",
+            blockIndex: 1,
+            state: siblingState,
+            sessionId: siblingState === "running" ? "api-peer" : undefined,
+            claimedAt: new Date().toISOString(),
+            startedAt: siblingState === "running" ? new Date().toISOString() : undefined,
+          });
+          actual.updateWorkItemMembers(
+            dataDir,
+            "api",
+            "pr-watch",
+            {
+              ...WORK_ITEM_BASE,
+              createdAt: new Date().toISOString(),
+              autoComplete: false,
+            },
+            () => [previous, sibling],
+          );
+          readWorkItemLifecyclesMock.mockImplementation(() =>
+            actual.readWorkItemLifecycles(dataDir, "api", "pr-watch"),
+          );
+          updateWorkItemMembersMock.mockImplementation(
+            (
+              _dir: string,
+              project: string,
+              source: string,
+              base: WorkItemRecordBase,
+              mutate: (members: WorkItemMember[]) => WorkItemMember[],
+            ) => actual.updateWorkItemMembers(dataDir, project, source, base, mutate),
+          );
+          const members = () =>
+            actual.readWorkItemLifecycles(dataDir, "api", "pr-watch").get(WORK_ITEM_BASE.externalId)
+              ?.members;
+          listSessionsMock.mockReturnValue([
+            taggedBy("unrelated-D", "api-other"),
+            taggedBy("old-A", "api-native"),
+          ]);
+          const get = vi
+            .fn()
+            .mockRejectedValueOnce(new Error("unit transient retained-owner lookup"))
+            .mockImplementation(async (id: string) => ({ id, ...WORKING }));
+          const spawn = vi.fn();
+          const { bus, controller } = await startTriggers(
+            workItemSpawnConfig({ autoComplete: false }),
+            { get, spawn },
+          );
+          try {
+            bus.emit(workItemEvent());
+            await vi.waitFor(() => expect(eventsOf("trigger.spawn.failed")).toHaveLength(1));
+            expect(members()?.[0]).toMatchObject({
+              ...previous,
+              triggerId: "pick-up",
+              previousTriggerIds: ["old-A", "middle-B"],
+            });
+            expect(members()?.[1]).toMatchObject({ ...sibling, triggerId: "pick-up" });
+            bus.emit(workItemEvent());
+            await vi.waitFor(() => expect(eventsOf("trigger.spawn.adopted")).toHaveLength(1));
+            expect(members()?.[0]).toMatchObject({
+              triggerId: "pick-up",
+              state: "running",
+              sessionId: "api-native",
+              attempts: 2,
+              deferrals: previous.deferrals,
+            });
+            expect(members()?.[0]).not.toHaveProperty("previousTriggerIds");
+            expect(members()?.[1]).toMatchObject({ ...sibling, triggerId: "pick-up" });
+            expect(get).toHaveBeenCalledWith("api-native");
+            expect(get).not.toHaveBeenCalledWith("api-other");
+            expect(spawn).not.toHaveBeenCalled();
+          } finally {
+            await controller.stop();
+            rmSync(dataDir, { recursive: true, force: true });
+          }
+        },
+      );
+
+      it.each(["live owner", "owner load error"])(
+        "clears settled history when a planned running owner is restored after %s",
+        async (branch) => {
+          const owner = workItemMember({
+            triggerId: "middle-B",
+            previousTriggerIds: ["old-A"],
+            sessionId: "api-native",
+            startedAt: new Date(Date.now() - 46 * MINUTE).toISOString(),
+            attempts: 3,
+            deferrals: 2,
+          });
+          const records = useWorkItemLifecycleStore([
+            workItemLifecycle([owner], { autoComplete: false }),
+          ]);
+          const get = vi.fn().mockResolvedValue({ id: "api-native", ...WORKING });
+          if (branch === "owner load error")
+            get.mockRejectedValue(new Error("unit transient owner lookup"));
+          const spawn = vi.fn();
+          const { bus, controller } = await startTriggers(
+            workItemSpawnConfig({ autoComplete: false }),
+            { get, spawn },
+          );
+          try {
+            bus.emit(workItemEvent());
+            await vi.waitFor(() =>
+              expect(memberOf(records)).toMatchObject({ triggerId: "pick-up", state: "running" }),
+            );
+            const { previousTriggerIds: _previousTriggerIds, ...settled } = owner;
+            expect(memberOf(records)).toEqual({ ...settled, triggerId: "pick-up" });
+            expect(get).toHaveBeenCalledWith("api-native");
+            expect(spawn).not.toHaveBeenCalled();
+          } finally {
+            await controller.stop();
+          }
+        },
+      );
     });
 
     it("resumes a persisted due retry after controller restart", async () => {

@@ -292,7 +292,7 @@ function settledMember(
     nextRetryAt: _nextRetryAt,
     error: _error,
     replacesSessionId: _replaces,
-    previousTriggerId: _previousTriggerId,
+    previousTriggerIds: _previousTriggerIds,
     ...rest
   } = member;
   return { ...rest, state, sessionId, startedAt: new Date().toISOString() };
@@ -320,15 +320,19 @@ function claimWorkItemBlocks(
   // next, like a pre-upgrade member.
   const adoptsOrphans = ownMembers.length === 0 && members.some(isOrphan);
   const own = adoptsOrphans ? members.filter(isOrphan) : ownMembers;
-  // The trigger id a replaced member held before a takeover, kept on the new
-  // member so a restart before adoption still finds the sessions it launched.
-  const previousTriggerIdOf = (entry: PlannedSpawnBlock): { previousTriggerId?: string } => {
-    const replaced = entry.previous[0];
-    const previousTriggerId =
-      adoptsOrphans && replaced !== undefined && isOrphan(replaced)
-        ? replaced.triggerId
-        : replaced?.previousTriggerId;
-    return previousTriggerId !== undefined ? { previousTriggerId } : {};
+  // Preserve every unresolved namespace through takeovers and reclaims.
+  const previousTriggerIdsOf = (previous: WorkItemMember[]): { previousTriggerIds?: string[] } => {
+    const previousTriggerIds = [
+      ...new Set(
+        previous.flatMap((member) => [
+          ...(member.previousTriggerIds ?? []),
+          ...(adoptsOrphans && isOrphan(member) && member.triggerId !== undefined
+            ? [member.triggerId]
+            : []),
+        ]),
+      ),
+    ].filter((id) => id !== ctx.triggerId);
+    return previousTriggerIds.length > 0 ? { previousTriggerIds } : {};
   };
   const legacy = members.find((member) => member.triggerId === undefined);
   if (record && own.length === 0 && !legacy) {
@@ -405,12 +409,12 @@ function claimWorkItemBlocks(
       ...current
         .map((member) => {
           if (!adoptsOrphans || !isOrphan(member)) return member;
-          const previousTriggerId = member.previousTriggerId ?? member.triggerId;
+          const { previousTriggerIds: _previousTriggerIds, ...rest } = member;
           return {
-            ...member,
+            ...rest,
             triggerId: ctx.triggerId,
-            ...(member.state !== "running" && previousTriggerId !== undefined
-              ? { previousTriggerId }
+            ...(member.state === "spawning" || member.state === "failed"
+              ? previousTriggerIdsOf([member])
               : {}),
           };
         })
@@ -430,7 +434,7 @@ function claimWorkItemBlocks(
           ...(entry.replacesSessionId !== undefined
             ? { replacesSessionId: entry.replacesSessionId }
             : {}),
-          ...previousTriggerIdOf(entry),
+          ...previousTriggerIdsOf(entry.previous),
         }),
       ),
     ],
@@ -438,7 +442,7 @@ function claimWorkItemBlocks(
   return { planned, claimedAt };
 }
 
-// Puts planned blocks back exactly as they were before the claim.
+// Restores pre-claim state and budget without undoing a rename takeover.
 function releaseWorkItemClaim(ctx: WorkItemClaimContext, entries: PlannedSpawnBlock[]): void {
   const indexes = new Set(entries.map((entry) => entry.blockIndex));
   const restored = new Set(entries.flatMap((entry) => entry.previous));
@@ -451,7 +455,25 @@ function releaseWorkItemClaim(ctx: WorkItemClaimContext, entries: PlannedSpawnBl
       ...current.filter(
         (member) => !(member.triggerId === ctx.triggerId && indexes.has(member.blockIndex)),
       ),
-      ...restored,
+      ...[...restored].map((member) => {
+        const { previousTriggerIds: _previousTriggerIds, ...settled } = member;
+        const previousState = member.state === "running" ? settled : member;
+        if (member.triggerId === undefined || member.triggerId === ctx.triggerId)
+          return previousState;
+        const claimed = current.find(
+          (candidate) =>
+            candidate.triggerId === ctx.triggerId && candidate.blockIndex === member.blockIndex,
+        );
+        return claimed === undefined
+          ? previousState
+          : {
+              ...previousState,
+              triggerId: ctx.triggerId,
+              ...(member.state !== "running" && claimed.previousTriggerIds !== undefined
+                ? { previousTriggerIds: claimed.previousTriggerIds }
+                : {}),
+            };
+      }),
     ],
   );
 }
@@ -691,13 +713,15 @@ async function adoptExistingWorkItemSessions(
     // A takeover rewrote orphan members to this trigger; a session they
     // launched still carries the orphaned trigger id.
     const triggerIds = [
-      ctx.triggerId,
-      ...entry.previous
-        .flatMap((member) => [member.triggerId, member.previousTriggerId])
-        .filter(
-          (id): id is string =>
-            id !== undefined && id !== ctx.triggerId && !ctx.sourceSpawnTriggerIds.has(id),
-        ),
+      ...new Set([
+        ctx.triggerId,
+        ...entry.previous
+          .flatMap((member) => [member.triggerId, ...(member.previousTriggerIds ?? [])])
+          .filter(
+            (id): id is string =>
+              id !== undefined && id !== ctx.triggerId && !ctx.sourceSpawnTriggerIds.has(id),
+          ),
+      ]),
     ];
     const tagged = await findTaggedWorkItemSession(
       ctx,

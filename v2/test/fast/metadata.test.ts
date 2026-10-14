@@ -340,12 +340,12 @@ describe("work-item lifecycle registry", () => {
     });
   });
 
-  it("round-trips the pre-takeover trigger id of a spawning member", async () => {
+  it("round-trips retained trigger namespaces of a spawning member", async () => {
     const dataDir = await newDataDir();
     updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, () => [
       {
         triggerId: "new-name",
-        previousTriggerId: "old-name",
+        previousTriggerIds: ["old-name", "middle-name"],
         blockIndex: 0,
         state: "spawning",
         claimedAt: "2026-05-11T10:00:00.000Z",
@@ -356,7 +356,94 @@ describe("work-item lifecycle registry", () => {
 
     expect(
       readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")?.members[0],
-    ).toMatchObject({ triggerId: "new-name", previousTriggerId: "old-name" });
+    ).toMatchObject({ triggerId: "new-name", previousTriggerIds: ["old-name", "middle-name"] });
+  });
+
+  it("migrates a legacy trigger scalar into the canonical namespace list", async () => {
+    const dataDir = await newDataDir();
+    await writeLifecycleFile(dataDir, [
+      {
+        ...itemBase,
+        members: [
+          {
+            triggerId: "new-name",
+            previousTriggerId: "old-name",
+            blockIndex: 0,
+            state: "spawning",
+            claimedAt: itemBase.createdAt,
+            attempts: 1,
+          },
+        ],
+      },
+    ]);
+    const member = readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)
+      ?.members[0];
+    expect(member).toMatchObject({ previousTriggerIds: ["old-name"] });
+    expect(member).not.toHaveProperty("previousTriggerId");
+    updateWorkItemMembers(dataDir, "api", "pr-watch", itemBase, (members) => members);
+    const saved = readFileSync(
+      join(dataDir, "source-state", "work-item-lifecycle", "api", "pr-watch.json"),
+      "utf8",
+    );
+    expect(saved).not.toContain('"previousTriggerId"');
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).toEqual(member);
+  });
+
+  it.each([null, "old-name", ["old-name", 7]])(
+    "rejects malformed retained trigger namespaces %j",
+    async (previousTriggerIds) => {
+      const dataDir = await newDataDir();
+      await writeLifecycleFile(dataDir, [
+        {
+          ...itemBase,
+          members: [
+            {
+              triggerId: "new-name",
+              previousTriggerIds,
+              blockIndex: 0,
+              state: "spawning",
+              claimedAt: itemBase.createdAt,
+              attempts: 1,
+            },
+          ],
+        },
+      ]);
+      expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
+    },
+  );
+
+  it("deduplicates retained namespaces and omits empty/current-only history", async () => {
+    const dataDir = await newDataDir();
+    const member = {
+      triggerId: "new-name",
+      blockIndex: 0,
+      state: "spawning",
+      claimedAt: itemBase.createdAt,
+      attempts: 1,
+    };
+    await writeLifecycleFile(dataDir, [
+      {
+        ...itemBase,
+        members: [
+          {
+            ...member,
+            previousTriggerIds: ["old-name", "middle-name", "old-name", "new-name"],
+            previousTriggerId: "ignored-legacy",
+          },
+        ],
+      },
+    ]);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).toMatchObject({ previousTriggerIds: ["old-name", "middle-name"] });
+    await writeLifecycleFile(dataDir, [
+      { ...itemBase, members: [{ ...member, previousTriggerIds: ["new-name"] }] },
+    ]);
+    expect(
+      readWorkItemLifecycles(dataDir, "api", "pr-watch").get(itemBase.externalId)?.members[0],
+    ).not.toHaveProperty("previousTriggerIds");
   });
 
   it("derives the anchor session from the lowest running block", async () => {

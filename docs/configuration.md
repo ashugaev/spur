@@ -109,6 +109,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
 - Work-item spawn retries: `v2/src/work-item-retry.ts`; tagged never-launched cleanup: `v2/src/session-service.ts` (`discardFailedSpawn`); unused own-branch guards: `v2/src/workspace.ts` (`deleteLocalBranch`).
+- Work-item trigger renames: unresolved tagged-session adoption and guarded cleanup; v2/src/triggers.ts.
 - `send.{interrupt false, prompt}`. `false` opens a send window (default 30s, `SPUR_IDLE_WAIT_BEFORE_FLUSH_MS`; `telegram:message` batches use 2s, never above the env value), counted from the agent's last activity.
 - `projects.<id>.backlog.<backlogId>.{source,query,intervalMs 60000,runOnStart false}` (`.spawn` parsed, ignored — wire a `jira:work_item.new` trigger instead).
 - Launch UI (spawn, respawn, handoff, desk spawn): agent/model-supported Reasoning choices; Default inherits live project effort; same-agent respawn/handoff carries current effort until Default clears it; [API](daemon-api.md).
