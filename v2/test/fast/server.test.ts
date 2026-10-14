@@ -953,9 +953,9 @@ describe("startServer", () => {
     }
 
     expect(calls).toEqual([
-      { includeCompleted: false, view: "full" },
-      { includeCompleted: true, view: "full" },
-      { includeCompleted: false, view: "dashboard" },
+      { includeCompleted: false, view: "full", signal: expect.any(AbortSignal) },
+      { includeCompleted: true, view: "full", signal: expect.any(AbortSignal) },
+      { includeCompleted: false, view: "dashboard", signal: expect.any(AbortSignal) },
     ]);
   });
 
@@ -5059,7 +5059,7 @@ describe("GET /sessions abort", () => {
       ].join("\n"),
     );
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
-    return { server, port, dataDir };
+    return { server, port, dataDir, root };
   }
 
   const macrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
@@ -5084,8 +5084,9 @@ describe("GET /sessions abort", () => {
   }
 
   it("logs and writes nothing when list rejects after the client disconnects", async () => {
-    const { server, port, dataDir } = await startFixture();
+    const { server, port, dataDir, root } = await startFixture();
     const held = holdList(server);
+    let failed: unknown[];
     try {
       const client = new AbortController();
       const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
@@ -5099,13 +5100,16 @@ describe("GET /sessions abort", () => {
     } finally {
       vi.restoreAllMocks();
       await server.stop();
+      failed = failedRequests(dataDir);
+      await rm(root, { recursive: true, force: true });
     }
-    expect(failedRequests(dataDir)).toHaveLength(0);
+    expect(failed).toHaveLength(0);
   });
 
   it("sends nothing when list resolves after the client disconnects", async () => {
-    const { server, port, dataDir } = await startFixture();
+    const { server, port, dataDir, root } = await startFixture();
     const held = holdList(server);
+    let failed: unknown[];
     try {
       const client = new AbortController();
       const request = fetch(`http://127.0.0.1:${port}/sessions`, { signal: client.signal });
@@ -5122,12 +5126,14 @@ describe("GET /sessions abort", () => {
     } finally {
       vi.restoreAllMocks();
       await server.stop();
+      failed = failedRequests(dataDir);
+      await rm(root, { recursive: true, force: true });
     }
-    expect(failedRequests(dataDir)).toHaveLength(0);
+    expect(failed).toHaveLength(0);
   });
 
   it("does not abort a request that completes normally", async () => {
-    const { server, port } = await startFixture();
+    const { server, port, root } = await startFixture();
     const held = holdList(server);
     try {
       const request = fetch(`http://127.0.0.1:${port}/sessions`);
@@ -5141,6 +5147,7 @@ describe("GET /sessions abort", () => {
     } finally {
       vi.restoreAllMocks();
       await server.stop();
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -22832,7 +22832,7 @@ describe("SessionService", () => {
 
   it("persists every Codex generation discovered between sweeps", async () => {
     const session = runningSession({ agent: "codex", agentSessionId: "root-thread" });
-    readSessionMock.mockReturnValue(session);
+    createSessionStore(session);
     const sample = (generationId: string, totalTokens: number) => ({
       provider: "codex",
       generationId,
@@ -46722,6 +46722,31 @@ describe("SessionService", () => {
           });
           const watch = watchBuilds(internals);
           const rows = await service.list({ includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(2);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("rebuilds a dashboard cache-miss row whose build re-read saw an intermediate version", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          const watch = watchDashboardBuilds(internals);
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
           expect(watch.builds("api-1")).toBe(2);
           expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
         } finally {
