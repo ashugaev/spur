@@ -333,6 +333,40 @@ const R12_WAIT_HERE_PROSE = [
   R_FOOTER,
 ];
 
+const DATED_FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+const datedMenu = (waitLines: string[]): string =>
+  [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    ...waitLines,
+    "  3. Ask your admin for more usage",
+    "",
+    DATED_FOOTER,
+  ].join("\n");
+const DATED_PROSE_CASES: ReadonlyArray<readonly [string, string[]]> = [
+  [
+    "prose after a dated wait-here option",
+    [
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "This is prose, not a wrapped menu label",
+    ],
+  ],
+  [
+    "prose across two continuation lines after a dated wait-here option",
+    [
+      "  2. Wait here, then continue automatically at Sep 2, 8am",
+      "This is prose",
+      "not a wrapped menu label",
+    ],
+  ],
+  [
+    "a wrapped at-suffix that is not a formatted date",
+    ["  2. Wait here, then continue automatically at", "  some other prose"],
+  ],
+];
+const DATED_FORMATS = ["8am", "8:30pm", "Sep 2, 8am", "Sep 2, 8:30am", "Sep 2, 2027, 8am"];
+
 describe("detectClaudeUsageLimitMenu", () => {
   const MENU_TEXT = [
     "What do you want to do?",
@@ -670,6 +704,34 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(lines.join("\n"))).toBeNull();
   });
 
+  it.each(DATED_PROSE_CASES)("returns null for %s", (_name, waitLines) => {
+    expect(detectClaudeUsageLimitMenu(datedMenu(waitLines))).toBeNull();
+  });
+
+  it.each(DATED_FORMATS)("flags the wait-here option dated %s", (date) => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu([`  2. Wait here, then continue automatically at ${date}`]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
+  it("flags the wait-here option when a dated suffix with a year wraps in a narrow pane", () => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2, 2027,", "  8am"]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
+  it("flags the wait-here option when its dated suffix wraps in a narrow pane", () => {
+    expect(
+      detectClaudeUsageLimitMenu(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2,", "  8:30am"]),
+      ),
+    ).toEqual(LIMITED);
+  });
+
   it("returns null when a non-numbered prose line sits inside the menu block", () => {
     const paneText = [
       "What do you want to do?",
@@ -868,6 +930,18 @@ describe("claudeUsageMenuOptionOneSelected", () => {
     ["prose after a wait-here option", R12_WAIT_HERE_PROSE],
   ])("returns false for %s", (_name, lines) => {
     expect(claudeUsageMenuOptionOneSelected(lines.join("\n"))).toBe(false);
+  });
+
+  it.each(DATED_PROSE_CASES)("returns false for %s", (_name, waitLines) => {
+    expect(claudeUsageMenuOptionOneSelected(datedMenu(waitLines))).toBe(false);
+  });
+
+  it("returns true when the dated wait-here suffix wraps after a selected option 1", () => {
+    expect(
+      claudeUsageMenuOptionOneSelected(
+        datedMenu(["  2. Wait here, then continue automatically at Sep 2,", "  8:30am"]),
+      ),
+    ).toBe(true);
   });
 
   it("returns false for plain unrelated text", () => {

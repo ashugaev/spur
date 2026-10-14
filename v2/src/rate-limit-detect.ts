@@ -299,7 +299,7 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
 const CLAUDE_USAGE_MENU_HEADER = /^what do you want to do\?$/i;
 const CLAUDE_USAGE_MENU_NUMBERED = /^[^0-9a-z]{0,3}\d\.\s+\S/i;
 const CLAUDE_USAGE_MENU_KNOWN_LABEL =
-  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically(?: shortly| at .+| when the limit resets)?|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
+  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically(?: shortly| at (?:[a-z]{3} \d{1,2}, (?:\d{4}, )?)?\d{1,2}(?::\d{2})?[ap]m| when the limit resets)?|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
