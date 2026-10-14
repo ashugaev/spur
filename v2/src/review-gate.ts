@@ -130,37 +130,9 @@ function ciIdentity(policy: GatePolicy, run: Record<string, unknown>) {
     run.event === "pull_request"
   );
 }
-function ciCandidate(number: number, snapshot: GateSnapshot, run: Record<string, unknown>) {
-  const head = object(snapshot.pr.head);
-  if (run.head_sha === head.sha) return true;
-  const anchor = snapshot.ciAnchors.find((value) => value.runId === run.id);
-  if (
-    anchor?.parents.length === 2 &&
-    anchor.parents.every((sha) => /^[a-f0-9]{40}$/.test(sha)) &&
-    (run.head_sha === anchor.merge || run.head_sha === anchor.parents[1]) &&
-    run.head_branch === head.ref &&
-    Array.isArray(run.pull_requests) &&
-    run.pull_requests.every((value) => {
-      const associated = object(value);
-      return (
-        associated.number === number &&
-        object(associated.head).sha === anchor.parents[1] &&
-        object(associated.base).sha === anchor.parents[0]
-      );
-    })
-  )
-    return anchor.parents[1] === head.sha;
-  if (ciRef(run)?.number === number) return true;
-  return (
-    run.head_branch === head.ref &&
-    (string(run.path).endsWith(`@refs/pull/${number}/merge`) ||
-      (Array.isArray(run.pull_requests) &&
-        run.pull_requests.some((value) => object(value).number === number)))
-  );
-}
-function ciCandidates(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
+function ciCandidates(policy: GatePolicy, snapshot: GateSnapshot) {
   return snapshot.runs.filter(
-    (run) => ciIdentity(policy, run) && ciCandidate(number, snapshot, run),
+    (run) => ciIdentity(policy, run) && run.head_sha === object(snapshot.pr.head).sha,
   );
 }
 function selectCiRun(candidates: GateSnapshot["runs"]) {
@@ -206,7 +178,7 @@ function ciProvenance(
     anchor.parents.length === 2 &&
     anchor.parents[0] === B &&
     anchor.parents[1] === H &&
-    (run.head_sha === H || run.head_sha === ref.merge) &&
+    run.head_sha === H &&
     run.head_branch === object(snapshot.pr.head).ref &&
     Array.isArray(run.pull_requests) &&
     run.pull_requests.every((value) => {
@@ -225,7 +197,12 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     reason,
     H: string(object(snapshot.pr.head).sha),
     B: string(object(snapshot.pr.base).sha),
-    fingerprint: digest({ domain: "gate-blocked-v1", snapshot }),
+    fingerprint: digest({
+      domain: "gate-blocked-v1",
+      reason,
+      H: string(object(snapshot.pr.head).sha),
+      B: string(object(snapshot.pr.base).sha),
+    }),
   });
   try {
     const pr = snapshot.pr,
@@ -376,7 +353,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
         consent,
       };
     }
-    const candidates = ciCandidates(policy, number, snapshot);
+    const candidates = ciCandidates(policy, snapshot);
     const run = selectCiRun(candidates);
     if (
       !run ||
@@ -491,11 +468,16 @@ export async function readGateSnapshot(
 ): Promise<GateSnapshot> {
   const path = `/repos/${policy.repository}`;
   const pr = object(await api.request(`${path}/pulls/${number}`));
+  const H = string(object(pr.head).sha);
+  if (!/^[a-f0-9]{40}$/.test(H)) throw new ReviewAppError("gate-response");
   const [reviews, comments, files, listedRuns] = await Promise.all([
     api.pages(`${path}/pulls/${number}/reviews`),
     api.pages(`${path}/issues/${number}/comments`),
     api.pages(`${path}/pulls/${number}/files`),
-    api.pages(`${path}/actions/workflows/${policy.ciWorkflowId}/runs`, "workflow_runs"),
+    api.pages(
+      `${path}/actions/workflows/${policy.ciWorkflowId}/runs?head_sha=${H}`,
+      "workflow_runs",
+    ),
   ]);
   let unresolved = 0,
     cursor: string | null = null;
@@ -529,19 +511,7 @@ export async function readGateSnapshot(
     ciAnchors: GateSnapshot["ciAnchors"] = [];
   for (const listed of listedRuns) {
     if (!ciIdentity(policy, listed)) continue;
-    const ref = ciRef(listed);
-    if (
-      listed.head_sha !== object(pr.head).sha &&
-      ref?.number !== number &&
-      !(
-        listed.head_branch === object(pr.head).ref &&
-        (ref ||
-          string(listed.path).endsWith(`@refs/pull/${number}/merge`) ||
-          (Array.isArray(listed.pull_requests) &&
-            listed.pull_requests.some((value) => object(value).number === number)))
-      )
-    )
-      continue;
+    if (listed.head_sha !== H) continue;
     const run = object(await api.request(`${path}/actions/runs/${integer(listed.id)}`));
     const attempt = object(
       await api.request(
@@ -571,9 +541,7 @@ export async function readGateSnapshot(
       throw new ReviewAppError("ci-attempt-mismatch");
     runs.push(attempt);
     const actualRef = ciRef(attempt);
-    const historicalMerge =
-      actualRef?.merge ??
-      (attempt.head_sha === object(pr.head).sha ? null : string(attempt.head_sha));
+    const historicalMerge = actualRef?.merge;
     if (historicalMerge) {
       if (!/^[a-f0-9]{40}$/.test(historicalMerge)) throw new ReviewAppError("invalid-ci-head");
       let parents: string[] = [];
@@ -588,7 +556,7 @@ export async function readGateSnapshot(
     }
   }
   const snapshot = { pr, reviews, comments, files, unresolved, runs, jobs: [], ciAnchors };
-  const run = selectCiRun(ciCandidates(policy, number, snapshot));
+  const run = selectCiRun(ciCandidates(policy, snapshot));
   const jobs = run
     ? await api.pages(
         `${path}/actions/runs/${integer(run.id)}/attempts/${integer(run.run_attempt)}/jobs`,

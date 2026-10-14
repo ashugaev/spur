@@ -501,16 +501,18 @@ async function readCiFixture(
     runMismatch?: boolean;
     jobFault?: string;
     extraJob?: Record<string, unknown>;
-    unavailableCommitStatus?: 403 | 404;
     historicalCommit?: Record<string, unknown>;
     associationMismatch?: boolean;
+    ignoreRunFilter?: boolean;
     threadFault?: "graphql" | "node" | "cursor";
   } = {},
   gate: GateReader = { GateGitHub, readGateSnapshot, evaluateSnapshot },
 ) {
   const paths: string[] = [];
+  const runListUrls: string[] = [];
   const api = new gate.GateGitHub("fixture", async (url) => {
-    const path = new URL(String(url)).pathname;
+    const parsed = new URL(String(url));
+    const path = parsed.pathname;
     paths.push(path);
     if (path === "/graphql")
       return Response.json({
@@ -533,7 +535,16 @@ async function readCiFixture(
     if (path.endsWith("/reviews")) return Response.json(snapshot.reviews);
     if (path.endsWith("/comments")) return Response.json(snapshot.comments);
     if (path.endsWith("/files")) return Response.json(snapshot.files);
-    if (path.endsWith("/runs")) return Response.json({ workflow_runs: snapshot.runs });
+    if (path.endsWith("/runs")) {
+      runListUrls.push(parsed.search);
+      const headSha = parsed.searchParams.get("head_sha");
+      return Response.json({
+        workflow_runs:
+          options.ignoreRunFilter || !headSha
+            ? snapshot.runs
+            : snapshot.runs.filter((run) => run.head_sha === headSha),
+      });
+    }
     if (path.endsWith(`/commits/${M}`)) {
       if (options.commit === null) return new Response("missing", { status: 404 });
       return Response.json(options.commit ?? { sha: M, parents: [{ sha: B }, { sha: H }] });
@@ -541,7 +552,7 @@ async function readCiFixture(
     if (path.includes("/commits/"))
       return options.historicalCommit
         ? Response.json(options.historicalCommit)
-        : new Response("unavailable", { status: options.unavailableCommitStatus ?? 404 });
+        : new Response("unavailable", { status: 404 });
     const match = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?(\/jobs)?$/.exec(path);
     if (match) {
       const run = snapshot.runs.find((value) => value.id === Number(match[1]));
@@ -571,8 +582,93 @@ async function readCiFixture(
     throw new Error("unexpected CI fixture API");
   });
   const fresh = await gate.readGateSnapshot(api, strictPolicy, 5);
-  return { result: gate.evaluateSnapshot(strictPolicy, 5, fresh), paths, snapshot: fresh };
+  return {
+    result: gate.evaluateSnapshot(strictPolicy, 5, fresh),
+    paths,
+    runListUrls,
+    snapshot: fresh,
+  };
 }
+test("workflow runs list is scoped to the PR head and read once", async () => {
+  const { runListUrls } = await readCiFixture(fixture());
+  expect(runListUrls).toEqual([`?head_sha=${H}&per_page=100&page=1`]);
+});
+test("a listed run with another head is never fetched and cannot change the verdict", async () => {
+  const snapshot = fixture();
+  snapshot.runs.push({
+    ...snapshot.runs[0],
+    id: 7,
+    head_sha: "f".repeat(40),
+    run_started_at: "2026-10-05T13:00:00Z",
+    status: "in_progress",
+    conclusion: null,
+  });
+  const { result, paths } = await readCiFixture(snapshot, { ignoreRunFilter: true });
+  expect(result.status).toBe("APPROVED");
+  expect(paths.some((path) => path.includes("/actions/runs/7"))).toBe(false);
+});
+test("malformed head sha rejects before any actions request", async () => {
+  const snapshot = fixture();
+  snapshot.pr.head = { ...(snapshot.pr.head as object), sha: "not-a-sha" };
+  const paths: string[] = [];
+  const api = new GateGitHub("fixture", async (url) => {
+    const path = new URL(String(url)).pathname;
+    paths.push(path);
+    if (path.endsWith("/pulls/5")) return Response.json(snapshot.pr);
+    return Response.json([]);
+  });
+  await expect(readGateSnapshot(api, strictPolicy, 5)).rejects.toThrow("gate-response");
+  expect(paths.some((path) => path.includes("/actions/"))).toBe(false);
+});
+test("evaluator ignores non-head runs and never approves a merge-head run", () => {
+  const snapshot = fixture();
+  snapshot.runs.push({
+    ...snapshot.runs[0],
+    id: 7,
+    head_sha: "f".repeat(40),
+    run_started_at: "2026-10-05T13:00:00Z",
+    status: "in_progress",
+    conclusion: null,
+  });
+  expect(evaluateSnapshot(policy, 5, snapshot).status).toBe("APPROVED");
+  const merged = fixture();
+  const run = merged.runs[0];
+  if (!run) throw new Error("missing fixture run");
+  run.head_sha = M;
+  const result = evaluateSnapshot(policy, 5, merged);
+  expect(result.status).toBe("BLOCKED");
+  expect(result.reason).toBe("ci-not-success");
+});
+test("blocked fingerprint covers only reason, head and base", () => {
+  const blockedFixture = () => {
+    const snapshot = fixture();
+    snapshot.reviews = [];
+    return snapshot;
+  };
+  const first = evaluateSnapshot(policy, 5, blockedFixture());
+  expect(first.status).toBe("BLOCKED");
+  const churned = blockedFixture();
+  const base = churned.pr.base as { repo: Record<string, unknown> };
+  Object.assign(churned.pr, { updated_at: "x", mergeable_state: "clean" });
+  Object.assign(base.repo, { pushed_at: "y", open_issues_count: 99 });
+  churned.comments = churned.comments.map((row) => ({ ...row, updated_at: "z" }));
+  churned.runs = churned.runs.map((row) => ({ ...row, updated_at: "w" }));
+  const second = evaluateSnapshot(policy, 5, churned);
+  expect(second.fingerprint).toBe(first.fingerprint);
+  const otherReason = fixture();
+  otherReason.unresolved = 1;
+  const reasonResult = evaluateSnapshot(policy, 5, otherReason);
+  expect(reasonResult.status).toBe("BLOCKED");
+  expect(reasonResult.reason).not.toBe(first.reason);
+  expect(reasonResult.fingerprint).not.toBe(first.fingerprint);
+  const otherHead = blockedFixture();
+  otherHead.pr.head = { ...(otherHead.pr.head as object), sha: "c".repeat(40) };
+  expect(evaluateSnapshot(policy, 5, otherHead).fingerprint).not.toBe(first.fingerprint);
+  const otherBase = blockedFixture();
+  otherBase.pr.base = { ...(otherBase.pr.base as object), sha: "c".repeat(40) };
+  expect(evaluateSnapshot(policy, 5, otherBase).fingerprint).not.toBe(first.fingerprint);
+  expect(evaluateSnapshot(policy, 5, fixture()).fingerprint).not.toBe(first.fingerprint);
+});
 test.each(["source", "built"])(
   "%s HTTP reader retains five raw rows and approves four required jobs",
   async (mode) => {
@@ -674,14 +770,16 @@ test.each([
       return;
     }
     const { result, paths } = await readCiFixture(snapshot, options);
-    expect(result.status).toBe(
-      ["fork", "dependabot", "merge-head"].includes(fault) ? "APPROVED" : "BLOCKED",
-    );
+    expect(result.status).toBe(["fork", "dependabot"].includes(fault) ? "APPROVED" : "BLOCKED");
     expect(paths).not.toContain(`/repos/owner/repo/commits/${snapshot.pr.merge_commit_sha}`);
-    if (["fork", "dependabot", "merge-head"].includes(fault)) {
+    if (["fork", "dependabot"].includes(fault)) {
       expect(paths).toContain("/repos/owner/repo/actions/runs/1");
       expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1");
       expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1/jobs");
+    }
+    if (fault === "merge-head") {
+      expect(result.reason).toBe("ci-not-success");
+      expect(paths).not.toContain("/repos/owner/repo/actions/runs/1");
     }
   },
 );
@@ -732,16 +830,19 @@ test.each([
       await expect(readCiFixture(snapshot)).rejects.toThrow("ci-attempt-time-ambiguous");
       return;
     }
-    const { result, paths } = await readCiFixture(snapshot, {
-      ...(scenario === "markerless-denied-merge-rerun" ? { unavailableCommitStatus: 403 } : {}),
-    });
-    if (scenario.startsWith("markerless-"))
+    const { result, paths } = await readCiFixture(snapshot);
+    const markerless = scenario.startsWith("markerless-");
+    if (markerless)
       expect((await readCiFixture({ ...snapshot, runs: [later] })).result.status).toBe("APPROVED");
-    expect(result.status).toBe(scenario === "completed-rerun" ? "APPROVED" : "BLOCKED");
-    expect(paths).toContain("/repos/owner/repo/actions/runs/2/attempts/1");
-    expect(paths).toContain(
-      `/repos/owner/repo/actions/runs/1/attempts/${scenario === "old-late-completion" ? 1 : 2}`,
+    expect(result.status).toBe(
+      scenario === "completed-rerun" || markerless ? "APPROVED" : "BLOCKED",
     );
+    expect(paths).toContain("/repos/owner/repo/actions/runs/2/attempts/1");
+    if (markerless) expect(paths).not.toContain("/repos/owner/repo/actions/runs/1");
+    else
+      expect(paths).toContain(
+        `/repos/owner/repo/actions/runs/1/attempts/${scenario === "old-late-completion" ? 1 : 2}`,
+      );
     if (scenario === "completed-rerun")
       expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/2/jobs");
   },
@@ -787,7 +888,7 @@ test.each([
   "native-old-contradiction",
   "association-contradiction",
 ])(
-  "obsolete historical head %s excludes only proven history and retains uncertain/contradictory blockers",
+  "obsolete historical head %s is out of scope; only a same-head contradiction blocks",
   async (scenario) => {
     const snapshot = fixture(),
       oldH = "f".repeat(40),
@@ -806,10 +907,7 @@ test.each([
     const options: Parameters<typeof readCiFixture>[1] = {
       historicalCommit: { sha: oldM, parents: [{ sha: B }, { sha: oldH }] },
     };
-    if (["denied", "missing"].includes(scenario)) {
-      delete options.historicalCommit;
-      options.unavailableCommitStatus = scenario === "denied" ? 403 : 404;
-    }
+    if (["denied", "missing"].includes(scenario)) delete options.historicalCommit;
     if (scenario === "malformed-parent")
       options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: "invalid" }] };
     if (scenario === "extra-parent")
@@ -823,12 +921,12 @@ test.each([
       Object.assign(oldRun, { pull_requests: [{ number: 5, head: { sha: H }, base: { sha: B } }] });
     const { result, paths } = await readCiFixture(snapshot, options);
     expect(result.status).toBe(
-      ["queued", "in_progress", "success", "failure", "native-merge"].includes(scenario)
-        ? "APPROVED"
-        : "BLOCKED",
+      scenario === "native-current-contradiction" ? "BLOCKED" : "APPROVED",
     );
-    if (result.status === "APPROVED")
+    if (result.status === "APPROVED") {
       expect(paths).toContain("/repos/owner/repo/actions/runs/1/attempts/1/jobs");
+      expect(paths).not.toContain("/repos/owner/repo/actions/runs/2");
+    }
   },
 );
 test.each(["newer-blocker", "missing-time", "tied-time"])(
@@ -881,6 +979,7 @@ test.each([
   "native-malformed",
   "native-type",
   "lane-blocked",
+  "lane-blocked-churn",
   "positive-outsider",
   "positive-threads",
   "merge-head",
@@ -923,7 +1022,7 @@ test.each([
         ...snapshot.reviews[0],
         user: { id: policy.codeActor, type: "User" },
       };
-    if (mode === "lane-blocked")
+    if (mode === "lane-blocked" || mode === "lane-blocked-churn")
       snapshot.comments[0] = {
         ...snapshot.comments[0],
         body: stateBody({
@@ -1026,7 +1125,7 @@ test.each([
         prNumbers.push(Number(path.split("/").at(-1)));
         reads++;
         if (reads === 3) {
-          changeEquivalent(snapshot, mode);
+          changeEquivalent(snapshot, mode === "lane-blocked-churn" ? "updated-at" : mode);
           if (mode === "unlisted-churn") snapshot.jobs.pop();
           if (mode === "corrupt-unlisted") {
             const extra = snapshot.jobs.at(-1);
@@ -1062,7 +1161,12 @@ test.each([
       }
       if (path.endsWith("/comments")) return Response.json(snapshot.comments);
       if (path.endsWith("/files")) return Response.json(snapshot.files);
-      if (path.endsWith("/runs")) return Response.json({ workflow_runs: snapshot.runs });
+      if (path.endsWith("/runs")) {
+        const headSha = new URL(String(url)).searchParams.get("head_sha");
+        return Response.json({
+          workflow_runs: snapshot.runs.filter((run) => run.head_sha === headSha),
+        });
+      }
       const runPath = /\/runs\/(\d+)(?:\/attempts\/\d+)?$/.exec(path);
       if (runPath) return Response.json(snapshot.runs.find((run) => run.id === Number(runPath[1])));
       if (path.endsWith(`/commits/${M}`))
@@ -1114,7 +1218,6 @@ test.each([
         expect(writes.at(-1)?.conclusion).toBe(
           mode === "clean" ||
             mode === "native-page-two" ||
-            mode === "merge-head" ||
             mode === "unlisted-churn" ||
             equivalentChanges.some((change) => change === mode)
             ? "success"
@@ -1135,12 +1238,13 @@ test.each([
             "native-malformed",
             "native-type",
             "lane-blocked",
+            "lane-blocked-churn",
             "positive-outsider",
             "positive-threads",
             "merge-head",
           ].includes(mode)
         ) {
-          expect(jobReads).toBe(2);
+          expect(jobReads).toBe(mode === "merge-head" ? 0 : 2);
           expect(reviewRequests).toBe(3);
         }
         if (mode === "native-malformed")
@@ -1149,7 +1253,7 @@ test.each([
           expect(writes.at(-1)?.output?.summary).toBe("changes-requested");
         if (mode === "positive-threads")
           expect(writes.at(-1)?.output?.summary).toBe("unresolved-threads");
-        if (mode === "lane-blocked")
+        if (mode === "lane-blocked" || mode === "lane-blocked-churn")
           expect(writes.at(-1)?.output?.summary).toBe("lane-state-not-approved");
       }
     } finally {
