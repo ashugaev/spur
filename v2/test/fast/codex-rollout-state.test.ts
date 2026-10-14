@@ -91,6 +91,45 @@ async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<strin
 }
 
 describe("readCodexRolloutState", () => {
+  it.each([
+    ["usable credits", { credits: { has_credits: true } }, false],
+    ["unlimited credits", { credits: { has_credits: false, unlimited: true } }, false],
+    ["hard reached type", { credits: { has_credits: true }, rate_limit_reached_type: "hard_cap" }, true],
+    ["unknown cap", { credits: { has_credits: true }, individual_limit: {} }, true],
+  ] as const)("selects the newest %s snapshot over an older hard limit", async (_name, latest, limited) => {
+    const lines = [
+      sessionMeta("credit-thread"),
+      JSON.stringify({
+        timestamp: "2026-06-28T08:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "token_count", rate_limits: { rate_limit_reached_type: "old_hard_cap" } },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-28T08:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: null,
+          rate_limits: {
+            limit_id: "codex",
+            primary: { used_percent: 100, window_minutes: 300 },
+            secondary: { used_percent: 100, window_minutes: 10080 },
+            ...latest,
+          },
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-28T08:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "credit-turn" },
+      }),
+    ];
+    const dir = await makeSessionsDir(lines.join("\n") + "\n");
+    const result = await readCodexRolloutState(dir, undefined, "credit-thread");
+    expect(result.rollout).toMatchObject({ state: "waiting", reason: "task_complete" });
+    expect(result.rateLimit?.limited).toBe(limited);
+  });
+
   it("reuses parsed unchanged rollout files and refreshes a changed file", async () => {
     const firstRecord = JSON.stringify({
       timestamp: "2026-05-10T10:00:00.000Z",

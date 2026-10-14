@@ -123,6 +123,15 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
     return { limited: true, reason: `codex ${reachedType}` };
   }
   const credits = rateLimits["credits"];
+  const creditedMeters =
+    (reachedType === undefined || reachedType === null) &&
+    (rateLimits["individual_limit"] === undefined || rateLimits["individual_limit"] === null) &&
+    (rateLimits["spend_control_reached"] === undefined ||
+      rateLimits["spend_control_reached"] === null) &&
+    isRecord(credits) &&
+    (credits["has_credits"] === undefined || typeof credits["has_credits"] === "boolean") &&
+    (credits["unlimited"] === undefined || typeof credits["unlimited"] === "boolean") &&
+    (credits["has_credits"] === true || credits["unlimited"] === true);
   // A window-metered account (e.g. team/enterprise, billed via Azure/API key)
   // reports has_credits:false as a benign soft signal alongside a live usage
   // window even at 0% used — it just means "not on the credits plan", not
@@ -138,10 +147,10 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   ) {
     return { limited: true, reason: "codex out of credits" };
   }
-  if (usedPercentExhausted(rateLimits["primary"])) {
+  if (!creditedMeters && usedPercentExhausted(rateLimits["primary"])) {
     return { limited: true, reason: "codex 5h window exhausted" };
   }
-  if (usedPercentExhausted(rateLimits["secondary"])) {
+  if (!creditedMeters && usedPercentExhausted(rateLimits["secondary"])) {
     return { limited: true, reason: "codex weekly window exhausted" };
   }
   return NOT_LIMITED;
