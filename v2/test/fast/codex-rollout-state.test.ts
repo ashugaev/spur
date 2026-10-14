@@ -91,6 +91,67 @@ async function makeMultiFileSessionsDir(fileSpecs: SessionFile[]): Promise<strin
 }
 
 describe("readCodexRolloutState", () => {
+  it("Codex quota expiry retains the pinned root reset across restore and refreshes genuine rejection", async () => {
+    const reset = 1791949078;
+    const record = (type: string, payload: Record<string, unknown>) =>
+      JSON.stringify({
+        timestamp: "2026-10-14T03:38:00.000Z",
+        type,
+        payload,
+      });
+    const content = [
+      sessionMeta("quota-root"),
+      record("event_msg", {
+        type: "token_count",
+        rate_limits: {
+          primary: { used_percent: 100, window_minutes: 10080, resets_at: reset },
+          secondary: null,
+          rate_limit_reached_type: null,
+        },
+      }),
+      record("event_msg", { type: "thread_settings_applied", thread_id: "quota-root" }),
+    ].join("\n");
+    const sessionsDir = await makeMultiFileSessionsDir([
+      { filename: "rollout-root.jsonl", content, mtimeMs: 1_000 },
+      {
+        filename: "rollout-sibling.jsonl",
+        mtimeMs: 2_000,
+        content: [
+          sessionMeta("quota-sibling"),
+          record("event_msg", {
+            type: "token_count",
+            rate_limits: {
+              rate_limit_reached_type: "weekly",
+            },
+          }),
+        ].join("\n"),
+      },
+    ]);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const first = await readCodexRolloutState(sessionsDir, reader, "quota-root");
+    expect(first.rollout?.reason).toBe("thread_settings_applied");
+    expect(first.rateLimit).toEqual({
+      limited: true,
+      reason: "codex 5h window exhausted",
+      resetAtMs: reset * 1000,
+    });
+    expect(await readCodexRolloutState(sessionsDir, reader, "quota-root")).toEqual(first);
+    await writeFile(
+      join(sessionsDir, "2026", "04", "19", "rollout-root.jsonl"),
+      `${content}\n${record("event_msg", {
+        type: "token_count",
+        rate_limits: {
+          rate_limit_reached_type: "weekly",
+        },
+      })}`,
+      "utf8",
+    );
+    expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toEqual({
+      limited: true,
+      reason: "codex weekly",
+    });
+  });
+
   it("reuses parsed unchanged rollout files and refreshes a changed file", async () => {
     const firstRecord = JSON.stringify({
       timestamp: "2026-05-10T10:00:00.000Z",
