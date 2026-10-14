@@ -33392,7 +33392,7 @@ describe("SessionService", () => {
         expect(sessions.get("api-1")?.error).toBe(EXITED);
       });
 
-      it("keeps the same dead-runtime running+error sidecar within the idle TTL (within_idle_ttl)", async () => {
+      it("keeps the same dead-runtime running+error sidecar within the idle TTL without probing", async () => {
         const { sessions, service } = await setup();
         sessions.set("api-1", exitedSolo("api-1", { updatedAt: RECENT }));
         paneAliveUntilKilled(["api-1"]);
@@ -33404,7 +33404,125 @@ describe("SessionService", () => {
         );
 
         expect(plan.reap).toEqual([]);
-        expect(plan.keep.map((k) => k.reason)).toEqual(["within_idle_ttl"]);
+        // Unprobed: the verdict stays the retained-error keep, and the tick
+        // pays no confirm sleep and no fresh read while inside the TTL.
+        expect(plan.keep.map((k) => k.reason)).toEqual(["retained_error"]);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+        expect(confirmSleeps()).toBe(0);
+        expect(freshReads("api-1")).toBe(0);
+        expect(getTmuxSessionPresenceMock).not.toHaveBeenCalledWith("api-1", expect.anything());
+      });
+
+      it.each([
+        {
+          label: "live",
+          fresh: async () => ({ present: true, unresponsive: false }),
+        },
+        {
+          label: "unresponsive",
+          fresh: async () => ({
+            present: false,
+            unresponsive: true,
+            diagnostic: "list-windows timed out",
+          }),
+        },
+        {
+          label: "throw",
+          fresh: async (): Promise<never> => {
+            throw new Error("tmux probe exploded");
+          },
+        },
+      ])(
+        "keeps a sidecar when the plain read looks dead but the fresh confirm read is $label",
+        async ({ fresh }) => {
+          const { sessions, service } = await setup();
+          sessions.set("api-1", exitedSolo("api-1"));
+          paneAliveUntilKilled(["api-1"]);
+          agentRuntimeLive([]);
+          isProcessRunningInTmuxMock.mockResolvedValue(true);
+          getTmuxSessionPresenceMock.mockImplementation(async (name: string, options) =>
+            name === "api-1" && options?.fresh ? fresh() : { present: false, unresponsive: false },
+          );
+
+          const plan = await service.collectAndExecuteSidecarReapPass(
+            [...sessions.values()],
+            new Set([`api-1--${SIDECAR}`]),
+          );
+
+          expect(plan.reap).toEqual([]);
+          expect(plan.keep.map((k) => k.reason)).toEqual(["retained_error"]);
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          expect(reapedEvents()).toEqual([]);
+          expect(confirmSleeps()).toBe(1);
+        },
+      );
+
+      it("keeps a desk sidecar when an errored member has a sibling whose runtime reads unknown", async () => {
+        const { sessions, service } = await setup();
+        sessions.set(
+          "api-1",
+          sessionRecord({
+            id: "api-1",
+            status: "errored",
+            error: EXITED,
+            worktreePath: TEST_DATA_DIR,
+            sidecarNames: [SIDECAR],
+            updatedAt: OLD,
+          }),
+        );
+        sessions.set(
+          "api-2",
+          sessionRecord({
+            id: "api-2",
+            deskId: "api-1",
+            status: "running",
+            worktreePath: TEST_DATA_DIR,
+            sidecarNames: [SIDECAR],
+            updatedAt: OLD,
+          }),
+        );
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+        getTmuxSessionPresenceMock.mockImplementation(async (name: string) =>
+          name === "api-2"
+            ? { present: false, unresponsive: true, diagnostic: "list-windows timed out" }
+            : { present: false, unresponsive: false },
+        );
+
+        const plan = await service.collectAndExecuteSidecarReapPass(
+          [...sessions.values()],
+          new Set([`api-1--${SIDECAR}`]),
+        );
+
+        expect(plan.reap).toEqual([]);
+        expect(plan.keep.map((k) => k.reason)).toEqual(["retained_error"]);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(reapedEvents()).toEqual([]);
+        expect(confirmSleeps()).toBe(0);
+      });
+
+      it("held lock: a member that becomes spawning during the hold is skipped", async () => {
+        const { sessions, service } = await setup();
+        sessions.set("api-1", exitedSolo("api-1"));
+        paneAliveUntilKilled(["api-1"]);
+        agentRuntimeLive([]);
+        let release!: () => void;
+        const held = service.withWorkspaceLifecycleLocks(
+          "api-1",
+          () => new Promise<void>((resolve) => (release = resolve)),
+        );
+        const run = service.executeSidecarReapPlan(
+          planOf("api-1"),
+          contextOf("api-1", { identity: identityOf(2_000_000_000), workspaceRuntime: "dead" }),
+        );
+        await flush();
+        const current = sessions.get("api-1");
+        if (!current) throw new Error("fixture record missing");
+        sessions.set("api-1", { ...current, status: "spawning" });
+        release();
+        await Promise.all([held, run]);
+
         expect(killTmuxSessionMock).not.toHaveBeenCalled();
         expect(reapedEvents()).toEqual([]);
       });

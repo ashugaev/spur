@@ -4631,29 +4631,6 @@ export class SessionService {
           }
         }
 
-        // Runtime liveness is resolved only for a candidate the retained-error
-        // veto (policy step 6) would otherwise decide: every cheaper veto and
-        // every workspace without retained error never probes.
-        const needsRuntime =
-          !sidecar.mcp &&
-          (paneAlive || identity !== undefined) &&
-          connections === "none" &&
-          workspaceRetainedError;
-        let samples: MemberRuntimeSample[] = [];
-        if (needsRuntime) {
-          samples = await Promise.all(
-            workspaceMembers.map((member) => {
-              let pending = memberSamples.get(member.id);
-              if (!pending) {
-                pending = this.sampleMemberRuntime(member, false);
-                memberSamples.set(member.id, pending);
-              }
-              return pending;
-            }),
-          );
-        }
-        const workspaceRuntime = needsRuntime ? foldMemberRuntime(samples) : undefined;
-
         const candidate: SidecarReapCandidate = {
           ownerId,
           sidecarName,
@@ -4673,6 +4650,31 @@ export class SessionService {
           connections,
           ageSeconds: identity ? (psSnapshot.byPid.get(identity.pid)?.etimes ?? null) : null,
         };
+        // Runtime liveness is resolved only when a "dead" verdict would
+        // actually reap this candidate: every earlier veto, every workspace
+        // without retained error, and a candidate still inside its idle TTL
+        // never probe (policy stays pure; the hypothesis is evaluated here).
+        const needsRuntime =
+          workspaceRetainedError &&
+          planSidecarReap({
+            nowMs: Date.now(),
+            config: this.config.sidecarGc,
+            candidates: [{ ...candidate, workspaceRuntime: "dead" }],
+          }).reap.length > 0;
+        let samples: MemberRuntimeSample[] = [];
+        if (needsRuntime) {
+          samples = await Promise.all(
+            workspaceMembers.map((member) => {
+              let pending = memberSamples.get(member.id);
+              if (!pending) {
+                pending = this.sampleMemberRuntime(member, false);
+                memberSamples.set(member.id, pending);
+              }
+              return pending;
+            }),
+          );
+        }
+        const workspaceRuntime = needsRuntime ? foldMemberRuntime(samples) : undefined;
         if (workspaceRuntime === "pending") {
           pendingRuntime.push({ candidate, members: workspaceMembers, samples });
         } else if (workspaceRuntime) {
