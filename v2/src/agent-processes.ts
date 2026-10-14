@@ -232,23 +232,39 @@ export async function captureAgentProcessesForLaunch(input: {
   sessionId: string;
   agentLaunchId: string;
   processMatchers: readonly string[];
-}): Promise<PaneAgentCapture> {
+  recovery?: true;
+}): Promise<PaneAgentCapture & { complete?: boolean }> {
   if (!(await canReadProcessEnv())) {
     return { status: "unavailable" };
   }
   const matchers = compileMatchers(input.processMatchers);
   if (matchers.length === 0) {
-    return { status: "ok", processes: [] };
+    return { status: "ok", processes: [], ...(input.recovery ? { complete: false } : {}) };
   }
   const snapshot = await snapshotProcesses();
   if (snapshot.status === "unavailable") {
     return { status: "unavailable" };
   }
   const matching: ProcessSnapshotEntry[] = [];
+  const uncertainPids: number[] = [];
+  const recoveryIdentities = new Map<number, string | null>();
   for (const proc of snapshot.processes) {
     if (!matchers.some((matcher) => matcher.test(proc.args))) continue;
+    const identity = input.recovery ? await readProcessIdentity(proc.pid) : null;
     const sessionEnv = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
     const launchEnv = await readProcessEnvValue(proc.pid, "SPUR_AGENT_LAUNCH_ID");
+    const identityAfter = input.recovery ? await readProcessIdentity(proc.pid) : null;
+    if (input.recovery)
+      recoveryIdentities.set(proc.pid, identity === identityAfter ? identity : null);
+    if (
+      input.recovery &&
+      (identity === null ||
+        identity !== identityAfter ||
+        sessionEnv.status !== "ok" ||
+        (sessionEnv.value === input.sessionId && launchEnv.status !== "ok"))
+    ) {
+      uncertainPids.push(proc.pid);
+    }
     if (
       sessionEnv.status === "ok" &&
       sessionEnv.value === input.sessionId &&
@@ -262,12 +278,23 @@ export async function captureAgentProcessesForLaunch(input: {
     matching.map((proc) => proc.pid),
     snapshot.processes,
   );
-  return {
-    status: "ok",
-    processes: await Promise.all(
-      pids.map(async (pid) => ({ pid, identity: await readProcessIdentity(pid) })),
-    ),
-  };
+  const processes = await Promise.all(
+    pids.map(async (pid) => ({
+      pid,
+      identity: input.recovery
+        ? (recoveryIdentities.get(pid) ?? null)
+        : await readProcessIdentity(pid),
+    })),
+  );
+  if (!input.recovery) return { status: "ok", processes };
+  let complete = processes.every((proc) => proc.identity !== null);
+  if (uncertainPids.length > 0) {
+    const fresh = await snapshotProcesses();
+    complete &&=
+      fresh.status === "ok" &&
+      uncertainPids.every((pid) => !fresh.processes.some((proc) => proc.pid === pid));
+  }
+  return { status: "ok", processes, complete };
 }
 
 export type AgentTerminationOutcome = { status: "clear" } | { status: "survivors"; pids: number[] };
