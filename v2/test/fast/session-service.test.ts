@@ -26964,6 +26964,79 @@ describe("SessionService", () => {
       });
     });
 
+    it("keeps a stopped probe error that carries serverErrorAt", async () => {
+      const sessions = createSessionStore(
+        runningSession({
+          status: "stopped",
+          error: PROBE_ERROR,
+          errorSource: "runtime_probe",
+          serverErrorAt: "2026-03-18T10:01:00.000Z",
+        }),
+      );
+      const before = clone(sessions.get("api-1"));
+      answerDead();
+      const service = await createDisposedSessionService();
+
+      await service.get("api-1");
+
+      expect(sessions.get("api-1")).toEqual(before);
+    });
+
+    it("keeps a stopped probe error while restore owns its recovery", async () => {
+      const sessions = createSessionStore(
+        runningSession({ status: "stopped", error: PROBE_ERROR, errorSource: "runtime_probe" }),
+      );
+      const before = clone(sessions.get("api-1"));
+      answerDead();
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      lifecycle.begin("restore", ["api-1"]);
+
+      await getSettled(service, "api-1");
+
+      expect(sessions.get("api-1")).toEqual(before);
+    });
+
+    it.each(["paused", "budget_limited"] as const)(
+      "drops a probe error from a %s record once the probe answers",
+      async (status) => {
+        const sessions = createSessionStore(
+          runningSession({ status, error: PROBE_ERROR, errorSource: "runtime_probe" }),
+        );
+        answerDead();
+        const service = await createDisposedSessionService();
+
+        await getSettled(service, "api-1");
+
+        expect(sessions.get("api-1")?.status).toBe(status);
+        expect(sessions.get("api-1")?.error).toBeUndefined();
+        expect(sessions.get("api-1")?.errorSource).toBeUndefined();
+      },
+    );
+
+    it.each([
+      "runtime state unknown",
+      "runtime probe (tmux or ps) timed out; runtime state unknown",
+      "tmux list-windows failed: x",
+      "tmux list-panes failed: x",
+      "ps failed: x",
+      "tmux process failed: x",
+    ])("heals a legacy unsourced stopped record carrying: %s", async (diagnostic) => {
+      const sessions = createSessionStore(
+        runningSession({
+          status: "stopped",
+          error: `Session status detection failed: ${diagnostic}`,
+        }),
+      );
+      answerDead();
+      const service = await createDisposedSessionService();
+
+      await getSettled(service, "api-1");
+
+      expect(sessions.get("api-1")?.status).toBe("stopped");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+    });
+
     it("keeps stamping a stopped owner on a Resource readout failure", async () => {
       const sessions = createSessionStore(
         runningSession({ status: "stopped", sidecarNames: ["dev"] }),
@@ -49639,6 +49712,28 @@ describe("SessionService", () => {
           service.dispose();
         });
 
+        it("keeps the parked rollback for a memory-shed record", async () => {
+          capAt(1);
+          trackRuntimes(["occupier"]);
+          mockClaudeJsonlState("waiting");
+          const sessions = createSessionStore(
+            runningSession({ id: "occupier" }),
+            stoppedRecord("api-1", {
+              stopReason: "memory_shed",
+              intervalWake: intervalWake("api-1"),
+            }),
+          );
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          expect(sessions.get("api-1")?.intervalWake?.nextDueAt).toBe(DUE);
+          const deferred = events("session.wake.interval_deferred", "api-1");
+          expect(deferred).toHaveLength(1);
+          expect(deferred[0]?.details).not.toHaveProperty("reason");
+          service.dispose();
+        });
+
         it("gates every stopped and paused wake, healed or not", async () => {
           capAt(1);
           trackRuntimes(["occupier"]);
@@ -49808,6 +49903,69 @@ describe("SessionService", () => {
           const deferred = events("session.wake.daily_deferred");
           expect(deferred).toHaveLength(2);
           expect(deferred[1]?.details?.["occurrence"]).toBe(iso(at(9, 40)));
+          service.dispose();
+        });
+
+        it.each([
+          {
+            name: "re-armed",
+            rearm: (record: SessionRecord): SessionRecord => ({
+              ...record,
+              dailyWake: {
+                dailyAt: ["09:50"],
+                nextDueAt: iso(at(9, 50)),
+                message: "rearmed",
+                stopCondition: "Stop condition",
+              },
+            }),
+          },
+          {
+            name: "cancelled",
+            rearm: (record: SessionRecord): SessionRecord => {
+              const { dailyWake: _cancelled, ...rest } = record;
+              return rest;
+            },
+          },
+        ])("keeps a $name daily wake when the denial write loses the claim", async ({ rearm }) => {
+          const { sessions } = seedDaily();
+          vi.setSystemTime(at(9, 0, 1));
+          const service = await createDisposedSessionService();
+          const internals = service as unknown as {
+            assertAdmissible(...args: unknown[]): unknown;
+          };
+          const original = internals.assertAdmissible.bind(service);
+          vi.spyOn(internals, "assertAdmissible").mockImplementation((...args: unknown[]) => {
+            const current = sessions.get("api-1");
+            if (current) sessions.set("api-1", rearm(current));
+            return original(...args);
+          });
+
+          await tick(service);
+
+          expect(events("session.admission.denied")).toHaveLength(1);
+          expect(events("session.wake.daily_deferred")).toHaveLength(0);
+          expect(sessions.get("api-1")?.dailyWake).toEqual(rearm(stoppedRecord("api-1")).dailyWake);
+          service.dispose();
+        });
+
+        it("drops the retry marker when a malformed dailyAt skips the occurrence", async () => {
+          const { sessions } = seedDaily({
+            dailyAt: ["99:99"],
+            nextDueAt: iso(at(9, 15, 1)),
+            admissionDeferredOccurrence: iso(at(9, 0)),
+          });
+          vi.setSystemTime(at(9, 15, 2));
+          const service = await createDisposedSessionService();
+
+          await tick(service);
+
+          expect(events("session.wake.daily_failed")).toHaveLength(1);
+          expect(sessions.get("api-1")?.dailyWake).toMatchObject({
+            nextDueAt: iso(at(9, 15, 2) + 24 * 60 * 60 * 1000),
+          });
+          expect(sessions.get("api-1")?.dailyWake).not.toHaveProperty(
+            "admissionDeferredOccurrence",
+          );
           service.dispose();
         });
 
