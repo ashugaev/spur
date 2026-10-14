@@ -441,6 +441,35 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+const CODEX_PROVIDER_OVERRIDE = /^\s*(model_provider|profile)\s*=/;
+
+export function codexArgsSelectProvider(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (
+      arg === "--oss" ||
+      arg.startsWith("--local-provider") ||
+      arg === "--profile" ||
+      arg.startsWith("--profile=") ||
+      arg.startsWith("-p")
+    ) {
+      return true;
+    }
+    let value: string | undefined;
+    if (arg === "-c" || arg === "--config") {
+      value = args[i + 1];
+    } else if (arg.startsWith("--config=")) {
+      value = arg.slice("--config=".length);
+    } else if (arg.startsWith("-c")) {
+      value = arg.startsWith("-c=") ? arg.slice(3) : arg.slice(2);
+    }
+    if (value !== undefined && CODEX_PROVIDER_OVERRIDE.test(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function appendCodexReasoningEffort(
   command: string,
   reasoningEffort: ProviderReasoningEffort | undefined,
@@ -624,13 +653,42 @@ function withCodexMcpServer(configText: string, binding: SidecarMcpBinding): str
   return `${trimmed}${separator}${table}`;
 }
 
+export async function readCodexUserConfig(): Promise<string> {
+  return readFile(join(homedir(), ".codex", "config.toml"), "utf8").catch(() => "");
+}
+
+function codexTopLevelLines(configText: string): string[] {
+  const lines: string[] = [];
+  for (const line of configText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      break;
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
+export function codexUsesCustomProvider(configText: string): boolean {
+  const providerPattern = /^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')/;
+  return codexTopLevelLines(configText).some((line) => {
+    if (/^\s*profile\s*=/.test(line)) {
+      return true;
+    }
+    const match = providerPattern.exec(line);
+    return match !== null && (match[1] ?? match[2]) !== "openai";
+  });
+}
+
 export async function buildEphemeralCodexConfig(
   trustedProjects: readonly string[],
   mcpBindings: readonly SidecarMcpBinding[] = [],
   mcpExclude: readonly string[] = [],
 ): Promise<string> {
-  const userConfigPath = join(homedir(), ".codex", "config.toml");
-  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
+  const baseConfig = await readCodexUserConfig();
   const withTrust = appendCodexTrustedProjects(baseConfig, trustedProjects);
   // Exclude first so a project can suppress the host server and still receive
   // Spur's managed sidecar binding under the same name.
@@ -643,17 +701,8 @@ export async function buildEphemeralCodexConfig(
 
 function withSuppressUnstableFeaturesWarning(configText: string): string {
   const keyPattern = /^\s*suppress_unstable_features_warning\s*=/;
-  for (const line of configText.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    if (trimmed.startsWith("[")) {
-      break;
-    }
-    if (keyPattern.test(line)) {
-      return configText;
-    }
+  if (codexTopLevelLines(configText).some((line) => keyPattern.test(line))) {
+    return configText;
   }
 
   const line = "suppress_unstable_features_warning = true";

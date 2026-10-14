@@ -133,6 +133,7 @@ const resolveCursorLaunchModelMock = vi.fn(
   async (model: string | undefined): Promise<string | undefined> => model,
 );
 const validateOpenCodeModelMock = vi.fn(async (model: string): Promise<string> => model);
+const validateCodexModelMock = vi.fn(async (model: string): Promise<string> => model);
 const resolveAgentReasoningEffortMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
@@ -757,6 +758,7 @@ vi.mock("../../src/agents/codex.js", () => ({
 vi.mock("../../src/agents/models.js", () => ({
   resolveAgentReasoningEffort: resolveAgentReasoningEffortMock,
   resolveCursorLaunchModel: resolveCursorLaunchModelMock,
+  validateCodexModel: validateCodexModelMock,
   validateOpenCodeModel: validateOpenCodeModelMock,
 }));
 
@@ -2344,6 +2346,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation(async (model: string | undefined) => model);
     validateOpenCodeModelMock.mockReset().mockImplementation(async (model: string) => model);
+    validateCodexModelMock.mockReset().mockImplementation(async (model: string) => model);
     resolveAgentReasoningEffortMock
       .mockReset()
       .mockImplementation(
@@ -4981,6 +4984,162 @@ describe("SessionService", () => {
     expect(createWorktreeMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
     service.dispose();
+  });
+
+  describe("codex model validation", () => {
+    const rejection = new Error('Codex model "auto" is not available; available: gpt-5');
+
+    function expectNothingPrepared(): void {
+      expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+      expect(writeSessionMock).not.toHaveBeenCalled();
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    }
+
+    it.each([{}, { reasoningEffort: "high" as const }])(
+      "rejects an unavailable explicit codex model before preparing a background spawn %j",
+      async (extra) => {
+        validateCodexModelMock.mockRejectedValueOnce(rejection);
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        await expect(
+          service.spawnInBackground({
+            project: "api",
+            agent: "codex",
+            model: "auto",
+            prompt: "hello",
+            ...extra,
+          }),
+        ).rejects.toThrow('Codex model "auto" is not available');
+        expect(validateCodexModelMock).toHaveBeenCalledWith("auto", "/tmp/codex", []);
+        expect(resolveAgentReasoningEffortMock).not.toHaveBeenCalled();
+        expectNothingPrepared();
+        service.dispose();
+      },
+    );
+
+    it("rejects a foreground codex spawn and releases the admission reservation", async () => {
+      validateCodexModelMock.mockRejectedValueOnce(rejection);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawn({ project: "api", agent: "codex", model: "auto", prompt: "hello" }),
+      ).rejects.toThrow('Codex model "auto" is not available');
+
+      expect(validateCodexModelMock).toHaveBeenCalledWith("auto", "/tmp/codex", []);
+      expectNothingPrepared();
+      expect(sessionServiceInternals(service).admissionReservations.size).toBe(0);
+      service.dispose();
+    });
+
+    it("passes project codexArgs to the validator", async () => {
+      const base = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...base,
+        projects: { ...base.projects, api: { ...base.projects.api, codexArgs: ["--oss"] } },
+      });
+      validateCodexModelMock.mockRejectedValueOnce(rejection);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.spawnInBackground({ project: "api", agent: "codex", model: "auto", prompt: "x" }),
+      ).rejects.toThrow("not available");
+      expect(validateCodexModelMock).toHaveBeenCalledWith("auto", "/tmp/codex", ["--oss"]);
+      service.dispose();
+    });
+
+    it("does not validate a codex spawn without an explicit model", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawnInBackground({ project: "api", agent: "codex", prompt: "hello" });
+
+      expect(validateCodexModelMock).not.toHaveBeenCalled();
+      service.dispose();
+    });
+
+    it("does not validate the stored model when restoring a codex session", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore({
+        id: "api-1",
+        project: "api",
+        agent: "codex",
+        model: "gone",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "codex",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      mockExitedThenRestoredProcess();
+
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+
+      expect(validateCodexModelMock).not.toHaveBeenCalled();
+    });
+
+    it("validates the carried model on respawn", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "codex",
+          model: "gone",
+          status: "completed",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      validateCodexModelMock.mockRejectedValueOnce(rejection);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("api-1")).rejects.toThrow("not available");
+
+      expect(validateCodexModelMock).toHaveBeenCalledWith("gone", "/tmp/codex", []);
+      expectNothingPrepared();
+      service.dispose();
+    });
+
+    it("preserves the handoff source when the codex model is unavailable", async () => {
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          agent: "claude",
+          status: "running",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      workspaceExistsMock.mockReturnValue(true);
+      validateCodexModelMock.mockRejectedValueOnce(rejection);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.handoff("api-1", { agent: "codex", model: "auto" })).rejects.toThrow(
+        "not available",
+      );
+
+      expect(sessions.get("api-1")?.status).toBe("running");
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+      expectNothingPrepared();
+      service.dispose();
+    });
   });
 
   it("prepares a no-model OpenCode background spawn without model discovery", async () => {
@@ -11496,7 +11655,8 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1");
+        if (!record) throw new Error("expected api-1 to exist");
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
