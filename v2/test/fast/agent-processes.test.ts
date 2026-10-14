@@ -175,6 +175,7 @@ describe("capturePaneAgentProcesses", () => {
   it("returns an empty capture when panePid is null", async () => {
     expect(
       await capturePaneAgentProcesses({
+        sessionId: "api-1",
         panePid: null,
         paneDead: false,
         processMatchers: ["claude"],
@@ -192,7 +193,12 @@ describe("capturePaneAgentProcesses", () => {
     // stay distinguishable from "the pane had no agent processes".
     processSnapshotUnavailable = true;
     expect(
-      await capturePaneAgentProcesses({ panePid: 1, paneDead: false, processMatchers: ["claude"] }),
+      await capturePaneAgentProcesses({
+        sessionId: "api-1",
+        panePid: 1,
+        paneDead: false,
+        processMatchers: ["claude"],
+      }),
     ).toEqual({
       status: "unavailable",
     });
@@ -209,6 +215,7 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
     const capture = await capturePaneAgentProcesses({
+      sessionId: "api-1",
       panePid: 1,
       paneDead: false,
       processMatchers: ["claude"],
@@ -224,6 +231,7 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 2, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "/usr/bin/claude" },
     ];
     const capture = await capturePaneAgentProcesses({
+      sessionId: "api-1",
       panePid: 1,
       paneDead: false,
       processMatchers: ["claude"],
@@ -244,6 +252,7 @@ describe("capturePaneAgentProcesses", () => {
       { pid: 3, ppid: 0, rssKb: 300, elapsedSeconds: 1, args: "/usr/bin/claude --other" },
     ];
     const capture = await capturePaneAgentProcesses({
+      sessionId: "api-1",
       panePid: 1,
       paneDead: false,
       processMatchers: ["claude"],
@@ -262,8 +271,11 @@ describe("capturePaneAgentProcesses", () => {
       elapsedSeconds: 1,
       args,
       sid,
+      env: { SPUR_SESSION: "api-1", SPUR_AGENT_LAUNCH_ID: "launch-1" },
     });
     const pane = (paneDead = false): Parameters<typeof capturePaneAgentProcesses>[0] => ({
+      sessionId: "api-1",
+      agentLaunchId: "launch-1",
       panePid: 100,
       paneDead,
       processMatchers: ["codex"],
@@ -317,7 +329,12 @@ describe("capturePaneAgentProcesses", () => {
 
     it("T4 reads nothing for a null pane pid", async () => {
       expect(
-        await capturePaneAgentProcesses({ panePid: null, paneDead: false, processMatchers: ["x"] }),
+        await capturePaneAgentProcesses({
+          sessionId: "api-1",
+          panePid: null,
+          paneDead: false,
+          processMatchers: ["x"],
+        }),
       ).toEqual({ status: "ok", processes: [] });
       expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
       expect(readProcessStatMock).not.toHaveBeenCalled();
@@ -386,6 +403,137 @@ describe("capturePaneAgentProcesses", () => {
       fakeTable = [row(100, 1, "-zsh", 100), row(901, 1, "other-session-member", 100)];
       expect(await capturedPids(pane(true))).toEqual([]);
       expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
+    });
+
+    const captureAndTerminate = async (input = pane()): Promise<number[]> => {
+      const capture = await capturePaneAgentProcesses(input);
+      if (capture.status !== "ok") throw new Error("expected readable capture");
+      await terminateAgentProcesses(capture.processes, {
+        hupGraceMs: 0,
+        termGraceMs: 0,
+        killGraceMs: 0,
+      });
+      return capture.processes.map((ref) => ref.pid);
+    };
+
+    const ownedOrphan = (): FakeProc => {
+      identities = new Map([
+        [100, "recycled-leader"],
+        [901, "helper-generation"],
+      ]);
+      const helper = row(901, 1, "native-mcp-helper", 100);
+      fakeTable = [row(100, 1, "-zsh", 100), helper];
+      return helper;
+    };
+
+    it("retains an owned helper when its leader exits during enumeration", async () => {
+      ownedOrphan();
+      listSessionMemberPidsMock.mockImplementationOnce(async () => {
+        identities.delete(100);
+        fakeTable = fakeTable.filter((proc) => proc.pid !== 100);
+        return [901];
+      });
+      expect(await captureAndTerminate()).toEqual([901]);
+      expect(signalPidMock).toHaveBeenCalledExactlyOnceWith(901, "SIGHUP");
+    });
+
+    it("does not add duplicate SID refs or reread matched descendants", async () => {
+      ownedOrphan();
+      fakeTable.push({ ...row(101, 100, "codex", 100), env: {} });
+      identities.set(101, "baseline");
+      listSessionMemberPidsMock.mockResolvedValueOnce([100, 101, 901, 901, process.pid]);
+      expect(await captureAndTerminate()).toEqual([101, 901]);
+      expect(readProcessEnvValueMock.mock.calls).toEqual([
+        [901, "SPUR_SESSION"],
+        [901, "SPUR_AGENT_LAUNCH_ID"],
+      ]);
+      expect(signalPidMock.mock.calls).toEqual([
+        [901, "SIGHUP"],
+        [101, "SIGHUP"],
+      ]);
+    });
+
+    it.each([
+      ["foreign session", "SPUR_SESSION", "peer"],
+      ["overridden session", "SPUR_SESSION", "configured-override"],
+      ["new launch", "SPUR_AGENT_LAUNCH_ID", "launch-2"],
+      ["absent session", "SPUR_SESSION", undefined],
+      ["absent launch", "SPUR_AGENT_LAUNCH_ID", undefined],
+    ])(
+      "rejects a recycled leader's member with %s through termination",
+      async (_label, key, value) => {
+        const helper = ownedOrphan();
+        if (value === undefined) delete helper.env?.[key];
+        else if (helper.env) helper.env[key] = value;
+        // Baseline matched descendants remain eligible without markers.
+        fakeTable.push({ ...row(101, 100, "codex", 100), env: {} });
+        identities.set(101, "baseline");
+        expect(await captureAndTerminate()).toEqual([101]);
+        expect(signalPidMock).toHaveBeenCalledExactlyOnceWith(101, "SIGHUP");
+        expect(signalPidMock).not.toHaveBeenCalledWith(901, expect.anything());
+      },
+    );
+
+    it.each(["SPUR_SESSION", "SPUR_AGENT_LAUNCH_ID"])(
+      "rejects an unreadable %s through termination",
+      async (unreadableKey) => {
+        ownedOrphan();
+        const readMarker = async (_pid: number, key: string) =>
+          key === unreadableKey
+            ? ({ status: "unreadable" } as const)
+            : ({ status: "ok", value: key === "SPUR_SESSION" ? "api-1" : "launch-1" } as const);
+        readProcessEnvValueMock
+          .mockImplementationOnce(readMarker)
+          .mockImplementationOnce(readMarker);
+        expect(await captureAndTerminate()).toEqual([]);
+        expect(signalPidMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([undefined, ""])(
+      "keeps baseline capture without expected launch token %s",
+      async (agentLaunchId) => {
+        ownedOrphan();
+        fakeTable.push(row(101, 100, "codex", 100));
+        expect(await captureAndTerminate({ ...pane(), agentLaunchId })).toEqual([101]);
+        expect(readProcessEnvValueMock).not.toHaveBeenCalled();
+        expect(signalPidMock).not.toHaveBeenCalledWith(901, expect.anything());
+      },
+    );
+
+    it.each([
+      ["SPUR_SESSION", "identity"],
+      ["SPUR_AGENT_LAUNCH_ID", "identity"],
+      ["SPUR_SESSION", "sid"],
+      ["SPUR_AGENT_LAUNCH_ID", "sid"],
+      ["SPUR_SESSION", "unreadable stat"],
+      ["SPUR_AGENT_LAUNCH_ID", "unreadable stat"],
+    ])("rejects %s read changing %s before signaling", async (mutationKey, mutation) => {
+      const helper = ownedOrphan();
+      const readMarker = async (_pid: number, key: string) => {
+        if (key === mutationKey) {
+          if (mutation === "identity") identities.set(901, "replacement");
+          else if (mutation === "sid") helper.sid = 200;
+          else identities.delete(901);
+        }
+        return { status: "ok", value: helper.env?.[key] } as const;
+      };
+      readProcessEnvValueMock.mockImplementationOnce(readMarker).mockImplementationOnce(readMarker);
+      expect(await captureAndTerminate()).toEqual([]);
+      expect(signalPidMock).not.toHaveBeenCalled();
+    });
+
+    it("drops an attested helper whose generation changes after capture", async () => {
+      ownedOrphan();
+      const capture = await capturePaneAgentProcesses(pane());
+      expect(capture).toEqual({
+        status: "ok",
+        processes: [{ pid: 901, identity: "helper-generation" }],
+      });
+      if (capture.status !== "ok") throw new Error("expected readable capture");
+      identities.set(901, "replacement");
+      expect(await terminateAgentProcesses(capture.processes)).toEqual({ status: "clear" });
+      expect(signalPidMock).not.toHaveBeenCalled();
     });
   });
 });

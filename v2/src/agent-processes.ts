@@ -184,13 +184,13 @@ export type PaneAgentCapture =
 const CAPTURE_RETRY_DELAY_MS = 100;
 
 // P1, pane-rooted and exact: descendants of `panePid` whose args match this
-// session's own agent matchers, plus every other member of the pane's kernel
-// session (sid === panePid). The session pass catches processes re-parented to
-// init after the agent wrapper died, and MCP children that never match an
-// agent matcher. It runs only while the pane is alive and `panePid` is still a
-// live session leader, so a dead pane whose pid number was recycled never
-// widens the kill set. `panePid: null` (pane already gone, or the caller never
-// resolved one) reads as an empty capture — never throws.
+// session's own agent matchers, plus members of the pane's kernel session
+// (sid === panePid) carrying this exact launch's markers. The session pass
+// catches processes re-parented to init after the agent wrapper died, and MCP
+// children that never match an agent matcher. It starts only while the pane
+// is alive and `panePid` is a live session leader. Each added member must keep
+// its identity and SID across both marker reads. `panePid: null` (pane already
+// gone, or the caller never resolved one) reads as an empty capture — never throws.
 //
 // "unavailable" when the process table could not be read. That must NOT
 // collapse into an empty capture: an empty capture makes
@@ -200,6 +200,8 @@ const CAPTURE_RETRY_DELAY_MS = 100;
 // snapshotProcessLiveness. One retry first, since a `ps` failure here is
 // usually transient fork pressure.
 export async function capturePaneAgentProcesses(input: {
+  sessionId: string;
+  agentLaunchId?: string | undefined;
   panePid: number | null;
   paneDead: boolean;
   processMatchers: readonly string[];
@@ -229,21 +231,44 @@ export async function capturePaneAgentProcesses(input: {
       refs.push({ pid: proc.pid, identity: await readProcessIdentity(proc.pid) });
     }
   }
-  const { panePid } = input;
-  if (!input.paneDead && panePid > 1 && (await readProcessStat(panePid))?.sid === panePid) {
+  const { panePid, sessionId, agentLaunchId } = input;
+  if (
+    agentLaunchId &&
+    !input.paneDead &&
+    panePid > 1 &&
+    (await readProcessStat(panePid))?.sid === panePid
+  ) {
     const captured = new Set(refs.map((ref) => ref.pid));
     for (const pid of await listSessionMemberPids(panePid)) {
       if (pid === panePid || pid === process.pid || captured.has(pid)) {
         continue;
       }
-      const stat = await readProcessStat(pid);
-      if (stat !== null && stat.sid === panePid) {
-        refs.push({ pid, identity: stat.identity });
+      const before = await readProcessStat(pid);
+      if (before === null || before.sid !== panePid) continue;
+      if (!(await matchesLaunchMarkers(pid, sessionId, agentLaunchId))) continue;
+      const after = await readProcessStat(pid);
+      if (after !== null && after.sid === panePid && after.identity === before.identity) {
+        refs.push({ pid, identity: after.identity });
         captured.add(pid);
       }
     }
   }
   return { status: "ok", processes: refs };
+}
+
+async function matchesLaunchMarkers(
+  pid: number,
+  sessionId: string,
+  agentLaunchId: string,
+): Promise<boolean> {
+  const sessionEnv = await readProcessEnvValue(pid, "SPUR_SESSION");
+  const launchEnv = await readProcessEnvValue(pid, "SPUR_AGENT_LAUNCH_ID");
+  return (
+    sessionEnv.status === "ok" &&
+    sessionEnv.value === sessionId &&
+    launchEnv.status === "ok" &&
+    launchEnv.value === agentLaunchId
+  );
 }
 
 // Exact launch-rooted capture for a pane that has already disappeared. Both
@@ -269,14 +294,7 @@ export async function captureAgentProcessesForLaunch(input: {
   const matching: ProcessSnapshotEntry[] = [];
   for (const proc of snapshot.processes) {
     if (!matchers.some((matcher) => matcher.test(proc.args))) continue;
-    const sessionEnv = await readProcessEnvValue(proc.pid, "SPUR_SESSION");
-    const launchEnv = await readProcessEnvValue(proc.pid, "SPUR_AGENT_LAUNCH_ID");
-    if (
-      sessionEnv.status === "ok" &&
-      sessionEnv.value === input.sessionId &&
-      launchEnv.status === "ok" &&
-      launchEnv.value === input.agentLaunchId
-    ) {
+    if (await matchesLaunchMarkers(proc.pid, input.sessionId, input.agentLaunchId)) {
       matching.push(proc);
     }
   }
@@ -298,8 +316,8 @@ const DEFAULT_GRACE_MS = 2_000;
 const POLL_MS = 100;
 
 // Poll -> SIGHUP -> poll -> SIGTERM -> poll -> SIGKILL -> poll. `processes`
-// is expected root-first (capturePaneAgentProcesses' order); signalling
-// walks it leaves-first so a parent is never signalled before its children.
+// are signalled in reverse capture order. Added SID members can have a
+// different ancestry order from the matched descendant pass.
 // Portable: signals, a `ps`-based liveness probe, and an identity re-check
 // that no-ops where /proc is absent.
 //
