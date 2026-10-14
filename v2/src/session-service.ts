@@ -4704,8 +4704,7 @@ export class SessionService {
         context.set(tmuxName, {
           identity,
           workspaceRuntime: candidate.workspaceRuntime,
-          confirmedMembers:
-            candidate.workspaceRuntime === "dead" ? confirmedMemberMap(runtimeMembers) : undefined,
+          confirmedMembers: undefined,
         });
       }
     }
