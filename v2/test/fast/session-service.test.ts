@@ -46395,6 +46395,67 @@ describe("SessionService", () => {
         }
       });
 
+      it("does not pick up a created session whose pending operation is a complete", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            if (build === 1) rewrite(records, id, { branch: "rewritten" });
+            if (build !== 2) return;
+            const base = records.get("api-1");
+            if (!base) throw new Error("Missing fixture");
+            records.set("api-3", {
+              ...base,
+              id: "api-3",
+              workspaceId: "api-3",
+              branch: "api-3",
+              tmuxSession: "api-3",
+              status: "running",
+            });
+            internals.lifecycle.begin("complete", ["api-3"], "pending-complete");
+          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id).sort()).toEqual(["api-1", "api-2"]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("refuses naming the picked-up session when a pickup and a stale row remain at the last pass", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            rewrite(records, id, { branch: `changed ${build}` });
+            if (build !== 4) return;
+            const base = records.get("api-1");
+            if (!base) throw new Error("Missing fixture");
+            records.set("api-3", {
+              ...base,
+              id: "api-3",
+              workspaceId: "api-3",
+              branch: "api-3",
+              tmuxSession: "api-3",
+              status: "completed",
+            });
+            internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+          });
+          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
+            ...snapshotChanged,
+            payload: {
+              code: "session_lifecycle_snapshot_changed",
+              lifecycle: { operation: { operationId: "pending-reopen", phase: "pending" } },
+            },
+          });
+        } finally {
+          service.dispose();
+        }
+      });
+
       it("rebuilds desk rows when workspace slots or membership move mid-pass", async () => {
         const { writeWorkspaceState } = await loadWorkspaceStoreModule();
         for (const scenario of ["slots", "membership"] as const) {
@@ -46549,6 +46610,50 @@ describe("SessionService", () => {
         }
       });
 
+      it("shows the stored normalized token usage on a revision-0 row", async () => {
+        const records = plainSeed();
+        rewrite(records, "api-1", {
+          agent: "codex",
+          agentSessionId: "root-thread",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        });
+        writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+          const usage = session.tokenUsage;
+          records.set(
+            session.id,
+            normalizeSessionPrBinding(
+              clone(
+                usage
+                  ? { ...session, tokenUsage: { ...usage, totalTokens: usage.totalTokens + 1000 } }
+                  : session,
+              ),
+            ),
+          );
+        });
+        readCodexRolloutStateMock.mockImplementation(async () => {
+          const sample = {
+            provider: "codex",
+            generationId: "codex:root-thread",
+            inputTokens: 90,
+            outputTokens: 10,
+            totalTokens: 100,
+          };
+          return { rollout: null, rateLimit: null, tokenUsage: sample, tokenUsages: [sample] };
+        });
+        const { service } = await setup();
+        try {
+          const rows = await service.list({ includeCompleted: true });
+          const stored = records.get("api-1")?.tokenUsage?.totalTokens;
+          expect(stored).toBe(1100);
+          expect(rows.find((row) => row.id === "api-1")?.tokenUsageView).toMatchObject({
+            status: "available",
+            totalTokens: stored,
+          });
+        } finally {
+          service.dispose();
+        }
+      });
+
       it("captures the lifecycle receipt before the store read", async () => {
         const records = plainSeed();
         const { service, internals } = await setup();
@@ -46697,6 +46802,68 @@ describe("SessionService", () => {
               ).rejects.toMatchObject({ name: "AbortError" });
               expect(watch.builds("api-1")).toBe(2);
               expect(listSessionsMock).toHaveBeenCalledTimes(when === "during rebuild" ? 2 : 3);
+            } finally {
+              service.dispose();
+            }
+          },
+        );
+      });
+
+      describe("dashboard abort", () => {
+        it("rejects a pre-aborted dashboard list before any pass read", async () => {
+          plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            const controller = new AbortController();
+            controller.abort();
+            listSessionsMock.mockClear();
+            await expect(
+              service.list({
+                view: "dashboard",
+                includeCompleted: true,
+                signal: controller.signal,
+              }),
+            ).rejects.toMatchObject({ name: "AbortError" });
+            expect(listSessionsMock).toHaveBeenCalledTimes(2);
+          } finally {
+            service.dispose();
+          }
+        });
+
+        it.each(["during rebuild", "during the next read"] as const)(
+          "stops starting dashboard passes after an abort %s",
+          async (when) => {
+            const records = plainSeed();
+            const { service, internals } = await setup();
+            try {
+              settleOp(internals, "api-1");
+              const controller = new AbortController();
+              const watch = watchDashboardBuilds(internals, (id, build) => {
+                if (id !== "api-1") return;
+                rewrite(records, id, { branch: `changed ${build}` });
+                if (build !== 2) return;
+                if (when === "during rebuild") {
+                  controller.abort();
+                  return;
+                }
+                const read = listSessionsMock.getMockImplementation();
+                if (!read) throw new Error("Missing store mock");
+                listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                  controller.abort();
+                  return read(...args);
+                });
+              });
+              listSessionsMock.mockClear();
+              await expect(
+                service.list({
+                  view: "dashboard",
+                  includeCompleted: true,
+                  signal: controller.signal,
+                }),
+              ).rejects.toMatchObject({ name: "AbortError" });
+              expect(watch.builds("api-1")).toBe(2);
+              expect(listSessionsMock).toHaveBeenCalledTimes(when === "during rebuild" ? 3 : 4);
             } finally {
               service.dispose();
             }
