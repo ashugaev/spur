@@ -26509,6 +26509,63 @@ describe("SessionService", () => {
     },
   );
 
+  it("classifies a healed legacy inferred runtime exit rate_limited when the pane shows the usage-limit menu", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1", error: "Agent runtime exited unexpectedly." });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "   ❯ 1. Stop and wait for limit to reset",
+        "     2. Wait here, then continue automatically shortly",
+        "     3. Ask your admin for more usage",
+        "",
+        "   Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const service = await createDisposedSessionService();
+    const result = await service.get(record.id);
+
+    expect(result.state).toBe("rate_limited");
+    expect(result.error).toBeUndefined();
+    expect(sessions.get(record.id)?.error).toBeUndefined();
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+  });
+
+  it("classifies a reordered usage-limit menu rate_limited without Enter despite a stale selected stop line in scrollback", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1" });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "❯ 1. Stop and wait for limit to reset",
+        ...Array.from({ length: 25 }, (_, i) => `line ${i}: later output`),
+        "What do you want to do?",
+        "",
+        "❯ 1. Add funds to continue with usage credits",
+        "  2. Upgrade your plan",
+        "  3. Stop and wait for limit to reset",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const service = await createDisposedSessionService();
+    const result = await service.get(record.id);
+
+    expect(result.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
   it.each(["ps failed: transient", "runtime state unknown"])(
     "heals a persisted legacy runtime diagnostic: %s",
     async (diagnostic) => {

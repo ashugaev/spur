@@ -285,19 +285,21 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
   return null;
 }
 
-// Claude Code's stop-and-wait / ask-your-admin usage-limit menu, whose
+// Claude Code's usage-limit menu ("What do you want to do?"), whose
 // cursor-selected option line would be rejected by scanTmuxRateLimit's
-// gutter/anchor checks. This detector requires three distinct whole physical
-// lines — both menu options plus the confirm/cancel footer — rather than a
-// whole-buffer substring scan, so prose or fixtures that merely mention the
-// menu's wording don't bare-reproduce a matching line and can't self-trigger.
-// Claude Code renders the admin option as "2." on the two-option menu and as
-// "3." on the newer three-option one, whose extra middle option is "2. Wait
-// here, then continue automatically at <date>". Matching either index keeps
-// one detector for both layouts; the three required distinct physical lines
-// stay option one, the admin option, and the footer.
-const CLAUDE_USAGE_MENU_OPTION_ONE = /^[^0-9a-z]{0,3}1\.\s*stop and wait for limit to reset$/i;
-const CLAUDE_USAGE_MENU_OPTION_ADMIN = /^[^0-9a-z]{0,3}[23]\.\s*ask your admin for more usage$/i;
+// gutter/anchor checks. Claude Code 2.1.291 renders a variable option set: the
+// stop label ("Stop and wait for limit to reset"), an optional "Wait here, then
+// continue automatically ..." or "Don't continue automatically" slot, and the
+// extra-usage options ("Ask your admin for more usage", "Add funds to continue
+// with usage credits", "Switch to usage credits") plus "Upgrade your plan", in
+// an order that depends on the account. The menu is therefore recognised by
+// shape: header, numbered/blank lines only, footer, with at least two distinct
+// known labels. Whole physical lines are required so prose or fixtures that
+// merely mention the wording can't self-trigger.
+const CLAUDE_USAGE_MENU_HEADER = /^what do you want to do\?$/i;
+const CLAUDE_USAGE_MENU_NUMBERED = /^[^0-9a-z]{0,3}\d\.\s+\S/i;
+const CLAUDE_USAGE_MENU_KNOWN_LABEL =
+  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically\b.*|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
@@ -310,35 +312,53 @@ const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/
 // does not prove the menu is still live.
 const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
 
-export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+// Numbered option lines of the live menu block in the pane tail, or null when
+// the tail holds no header + numbered/blank lines + footer block.
+function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
   const allLines = paneText.split("\n").map((line) => line.trim());
   let end = allLines.length;
   while (end > 0 && allLines[end - 1] === "") end--;
   const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
-  const hasOptionOne = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE.test(line));
-  const hasAdminOption = lines.some((line) => CLAUDE_USAGE_MENU_OPTION_ADMIN.test(line));
-  const hasFooter = lines.some((line) => CLAUDE_USAGE_MENU_FOOTER.test(line));
-  if (hasOptionOne && hasAdminOption && hasFooter) {
-    return { limited: true, reason: "claude usage limit menu" };
+  let footerIndex = lines.length - 1;
+  while (footerIndex >= 0 && !CLAUDE_USAGE_MENU_FOOTER.test(lines[footerIndex] ?? ""))
+    footerIndex--;
+  if (footerIndex < 0) return null;
+  let headerIndex = footerIndex - 1;
+  while (headerIndex >= 0 && !CLAUDE_USAGE_MENU_HEADER.test(lines[headerIndex] ?? ""))
+    headerIndex--;
+  if (headerIndex < 0) return null;
+  const options: string[] = [];
+  for (const line of lines.slice(headerIndex + 1, footerIndex)) {
+    if (line === "") continue;
+    if (!CLAUDE_USAGE_MENU_NUMBERED.test(line)) return null;
+    options.push(line);
   }
-  return null;
+  return options;
+}
+
+export function detectClaudeUsageLimitMenu(paneText: string): RateLimitDetection | null {
+  const options = extractClaudeUsageMenuBlock(paneText);
+  if (!options) return null;
+  const labels = new Set<string>();
+  for (const line of options) {
+    const label = CLAUDE_USAGE_MENU_KNOWN_LABEL.exec(line)?.[1];
+    if (label) labels.add(label.toLowerCase());
+  }
+  return labels.size >= 2 ? { limited: true, reason: "claude usage limit menu" } : null;
 }
 
 // Claude Code renders the selection cursor as "❯" (U+276F) in its current TUI
 // and as ">" in older builds; both mean option 1 is highlighted.
 const CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED = /^[>❯]\s*1\.\s*stop and wait for limit to reset$/i;
 
-// True only when the pane's cursor is on "Stop and wait for limit to reset"
-// (option 1), not on any other option ("Wait here, then continue
-// automatically at <date>", "Ask your admin for more usage"). Confirming via
-// Enter must be gated on this specifically — detectClaudeUsageLimitMenu only
-// proves the menu is showing, not which option is currently highlighted, so
-// blindly sending Enter could otherwise select "Ask your admin" instead.
+// True only when the live menu block's cursor is on "Stop and wait for limit to
+// reset" (option 1), not on any other option. Confirming via Enter must be gated
+// on this specifically — detectClaudeUsageLimitMenu only proves the menu is
+// showing, not which option is highlighted, and on reordered menus option 1 is
+// "Add funds", where Enter would buy credits. Scrollback never counts.
 export function claudeUsageMenuOptionOneSelected(paneText: string): boolean {
-  return paneText
-    .split("\n")
-    .map((line) => line.trim())
-    .some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line));
+  const options = extractClaudeUsageMenuBlock(paneText);
+  return options?.some((line) => CLAUDE_USAGE_MENU_OPTION_ONE_SELECTED.test(line)) ?? false;
 }
 
 // Claude Code's compaction spinner ("✳ Compacting conversation… (18s)"). This

@@ -450,7 +450,7 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(`${THREE_OPTION_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
   });
 
-  it("returns null when the wait-here option is present but the admin option is not", () => {
+  it("flags the menu with stop-and-wait and wait-here but no extra-usage option", () => {
     const paneText = [
       "What do you want to do?",
       "",
@@ -459,7 +459,150 @@ describe("detectClaudeUsageLimitMenu", () => {
       "",
       "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+  });
+
+  const LIMITED = { limited: true, reason: "claude usage limit menu" };
+  const FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+  const A0B7_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "   \u276f 1. Stop and wait for limit to reset",
+    "     2. Wait here, then continue automatically shortly",
+    "     3. Ask your admin for more usage",
+    "",
+    FOOTER,
+  ].join("\n");
+  const PRO_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Stop and wait for limit to reset",
+    "  2. Switch to usage credits",
+    "  3. Upgrade your plan",
+    "",
+    FOOTER,
+  ].join("\n");
+  const REORDERED_MENU_TEXT = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Add funds to continue with usage credits",
+    "  2. Upgrade your plan",
+    "  3. Stop and wait for limit to reset",
+    "",
+    FOOTER,
+  ].join("\n");
+
+  it("flags the verbatim captured menu with the wait-here and admin options", () => {
+    expect(detectClaudeUsageLimitMenu(A0B7_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags the Pro variant with switch-to-usage-credits and upgrade options", () => {
+    expect(detectClaudeUsageLimitMenu(PRO_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags the reordered variant whose option 1 is add-funds", () => {
+    expect(detectClaudeUsageLimitMenu(REORDERED_MENU_TEXT)).toEqual(LIMITED);
+  });
+
+  it("flags stop-and-wait with only an upgrade-your-plan option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it.each(["\u2019", "'"])(
+    "flags stop-and-wait with the don%st-continue auto-resume slot",
+    (apostrophe) => {
+      const paneText = [
+        "What do you want to do?",
+        "",
+        "\u276f 1. Stop and wait for limit to reset",
+        `  2. Don${apostrophe}t continue automatically`,
+        "",
+        FOOTER,
+      ].join("\n");
+      expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+    },
+  );
+
+  it("flags a menu holding an unknown-label numbered option beside two known labels", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Some future promo option",
+      "  3. Upgrade your plan",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toEqual(LIMITED);
+  });
+
+  it("returns null for a prose numbered list followed by an unrelated dialog footer", () => {
+    const paneText = [
+      "\u25cf Options:",
+      "  1. Upgrade your plan",
+      "  2. Switch to usage credits",
+      "",
+      "",
+      "Some unrelated dialog",
+      "",
+      FOOTER,
+    ].join("\n");
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for two known numbered options directly above a footer with no menu header", () => {
+    const paneText = [
+      "Some assistant text",
+      "",
+      "  1. Upgrade your plan",
+      "  2. Switch to usage credits",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when a non-numbered prose line sits inside the menu block", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Stop and wait for limit to reset",
+      "  2. Upgrade your plan",
+      "  some prose in the block",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null for one known label plus an unknown option", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "\u276f 1. Upgrade your plan",
+      "  2. Something unrelated",
+      "",
+      FOOTER,
+    ].join("\n");
+    expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
+  });
+
+  it("returns null when the Pro variant has scrolled out of the live tail", () => {
+    const subsequentOutput = Array.from({ length: 25 }, (_, i) => `line ${i}: follow-up`).join(
+      "\n",
+    );
+    expect(detectClaudeUsageLimitMenu(`${PRO_MENU_TEXT}\n${subsequentOutput}`)).toBeNull();
   });
 
   it("returns null for unrelated normal Claude Code output", () => {
@@ -554,6 +697,45 @@ describe("claudeUsageMenuOptionOneSelected", () => {
       "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  const REORDERED_LIVE_MENU = [
+    "What do you want to do?",
+    "",
+    "\u276f 1. Add funds to continue with usage credits",
+    "  2. Upgrade your plan",
+    "  3. Stop and wait for limit to reset",
+    "",
+    "Enter to confirm \u00b7 Esc to cancel",
+  ];
+  const STALE_SELECTED_STOP = "\u276f 1. Stop and wait for limit to reset";
+  const SCROLLBACK = Array.from({ length: 25 }, (_, i) => `line ${i}: later output`);
+
+  it("returns false on the reordered menu where option 1 is add-funds", () => {
+    expect(claudeUsageMenuOptionOneSelected(REORDERED_LIVE_MENU.join("\n"))).toBe(false);
+  });
+
+  it("returns false when a stale selected stop line sits in scrollback above a reordered menu", () => {
+    const paneText = [STALE_SELECTED_STOP, ...SCROLLBACK, ...REORDERED_LIVE_MENU].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns false when the selected stop line is in scrollback and no live menu block exists", () => {
+    const paneText = [STALE_SELECTED_STOP, ...SCROLLBACK].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it("returns true on the verbatim captured menu with the cursor on option 1", () => {
+    const paneText = [
+      "What do you want to do?",
+      "",
+      "   \u276f 1. Stop and wait for limit to reset",
+      "     2. Wait here, then continue automatically shortly",
+      "     3. Ask your admin for more usage",
+      "",
+      "   Enter to confirm \u00b7 Esc to cancel",
+    ].join("\n");
+    expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(true);
   });
 
   it("returns false for plain unrelated text", () => {
