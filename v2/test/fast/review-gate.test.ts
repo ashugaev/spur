@@ -607,6 +607,25 @@ test("a listed run with another head is never fetched and cannot change the verd
   expect(result.status).toBe("APPROVED");
   expect(paths.some((path) => path.includes("/actions/runs/7"))).toBe(false);
 });
+test.each([5, 6])(
+  "a newer same-head run titled for PR 6 with association %i blocks and never approves",
+  async (associated) => {
+    const snapshot = fixture();
+    const otherM = "e".repeat(40);
+    snapshot.runs.push({
+      ...snapshot.runs[0],
+      id: 8,
+      display_title: `Spur CI v1 REF=refs/pull/6/merge M=${otherM}`,
+      pull_requests: [{ number: associated, head: { sha: H }, base: { sha: B } }],
+      run_started_at: "2026-10-05T13:00:00Z",
+    });
+    const { result } = await readCiFixture(snapshot, {
+      historicalCommit: { sha: otherM, parents: [{ sha: B }, { sha: H }] },
+    });
+    expect(result.status).toBe("BLOCKED");
+    expect(result.reason).toBe("ci-not-success");
+  },
+);
 test("malformed head sha rejects before any actions request", async () => {
   const snapshot = fixture();
   snapshot.pr.head = { ...(snapshot.pr.head as object), sha: "not-a-sha" };
@@ -977,6 +996,10 @@ test.each([
   "unlisted-churn",
   "corrupt-unlisted",
   "moved",
+  "base-moved",
+  "reason-changed",
+  "runs-502",
+  "runs-502-two-prs",
   "read-denied",
   "abort-read",
   "abort-before-write",
@@ -1016,6 +1039,7 @@ test.each([
           status: "BLOCKED",
         }),
       };
+    if (mode === "reason-changed") snapshot.unresolved = 1;
     if (mode === "negative-outsider" || mode === "positive-outsider")
       snapshot.reviews.push({
         id: 50,
@@ -1105,7 +1129,9 @@ test.each([
       }
       if (path.endsWith("/pulls"))
         return Response.json(
-          mode === "all-native-negative" ? [{ number: 6 }, { number: 5 }] : [{ number: 5 }],
+          mode === "all-native-negative" || mode === "runs-502-two-prs"
+            ? [{ number: 6 }, { number: 5 }]
+            : [{ number: 5 }],
         );
       if (/\/pulls\/(5|6)$/.test(path)) {
         prNumbers.push(Number(path.split("/").at(-1)));
@@ -1113,6 +1139,16 @@ test.each([
         if (reads === 3) {
           changeEquivalent(snapshot, mode === "lane-blocked-churn" ? "updated-at" : mode);
           if (mode === "unlisted-churn") snapshot.jobs.pop();
+          if (mode === "reason-changed") {
+            snapshot.unresolved = 0;
+            snapshot.comments[0] = {
+              ...snapshot.comments[0],
+              body: stateBody({
+                ...readStateBody(String(snapshot.comments[0]?.body)),
+                status: "BLOCKED",
+              }),
+            };
+          }
           if (mode === "corrupt-unlisted") {
             const extra = snapshot.jobs.at(-1);
             if (!extra) throw new Error("missing fixture job");
@@ -1134,7 +1170,9 @@ test.each([
         return Response.json(
           mode === "moved" && reads > 2
             ? { ...snapshot.pr, head: { ...(snapshot.pr.head as object), sha: "d".repeat(40) } }
-            : snapshot.pr,
+            : mode === "base-moved" && reads > 2
+              ? { ...snapshot.pr, base: { ...(snapshot.pr.base as object), sha: "c".repeat(40) } }
+              : snapshot.pr,
         );
       }
       if (path.endsWith("/reviews")) {
@@ -1148,6 +1186,8 @@ test.each([
       if (path.endsWith("/comments")) return Response.json(snapshot.comments);
       if (path.endsWith("/files")) return Response.json(snapshot.files);
       if (path.endsWith("/runs")) {
+        if ((mode === "runs-502" || mode === "runs-502-two-prs") && reads === 3)
+          return new Response("bad gateway", { status: 502 });
         const headSha = new URL(String(url)).searchParams.get("head_sha");
         return Response.json({
           workflow_runs: snapshot.runs.filter((run) => run.head_sha === headSha),
@@ -1197,8 +1237,15 @@ test.each([
           );
         }
       } else {
-        if (mode === "read-denied" || mode === "native-page-fault")
-          await expect(produceGates(api, policy)).rejects.toThrow("gate-reconciliation-incomplete");
+        if (
+          mode === "read-denied" ||
+          mode === "native-page-fault" ||
+          mode === "runs-502" ||
+          mode === "runs-502-two-prs"
+        )
+          await expect(
+            produceGates(api, policy, mode === "runs-502-two-prs" ? { number: 5 } : {}),
+          ).rejects.toThrow("gate-reconciliation-incomplete");
         else await produceGates(api, policy, mode === "all-native-negative" ? { number: 5 } : {});
         expect(writes[0]?.status).toBe("in_progress");
         expect(writes.at(-1)?.conclusion).toBe(
@@ -1232,6 +1279,22 @@ test.each([
         ) {
           expect(jobReads).toBe(mode === "merge-head" ? 0 : 2);
           expect(reviewRequests).toBe(3);
+        }
+        if (["moved", "base-moved", "reason-changed"].includes(mode))
+          expect(writes.at(-1)?.output?.summary).toBe("Evidence changed during evaluation");
+        if (mode === "runs-502" || mode === "runs-502-two-prs") {
+          expect(writes.some((write) => write.conclusion === "success")).toBe(false);
+          expect(writes.map((write) => write.output?.summary).filter(Boolean)[0]).toBe(
+            "Candidate evidence unavailable",
+          );
+        }
+        if (mode === "runs-502")
+          expect(writes.at(-1)?.output?.summary).toBe("Candidate evidence unavailable");
+        if (mode === "runs-502-two-prs") {
+          expect(prNumbers.slice(0, 3)).toEqual([5, 5, 5]);
+          expect(writes).toHaveLength(4);
+          expect(writes.at(-1)?.status).toBe("completed");
+          expect(writes.at(-1)?.output?.summary).not.toBe("Candidate evidence unavailable");
         }
         if (mode === "native-malformed")
           expect(writes.at(-1)?.output?.summary).toBe("malformed-evidence");
