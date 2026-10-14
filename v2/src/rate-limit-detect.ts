@@ -299,7 +299,7 @@ export function detectCursorRateLimit(text: string | null): RateLimitDetection |
 const CLAUDE_USAGE_MENU_HEADER = /^what do you want to do\?$/i;
 const CLAUDE_USAGE_MENU_NUMBERED = /^[^0-9a-z]{0,3}\d\.\s+\S/i;
 const CLAUDE_USAGE_MENU_KNOWN_LABEL =
-  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically\b.*|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
+  /^[^0-9a-z]{0,3}\d\.\s*(stop and wait for limit to reset|wait here, then continue automatically(?: shortly| at .+| when the limit resets)?|don[’']t continue automatically|ask your admin for more usage|add funds to continue with usage(?: credits)?|switch to usage(?: credits)?|upgrade your plan)$/i;
 const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/i;
 
 // captureTmuxPane's default 200-line capture is sized for scanTmuxRateLimit's
@@ -312,22 +312,24 @@ const CLAUDE_USAGE_MENU_FOOTER = /^enter to confirm\s*[·\-|/]\s*esc to cancel$/
 // does not prove the menu is still live.
 const CLAUDE_USAGE_MENU_TAIL_LINES = 20;
 
-// Numbered option lines (wrapped continuations joined by a space) of the live menu block in the pane tail, or null when
-// the tail holds no header + numbered/blank lines + footer block.
+// Numbered option lines (wrapped continuations joined by a space) of the live
+// menu block, or null when the pane tail does not end in a header + numbered/blank
+// lines + footer block. The footer must be the last tail line: content after it
+// means a newer dialog or output, so an older complete menu is stale. An option
+// that took a wrapped continuation must then match a known label exactly.
 function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
   const allLines = paneText.split("\n").map((line) => line.trim());
   let end = allLines.length;
   while (end > 0 && allLines[end - 1] === "") end--;
   const lines = allLines.slice(Math.max(0, end - CLAUDE_USAGE_MENU_TAIL_LINES), end);
-  let footerIndex = lines.length - 1;
-  while (footerIndex >= 0 && !CLAUDE_USAGE_MENU_FOOTER.test(lines[footerIndex] ?? ""))
-    footerIndex--;
-  if (footerIndex < 0) return null;
+  const footerIndex = lines.length - 1;
+  if (footerIndex < 0 || !CLAUDE_USAGE_MENU_FOOTER.test(lines[footerIndex] ?? "")) return null;
   let headerIndex = footerIndex - 1;
   while (headerIndex >= 0 && !CLAUDE_USAGE_MENU_HEADER.test(lines[headerIndex] ?? ""))
     headerIndex--;
   if (headerIndex < 0) return null;
   const options: string[] = [];
+  const wrapped = new Set<number>();
   for (const line of lines.slice(headerIndex + 1, footerIndex)) {
     if (line === "") continue;
     if (CLAUDE_USAGE_MENU_NUMBERED.test(line)) {
@@ -338,6 +340,10 @@ function extractClaudeUsageMenuBlock(paneText: string): string[] | null {
     const last = options.pop();
     if (last === undefined) return null;
     options.push(`${last} ${line}`);
+    wrapped.add(options.length - 1);
+  }
+  for (const index of wrapped) {
+    if (!CLAUDE_USAGE_MENU_KNOWN_LABEL.test(options[index] ?? "")) return null;
   }
   return options;
 }

@@ -300,6 +300,39 @@ describe("detectCursorRateLimit", () => {
   });
 });
 
+const R_HEADER = "What do you want to do?";
+const R_FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+const R_OLD_MENU = [
+  R_HEADER,
+  "",
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Ask your admin for more usage",
+  "",
+  R_FOOTER,
+];
+const R10_PARTIAL_NEWER_MENU = [
+  ...R_OLD_MENU,
+  R_HEADER,
+  "\u276f 1. Add funds to continue with usage credits",
+  "  2. Upgrade your plan",
+];
+const R10_POST_FOOTER_OUTPUT = [...R_OLD_MENU, "normal task output"];
+const R12_UNKNOWN_PROSE = [
+  R_HEADER,
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Upgrade your plan",
+  "  3. Something unrelated",
+  "This is prose, not a wrapped menu label",
+  R_FOOTER,
+];
+const R12_WAIT_HERE_PROSE = [
+  R_HEADER,
+  "\u276f 1. Stop and wait for limit to reset",
+  "  2. Wait here, then continue automatically shortly",
+  "This is prose, not a wrapped menu label",
+  R_FOOTER,
+];
+
 describe("detectClaudeUsageLimitMenu", () => {
   const MENU_TEXT = [
     "What do you want to do?",
@@ -628,6 +661,15 @@ describe("detectClaudeUsageLimitMenu", () => {
     expect(detectClaudeUsageLimitMenu(paneText)).toBeNull();
   });
 
+  it.each([
+    ["a newer partial menu after an old complete menu", R10_PARTIAL_NEWER_MENU],
+    ["ordinary output after the footer", R10_POST_FOOTER_OUTPUT],
+    ["prose after an unknown option", R12_UNKNOWN_PROSE],
+    ["prose after a wait-here option", R12_WAIT_HERE_PROSE],
+  ])("returns null for %s", (_name, lines) => {
+    expect(detectClaudeUsageLimitMenu(lines.join("\n"))).toBeNull();
+  });
+
   it("returns null when a non-numbered prose line sits inside the menu block", () => {
     const paneText = [
       "What do you want to do?",
@@ -817,6 +859,15 @@ describe("claudeUsageMenuOptionOneSelected", () => {
       "Enter to confirm \u00b7 Esc to cancel",
     ].join("\n");
     expect(claudeUsageMenuOptionOneSelected(paneText)).toBe(false);
+  });
+
+  it.each([
+    ["a newer partial menu after an old complete menu", R10_PARTIAL_NEWER_MENU],
+    ["ordinary output after the footer", R10_POST_FOOTER_OUTPUT],
+    ["prose after an unknown option", R12_UNKNOWN_PROSE],
+    ["prose after a wait-here option", R12_WAIT_HERE_PROSE],
+  ])("returns false for %s", (_name, lines) => {
+    expect(claudeUsageMenuOptionOneSelected(lines.join("\n"))).toBe(false);
   });
 
   it("returns false for plain unrelated text", () => {

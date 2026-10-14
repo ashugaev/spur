@@ -26566,6 +26566,33 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
+  it("sends no Enter for a stale selected stop menu followed by a newer partial usage-limit menu", async () => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1" });
+    sessions.set(record.id, record);
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "❯ 1. Stop and wait for limit to reset",
+        "  2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+        "What do you want to do?",
+        "❯ 1. Add funds to continue with usage credits",
+        "  2. Upgrade your plan",
+      ].join("\n"),
+    );
+
+    const service = await createDisposedSessionService();
+    await service.get(record.id);
+
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
   it.each(["ps failed: transient", "runtime state unknown"])(
     "heals a persisted legacy runtime diagnostic: %s",
     async (diagnostic) => {
