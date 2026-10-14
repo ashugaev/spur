@@ -154,9 +154,13 @@ const lookupTmuxPanePidMock = vi.fn(() =>
   }),
 );
 const lookupTmuxSessionPanePidsMock = vi.fn(() =>
-  Promise.resolve<{ status: "ok"; panePids: readonly number[] } | { status: "unavailable" }>({
+  Promise.resolve<
+    | { status: "ok"; panePids: readonly number[]; livePanePids: readonly number[] }
+    | { status: "unavailable" }
+  >({
     status: "ok",
     panePids: [],
+    livePanePids: [],
   }),
 );
 const getFleetSessionRssBytesMock = vi
@@ -1363,7 +1367,9 @@ describe("SessionService", () => {
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
     lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
-    lookupTmuxSessionPanePidsMock.mockReset().mockResolvedValue({ status: "ok", panePids: [] });
+    lookupTmuxSessionPanePidsMock
+      .mockReset()
+      .mockResolvedValue({ status: "ok", panePids: [], livePanePids: [] });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
     readCgroupPressureMock.mockReset().mockReturnValue(null);

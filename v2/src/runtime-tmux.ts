@@ -274,6 +274,9 @@ interface FleetPaneEntry {
   // isProcessRunningInTmux uses these to recognize a wrapper-exec'd agent by
   // parentage (ppid is a pane pid) when name matching misses (issue #806).
   allPanePids: number[];
+  // allPanePids minus panes tmux reports dead (remain-on-exit): a dead pane's
+  // pid can be recycled, so only these may root a kernel-session scan.
+  livePanePids: number[];
 }
 
 // `readable: false` means the `list-panes` fork itself failed, so the empty
@@ -331,6 +334,7 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           activePanePid: null,
           allTtys: [],
           allPanePids: [],
+          livePanePids: [],
         };
         if (paneTty) {
           entry.allTtys.push(paneTty);
@@ -340,6 +344,9 @@ function getFleetPaneSnapshot(): Promise<FleetPaneSnapshot> {
           Number.isFinite(parsedPanePid) && parsedPanePid > 0 ? parsedPanePid : null;
         if (panePidValue !== null) {
           entry.allPanePids.push(panePidValue);
+          if (paneDead === "0") {
+            entry.livePanePids.push(panePidValue);
+          }
         }
         // window_active + pane_active together identify the exact pane a
         // no-window/no-pane target (`=name:`) resolves to.
@@ -771,7 +778,7 @@ export async function lookupTmuxPanePid(
 }
 
 export type TmuxSessionPanesLookup =
-  | { status: "ok"; panePids: readonly number[] }
+  | { status: "ok"; panePids: readonly number[]; livePanePids: readonly number[] }
   | { status: "unavailable" };
 
 // Every pane pid of the session (all windows), the same set liveness reads.
@@ -780,12 +787,21 @@ export type TmuxSessionPanesLookup =
 // `panePids: []` means tmux replied and the session has no panes.
 export async function lookupTmuxSessionPanePids(
   sessionName: string,
+  options?: { fresh?: boolean },
 ): Promise<TmuxSessionPanesLookup> {
+  if (options?.fresh) {
+    fleetPaneCache.delete(FLEET_PANE_CACHE_KEY);
+  }
   const { readable, panes } = await getFleetPaneSnapshot();
   if (!readable) {
     return { status: "unavailable" };
   }
-  return { status: "ok", panePids: panes.get(sessionName)?.allPanePids ?? [] };
+  const entry = panes.get(sessionName);
+  return {
+    status: "ok",
+    panePids: entry?.allPanePids ?? [],
+    livePanePids: entry?.livePanePids ?? [],
+  };
 }
 
 interface PsRow {
