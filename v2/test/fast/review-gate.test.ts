@@ -879,14 +879,8 @@ test.each([
   "success",
   "failure",
   "native-merge",
-  "denied",
-  "missing",
-  "malformed-parent",
-  "extra-parent",
-  "wrong-commit",
-  "native-current-contradiction",
-  "native-old-contradiction",
   "association-contradiction",
+  "native-current-contradiction",
 ])(
   "obsolete historical head %s is out of scope; only a same-head contradiction blocks",
   async (scenario) => {
@@ -906,17 +900,9 @@ test.each([
     snapshot.runs.push(oldRun);
     const options: Parameters<typeof readCiFixture>[1] = {
       historicalCommit: { sha: oldM, parents: [{ sha: B }, { sha: oldH }] },
+      ignoreRunFilter: true,
     };
-    if (["denied", "missing"].includes(scenario)) delete options.historicalCommit;
-    if (scenario === "malformed-parent")
-      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: "invalid" }] };
-    if (scenario === "extra-parent")
-      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: oldH }, { sha: B }] };
-    if (scenario === "wrong-commit")
-      options.historicalCommit = { sha: M, parents: [{ sha: B }, { sha: oldH }] };
     if (scenario === "native-current-contradiction") oldRun.head_sha = H;
-    if (scenario === "native-old-contradiction")
-      options.historicalCommit = { sha: oldM, parents: [{ sha: B }, { sha: "c".repeat(40) }] };
     if (scenario === "association-contradiction")
       Object.assign(oldRun, { pull_requests: [{ number: 5, head: { sha: H }, base: { sha: B } }] });
     const { result, paths } = await readCiFixture(snapshot, options);

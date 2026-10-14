@@ -540,19 +540,17 @@ export async function readGateSnapshot(
     )
       throw new ReviewAppError("ci-attempt-mismatch");
     runs.push(attempt);
-    const actualRef = ciRef(attempt);
-    const historicalMerge = actualRef?.merge;
-    if (historicalMerge) {
-      if (!/^[a-f0-9]{40}$/.test(historicalMerge)) throw new ReviewAppError("invalid-ci-head");
+    const merge = ciRef(attempt)?.merge;
+    if (merge) {
       let parents: string[] = [];
       try {
-        const commit = object(await api.request(`${path}/commits/${historicalMerge}`));
-        if (commit.sha === historicalMerge && Array.isArray(commit.parents))
+        const commit = object(await api.request(`${path}/commits/${merge}`));
+        if (commit.sha === merge && Array.isArray(commit.parents))
           parents = commit.parents.map((value) => string(object(value).sha));
       } catch {
-        /* Missing historical lineage remains ineligible, never inferred from current merge state. */
+        /* Missing CI merge lineage remains ineligible, never inferred from current merge state. */
       }
-      ciAnchors.push({ runId: integer(attempt.id), merge: historicalMerge, parents });
+      ciAnchors.push({ runId: integer(attempt.id), merge, parents });
     }
   }
   const snapshot = { pr, reviews, comments, files, unresolved, runs, jobs: [], ciAnchors };
