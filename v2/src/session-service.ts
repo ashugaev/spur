@@ -12467,16 +12467,44 @@ export class SessionService {
         this.scheduleDeliveryRunner(updatedRecord.id);
       }
 
+      const callerFence = options?.configuredCaller
+        ? await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
+            const identity = this.nativeInputIdentity(updatedRecord);
+            const current = readSession(this.config.dataDir, updatedRecord.id);
+            if (
+              !identity ||
+              !current ||
+              !isDeepStrictEqual(this.nativeInputIdentity(current), identity) ||
+              (updatedRecord.agentSessionId !== undefined &&
+                current.agentSessionId !== updatedRecord.agentSessionId)
+            )
+              return null;
+            const journal = await readNativeInputJournal(this.config.dataDir, identity);
+            const initial = journal?.occurrences.filter((input) => input.initial);
+            if (
+              !journal ||
+              !initial ||
+              initial.length !== 1 ||
+              (journal.nativeSessionId !== null &&
+                journal.nativeSessionId !== current.agentSessionId)
+            )
+              return null;
+            return { identity, nativeSessionId: current.agentSessionId, initialId: initial[0]?.id };
+          }).catch(() => null)
+        : null;
       const enriched = await this.enrich(updatedRecord);
       if (options?.configuredCaller) {
         const bootstrap = options.configuredCaller;
         try {
           await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
             const current = readSession(this.config.dataDir, updatedRecord.id);
-            if (!current) return;
+            if (!current || !callerFence) return;
             const identity = this.nativeInputIdentity(current);
             if (
               !identity ||
+              !isDeepStrictEqual(identity, callerFence.identity) ||
+              (callerFence.nativeSessionId !== undefined &&
+                current.agentSessionId !== callerFence.nativeSessionId) ||
               current.prompt !== request.prompt ||
               createHash("sha256").update(current.prompt).digest("hex") !== bootstrap.promptDigest
             )
@@ -12485,7 +12513,10 @@ export class SessionService {
             if (
               !journal ||
               journal.caller ||
-              journal.occurrences.filter((input) => input.initial).length !== 1
+              (journal.nativeSessionId !== null &&
+                journal.nativeSessionId !== current.agentSessionId) ||
+              journal.occurrences.filter((input) => input.initial).length !== 1 ||
+              journal.occurrences.find((input) => input.initial)?.id !== callerFence.initialId
             )
               return;
             journal.caller = bootstrap;

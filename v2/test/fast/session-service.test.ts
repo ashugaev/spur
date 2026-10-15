@@ -30130,8 +30130,15 @@ describe("SessionService", () => {
       },
     );
 
-    it.each(["spawn", "background", "configured-source"])(
-      "native accepted input publishes embedded %s intent before actual launch",
+    it.each([
+      "spawn",
+      "background",
+      "configured-source",
+      "configured-source-launch",
+      "configured-source-native",
+      "configured-source-learned",
+    ])(
+      "native accepted input publishes embedded %s intent before actual launch and fences source provenance",
       async (mode) => {
         const fixture = await nativeInputSetup();
         buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
@@ -30181,7 +30188,45 @@ describe("SessionService", () => {
           prompt: "embedded initial",
           worktree: false,
         };
-        if (mode === "configured-source") {
+        if (mode.startsWith("configured-source-")) {
+          const native = await import("../../src/native-input.js");
+          if (mode.endsWith("native") || mode.endsWith("learned"))
+            vi.spyOn(
+              sessionServiceInternals(fixture.service),
+              "captureAgentSessionId",
+            ).mockImplementation(async (record) => {
+              const { agentSessionId: _native, ...unknown } = record;
+              return mode.endsWith("native")
+                ? { ...record, agentSessionId: "original-native" }
+                : unknown;
+            });
+          vi.spyOn(
+            fixture.service as unknown as { enrich(record: SessionRecord): Promise<unknown> },
+            "enrich",
+          ).mockImplementation(async (record) => {
+            const journal = await fixture.readJournal(record);
+            if (!journal) throw new Error("missing source launch journal");
+            const replacement = {
+              ...record,
+              ...(mode.endsWith("launch") ? { agentLaunchId: "replacement-launch" } : {}),
+              ...(mode.endsWith("native") || mode.endsWith("learned")
+                ? { agentSessionId: "replacement-native" }
+                : {}),
+            };
+            fixture.sessions.set(record.id, replacement);
+            const { updatedAt: _updatedAt, ...identity } = (
+              await loadSessionServiceModule()
+            ).captureReleaseTaskIdentity(replacement);
+            if (!identity.launchDigest) throw new Error("missing replacement launch");
+            await native.writeNativeInputJournal(TEST_DATA_DIR, {
+              ...journal,
+              identity: { ...identity, launchDigest: identity.launchDigest, agent: record.agent },
+              nativeSessionId: replacement.agentSessionId ?? null,
+            });
+            return record;
+          });
+        }
+        if (mode.startsWith("configured-source")) {
           await fixture.service.spawn(request, {
             configuredCaller: {
               config: { file: "/fixture/source.yaml", digest: "a".repeat(64) },
@@ -30209,7 +30254,8 @@ describe("SessionService", () => {
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
         const journal = await fixture.readJournal(current);
-        if (mode === "configured-source") expect(journal?.caller?.blockIndex).toBe(0);
+        if (mode === "configured-source" || mode === "configured-source-learned")
+          expect(journal?.caller?.blockIndex).toBe(0);
         else expect(journal?.caller).toBeUndefined();
       },
     );

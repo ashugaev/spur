@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
+import { execFile, spawn, type ChildProcess, type ExecFileOptions } from "node:child_process";
+import type * as childProcessModule from "node:child_process";
+import type * as fsPromisesModule from "node:fs/promises";
 import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
+import * as reap from "../../src/sidecars/reap.js";
 import { loadProjectConfig, projectConfigSource } from "../../src/config.js";
 import {
   callerSourceMatches,
@@ -15,7 +19,16 @@ import {
 import { createTempDir } from "../helpers/common.js";
 
 const roots: string[] = [];
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcessModule>();
+  return { ...actual, execFile: vi.fn(actual.execFile) };
+});
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromisesModule>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 async function pin(file: string): Promise<CallerPin> {
@@ -106,6 +119,94 @@ test("owned child readback ignores copied process claims and rejects pin/status 
     readConfiguredCaller(f.snapshot, tool, changedApps, "owner/repo", verify),
   ).rejects.toThrow("caller-status-invalid");
 });
+test.each(["ENOENT", "EACCES"])("optional source read %s supplies no caller fact", async (code) => {
+  const f = await fixture();
+  vi.mocked(readFile).mockRejectedValueOnce(
+    Object.assign(new Error("source unavailable"), { code }),
+  );
+  expect(
+    await captureConfiguredCaller(f.config, {
+      projectId: "reviewers",
+      sourceId: "gh",
+      triggerId: "review",
+      blockIndex: 0,
+      repository: "owner/repo",
+      pr: 4,
+      prompt: "code",
+    }),
+  ).toBeNull();
+});
 test("source snapshot rejects same-index lanes and missing runtime closure", () => {
   expect(() => parseCallerSourceSnapshot({ kind: "configured-source", modules: [] })).toThrow();
+});
+
+test("owned readback rejects timeout and unavailable PID identity", async () => {
+  const f = await fixture();
+  const tool = f.snapshot.modules[0];
+  if (!tool) throw new Error("missing tool");
+  const appsFile = join(f.root, "apps.json");
+  await writeFile(appsFile, JSON.stringify({ status: "OK" }));
+  const apps = await pin(appsFile);
+  const verify = async (expected: CallerPin) => expect(await pin(expected.file)).toEqual(expected);
+  const actual = await vi.importActual<typeof childProcessModule>("node:child_process");
+  const invoke = execFile as unknown as (
+    file: string,
+    args: string[],
+    options: ExecFileOptions,
+    callback: (error: Error | null, stdout: string) => void,
+  ) => ChildProcess;
+  vi.mocked(invoke).mockImplementationOnce((file, args, options, callback) =>
+    actual.execFile(file, args, { ...options, timeout: 10, encoding: "utf8" }, callback),
+  );
+  await expect(
+    readConfiguredCaller(f.snapshot, tool, apps, "owner/repo", verify),
+  ).rejects.toThrow();
+  const actualProbe = reap.readProcStarttime;
+  for (const kind of ["gone", "unknown"] as const) {
+    vi.spyOn(reap, "readProcStarttime").mockResolvedValueOnce({ kind });
+    await expect(
+      readConfiguredCaller(f.snapshot, tool, apps, "owner/repo", verify),
+    ).rejects.toThrow("caller-process-unavailable");
+  }
+  vi.spyOn(reap, "readProcStarttime").mockImplementationOnce(async (pid) => {
+    const identity = await actualProbe(pid);
+    const readText = readFile as (path: string, encoding: "utf8") => Promise<string>;
+    vi.mocked(readText).mockResolvedValueOnce("untrusted\0process\0");
+    return identity;
+  });
+  await expect(readConfiguredCaller(f.snapshot, tool, apps, "owner/repo", verify)).rejects.toThrow(
+    "caller-process-mismatch",
+  );
+});
+
+test("concurrent untrusted process cannot substitute owned readback", async () => {
+  const f = await fixture();
+  const tool = f.snapshot.modules[0];
+  if (!tool) throw new Error("missing tool");
+  const appsFile = join(f.root, "apps.json");
+  await writeFile(appsFile, JSON.stringify({ status: "OK" }));
+  const apps = await pin(appsFile);
+  const other = spawn(process.execPath, [
+    "-e",
+    "process.stdout.write('forged-current');setTimeout(()=>{},10000)",
+  ]);
+  const closed = new Promise<void>((resolve) => other.once("close", () => resolve()));
+  try {
+    Object.assign(f.snapshot, { pid: other.pid, identity: "copied", stdout: "forged-current" });
+    const result = await readConfiguredCaller(
+      f.snapshot,
+      tool,
+      apps,
+      "owner/repo",
+      async (pinValue) => {
+        expect(await pin(pinValue.file)).toEqual(pinValue);
+      },
+    );
+    expect(result.version).toBe("fixture-current");
+    expect(result.processes.every((row) => row.pid !== other.pid)).toBe(true);
+    expect(other.exitCode).toBeNull();
+  } finally {
+    other.kill();
+    await closed;
+  }
 });

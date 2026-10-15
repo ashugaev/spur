@@ -85,7 +85,10 @@ export async function captureConfiguredCaller(
     !trigger.spawn.blocks[request.blockIndex]
   )
     return null;
-  const bytes = await readFile(source.file);
+  // Provenance is optional; unavailable bytes cannot authorize this launch or
+  // prevent the configured source from delivering its ordinary task.
+  const bytes = await readFile(source.file).catch(() => null);
+  if (bytes === null) return null;
   if (createHash("sha256").update(bytes).digest("hex") !== source.digest) return null;
   return {
     config: source,

@@ -5153,6 +5153,36 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("source provenance loss preserves ordinary configured spawn without caller authority", async () => {
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const { loadProjectConfig } = await import("../../src/config.js");
+    const directory = mkdtempSync(join(tmpdir(), "spur-source-loss-"));
+    const file = join(directory, "source.yaml");
+    const source = workItemSpawnConfig();
+    writeFileSync(
+      file,
+      JSON.stringify({ projects: { api: { ...source.projects.api, path: directory } } }),
+    );
+    const config = loadProjectConfig(file);
+    rmSync(file);
+    const spawn = vi.fn().mockResolvedValue({ id: "api-9" });
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config,
+      bus,
+      sessionService: { spawn } as never,
+      logger: { warn: vi.fn() },
+    });
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+      expect(spawn.mock.calls[0]).toHaveLength(1);
+    } finally {
+      await controller.stop();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("spawn triggers never consult auto-ping suppression", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const policyDir = mkdtempSync(join(tmpdir(), "spur-work-item-policy-"));
