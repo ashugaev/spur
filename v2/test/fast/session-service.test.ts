@@ -38,6 +38,8 @@ import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as jsonlLogIoModule from "../../src/jsonl-log-io.js";
 import { detectClaudeUsageLimitMenu } from "../../src/rate-limit-detect.js";
 import type * as claudeModule from "../../src/agents/claude.js";
+import type * as CodexModule from "../../src/agents/codex.js";
+import type * as AgentsModule from "../../src/agents/index.js";
 import type * as openCodeModule from "../../src/agents/opencode.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as registryModule from "../../src/registry.js";
@@ -62409,6 +62411,336 @@ describe("SessionService", () => {
 
     const holdAgents = ["claude", "codex", "cursor", "opencode"] as const;
     const afterHold = Date.parse(PENDING_LAUNCH_AT) + 30_000;
+
+    async function historicalAckFixture(probe: string) {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        agent: "codex",
+        agentSessionId: "observer-native",
+        agentLaunchId: "resumed-launch",
+        launchCommand: "codex",
+      });
+      const root = join(TEST_ARTIFACTS_ROOT, `observer-${probe}`, "sessions");
+      const file = join(root, "original.jsonl");
+      mkdirSync(root, { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: record.agentSessionId, cwd: record.worktreePath },
+        }) + "\n",
+      );
+      const baseline = { agent: "codex" as const, offsets: { [file]: statSync(file).size } };
+      appendFileSync(
+        file,
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "typed" }],
+          },
+        }) + "\n",
+      );
+      seedSendHold(sessions, "codex", {
+        ...record,
+        queuedMessageTyped: { message: "typed", typedAt: PENDING_LAUNCH_AT, ackBaseline: baseline },
+      });
+      const previousCodex = { ...(await import("../../src/agents/codex.js")) };
+      const realCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      vi.doMock("../../src/agents/codex.js", () => ({
+        ...realCodex,
+        codexHookHomePath: codexHookHomePathMock,
+        readCodexRolloutState: readCodexRolloutStateMock,
+      }));
+      codexHookHomePathMock.mockReturnValue(dirname(root));
+      const service = await deferredService();
+      const realAgents = await vi.importActual<typeof AgentsModule>("../../src/agents/index.js");
+      const binding = await realAgents.resumeAgentSubmitAckBinding(
+        "codex",
+        {
+          worktreePath: record.worktreePath,
+          codexSessionsDir: root,
+          agentSessionId: "observer-native",
+        },
+        baseline,
+      );
+      expect(await binding?.scan("typed")).toMatchObject({ found: true });
+      const strictBinding = await realAgents.resumeAgentSubmitAckBinding(
+        "codex",
+        {
+          worktreePath: record.worktreePath,
+          codexSessionsDir: root,
+          agentSessionId: "observer-native",
+          codexAckScope: "current-native-baseline",
+        },
+        baseline,
+      );
+      expect(await strictBinding?.scan("typed")).toMatchObject({ found: true });
+      resumeAgentSubmitAckBindingMock.mockImplementation(realAgents.resumeAgentSubmitAckBinding);
+      return {
+        sessions,
+        record,
+        root,
+        file,
+        baseline,
+        realAgents,
+        service,
+        close() {
+          service.dispose();
+          codexHookHomePathMock.mockImplementation((dir: string) => `${dir}/codex-home`);
+          vi.doMock("../../src/agents/codex.js", () => previousCodex);
+        },
+      };
+    }
+
+    it.each(["throw", "diagnostic"] as const)(
+      "confirms historical Codex ACK during a %s probe failure",
+      async (probe) => {
+        const fixture = await historicalAckFixture(probe);
+        const { service, sessions } = fixture;
+        try {
+          const diagnostic = "ps failed: malformed process table output";
+          if (probe === "throw") probeTmuxProcessMatchMock.mockRejectedValue(new Error(diagnostic));
+          else
+            probeTmuxProcessMatchMock.mockResolvedValue({
+              alive: false,
+              matchedByName: false,
+              unresponsive: false,
+              diagnostic,
+            });
+          const view = await service.get("api-1");
+          expect(view.state).toBe("error");
+          expect(sessions.get("api-1")?.error).toContain(diagnostic);
+          expect(sessions.get("api-1")?.errorSource).toBe("runtime_probe");
+          expect(sessions.get("api-1")?.status).toBe("running");
+          expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+          expect(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+          expect(eventsNamed("session.submit.confirmed")).toEqual([
+            expect.objectContaining({ details: { evidence: "ack" } }),
+          ]);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          fixture.close();
+        }
+      },
+    );
+
+    it.each(
+      (
+        [
+          "payload",
+          "baseline",
+          "in-place-baseline",
+          "uuid",
+          "launch",
+          "workspace",
+          "desk",
+          "tmux",
+          "command",
+          "provider",
+          "project",
+          "terminal",
+          "delete",
+          "hold",
+          "typed-at",
+          "pending-lifecycle",
+          "settled-lifecycle",
+          "service-stop",
+          "queue-append",
+          "scanner-failure",
+          "concurrent",
+        ] as const
+      ).flatMap((guard) => (["binding", "scan"] as const).map((stage) => ({ guard, stage }))),
+    )("fences historical ACK observation: $guard during $stage", async ({ guard, stage }) => {
+      const fixture = await historicalAckFixture(guard);
+      const { service, sessions, realAgents } = fixture;
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+        diagnostic: "original ps diagnostic",
+      });
+      const entered = deferred<undefined>();
+      const release = deferred<undefined>();
+      resumeAgentSubmitAckBindingMock
+        .mockResolvedValue(null)
+        .mockImplementationOnce(
+          async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+            const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+            if (!binding) throw new Error("Expected qualified historical binding");
+            if (stage === "binding") {
+              entered.resolve(undefined);
+              await release.promise;
+            }
+            return {
+              ...binding,
+              scan: async (text: string) => {
+                if (stage === "scan") entered.resolve(undefined);
+                await release.promise;
+                if (guard === "scanner-failure") throw new Error("unreadable history");
+                return binding.scan(text);
+              },
+            };
+          },
+        );
+      const observing = service.get("api-1").catch((error: unknown) => error);
+      try {
+        await entered.promise;
+        const current = sessions.get("api-1");
+        if (!current?.queuedMessageTyped) throw new Error("Expected persisted hold");
+        const typed = current.queuedMessageTyped;
+        const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+        if (guard === "payload")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessageTyped: { ...typed, message: "replacement" },
+          });
+        if (guard === "baseline")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessageTyped: { ...typed, ackBaseline: { agent: "codex", offsets: {} } },
+          });
+        if (guard === "in-place-baseline" && typed.ackBaseline?.agent === "codex")
+          typed.ackBaseline.offsets[fixture.file] = 0;
+        if (guard === "uuid") sessions.set("api-1", { ...current, agentSessionId: "replacement" });
+        if (guard === "launch") sessions.set("api-1", { ...current, agentLaunchId: "replacement" });
+        if (guard === "workspace")
+          sessions.set("api-1", { ...current, worktreePath: "/replacement" });
+        if (guard === "desk") sessions.set("api-1", { ...current, deskId: "replacement" });
+        if (guard === "tmux") sessions.set("api-1", { ...current, tmuxSession: "replacement" });
+        if (guard === "command")
+          sessions.set("api-1", { ...current, launchCommand: "replacement" });
+        if (guard === "provider") sessions.set("api-1", { ...current, agent: "claude" });
+        if (guard === "project") sessions.set("api-1", { ...current, project: "replacement" });
+        if (guard === "terminal") sessions.set("api-1", { ...current, status: "completed" });
+        if (guard === "delete") sessions.delete("api-1");
+        if (guard === "hold")
+          sessions.set("api-1", { ...current, submitUnconfirmedAt: "replacement" });
+        if (guard === "typed-at")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessageTyped: { ...typed, typedAt: "replacement" },
+          });
+        if (guard === "pending-lifecycle" || guard === "settled-lifecycle") {
+          const owner = lifecycle.begin("restore", ["api-1"]);
+          if (guard === "settled-lifecycle")
+            lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+        }
+        if (guard === "service-stop") service.dispose();
+        if (guard === "queue-append")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessages: { messages: ["later", "arrived"], awaitingPrompt: true },
+          });
+        const concurrent = guard === "concurrent" ? service.get("api-1") : undefined;
+        const before = sessions.get("api-1");
+        release.resolve(undefined);
+        await observing;
+        await concurrent;
+        const confirmed = guard === "queue-append" || guard === "concurrent";
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(confirmed ? 1 : 0);
+        if (confirmed) {
+          expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(
+            guard === "queue-append" ? ["later", "arrived"] : ["later"],
+          );
+        } else {
+          expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(before?.submitUnconfirmedAt);
+          expect(sessions.get("api-1")?.queuedMessageTyped).toEqual(before?.queuedMessageTyped);
+        }
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        release.resolve(undefined);
+        await observing;
+        fixture.close();
+      }
+    });
+
+    it.each([
+      "no-ack",
+      "missing-uuid",
+      "missing-launch",
+      "missing-baseline",
+      "wrong-baseline",
+      "pending",
+      "restart",
+    ] as const)("keeps historical ACK uncertainty and restart semantics: %s", async (guard) => {
+      const fixture = await historicalAckFixture(guard);
+      const { service, sessions } = fixture;
+      let observer = service;
+      try {
+        const current = sessions.get("api-1");
+        if (!current?.queuedMessageTyped) throw new Error("Expected persisted hold");
+        if (guard === "no-ack")
+          writeFileSync(
+            fixture.file,
+            readFileSync(fixture.file).subarray(0, fixture.baseline.offsets[fixture.file]),
+          );
+        if (guard === "missing-uuid") sessions.set("api-1", { ...current, agentSessionId: "" });
+        if (guard === "missing-launch") sessions.set("api-1", { ...current, agentLaunchId: "" });
+        if (guard === "missing-baseline")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessageTyped: { message: "typed", typedAt: PENDING_LAUNCH_AT },
+          });
+        if (guard === "wrong-baseline")
+          sessions.set("api-1", {
+            ...current,
+            queuedMessageTyped: {
+              ...current.queuedMessageTyped,
+              ackBaseline: { agent: "claude", file: fixture.file, size: 0 },
+            },
+          });
+        if (guard === "pending")
+          (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle.begin(
+            "restore",
+            ["api-1"],
+          );
+        if (guard === "restart") {
+          service.dispose();
+          observer = await deferredService();
+        }
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: false,
+          matchedByName: false,
+          unresponsive: false,
+          diagnostic: "original unknown probe",
+        });
+        await observer.get("api-1").catch(() => undefined);
+        await observer.get("api-1").catch(() => undefined);
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(guard === "restart" ? 1 : 0);
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(
+          guard === "restart" ? undefined : PENDING_LAUNCH_AT,
+        );
+        expect(sessions.get("api-1")?.error).toContain("original unknown probe");
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        observer.dispose();
+        fixture.close();
+      }
+    });
 
     it.each(holdAgents)(
       "%s: a running turn's own records never clear a send's hold",

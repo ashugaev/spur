@@ -12147,19 +12147,62 @@ export class SessionService {
     session: SessionRecord,
     state: SessionState,
     agentActivityAt: Date | null,
+    mode: "normal" | "ack-only" = "normal",
   ): Promise<SessionRecord> {
     const holdAt = session.submitUnconfirmedAt;
-    if (!holdAt || !agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)) {
+    const ackOnly = mode === "ack-only";
+    if (
+      !holdAt ||
+      (!ackOnly && (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
+    ) {
       return session;
     }
     const typed = session.queuedMessageTyped;
     if (!typed?.ackBaseline) {
+      if (ackOnly) return session;
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest || latest.submitUnconfirmedAt !== holdAt) {
         return latest ?? session;
       }
       return this.confirmSubmitHold(latest, "activity");
     }
+    const observed = ackOnly ? { ...session } : session;
+    const originalTyped = {
+      ...typed,
+      ackBaseline: ackOnly ? structuredClone(typed.ackBaseline) : typed.ackBaseline,
+    };
+    const lifecycle = this.lifecycle.snapshot(session.id);
+    const matchesObservation = (latest: SessionRecord | null): boolean => {
+      const currentLifecycle = this.lifecycle.snapshot(session.id);
+      return (
+        latest !== null &&
+        !this.isDeliveryStopped() &&
+        latest.status === "running" &&
+        observed.status === "running" &&
+        sameSessionRuntimeOwner(latest, observed) &&
+        latest.workspaceId === observed.workspaceId &&
+        latest.deskId === observed.deskId &&
+        latest.agentLaunchId === observed.agentLaunchId &&
+        latest.submitUnconfirmedAt === holdAt &&
+        latest.queuedMessageTyped?.typedAt === originalTyped.typedAt &&
+        latest.queuedMessageTyped.message === originalTyped.message &&
+        isDeepStrictEqual(latest.queuedMessageTyped.ackBaseline, originalTyped.ackBaseline) &&
+        currentLifecycle.instanceId === lifecycle.instanceId &&
+        currentLifecycle.revision === lifecycle.revision &&
+        currentLifecycle.operation === lifecycle.operation &&
+        currentLifecycle.operation?.phase !== "pending"
+      );
+    };
+    if (
+      ackOnly &&
+      (session.agent !== "codex" ||
+        !session.agentSessionId?.trim() ||
+        !session.agentLaunchId?.trim() ||
+        originalTyped.typedAt !== holdAt ||
+        originalTyped.ackBaseline.agent !== "codex" ||
+        !matchesObservation(readSession(this.config.dataDir, session.id)))
+    )
+      return session;
     if (this.submitHoldScans.has(session.id)) {
       return session;
     }
@@ -12168,10 +12211,18 @@ export class SessionService {
     try {
       const binding = await resumeAgentSubmitAckBinding(
         session.agent,
-        this.submitAckContext(session),
-        typed.ackBaseline,
+        {
+          ...this.submitAckContext(session),
+          ...(ackOnly ? { codexAckScope: "current-native-baseline" as const } : {}),
+        },
+        originalTyped.ackBaseline,
       );
-      acked = binding ? (await binding.scan(typed.message)).found : false;
+      if (ackOnly && !matchesObservation(readSession(this.config.dataDir, session.id)))
+        return readSession(this.config.dataDir, session.id) ?? session;
+      acked = binding ? (await binding.scan(originalTyped.message)).found : false;
+    } catch (error) {
+      if (!ackOnly) throw error;
+      return readSession(this.config.dataDir, session.id) ?? session;
     } finally {
       this.submitHoldScans.delete(session.id);
     }
@@ -12180,13 +12231,15 @@ export class SessionService {
     if (
       !latest ||
       latest.submitUnconfirmedAt !== holdAt ||
-      latest.queuedMessageTyped?.typedAt !== typed.typedAt
+      latest.queuedMessageTyped?.typedAt !== typed.typedAt ||
+      (ackOnly && !matchesObservation(latest))
     ) {
       return latest ?? session;
     }
     if (acked) {
       return this.confirmSubmitHold(latest, "ack");
     }
+    if (ackOnly || !agentActivityAt) return latest;
     const turnEnded =
       state === "waiting" &&
       Date.now() - agentActivityAt.getTime() >= agentQueuedSendPromptGraceMs(session.agent);
@@ -22974,7 +23027,11 @@ export class SessionService {
       try {
         runtime = await this.readRuntimeSnapshot(session);
       } catch (error) {
-        return this.classificationErrorResult(session, error, "runtime_probe");
+        const result = this.classificationErrorResult(session, error, "runtime_probe");
+        return {
+          ...result,
+          session: await this.settleSubmitHold(result.session, result.state, null, "ack-only"),
+        };
       }
     }
     if (this.isDeliveryStopped())
@@ -23551,7 +23608,12 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
-    effectiveSession = await this.settleSubmitHold(effectiveSession, state, agentActivityAt);
+    effectiveSession = await this.settleSubmitHold(
+      effectiveSession,
+      state,
+      agentActivityAt,
+      runtime.probeUnresponsive ? "ack-only" : "normal",
+    );
 
     return {
       session: effectiveSession,

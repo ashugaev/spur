@@ -1,3 +1,9 @@
+import type * as FsPromises from "node:fs/promises";
+import type * as Fs from "node:fs";
+import type * as Os from "node:os";
+import type * as Readline from "node:readline";
+import type * as CodexModule from "../../src/agents/codex.js";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -1128,6 +1134,149 @@ describe("captureCodexRolloutBaseline", () => {
 });
 
 describe("scanCodexRolloutForMessage", () => {
+  it.each([
+    "exact",
+    "response-item",
+    "whitespace",
+    "wrong-uuid",
+    "wrong-cwd",
+    "subagent",
+    "missing-meta",
+    "unlisted-file",
+    "before-offset",
+    "malformed",
+    "malformed-prefix",
+    "malformed-after-ack",
+    "assistant",
+    "partial-line",
+    "negative-offset",
+    "zero-offset",
+    "nan-offset",
+    "past-eof",
+    "unreadable",
+    "file-alias",
+    "root-alias",
+    "replacement",
+    "truncation",
+    "append-during-scan",
+  ] as const)("qualifies only original strict historical ACK evidence: %s", async (guard) => {
+    const realFs = await vi.importActual<typeof Fs>("node:fs");
+    const realOs = await vi.importActual<typeof Os>("node:os");
+    const realPromises = await vi.importActual<typeof FsPromises>("node:fs/promises");
+    const realReadline = await vi.importActual<typeof Readline>("node:readline");
+    const previousFs = { ...(await import("node:fs")) };
+    const previousPromises = { ...(await import("node:fs/promises")) };
+    const previousReadline = { ...(await import("node:readline")) };
+    const root = await realPromises.mkdtemp(join(realOs.tmpdir(), "spur-codex-ack-"));
+    const file = join(root, "original.jsonl");
+    const message = "  held text\n";
+    const meta = JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: guard === "wrong-uuid" ? "foreign" : "native",
+        cwd: guard === "wrong-cwd" ? "/foreign" : "/worktree",
+        ...(guard === "subagent"
+          ? { source: { subagent: { thread_spawn: { parent_thread_id: "parent" } } } }
+          : {}),
+      },
+    });
+    const user = JSON.stringify(
+      guard === "response-item" || guard === "assistant"
+        ? {
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: guard === "assistant" ? "assistant" : "user",
+              content: [{ type: "input_text", text: message }],
+            },
+          }
+        : { type: "event_msg", payload: { type: "user_message", message } },
+    );
+    const prefix =
+      (guard === "malformed-prefix" ? "{broken}\n" : "") +
+      (guard === "missing-meta" ? "{}" : meta) +
+      "\n";
+    await realPromises.writeFile(file, prefix + (guard === "before-offset" ? user + "\n" : ""));
+    let offset = (await realPromises.stat(file)).size;
+    if (guard === "negative-offset") offset = -1;
+    if (guard === "zero-offset") offset = 0;
+    if (guard === "nan-offset") offset = NaN;
+    if (guard === "past-eof") offset = 1_000_000;
+    await realPromises.appendFile(
+      file,
+      guard === "malformed"
+        ? "{broken}\n"
+        : guard === "before-offset"
+          ? "{}\n"
+          : user + (guard === "partial-line" ? "" : "\n"),
+    );
+    if (guard === "malformed-after-ack") await realPromises.appendFile(file, "{broken}\n");
+    if (guard === "unlisted-file") {
+      await realPromises.writeFile(file, prefix);
+      await realPromises.writeFile(join(root, "new.jsonl"), prefix + user + "\n");
+    }
+    const baseline = new Map([[file, offset]]);
+    let scanRoot = root;
+    if (guard === "file-alias") {
+      const alias = join(root, "alias.jsonl");
+      await realPromises.symlink(file, alias);
+      baseline.clear();
+      baseline.set(alias, offset);
+    }
+    if (guard === "root-alias") {
+      scanRoot = root + "-alias";
+      await realPromises.symlink(root, scanRoot);
+      baseline.clear();
+      baseline.set(join(scanRoot, "original.jsonl"), offset);
+    }
+    let changed = false;
+    vi.doMock("node:fs", () => ({
+      ...realFs,
+      createReadStream: (...args: Parameters<typeof realFs.createReadStream>) => {
+        const [path, options] = args;
+        if (!changed && path === file && typeof options === "object" && options.start === offset) {
+          changed = true;
+          if (guard === "replacement") {
+            realFs.renameSync(file, join(root, "replaced.jsonl"));
+            realFs.writeFileSync(file, prefix + user + "\n");
+          }
+          if (guard === "truncation") realFs.truncateSync(file, offset);
+          if (guard === "append-during-scan") realFs.appendFileSync(file, "{}\n");
+        }
+        return realFs.createReadStream(...args);
+      },
+    }));
+    vi.doMock("node:fs/promises", () => ({
+      ...realPromises,
+      open:
+        guard === "unreadable"
+          ? async () => {
+              throw new Error("unreadable original");
+            }
+          : realPromises.open,
+    }));
+    vi.doMock("node:readline", () => realReadline);
+    vi.resetModules();
+    try {
+      const actual = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      const result = await actual.scanCodexRolloutForMessage(
+        scanRoot,
+        guard === "whitespace" ? message.trim() : message,
+        baseline,
+        { nativeSessionId: "native", worktreePath: "/worktree" },
+      );
+      expect(result.found).toBe(guard === "exact" || guard === "response-item");
+      if (["replacement", "truncation", "append-during-scan"].includes(guard))
+        expect(changed).toBe(true);
+    } finally {
+      vi.doMock("node:fs", () => previousFs);
+      vi.doMock("node:fs/promises", () => previousPromises);
+      vi.doMock("node:readline", () => previousReadline);
+      if (scanRoot !== root) await realPromises.unlink(scanRoot);
+      await realPromises.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("finds response_item/message user text with exact trimmed match", async () => {
     const line = JSON.stringify({
       type: "response_item",
