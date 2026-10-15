@@ -1735,10 +1735,34 @@ describe("runtime-tmux", () => {
     expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: null,
+      paneDead: false,
     });
     expect(await lookupTmuxPanePid("other-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: 4242,
+      paneDead: false,
+    });
+  });
+
+  it("R1 lookupTmuxPanePid carries the dead flag from the same pane row", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return { stdout: "api-1 1 1 1 4242 /dev/pts/1\nlive-1 1 1 0 4243 /dev/pts/2", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxPanePid } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 4242,
+      paneDead: true,
+    });
+    expect(await lookupTmuxPanePid("live-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 4243,
+      paneDead: false,
     });
   });
 

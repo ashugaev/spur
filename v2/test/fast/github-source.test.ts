@@ -1357,6 +1357,54 @@ describe("github source", () => {
     });
   }
 
+  async function pollCiSignal(rollup: unknown[]): Promise<ReviewSignal | undefined> {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ statusCheckRollup: rollup }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const handle = await startLifecycle(vi.fn());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    handle.stop();
+    return snapshot.signals.get("ci_failed");
+  }
+  const rolledRun = (
+    conclusion: string,
+    suite: { id: number; createdAt: string; app: number; workflow: number | null },
+  ): unknown => ({
+    name: "Labeler",
+    conclusion,
+    status: "COMPLETED",
+    checkSuite: {
+      databaseId: suite.id,
+      createdAt: suite.createdAt,
+      app: { databaseId: suite.app },
+      workflowRun:
+        suite.workflow === null
+          ? null
+          : { event: "pull_request", workflow: { databaseId: suite.workflow } },
+    },
+  });
+
+  it("emits no ci_failed for a cancelled run superseded by a later suite of the same workflow", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("CANCELLED", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: 7 }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 5, workflow: 7 }),
+    ]);
+    expect(signal).toBeUndefined();
+  });
+
+  it("emits ci_failed when another app publishes a later success under the same name", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("FAILURE", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: null }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 6, workflow: null }),
+    ]);
+    expect(signal?.text).toBe("CI is failing: Labeler.");
+  });
+
   it("emits github:ready_for_review when a draft PR becomes ready", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
     listSessionsMock.mockReturnValue([makeSession()]);
