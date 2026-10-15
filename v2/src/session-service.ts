@@ -17,13 +17,17 @@ import {
 } from "./review-interface-consent.js";
 import { isDeepStrictEqual } from "node:util";
 import {
+  appendNativeInputIntent,
   bindNativeInputUsers,
   captureNativeInputSources,
   nativeUserKey,
+  NativeInputError,
+  NativeInputSourceError,
   readNativeInputJournal,
   verifyNativeInputSources,
   writeNativeInputJournal,
   type NativeInputIdentity,
+  type NativeInputOccurrence,
 } from "./native-input.js";
 import {
   annotateLifecycleError,
@@ -1174,6 +1178,7 @@ export type AgentSendOutcome = "submitted" | "submit_unconfirmed";
 interface AgentMessageWriteOptions {
   interrupt?: boolean;
   freshLaunch?: boolean;
+  initialInput?: boolean;
   /** Target is idle or just interrupted: INTERACTIVE_SUBMIT_ACK_PACING. */
   interactive?: boolean;
   /**
@@ -12332,11 +12337,21 @@ export class SessionService {
           this.writeSpawnRecord(runningRecord);
         }
       };
-      if (launchAgent === "opencode") {
-        await withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind);
-      } else {
-        await launchAndBind();
-      }
+      const launch = () =>
+        launchAgent === "opencode"
+          ? withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind)
+          : launchAndBind();
+      if (
+        promptDeliveredOnLaunch ||
+        (startupImagePaths.length > 0 && !launchPlan.initialMessage.trim())
+      ) {
+        await this.launchWithNativeInputIntent(
+          placeholder,
+          runningRecord,
+          spawnInitialMessage,
+          launch,
+        );
+      } else await launch();
 
       this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
@@ -13548,11 +13563,21 @@ export class SessionService {
           this.writeSpawnRecord(runningRecord);
         }
       };
-      if (launchAgent === "opencode") {
-        await withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind);
-      } else {
-        await launchAndBind();
-      }
+      const launch = () =>
+        launchAgent === "opencode"
+          ? withOpenCodeLaunchIdentityLock(workspacePath, launchAndBind)
+          : launchAndBind();
+      if (
+        promptDeliveredOnLaunch ||
+        (startupImagePaths.length > 0 && !launchPlan.initialMessage.trim())
+      ) {
+        await this.launchWithNativeInputIntent(
+          spawnPlaceholder,
+          runningRecord,
+          spawnInitialMessage,
+          launch,
+        );
+      } else await launch();
 
       this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
@@ -15910,6 +15935,37 @@ export class SessionService {
     message: string,
     options?: AgentMessageOptions,
   ): Promise<StartedAgentMessage> {
+    const prepared = readSession(this.config.dataDir, session.id);
+    if (!prepared) throw new NativeInputError("session-missing");
+    if (
+      prepared.agent !== session.agent ||
+      prepared.tmuxSession !== session.tmuxSession ||
+      prepared.worktreePath !== session.worktreePath ||
+      prepared.launchCommand !== session.launchCommand
+    )
+      throw new NativeInputError("runtime-target-changed");
+    if (
+      prepared.agentLaunchId !== undefined &&
+      (typeof prepared.agentLaunchId !== "string" || !prepared.agentLaunchId.trim())
+    )
+      throw new NativeInputError("launch-identity-invalid");
+    const { updatedAt: _preparedAt, ...preparedTask } = captureReleaseTaskIdentity(prepared);
+    const currentForInput = (): SessionRecord => {
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current) throw new NativeInputError("session-missing");
+      const { updatedAt: _currentAt, ...task } = captureReleaseTaskIdentity(current);
+      if (
+        !isDeepStrictEqual(task, preparedTask) ||
+        current.agentLaunchId !== prepared.agentLaunchId ||
+        current.agent !== prepared.agent ||
+        current.launchCommand !== prepared.launchCommand ||
+        current.tmuxSession !== prepared.tmuxSession ||
+        (prepared.agentSessionId !== undefined &&
+          current.agentSessionId !== prepared.agentSessionId)
+      )
+        throw new NativeInputError("task-generation-changed");
+      return current;
+    };
     const freshLaunch = options?.freshLaunch === true;
     const interactive = options?.interactive === true;
     const shouldWaitForSubmitAck =
@@ -15926,6 +15982,7 @@ export class SessionService {
     const interruptState = { interrupted: false };
     if (options?.interrupt === true) {
       const interrupt = async () => {
+        currentForInput();
         interruptState.interrupted = await sendInterruptKeysToTmux(
           session.tmuxSession,
           session.agent,
@@ -15936,32 +15993,42 @@ export class SessionService {
           throw new Error(`Session ${session.id} changed before message delivery`);
         }
       } else {
-        await interrupt();
+        await this.withWorkspaceLifecycleLocks(session.id, interrupt);
       }
-    }
-    // Checked right before every paste, fresh:true: the interrupt key can end
-    // the agent, and an agent whose wrapper just died leaves the pane at the
-    // shell prompt while the session still reads running. A cached "alive"
-    // would paste the message into the shell.
-    const alive = await agentProcessAlive(
-      {
-        tmuxSession: session.tmuxSession,
-        agent: session.agent,
-        launchCommand: session.launchCommand,
-      },
-      { fresh: true },
-    );
-    if (!alive) {
-      throw new AgentExitedBeforeSendError(
-        interruptState.interrupted
-          ? `Agent process for ${session.id} exited after the interrupt; message not sent`
-          : `Agent process for ${session.id} is not running; message not sent`,
-      );
     }
     // After the interrupt and its settle: the interrupted turn's own record
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
     const send = async () => {
+      const current = currentForInput();
+      const input =
+        current.agentLaunchId === undefined
+          ? null
+          : await this.recordNativeInputIntentLocked(
+              current,
+              message,
+              binding,
+              pastedAt,
+              options?.initialInput === true || freshLaunch,
+            );
+      currentForInput();
+      // Intent publication may await filesystem syncs; keep the existing fresh
+      // liveness guard immediately before the actual paste, after those waits.
+      const alive = await agentProcessAlive(
+        {
+          tmuxSession: session.tmuxSession,
+          agent: session.agent,
+          launchCommand: session.launchCommand,
+        },
+        { fresh: true },
+      );
+      if (!alive) {
+        throw new AgentExitedBeforeSendError(
+          interruptState.interrupted
+            ? `Agent process for ${session.id} exited after the interrupt; message not sent`
+            : `Agent process for ${session.id} is not running; message not sent`,
+        );
+      }
       await sendMessageToTmux(session.tmuxSession, message, {
         agent: session.agent,
         ...(session.agent === "codex" && options?.interrupt === false
@@ -15970,13 +16037,14 @@ export class SessionService {
       });
       this.recordPaneWrite(session, pastedAt);
       options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
+      if (input) await this.finishNativeInputDispatchLocked(input);
     };
     if (options?.authorizeInput) {
       if (!(await options.authorizeInput(send))) {
         throw new Error(`Session ${session.id} changed before message delivery`);
       }
     } else {
-      await send();
+      await this.withWorkspaceLifecycleLocks(session.id, send);
     }
     if (!binding) {
       return { kind: "complete", outcome: "submitted" };
@@ -16520,6 +16588,146 @@ export class SessionService {
     });
   }
 
+  private async launchWithNativeInputIntent(
+    prepared: SessionRecord,
+    candidate: SessionRecord,
+    message: string,
+    launch: () => Promise<void>,
+  ): Promise<void> {
+    const { updatedAt: _preparedAt, ...expected } = captureReleaseTaskIdentity(prepared);
+    await this.withSessionLifecycleLocks(this.lifecycleIdsFor(prepared), async () => {
+      const canonical = readSession(this.config.dataDir, candidate.id);
+      if (!canonical) throw new NativeInputError("session-missing");
+      if (
+        canonical.worktreePath !== prepared.worktreePath &&
+        canonical.worktreePath !== candidate.worktreePath
+      )
+        throw new NativeInputError("workspace-changed");
+      const preparedIdentity = { ...expected, worktreePath: canonical.worktreePath };
+      const assertCurrent = () => {
+        const current = readSession(this.config.dataDir, candidate.id);
+        if (!current) throw new NativeInputError("session-missing");
+        const { updatedAt: _currentAt, ...actual } = captureReleaseTaskIdentity(current);
+        if (
+          !isDeepStrictEqual(preparedIdentity, actual) ||
+          current.agent !== prepared.agent ||
+          current.tmuxSession !== prepared.tmuxSession ||
+          current.launchCommand !== prepared.launchCommand ||
+          current.status !== prepared.status ||
+          current.stopReason !== prepared.stopReason
+        )
+          throw new NativeInputError("task-generation-changed");
+      };
+      assertCurrent();
+      await this.recordNativeInputIntentLocked(candidate, message, null, Date.now(), true);
+      assertCurrent();
+      await launch();
+    });
+  }
+
+  private async recordNativeInputIntentLocked(
+    session: SessionRecord,
+    message: string,
+    binding: SubmitAckBinding | null,
+    typedAt: number,
+    initial: boolean,
+  ): Promise<{ identity: NativeInputIdentity; id: string }> {
+    const identity = this.nativeInputIdentity(session);
+    if (!identity || !session.agentLaunchId)
+      throw new NativeInputError("launch-identity-unavailable");
+    const journal = (await readNativeInputJournal(this.config.dataDir, identity)) ?? {
+      identity,
+      nativeSessionId: session.agentSessionId ?? null,
+      processes: null,
+      occurrences: [],
+    };
+    const capture = await captureAgentProcessesForLaunch({
+      sessionId: session.id,
+      agentLaunchId: session.agentLaunchId,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    if (
+      capture.status === "ok" &&
+      capture.processes.length > 0 &&
+      capture.processes.every((process) => process.identity !== null)
+    ) {
+      const processes = [...capture.processes].sort((a, b) => a.pid - b.pid);
+      if (journal.processes && !isDeepStrictEqual(journal.processes, processes))
+        throw new NativeInputError("process-generation-changed");
+      journal.processes = processes;
+    }
+    const typed = session.queuedMessageTyped;
+    const predecessors = typed?.ackBaseline
+      ? journal.occurrences.filter(
+          (input) =>
+            input.baseline !== null &&
+            new Date(input.typedAt).toISOString() === typed.typedAt &&
+            isDeepStrictEqual(input.baseline, typed.ackBaseline) &&
+            input.bodyDigest === binding?.nativeInput?.digest(typed.message),
+        )
+      : [];
+    const common = {
+      initial,
+      typedAt,
+      predecessor: predecessors.length === 1 ? (predecessors[0]?.id ?? null) : null,
+    };
+    let sources: Awaited<ReturnType<typeof captureNativeInputSources>> | null = null;
+    const native = binding?.nativeInput;
+    const digest = native ? native.digest(message) : null;
+    let sourceUnavailable = false;
+    if (binding && native) {
+      try {
+        sources = await captureNativeInputSources(binding.baseline);
+      } catch (error) {
+        if (!(error instanceof NativeInputSourceError)) throw error;
+        sourceUnavailable = true;
+      }
+    }
+    let input: NativeInputOccurrence;
+    if (binding && native && digest !== null && sources !== null) {
+      input = appendNativeInputIntent(journal, {
+        ...common,
+        bodyDigest: digest,
+        baseline: binding.baseline,
+        sources,
+      });
+      if ((await native.observe(digest)).length > 0)
+        input.state = { kind: "ambiguous", reason: "native_input_retry_ambiguous" };
+    } else {
+      input = appendNativeInputIntent(journal, {
+        ...common,
+        baseline: null,
+        bodyDigest: null,
+        sources: [],
+        submittedDigest: createHash("sha256").update(message).digest("hex"),
+        state: {
+          kind: "unobservable",
+          reason: sourceUnavailable
+            ? "native_input_source_unavailable"
+            : "native_input_baseline_unavailable",
+        },
+      });
+    }
+    await writeNativeInputJournal(this.config.dataDir, journal);
+    return { identity, id: input.id };
+  }
+
+  private async finishNativeInputDispatchLocked(input: {
+    identity: NativeInputIdentity;
+    id: string;
+  }): Promise<void> {
+    const current = readSession(this.config.dataDir, input.identity.sessionId);
+    if (!current || !isDeepStrictEqual(this.nativeInputIdentity(current), input.identity))
+      throw new NativeInputError("task-generation-changed");
+    const journal = await readNativeInputJournal(this.config.dataDir, input.identity);
+    const occurrence = journal?.occurrences.find((row) => row.id === input.id);
+    if (!journal || !occurrence) throw new NativeInputError("intent-missing");
+    if (occurrence.baseline !== null && occurrence.state.kind === "intent") {
+      occurrence.state = { kind: "dispatched" };
+      await writeNativeInputJournal(this.config.dataDir, journal);
+    }
+  }
+
   private nativeInputIdentity(session: SessionRecord): NativeInputIdentity | null {
     const { updatedAt: _updatedAt, ...identity } = captureReleaseTaskIdentity(session);
     return identity.launchDigest
@@ -16544,6 +16752,14 @@ export class SessionService {
       return null;
     const journal = await readNativeInputJournal(this.config.dataDir, identity);
     if (!journal) return null;
+    if (
+      !journal.occurrences.some(
+        (input) =>
+          input.baseline !== null &&
+          (input.state.kind === "dispatched" || input.state.kind === "accepted"),
+      )
+    )
+      return null;
     const sorted = [...processes].sort((a, b) => a.pid - b.pid);
     if (journal.processes && !isDeepStrictEqual(journal.processes, sorted)) return null;
     if (journal.nativeSessionId && journal.nativeSessionId !== session.agentSessionId) return null;
@@ -18523,6 +18739,13 @@ export class SessionService {
       try {
         await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
           const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
+          await this.recordNativeInputIntentLocked(
+            currentRetentionCandidate,
+            recoveryContextMessage,
+            null,
+            Date.now(),
+            true,
+          );
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
@@ -19230,13 +19453,26 @@ export class SessionService {
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
-      await createTmuxSession({
-        sessionName: current.tmuxSession,
-        cwd: current.worktreePath,
-        launchCommand: restoreLaunchCommand,
-        launchScriptDir: sessionToolDir,
-        env,
-      });
+      const launch = () =>
+        createTmuxSession({
+          sessionName: current.tmuxSession,
+          cwd: current.worktreePath,
+          launchCommand: restoreLaunchCommand,
+          launchScriptDir: sessionToolDir,
+          env,
+        });
+      if (
+        shouldSendRestoreMessage &&
+        effectivePlan.initialMessageDeliveredOnLaunch === true &&
+        restoreLaunchCommand === effectivePlan.launchCommand
+      ) {
+        await this.launchWithNativeInputIntent(
+          current,
+          { ...current, launchCommand: restoreLaunchCommand, agentLaunchId: restoreAgentLaunchId },
+          restorePrompt,
+          launch,
+        );
+      } else await launch();
       launched = true;
       restoreGeneration = await this.capturePaneGeneration(current);
       claim = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
@@ -19335,6 +19571,7 @@ export class SessionService {
           { ...current, launchCommand: restoreLaunchCommand },
           restoreInitialMessage,
           {
+            initialInput: true,
             freshLaunch: freshLaunchFallback,
             ...(current.agent === "codex" ? { skipSubmitAck: true } : {}),
             authorizeInput: (send) =>

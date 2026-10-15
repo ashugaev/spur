@@ -235,6 +235,8 @@ function parseOccurrence(value: unknown): NativeInputOccurrence {
     typedAt: timestamp(row.typedAt),
     predecessor: row.predecessor === null ? null : receiptIdentifier(row.predecessor),
   };
+  if (!Number.isFinite(new Date(common.typedAt).getTime()))
+    throw new NativeInputError("position-invalid");
   if (typeof row.initial !== "boolean") throw new NativeInputError("occurrence-invalid");
   const state = object(row.state);
   if (row.baseline === null) {
@@ -418,7 +420,11 @@ export async function writeNativeInputJournal(
     }
   }
   for (const input of journal.occurrences.slice(previous?.occurrences.length ?? 0)) {
-    if (input.state.kind !== "intent" && input.state.kind !== "unobservable") {
+    if (
+      input.state.kind !== "intent" &&
+      input.state.kind !== "unobservable" &&
+      input.state.kind !== "ambiguous"
+    ) {
       throw new NativeInputError("intent-publication-required");
     }
   }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { loadConfig } from "../../src/config.js";
@@ -15,8 +15,16 @@ import {
   unresolvedReviewTransitions,
   type ReviewReceipt,
 } from "../../src/review-receipt.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
-import { captureReleaseTaskIdentity } from "../../src/session-service.js";
+import type { SessionRecord, SessionView, SubmitAckBaseline } from "../../src/types.js";
+import { captureReleaseTaskIdentity, SessionService } from "../../src/session-service.js";
+import { writeSession } from "../../src/metadata.js";
+import * as agents from "../../src/agents/index.js";
+import * as nativeProcesses from "../../src/agent-processes.js";
+import * as tmux from "../../src/runtime-tmux.js";
+import {
+  claudeNativeInputDigest,
+  observeClaudeNativeUsers,
+} from "../../src/agents/claude-submit-ack.js";
 import { object } from "../../src/github-app.js";
 import type * as GateModule from "../../src/review-gate.js";
 import type * as AppModule from "../../src/github-app.js";
@@ -350,7 +358,9 @@ async function setup(recovery?: unknown) {
     restore: vi.fn(),
     complete: vi.fn(),
     reviewerEvidence: vi.fn(
-      async (): Promise<{
+      async (
+        _id: string,
+      ): Promise<{
         nativeAgentAlive: boolean | null;
         historyAvailable: boolean;
         initialAcknowledged: boolean | null;
@@ -916,6 +926,96 @@ test("unknown current-launch acknowledgement cannot be replaced by old healthy n
   expect((await f.readState()).reason).toBe("reviewer-current-launch-ack-unavailable");
   expect(f.deps.restore).not.toHaveBeenCalled();
   expect(f.send.mock.calls.some((call) => call[0] === "browser-session")).toBe(false);
+});
+test("actual producer USER advances current acknowledgement only to the caller-source hold", async () => {
+  const f = await setup(recoveryBounds());
+  await rm(join(f.receiptDir, "browser.json"));
+  const prior = f.sessions.get("browser-session");
+  if (!prior) throw new Error("browser fixture missing");
+  const nativeId = "current-native-fixture";
+  const session: SessionRecord = {
+    ...prior,
+    agent: "claude",
+    launchCommand: "claude",
+    agentSessionId: nativeId,
+  };
+  f.sessions.set(session.id, session);
+  writeSession(f.config.dataDir, session);
+  const file = join(f.root, "native-user.jsonl");
+  await writeFile(file, "");
+  const bind = (baseline: SubmitAckBaseline): agents.SubmitAckBinding => {
+    if (baseline.agent !== "claude") throw new Error("unexpected provider");
+    return {
+      baseline,
+      nativeInput: {
+        digest: claudeNativeInputDigest,
+        observe: (body) => observeClaudeNativeUsers(baseline, body, nativeId),
+      },
+      scan: async () => ({ found: true, lastScannedFile: file }),
+    };
+  };
+  const spies = [
+    vi
+      .spyOn(agents, "createAgentSubmitAckBinding")
+      .mockImplementation(async () =>
+        bind({ agent: "claude", file, size: (await stat(file)).size }),
+      ),
+    vi
+      .spyOn(agents, "resumeAgentSubmitAckBinding")
+      .mockImplementation(async (_agent, _context, baseline) => bind(baseline)),
+    vi.spyOn(nativeProcesses, "captureAgentProcessesForLaunch").mockResolvedValue({
+      status: "ok",
+      processes: [{ pid: 42, identity: "fixture-start" }],
+    }),
+    vi
+      .spyOn(tmux, "probeTmuxProcessMatch")
+      .mockResolvedValue({ alive: true, matchedByName: true, unresponsive: false }),
+    vi.spyOn(tmux, "sendMessageToTmux").mockImplementation(async (_pane, body) => {
+      await appendFile(
+        file,
+        `${JSON.stringify({ type: "user", sessionId: session.agentSessionId, uuid: "current-user", message: { role: "user", content: [{ type: "text", text: body }] } })}\n`,
+      );
+    }),
+  ];
+  try {
+    const service = new SessionService(join(f.root, "spur.yaml"), session.createdAt, {
+      deferBackgroundLoops: true,
+    });
+    vi.spyOn(service, "getConversation").mockResolvedValue({
+      messages: [],
+      entries: [{ kind: "message", role: "user", text: session.prompt }],
+      durationMs: 0,
+      state: "waiting",
+      startIndex: 0,
+      totalEntries: 1,
+    });
+    f.deps.reviewerEvidence.mockImplementation((id) => service.releaseReviewerEvidence(id));
+    expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+      initialAcknowledged: null,
+    });
+    const controller = await f.start();
+    expect((await f.readState()).reason).toBe("reviewer-current-launch-ack-unavailable");
+    await controller.stop();
+    controllers.splice(controllers.indexOf(controller), 1);
+    const producer = service as unknown as {
+      sendAgentMessage(
+        record: SessionRecord,
+        body: string,
+        options: { freshLaunch: true },
+      ): Promise<unknown>;
+    };
+    await producer.sendAgentMessage(session, "Привет 🦊 exact caller task", { freshLaunch: true });
+    expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+      initialAcknowledged: true,
+    });
+    await f.start();
+    expect((await f.readState()).reason).toBe("reviewer-caller-current-source-unavailable");
+    expect(f.deps.restore).not.toHaveBeenCalled();
+    expect(f.send.mock.calls.some((call) => call[0] === session.id)).toBe(false);
+    expect(tmux.sendMessageToTmux).toHaveBeenCalledTimes(1);
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+  }
 });
 test("startup recovers existing approvals once and restart does not resend", async () => {
   const f = await setup(),
