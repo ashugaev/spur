@@ -774,6 +774,11 @@ test("four CI, two Security, one onboarding fixed allocations total at most 600 
 });
 
 type Workflow = {
+  on: {
+    workflow_dispatch?: null;
+    push?: { branches: string[] };
+    pull_request?: { branches: string[] };
+  };
   permissions?: Record<string, string>;
   jobs: Record<
     string,
@@ -793,6 +798,31 @@ async function workflow(name: string): Promise<Workflow> {
     await readFile(new URL(`../../../.github/workflows/${name}`, import.meta.url), "utf8"),
   ) as Workflow;
 }
+test("CI preserves dispatch and main pushes while admitting exactly the intended PR bases", async () => {
+  const definition = await workflow("ci.yml");
+  expect(definition.on).toEqual({
+    workflow_dispatch: null,
+    push: { branches: ["main"] },
+    pull_request: { branches: ["main", "feature/release-continuation"] },
+  });
+  const branches = present(definition.on.pull_request).branches;
+  expect(new Set(branches).size).toBe(branches.length);
+  for (const branch of branches) expect(branch).not.toMatch(/[*!?[\]+]/);
+});
+test.each([
+  ["main", true],
+  ["feature/release-continuation", true],
+  ["feature/native-input-proof", false],
+  ["feature/unrelated", false],
+  ["feature/release-other", false],
+  ["feature/release-continuation-extra", false],
+  ["feature/release-continuation/child", false],
+  ["prefix/feature/release-continuation", false],
+  ["feature/release", false],
+])("CI PR base %s admitted=%s", async (base, admitted) => {
+  const definition = await workflow("ci.yml");
+  expect(present(definition.on.pull_request).branches.includes(base)).toBe(admitted);
+});
 test("all seven real jobs depend on hosted admission, preserve serial required stages and readonly caller permissions", async () => {
   const expected = {
     "ci.yml": ["quality", "playwright", "runtime-integration", "real-agent-smoke"],
