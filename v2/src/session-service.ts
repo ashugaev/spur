@@ -17061,7 +17061,7 @@ export class SessionService {
     );
   }
 
-  // Every pane of the session, the set P1 captures from and P2 excludes.
+  // Every live pane for Codex ownership.
   private lookupSessionPanePidsQuietly(
     tmuxSession: string,
     options?: { fresh?: boolean },
@@ -17073,6 +17073,18 @@ export class SessionService {
     );
   }
 
+  private async lookupOwnershipExclusions(
+    session: Pick<SessionRecord, "agent" | "tmuxSession">,
+  ): Promise<TmuxSessionPanesLookup> {
+    if (session.agent === "codex") {
+      return this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true });
+    }
+    const lookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    return lookup.status === "unavailable"
+      ? lookup
+      : { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] };
+  }
+
   private async killAgentPaneAndConfirmExit(
     session: Pick<
       SessionRecord,
@@ -17080,9 +17092,10 @@ export class SessionService {
     >,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const paneLookup = await this.lookupSessionPanePidsQuietly(session.tmuxSession, {
-      fresh: true,
-    });
+    const paneLookup =
+      session.agent === "codex"
+        ? await this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true })
+        : await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17096,7 +17109,11 @@ export class SessionService {
     const capture = await capturePaneAgentProcesses({
       sessionId: session.id,
       agentLaunchId: session.agentLaunchId,
-      panePids: paneLookup.status === "ok" ? paneLookup.panePids : [],
+      ...(paneLookup.status !== "ok"
+        ? { panePids: [] }
+        : "panePids" in paneLookup
+          ? { panePids: paneLookup.panePids }
+          : { panePid: paneLookup.panePid, paneDead: paneLookup.paneDead }),
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {
@@ -17173,9 +17190,7 @@ export class SessionService {
   // instance whose pane P1 could not see, e.g. its tmux pane is already
   // gone). Never blocks on a scan it could not perform — "unavailable" and
   // "no findings" both proceed. `force` bypasses this guard only; it never
-  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check. Callers pass
-  // a fresh pane lookup: a cached row can name a pane that died since, whose
-  // recycled pid would exclude an unrelated process tree from the scan.
+  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
     paneLookup: TmuxSessionPanesLookup,
@@ -17913,7 +17928,7 @@ export class SessionService {
     }
     await this.assertNoForeignAgentForSession(
       session,
-      await this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true }),
+      await this.lookupOwnershipExclusions(session),
       false,
     );
     await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
@@ -18551,7 +18566,7 @@ export class SessionService {
     });
     await this.assertNoForeignAgentForSession(
       current,
-      await this.lookupSessionPanePidsQuietly(current.tmuxSession, { fresh: true }),
+      await this.lookupOwnershipExclusions(current),
       request.force === true,
     );
     // Past both gates above (restorability, foreign-process): this restore is

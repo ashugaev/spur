@@ -148,9 +148,12 @@ const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolve
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const lookupTmuxPanePidMock = vi.fn(() =>
-  Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
+  Promise.resolve<
+    { status: "ok"; panePid: number | null; paneDead: boolean } | { status: "unavailable" }
+  >({
     status: "ok",
     panePid: null,
+    paneDead: false,
   }),
 );
 const lookupTmuxSessionPanePidsMock = vi.fn(() =>
@@ -1362,7 +1365,9 @@ describe("SessionService", () => {
     captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     getTmuxPanePidMock.mockReset().mockResolvedValue(null);
-    lookupTmuxPanePidMock.mockReset().mockResolvedValue({ status: "ok", panePid: null });
+    lookupTmuxPanePidMock
+      .mockReset()
+      .mockResolvedValue({ status: "ok", panePid: null, paneDead: false });
     lookupTmuxSessionPanePidsMock.mockReset().mockResolvedValue({ status: "ok", panePids: [] });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);

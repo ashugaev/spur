@@ -4,9 +4,9 @@ import type * as processTreeModule from "../../src/process-tree.js";
 
 // Composes the real session pane lookup with the real P1 capture/terminate and
 // the real P2 foreign scan. Only the tmux fork and the process table are fake.
-// Session api-1 keeps a dead (remain-on-exit) inactive pane whose pid 100 was
+// Session api-1 keeps a dead (remain-on-exit) active pane whose pid 100 was
 // recycled by an unrelated process carrying the same SPUR_SESSION from another
-// launch generation; its own agent lives under the live active pane 200.
+// launch generation; its own agent lives under the live inactive pane 200.
 
 interface FakeProc {
   pid: number;
@@ -64,7 +64,7 @@ vi.mock("../../src/process-tree.js", async (importOriginal) => ({
 
 const execFileAsyncMock = vi.fn(async (_file: string, args: string[]) =>
   args.includes("list-panes")
-    ? { stdout: "api-1 0 0 1 100 /dev/pts/1\napi-1 1 1 0 200 /dev/pts/2\n", stderr: "" }
+    ? { stdout: "api-1 1 1 1 100 /dev/pts/1\napi-1 0 0 0 200 /dev/pts/2\n", stderr: "" }
     : { stdout: "", stderr: "" },
 );
 vi.mock("node:child_process", () => ({
@@ -72,7 +72,8 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
-const { lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+const { lookupTmuxPanePid, lookupTmuxSessionPanePids } = await import("../../src/runtime-tmux.js");
+const { listSessionMemberPids } = await import("../../src/process-tree.js");
 const { capturePaneAgentProcesses, findForeignAgentProcessesForSession, terminateAgentProcesses } =
   await import("../../src/agent-processes.js");
 
@@ -82,9 +83,39 @@ async function sessionPanePids(): Promise<readonly number[]> {
   return lookup.panePids;
 }
 
-describe("dead pane with a recycled pid", () => {
+describe("Codex all-live and legacy dead active pane ownership", () => {
   beforeEach(() => {
     signalled = [];
+    vi.mocked(listSessionMemberPids).mockClear();
+  });
+
+  it("legacy captures dead active descendants, skips its SID members, and excludes only that tree from P2", async () => {
+    const lookup = await lookupTmuxPanePid("api-1", { fresh: true });
+    if (lookup.status !== "ok") throw new Error("expected readable lookup");
+    expect(lookup).toEqual({ status: "ok", panePid: 100, paneDead: true });
+    const capture = await capturePaneAgentProcesses({
+      sessionId: "api-1",
+      agentLaunchId: "launch-1",
+      panePid: lookup.panePid,
+      paneDead: lookup.paneDead,
+      processMatchers: ["claude"],
+    });
+    if (capture.status !== "ok") throw new Error("expected readable capture");
+    expect(capture.processes.map((ref) => ref.pid)).toEqual([100, 101]);
+    expect(listSessionMemberPids).not.toHaveBeenCalled();
+    expect(
+      await findForeignAgentProcessesForSession({
+        sessionId: "api-1",
+        processMatchers: ["claude"],
+        excludePanePids: [100],
+      }),
+    ).toEqual({ status: "ok", pids: [201] });
+    await terminateAgentProcesses(capture.processes, {
+      hupGraceMs: 0,
+      termGraceMs: 0,
+      killGraceMs: 0,
+    });
+    expect(signalled).toEqual([101, 100]);
   });
 
   it("P1 captures and signals only the live pane's agent, never the reused root, its matching child, or a marked member of the dead pane's kernel session", async () => {

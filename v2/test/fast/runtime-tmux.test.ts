@@ -1735,10 +1735,45 @@ describe("runtime-tmux", () => {
     expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: null,
+      paneDead: false,
     });
     expect(await lookupTmuxPanePid("other-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: 4242,
+      paneDead: false,
+    });
+  });
+
+  it("ownership lookup retains cached active metadata until a fresh active or all-live read", async () => {
+    let output = "api-1 1 1 0 100 /dev/pts/1";
+    execFileAsyncMock.mockImplementation(async () => ({ stdout: output, stderr: "" }));
+    const { lookupTmuxPanePid, lookupTmuxSessionPanePids } =
+      await import("../../src/runtime-tmux.js");
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 100,
+      paneDead: false,
+    });
+    output = "api-1 1 1 1 200 /dev/pts/2\napi-1 0 0 0 300 /dev/pts/3";
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 100,
+      paneDead: false,
+    });
+    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 200,
+      paneDead: true,
+    });
+    output = "api-1 1 1 0 400 /dev/pts/4";
+    expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePids: [400],
+    });
+    expect(await lookupTmuxPanePid("api-1")).toEqual({
+      status: "ok",
+      panePid: 400,
+      paneDead: false,
     });
   });
 

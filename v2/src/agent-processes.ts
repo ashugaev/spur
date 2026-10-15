@@ -183,12 +183,14 @@ export type PaneAgentCapture =
 
 const CAPTURE_RETRY_DELAY_MS = 100;
 
-// P1, pane-rooted and exact: descendants of every live pane pid of the session
+// P1, pane-rooted and exact: descendants of the selected pane roots
 // whose args match this session's own agent matchers, plus members of each
 // pane's kernel session (sid === pane pid) carrying this exact launch's
 // markers. The session pass catches processes re-parented to init after the
 // agent wrapper died, and MCP children that never match an agent matcher. It
-// runs only for a pane pid that is still a live session leader. `panePids`
+// runs only for a pane pid that is still a live session leader. Legacy
+// {panePid, paneDead} keeps dead active descendants but skips their SID pass.
+// The all-live `panePids` form
 // must hold live panes only (lookupTmuxSessionPanePids): a dead pane's pid can
 // be recycled. Each added member must keep its identity and SID across both
 // marker reads. Empty `panePids` (panes already gone, or the caller never
@@ -201,13 +203,17 @@ const CAPTURE_RETRY_DELAY_MS = 100;
 // duplicate this module exists to prevent. Same fail-safe policy as
 // snapshotProcessLiveness. One retry first, since a `ps` failure here is
 // usually transient fork pressure.
-export async function capturePaneAgentProcesses(input: {
-  sessionId: string;
-  agentLaunchId?: string | undefined;
-  panePids: readonly number[];
-  processMatchers: readonly string[];
-}): Promise<PaneAgentCapture> {
-  if (input.panePids.length === 0) {
+export async function capturePaneAgentProcesses(
+  input: {
+    sessionId: string;
+    agentLaunchId?: string | undefined;
+    processMatchers: readonly string[];
+  } & ({ panePids: readonly number[] } | { panePid: number | null; paneDead: boolean }),
+): Promise<PaneAgentCapture> {
+  const panePids =
+    "panePids" in input ? input.panePids : input.panePid === null ? [] : [input.panePid];
+  const sidPanePids = "panePids" in input || !input.paneDead ? panePids : [];
+  if (panePids.length === 0) {
     return { status: "ok", processes: [] };
   }
   const matchers = compileMatchers(input.processMatchers);
@@ -224,7 +230,7 @@ export async function capturePaneAgentProcesses(input: {
   }
   const processes = snapshot.processes;
   const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
-  const orderedPids = input.panePids.flatMap((panePid) => collectDescendants(panePid, processes));
+  const orderedPids = panePids.flatMap((panePid) => collectDescendants(panePid, processes));
   const refs: AgentProcessRef[] = [];
   for (const pid of orderedPids) {
     const proc = byPid.get(pid);
@@ -237,7 +243,7 @@ export async function capturePaneAgentProcesses(input: {
     return { status: "ok", processes: refs };
   }
   const captured = new Set(refs.map((ref) => ref.pid));
-  for (const panePid of input.panePids) {
+  for (const panePid of sidPanePids) {
     if (panePid <= 1 || (await readProcessStat(panePid))?.sid !== panePid) {
       continue;
     }
