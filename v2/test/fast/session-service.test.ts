@@ -12509,12 +12509,17 @@ describe("SessionService", () => {
         sessionServiceInternals(service).restoreWarmupUntil.set("api-1", Date.now() + 30_000);
       }
 
-      await service.flushQueuedMessage("api-1", "flush me");
+      const flush = service.flushQueuedMessage("api-1", "flush me");
+      if (scenario === "classification failed") {
+        await expect(flush).rejects.toThrow("structured state unavailable");
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["held", "flush me"]);
+        return;
+      }
+      await flush;
 
-      const interrupts =
-        scenario !== "waiting" &&
-        scenario !== "classification failed" &&
-        scenario !== "restore warmup";
+      const interrupts = scenario !== "waiting" && scenario !== "restore warmup";
       if (interrupts) {
         expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
         expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
@@ -12529,6 +12534,254 @@ describe("SessionService", () => {
     },
   );
 
+  describe.each(["flush", "send now"] as const)(
+    "Codex %s behind a retained error (issue #1209)",
+    (entryPoint) => {
+      it.each(["input_required", "request_user_input", "MCP menu", "working"] as const)(
+        "cancels native %s before delivering a new message",
+        async (nativeState) => {
+          const sessions = createSessionStore(
+            runningSession({
+              agent: "codex",
+              launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+              agentSessionId: "retained-native-thread",
+              error: "Agent runtime exited unexpectedly.",
+              errorSource: "other",
+              queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+            }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          if (nativeState === "MCP menu") {
+            captureTmuxPaneMock.mockResolvedValue(
+              'Allow the playwright MCP server to run tool "browser_navigate"?\n' +
+                "› 1. Allow\n2. Allow for this session\n3. Always allow\n4. Cancel\nenter to submit | esc to cancel",
+            );
+          } else {
+            readCodexRolloutStateMock.mockResolvedValue({
+              rollout: {
+                state: nativeState === "working" ? "working" : "needs_input",
+                reason: nativeState === "working" ? "task_started" : nativeState,
+                timestamp: "2026-03-18T10:04:59.000Z",
+                timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+                filePath: "/tmp/codex/rollout.jsonl",
+              },
+              rateLimit: null,
+            });
+          }
+          const service = await createDisposedSessionService();
+
+          if (entryPoint === "flush") {
+            await service.flushQueuedMessage("api-1", "flush me");
+          } else {
+            await service.send("api-1", { message: "flush me", queue: false, interrupt: true });
+          }
+
+          expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+            agent: "codex",
+          });
+          expect(sessions.get("api-1")).toMatchObject({
+            agentSessionId: "retained-native-thread",
+            error: "Agent runtime exited unexpectedly.",
+            errorSource: "other",
+            queuedMessages: {
+              messages: entryPoint === "flush" ? ["held"] : ["held", "flush me"],
+            },
+          });
+        },
+      );
+
+      it.each([
+        "no native evidence",
+        "failed pane",
+        "busy failed pane",
+        "runtime unknown",
+        "rate limited",
+      ] as const)(
+        "holds before any interrupt or paste when masked native evidence is %s",
+        async (scenario) => {
+          const sessions = createSessionStore(
+            runningSession({
+              agent: "codex",
+              launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+              agentSessionId: "retained-native-thread",
+              error: "Agent runtime exited unexpectedly.",
+              errorSource: "other",
+              queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+            }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          if (scenario !== "no native evidence") {
+            readAgentHookStateMock.mockReturnValue({
+              state: scenario === "busy failed pane" ? "working" : "waiting",
+              updatedAt: "2026-03-18T10:04:59.000Z",
+              hookEvent: "PreToolUse",
+            });
+          }
+          if (scenario === "failed pane" || scenario === "busy failed pane") {
+            captureTmuxPaneMock.mockResolvedValue(null);
+          } else if (scenario === "rate limited") {
+            readCodexRolloutStateMock.mockResolvedValue({
+              rollout: null,
+              rateLimit: { limited: true, reason: "codex out of credits" },
+            });
+          }
+          const service = await createDisposedSessionService();
+          if (scenario === "runtime unknown") {
+            const runtime = {
+              runtimeAlive: true,
+              paneUsable: true,
+              processAlive: true,
+              tmuxActivityAt: null,
+              probeUnresponsive: false,
+            };
+            vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+              .mockResolvedValueOnce(runtime)
+              .mockResolvedValueOnce({
+                ...runtime,
+                processAlive: false,
+                probeUnresponsive: true,
+              });
+          }
+          const result =
+            entryPoint === "flush"
+              ? service.flushQueuedMessage("api-1", "flush me")
+              : service.send("api-1", { message: "flush me", queue: false, interrupt: true });
+
+          await expect(result).rejects.toThrow(
+            scenario === "rate limited"
+              ? "is rate limited"
+              : "Cannot safely determine Codex input state",
+          );
+
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")).toMatchObject({
+            error: "Agent runtime exited unexpectedly.",
+            errorSource: "other",
+            queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+          });
+          expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+          expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+        },
+      );
+    },
+  );
+
+  it.each(["native reader throws", "hard pane limit"] as const)(
+    "holds retained-error Codex after reaching %s (issue #1209)",
+    async (scenario) => {
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          agentSessionId: "retained-native-thread",
+          error: "Agent runtime exited unexpectedly.",
+          errorSource: "other",
+          queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+        }),
+      );
+      listSessionsMock.mockReturnValue([]);
+      readAgentHookStateMock.mockReturnValue({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "PreToolUse",
+      });
+      if (scenario === "native reader throws") {
+        readCodexRolloutStateMock.mockRejectedValue(new Error("native state read failed"));
+      } else {
+        captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits");
+      }
+      const service = await createDisposedSessionService();
+      const before = sessions.get("api-1");
+      const result =
+        scenario === "native reader throws"
+          ? service.send("api-1", { message: "flush me", queue: false, interrupt: true })
+          : service.flushQueuedMessage("api-1", "flush me");
+
+      await expect(result).rejects.toThrow(
+        scenario === "native reader throws" ? "native state read failed" : "is rate limited",
+      );
+
+      expect(readCodexRolloutStateMock).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.any(Object),
+        "retained-native-thread",
+      );
+      if (scenario === "native reader throws") {
+        expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+      } else {
+        expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+      }
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toEqual(before);
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+    },
+  );
+
+  it("refuses every key after the Codex pane changes during a retained-input read (issue #1209)", async () => {
+    const sessions = createSessionStore(
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        agentSessionId: "retained-native-thread",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "other",
+        queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+      }),
+    );
+    listSessionsMock.mockReturnValue([]);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "needs_input",
+        reason: "request_user_input",
+        timestamp: "2026-03-18T10:04:59.000Z",
+        timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+        filePath: "/tmp/codex/rollout.jsonl",
+      },
+      rateLimit: null,
+    });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+    const service = await createDisposedSessionService({ realPaneGeneration: true });
+    let releasePane!: () => void;
+    const paneGate = new Promise<void>((resolve) => {
+      releasePane = resolve;
+    });
+    let paneHeld = false;
+    captureTmuxPaneMock.mockImplementationOnce(async () => {
+      paneHeld = true;
+      await paneGate;
+      return "";
+    });
+    const before = sessions.get("api-1");
+    const flush = service.flushQueuedMessage("api-1", "flush me").then(
+      (view) => ({ view }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.waitFor(() => expect(paneHeld).toBe(true));
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.ppid });
+    releasePane();
+
+    await expect(flush).resolves.toMatchObject({
+      error: expect.objectContaining({ message: "Session api-1 changed before message delivery" }),
+    });
+    expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")).toEqual(before);
+    expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+    expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+    expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+  });
+
   it.each(["dead process", "replacement pane"] as const)(
     "retains the Codex flush queue without typing into a %s (issue #1209)",
     async (scenario) => {
@@ -12541,6 +12794,10 @@ describe("SessionService", () => {
           queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
         }),
       );
+      readAgentHookStateMock.mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      });
       lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
       const service = await createDisposedSessionService({ realPaneGeneration: true });
       createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
