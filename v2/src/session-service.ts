@@ -54,6 +54,7 @@ import {
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
+  openCodeHeartbeatExpired,
   readOpenCodeStructuredState,
   resolveNewOpenCodeSessionId,
   waitForOpenCodeLaunchMessage,
@@ -22407,6 +22408,16 @@ export class SessionService {
         classifiedDetail = structuredState
           ? `State: ${state} (opencode export, ${structuredState.reason})`
           : "State: working (opencode export unavailable)";
+        if (
+          (state === "working" || state === "waiting" || state === "needs_input") &&
+          (await openCodeHeartbeatExpired(
+            join(this.config.dataDir, "session-tools", session.id),
+            session.agentLaunchId,
+          ))
+        ) {
+          state = "error";
+          classifiedDetail = "State: error (opencode worker heartbeat expired)";
+        }
       }
 
       // Structured sources first; the generic tmux-banner scan only runs when they

@@ -1,8 +1,9 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { shellEscape } from "./shell-escape.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -18,6 +19,67 @@ const execFileAsync = promisify(execFile);
 
 const OPENCODE_SESSION_LIST_TIMEOUT_MS = 20_000;
 const OPENCODE_EXPORT_TIMEOUT_MS = 30_000;
+const OPENCODE_HEARTBEAT_INTERVAL_MS = 5_000;
+const OPENCODE_HEARTBEAT_TIMEOUT_MS = 60_000;
+const OPENCODE_HEARTBEAT_FILE = "opencode-heartbeat.json";
+
+// Runs inside OpenCode's backend Worker, not its independently responsive TUI.
+// Async tools and provider waits leave this clock running; a blocked event loop does not.
+export async function ensureOpenCodeHeartbeatPlugin(sessionToolDir: string): Promise<string> {
+  const pluginPath = join(sessionToolDir, "opencode-heartbeat.mjs");
+  await mkdir(sessionToolDir, { recursive: true });
+  await writeFile(
+    pluginPath,
+    `import { writeFileSync, renameSync } from "node:fs";
+export const SpurHeartbeat = async () => {
+  const agentLaunchId = process.env.SPUR_AGENT_LAUNCH_ID;
+  if (!agentLaunchId) return {};
+  const path = new URL("./${OPENCODE_HEARTBEAT_FILE}", import.meta.url);
+  const temporary = new URL("./${OPENCODE_HEARTBEAT_FILE}." + process.pid + ".tmp", import.meta.url);
+  let reportedWriteError = false;
+  const beat = () => {
+    try {
+      writeFileSync(temporary, JSON.stringify({ agentLaunchId, updatedAt: Date.now() }));
+      renameSync(temporary, path);
+    } catch (error) {
+      if (!reportedWriteError) {
+        console.error("Spur heartbeat storage unavailable; retrying", error);
+        reportedWriteError = true;
+      }
+    }
+  };
+  const timer = setInterval(beat, ${OPENCODE_HEARTBEAT_INTERVAL_MS});
+  timer.unref();
+  beat();
+  return {};
+};
+`,
+  );
+  return pluginPath;
+}
+
+export async function openCodeHeartbeatExpired(
+  sessionToolDir: string,
+  agentLaunchId: string | undefined,
+  now = Date.now(),
+): Promise<boolean> {
+  if (!agentLaunchId) return false;
+  try {
+    const value: unknown = JSON.parse(
+      await readFile(join(sessionToolDir, OPENCODE_HEARTBEAT_FILE), "utf8"),
+    );
+    return (
+      isRecord(value) &&
+      value["agentLaunchId"] === agentLaunchId &&
+      typeof value["updatedAt"] === "number" &&
+      Number.isFinite(value["updatedAt"]) &&
+      value["updatedAt"] > 0 &&
+      now - value["updatedAt"] > OPENCODE_HEARTBEAT_TIMEOUT_MS
+    );
+  } catch {
+    return false;
+  }
+}
 
 // `opencode` truncates its own stdout at 128 KB when stdout is a pipe: it exits
 // before the pipe drains, so a piped `export` of any session with real history
@@ -83,8 +145,10 @@ export function buildOpenCodeConfig(
   mcpBindings: SidecarMcpBinding[] | undefined,
   restrictWrites: boolean | undefined,
   reasoning?: { model: string; reasoningEffort: ProviderReasoningEffort; variantNames: string[] },
+  heartbeatPluginPath?: string,
 ): string | undefined {
   const config: Record<string, unknown> = {};
+  if (heartbeatPluginPath) config["plugin"] = [pathToFileURL(heartbeatPluginPath).href];
   if (mcpBindings?.length) {
     config["mcp"] = Object.fromEntries(
       mcpBindings.map((binding) => [
