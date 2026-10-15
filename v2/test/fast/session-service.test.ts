@@ -27074,6 +27074,233 @@ describe("SessionService", () => {
     }
   });
 
+  it.each(
+    (["direct", "queued"] as const).flatMap((origin) =>
+      (
+        [
+          "none",
+          "other",
+          "provider",
+          "server-error",
+          "launch",
+          "native",
+          "working",
+          "needs_input",
+          "rate_limited",
+          "composer",
+          "stale-write",
+        ] as const
+      ).map((guard) => ({ origin, guard })),
+    ),
+  )(
+    "rearms queued delivery after a held $origin pre-paste runtime diagnostic with guard=$guard",
+    async ({ origin, guard }) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const text = `probe recovery ${origin}`;
+      const record = runningSession({
+        agentLaunchId: "probe-generation",
+        agentSessionId: "session-uuid",
+        queuedMessages: { messages: [text], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      const file = join(TEST_ARTIFACTS_ROOT, `probe-recovery-${origin}.jsonl`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+      );
+      const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+      const acknowledgements: boolean[] = [];
+      createAgentSubmitAckBindingMock.mockImplementation(async () => {
+        const baseline = { agent: "claude" as const, file, size: statSync(file).size };
+        expect(await scanClaudeJsonlForMessage(baseline, text, record.worktreePath)).toBe(false);
+        return {
+          baseline,
+          async scan(message: string) {
+            const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+            acknowledgements.push(found);
+            return { found, lastScannedFile: file };
+          },
+        };
+      });
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: message } }) + "\n",
+        );
+      });
+      let releaseProbe: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
+      let enteredProbe: () => void = () => {};
+      const probing = new Promise<void>((resolve) => {
+        enteredProbe = resolve;
+      });
+      let failed = false;
+      probeTmuxProcessMatchMock.mockImplementation(
+        async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+          if (options?.fresh && !failed) {
+            failed = true;
+            enteredProbe();
+            await gate;
+            return {
+              alive: false,
+              matchedByName: false,
+              unresponsive: false,
+              diagnostic: "ps failed: malformed process table output",
+            };
+          }
+          return { alive: true, matchedByName: true, unresponsive: false };
+        },
+      );
+      const attempt = (
+        origin === "direct"
+          ? service.send(record.id, { message: "direct probe", queue: false, interrupt: false })
+          : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
+      ).catch((error: unknown) => error);
+      try {
+        await probing;
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        if (guard === "launch" || guard === "native") {
+          sessions.set(record.id, {
+            ...record,
+            ...(guard === "launch"
+              ? { agentLaunchId: "replacement-generation" }
+              : { agentSessionId: "replacement-native" }),
+          });
+        } else if (guard === "other" || guard === "provider") {
+          sessions.set(record.id, {
+            ...record,
+            error:
+              guard === "other"
+                ? "Session status detection failed: unrelated diagnostic"
+                : "Provider request refused",
+            errorSource: "other",
+          });
+        } else if (guard === "server-error") {
+          sessions.set(record.id, { ...record, serverErrorAt: "2026-03-18T10:04:00.000Z" });
+        }
+        releaseProbe();
+        await attempt;
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+        if (guard !== "other" && guard !== "provider") {
+          expect(sessions.get(record.id)?.error).toContain("malformed process table output");
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(acknowledgements).toEqual([]);
+
+        if (guard === "working" || guard === "needs_input" || guard === "rate_limited") {
+          mockClaudeJsonlState(guard);
+        } else if (guard === "composer") {
+          const current = sessions.get(record.id);
+          if (!current) throw new Error("Probe removed session");
+          sessions.set(record.id, {
+            ...current,
+            submitUnconfirmedAt: "2026-03-18T10:06:00.000Z",
+            queuedMessages: { messages: [text], awaitingPrompt: true },
+          });
+        } else if (guard === "stale-write") {
+          mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 1_000 });
+          const { paneWriteFenceAt } = service as unknown as {
+            paneWriteFenceAt: Map<string, number>;
+          };
+          paneWriteFenceAt.set(record.id, Date.now());
+        }
+        if (guard !== "none") {
+          const view = await service.get(record.id);
+          if (guard === "composer") {
+            expect(view.submitUnconfirmedAt).toBe("2026-03-18T10:06:00.000Z");
+          } else {
+            await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+          }
+          expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(acknowledgements).toEqual([]);
+          if (["other", "provider", "launch", "native"].includes(guard)) {
+            expect(sessions.get(record.id)?.errorSource).toBe("other");
+            expect(view.state).toBe("error");
+          }
+          return;
+        }
+        expect((await service.get(record.id)).state).toBe("waiting");
+        await vi.waitFor(() => {
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        });
+        expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith(
+          record.tmuxSession,
+          text,
+          expect.anything(),
+        );
+        expect(acknowledgements).toEqual([true]);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.agentLaunchId).toBe(record.agentLaunchId);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        await service.get(record.id);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      } finally {
+        releaseProbe();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(["direct", "queued"] as const)(
+    "keeps a typed workspace diagnostic from %s delivery outside runtime healing",
+    async (origin) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({
+        agentSessionId: "session-uuid",
+        agentLaunchId: "workspace-generation",
+        queuedMessages: { messages: ["keep workspace head"], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+      });
+      probeWorkspaceMock.mockReturnValue({
+        exists: false,
+        missing: false,
+        diagnostic: "workspace stat failed: permission denied",
+      });
+      try {
+        if (origin === "direct") {
+          await expect(
+            service.send(record.id, { message: "direct workspace", queue: false }),
+          ).rejects.toMatchObject({ name: "TmuxProbeUnknownError" });
+        } else {
+          await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+        }
+        expect(sessions.get(record.id)?.errorSource).toBe("other");
+        probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        expect((await service.get(record.id)).state).toBe("error");
+        await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+        expect(sessions.get(record.id)?.errorSource).toBe("other");
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["keep workspace head"]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
   it("automatically drains queued delivery after already-running runtime probe heals", async () => {
     const sessions = createSessionStore();
     const service = await createDisposedSessionService();

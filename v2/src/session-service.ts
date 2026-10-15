@@ -16055,7 +16055,17 @@ export class SessionService {
         return this.enrich(readSession(this.config.dataDir, sessionId) ?? initialSession);
       }
       if (error instanceof TmuxProbeUnknownError && initialSession) {
-        this.retainDetectionError(initialSession, error.message, "other");
+        const latest = readSession(this.config.dataDir, sessionId);
+        this.retainDetectionError(
+          initialSession,
+          error.message,
+          latest &&
+            latest.errorSource !== "other" &&
+            sameSessionRuntimeOwner(latest, initialSession) &&
+            latest.agentLaunchId === initialSession.agentLaunchId
+            ? "runtime_probe"
+            : "other",
+        );
       }
       if (
         error instanceof SessionRateLimitedError ||
@@ -21035,7 +21045,17 @@ export class SessionService {
         // attempt, not only the send itself). The message stays queued; the
         // loop's own sleep-and-continue retries it on the next poll.
         if (error instanceof TmuxProbeUnknownError) {
-          this.retainDetectionError(session, error.message, "other");
+          const latest = readSession(this.config.dataDir, sessionId);
+          this.retainDetectionError(
+            session,
+            error.message,
+            latest &&
+              latest.errorSource !== "other" &&
+              sameSessionRuntimeOwner(latest, session) &&
+              latest.agentLaunchId === session.agentLaunchId
+              ? "runtime_probe"
+              : "other",
+          );
         }
         const failure = error instanceof Error ? error.message : String(error);
         // Log-once-per-transition: a permanently broken session (e.g. a
