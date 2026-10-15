@@ -30467,6 +30467,57 @@ describe("SessionService", () => {
     expect(recoverWrite?.[1].agentSessionId).not.toBe(PINNED_CLAUDE_SESSION_ID);
   });
 
+  it("refuses the fresh-launch fallback when the failed resume generation leaves a non-active-pane survivor", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: PINNED_CLAUDE_SESSION_ID,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: `claude --session-id ${PINNED_CLAUDE_SESSION_ID} --dangerously-skip-permissions`,
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    createTmuxSessionMock.mockRejectedValueOnce(new Error("native launch failed before creation"));
+    const refs = [
+      { pid: 501, identity: "start-501" },
+      { pid: 502, identity: "start-502" },
+    ];
+    lookupTmuxSessionPanePidsMock.mockResolvedValue({ status: "ok", panePids: [4242, 4343] });
+    capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: refs });
+    // First teardown (before the resume launch) is clean; the failed resume
+    // generation's teardown leaves the non-active pane's agent alive.
+    terminateAgentProcessesMock
+      .mockResolvedValueOnce({ status: "clear" })
+      .mockResolvedValueOnce({ status: "survivors", pids: [502] });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(
+      /502 survived SIGKILL; refusing to launch a replacement/,
+    );
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "session.recover.resume_failed",
+      ),
+    ).toBe(true);
+    expect(capturePaneAgentProcessesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ panePids: [4242, 4343] }),
+    );
+    expect(terminateAgentProcessesMock).toHaveBeenCalledTimes(2);
+    expect(terminateAgentProcessesMock).toHaveBeenLastCalledWith(refs);
+    // Only the failed native resume attempt; no fresh-launch replacement.
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("drops the cached claude jsonl reader when fallback recovery mints a fresh id", async () => {
     const FRESH_CLAUDE_SESSION_ID = "22222222-2222-4222-8222-222222222222";
     buildAgentLaunchPlanMock.mockImplementation(
@@ -51674,6 +51725,79 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
 
       await expect(service.restore("api-1")).rejects.toThrow(/555/);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    // Expanded capture set: pane 4242 is the non-active agent pane, 4343 the
+    // active user split. Its captured agent (502) surviving SIGKILL must
+    // refuse the replacement exactly like an active-pane survivor.
+    const expandedSetSurvivor = () => {
+      const refs = [
+        { pid: 501, identity: "start-501" },
+        { pid: 502, identity: "start-502" },
+      ];
+      lookupTmuxSessionPanePidsMock.mockResolvedValue({ status: "ok", panePids: [4242, 4343] });
+      capturePaneAgentProcessesMock.mockResolvedValue({ status: "ok", processes: refs });
+      return refs;
+    };
+
+    it("refuses restore when an agent captured from a non-active pane survives SIGKILL", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      const refs = expandedSetSurvivor();
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [502] });
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(
+        /502 survived SIGKILL; refusing to launch a replacement/,
+      );
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+        expect.objectContaining({ panePids: [4242, 4343] }),
+      );
+      expect(terminateAgentProcessesMock).toHaveBeenCalledWith(refs);
+      expect(
+        logSpurEventMock.mock.calls.some(
+          ([, entry]) =>
+            entry.event === "session.agent_process.survivors" &&
+            JSON.stringify(entry.details) === JSON.stringify({ pids: [502] }),
+        ),
+      ).toBe(true);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses send-path relaunch when an agent captured from a non-active pane survives SIGKILL", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        agentSessionId: "session-uuid",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      const refs = expandedSetSurvivor();
+      terminateAgentProcessesMock.mockResolvedValueOnce({ status: "survivors", pids: [502] });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(
+        /502 survived SIGKILL; refusing to launch a replacement/,
+      );
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+        expect.objectContaining({ panePids: [4242, 4343] }),
+      );
+      expect(terminateAgentProcessesMock).toHaveBeenCalledWith(refs);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
     });
 
