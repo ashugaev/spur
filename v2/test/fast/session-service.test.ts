@@ -16899,6 +16899,32 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
   });
 
+  it("sends Enter only once per cooldown window for a non-team usage-limit menu still showing on the next tick", async () => {
+    readSessionMock.mockReturnValue(runningSession());
+    mockClaudeSessionStatus("needs_input", "waiting");
+    mockClaudeJsonlState("waiting");
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "❯ 1. Stop and wait for limit to reset",
+        "  2. Switch to usage credits",
+        "  3. Upgrade your plan",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    await service.get("api-1");
+
+    expect(first.state).toBe("rate_limited");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+  });
+
   it("logs session.rate_limit.usage_menu_confirmed when the usage-limit menu is confirmed", async () => {
     readSessionMock.mockReturnValue(runningSession());
     mockClaudeSessionStatus("needs_input", "waiting");
@@ -17621,6 +17647,96 @@ describe("SessionService", () => {
         "",
         "  1. Stop and wait for limit to reset",
         "> 2. Ask your admin for more usage",
+        "",
+        "Enter to confirm · Esc to cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // Drain construction's baseline dashboard + attention ticks, then freeze
+    // both background loops so the rest of this test is driven only by the
+    // explicit calls below — the periodic dashboard tick's own exempt
+    // rate_limited re-affirmations would otherwise keep refreshing
+    // stabilizeState's hold window against a real clock advance and mask
+    // the very transitions this test checks.
+    const internals = service as unknown as {
+      attentionMonitorRunning: boolean;
+      dashboardCacheReady: Promise<void> | null;
+      stopDashboardCacheLoop: () => void;
+      runDashboardCacheTick: () => Promise<void>;
+    };
+    await internals.dashboardCacheReady;
+    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
+      await Promise.resolve();
+    }
+    internals.attentionMonitorRunning = true;
+    internals.stopDashboardCacheLoop();
+
+    // A live (scanPane:true) classify sees the menu and re-confirms.
+    const live = await service.get("api-1");
+    expect(live.state).toBe("rate_limited");
+
+    // A genuinely blank ("") capture is not an observation in either
+    // direction for this override (distinct from a failed fork, which
+    // returns `null` — see the sibling `null` test below): this live tick
+    // must reuse the stored override rather than recomputing
+    // paneReconfirmedLimit fresh off a null menuHit, which would otherwise
+    // flip this exact tick to "waiting" — reopening the delivery-suppression
+    // window stateHistory feeds isLiveStateRateLimited, even if only for one
+    // tick.
+    captureTmuxPaneMock.mockResolvedValue("");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterFailedCapture = await service.get("api-1");
+    expect(afterFailedCapture.state).toBe("rate_limited");
+
+    // The scanPane:false dashboard tick never captures its own pane, so it
+    // only sees "rate_limited" here if the override survived the empty
+    // capture above.
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterFailedCapture = await service.list({ view: "dashboard" });
+    expect(dashboardAfterFailedCapture[0]).toMatchObject({ id: "api-1", state: "rate_limited" });
+
+    // A genuine (non-empty) pane with no menu is a real observation: it must
+    // still clear the override so the dashboard doesn't strand rate_limited
+    // forever once the menu is actually gone.
+    captureTmuxPaneMock.mockResolvedValue("line 1: doing unrelated follow-up work");
+    await vi.advanceTimersByTimeAsync(4_001);
+    const afterRealClear = await service.get("api-1");
+    expect(afterRealClear.state).toBe("waiting");
+
+    captureTmuxPaneMock.mockClear();
+    await internals.runDashboardCacheTick();
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    const dashboardAfterRealClear = await service.list({ view: "dashboard" });
+    expect(dashboardAfterRealClear[0]).toMatchObject({ id: "api-1", state: "waiting" });
+
+    service.dispose();
+  });
+
+  it("clears rate_limited once a non-team usage-limit menu is replaced by a genuine non-empty pane", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ rateLimitedAt: "2026-03-18T09:00:00.000Z" }));
+    mockClaudeSessionStatus("waiting", "idle");
+    readClaudeJsonlStateMock.mockResolvedValue({
+      state: "waiting",
+      reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+      rateLimit: {
+        limited: true,
+        reason: "claude rate_limit",
+        resetAtMs: Date.parse("2026-03-18T09:00:00.000Z"),
+      },
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "What do you want to do?",
+        "",
+        "  1. Stop and wait for limit to reset",
+        "> 2. Wait here, then continue automatically shortly",
+        "  3. Upgrade your plan",
         "",
         "Enter to confirm · Esc to cancel",
       ].join("\n"),
