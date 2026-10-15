@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { parse } from "yaml";
 import { integer, object, string, ReviewAppError } from "./github-app.js";
+import { requiredCiJobNames } from "./ci-job-definitions.js";
 import {
   GateGitHub,
   readGateSnapshot,
@@ -218,7 +219,7 @@ export async function runProducer(env: NodeJS.ProcessEnv): Promise<void> {
   const target = await verifyWake(api, repo, string(env.GITHUB_EVENT_NAME), payload);
   const ciPath = resolve(fileURLToPath(new URL("../../.github/workflows/ci.yml", import.meta.url)));
   const definition = object(parse(await readFile(ciPath, "utf8")));
-  const jobs = Object.values(object(definition.jobs)).map((value) => string(object(value).name));
+  const jobs = requiredCiJobNames(definition);
   const workflow = object(await api.request(`/repos/${repo}/actions/workflows/ci.yml`));
   if (workflow.path !== ".github/workflows/ci.yml")
     throw new ReviewAppError("ci-workflow-mismatch");

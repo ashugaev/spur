@@ -5,6 +5,36 @@ import { GateGitHub } from "../../src/review-gate.js";
 import { produceGates, runProducer, verifyWake } from "../../src/review-gate-producer.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REQUIRED_CI_JOB_IDS, requiredCiJobNames } from "../../src/ci-job-definitions.js";
+
+test("hosted admission jobs cannot expand the four real required contexts", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  ) as { jobs: Record<string, unknown> };
+  const expected = ["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"];
+  expect(requiredCiJobNames(workflow)).toEqual(expected);
+  expect(
+    requiredCiJobNames({
+      jobs: {
+        ...workflow.jobs,
+        "quality-admission": { name: "Hosted admission", uses: "./admission.yml" },
+        "unnamed-admission": { uses: "./admission.yml" },
+      },
+    }),
+  ).toEqual(expected);
+  for (const id of REQUIRED_CI_JOB_IDS) {
+    expect(() =>
+      requiredCiJobNames({
+        jobs: Object.fromEntries(Object.entries(workflow.jobs).filter(([name]) => name !== id)),
+      }),
+    ).toThrow();
+  }
+  expect(() =>
+    requiredCiJobNames({
+      jobs: Object.fromEntries(REQUIRED_CI_JOB_IDS.map((id) => [id, { name: "same" }])),
+    }),
+  ).toThrow("duplicate-required-ci-job-name");
+});
 
 const policy = {
   repository: "owner/repo",
@@ -409,8 +439,12 @@ test("CI provenance uses built-in merge ref/SHA and all four default event check
   expect(ci["run-name"]).toMatch(
     /^Spur CI v1 REF=\$\{\{ github.ref \}\} M=\$\{\{ github.sha \}\}$/,
   );
-  const checkouts = Object.values(ci.jobs).flatMap((job) =>
-    job.steps.filter((step) => step.uses?.startsWith("actions/checkout@")),
+  const checkouts = ["quality", "playwright", "runtime-integration", "real-agent-smoke"].flatMap(
+    (id) => {
+      const job = ci.jobs[id];
+      expect(job).toBeDefined();
+      return job?.steps.filter((step) => step.uses?.startsWith("actions/checkout@")) ?? [];
+    },
   );
   expect(checkouts).toHaveLength(4);
   expect(checkouts.every((step) => step.with?.ref === undefined)).toBe(true);
