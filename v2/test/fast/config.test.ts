@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,8 @@ import {
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
+  projectConfigSource,
+  carryProjectConfigSource,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -33,6 +36,23 @@ const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+
+it("retains the parsed source bytes without trusting a later config reread or copied object", async () => {
+  const file = await writeConfig("projects:\n  app:\n    path: $REPO_PATH\n");
+  await writeFile(file, Buffer.concat([await readFile(file), Buffer.from([35, 32, 255, 10])]));
+  const bytes = await readFile(file);
+  const project = loadConfig(file).projects["app"];
+  if (!project) throw new Error("missing project");
+  await writeFile(file, "projects: {}\n");
+  expect(projectConfigSource(project)).toEqual({
+    file: await realpath(file),
+    digest: createHash("sha256").update(bytes).digest("hex"),
+  });
+  const copied = { ...project };
+  expect(projectConfigSource(copied)).toBeNull();
+  carryProjectConfigSource(project, copied);
+  expect(projectConfigSource(copied)).toEqual(projectConfigSource(project));
+});
 
 it("parses caller-pinned release continuation and rejects invalid interval/digest", async () => {
   const configPath = await writeConfig(
