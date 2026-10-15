@@ -15590,6 +15590,217 @@ describe("SessionService", () => {
       ];
     }
 
+    describe("C7 legacy auth migration", () => {
+      function migrationFixture(state: "working" | "waiting", survivor = false) {
+        const original = runningSession({
+          claudeAccountId: "primary",
+          agentSessionId: "session-uuid",
+          agentLaunchId: "primary-launch",
+        });
+        const sessions = createSessionStore(original);
+        const sessionHome = `${TEST_DATA_DIR}/session-tools/api-1/claude-home`;
+        const activeRefs = [
+          { pid: 4343, identity: "active-exec" },
+          { pid: 4344, identity: "active-child" },
+        ];
+        const inactiveRef = { pid: 777, identity: "inactive-child" };
+        const alive = new Set([4343, 4344, 777]);
+        const signalled: number[] = [];
+        let installedAccount = "primary";
+        let runtimeAlive = true;
+        let survived = false;
+        seedAccounts();
+        mockOwnershipAgent("claude");
+        mockClaudeSessionStatus(state, state === "working" ? "busy" : "idle");
+        loadConfigMock.mockReturnValue(baseConfig());
+        mkdirSync(sessionHome, { recursive: true });
+        // The existing home must not select the modern in-place branch.
+        expect(original.launchCommand).not.toContain("CLAUDE_CONFIG_DIR");
+        swapSessionCredentialsMock.mockImplementation((_home: string, account: TestAccount) => {
+          installedAccount = account.id;
+        });
+        lookupTmuxPanePidMock.mockImplementation(async (_name, options) => ({
+          status: "ok",
+          panePid: options?.fresh ? 4343 : 4242,
+          paneDead: false,
+        }));
+        lookupTmuxSessionPanePidsMock.mockResolvedValue({
+          status: "ok",
+          panePids: [4242, 4343],
+        });
+        capturePaneAgentProcessesMock.mockImplementation(async (input) => {
+          expect(installedAccount).toBe("backup");
+          expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+          const roots = "panePids" in input ? input.panePids : [input.panePid];
+          const refs = [
+            ...(roots.includes(4343) ? activeRefs : []),
+            ...(roots.includes(4242) ? [inactiveRef] : []),
+          ];
+          return { status: "ok", processes: refs.filter((ref) => alive.has(ref.pid)) };
+        });
+        findForeignAgentProcessesForSessionMock.mockImplementation(async (input) => ({
+          status: "ok" as const,
+          pids: alive.has(777) && !input?.excludePanePids.includes(4242) ? [777] : [],
+        }));
+        terminateAgentProcessesMock.mockImplementation(async (refs) => {
+          expect(installedAccount).toBe("backup");
+          expect(sessions.get("api-1")?.claudeAccountId).toBe("backup");
+          for (const ref of refs) {
+            signalled.push(ref.pid);
+            if (!(survivor && !survived && ref.pid === 4344)) alive.delete(ref.pid);
+          }
+          if (survivor && !survived) {
+            survived = true;
+            return { status: "survivors", pids: [4344] };
+          }
+          return { status: "clear" };
+        });
+        isProcessRunningInTmuxMock.mockImplementation(async () => runtimeAlive);
+        tmuxSessionExistsMock.mockImplementation(async () => runtimeAlive);
+        killTmuxSessionMock.mockImplementation(async () => {
+          runtimeAlive = false;
+        });
+        createTmuxSessionMock.mockImplementation(async () => {
+          expect(alive.has(4343)).toBe(false);
+          expect(alive.has(4344)).toBe(false);
+          alive.add(900);
+          runtimeAlive = true;
+        });
+        return {
+          sessions,
+          original,
+          sessionHome,
+          activeRefs,
+          alive,
+          signalled,
+          installedAccount: () => installedAccount,
+        };
+      }
+
+      function expectUnchanged(fixture: ReturnType<typeof migrationFixture>): void {
+        expect(fixture.sessions.get("api-1")).toEqual(fixture.original);
+        expect(fixture.installedAccount()).toBe("primary");
+        expect([...fixture.alive]).toEqual([4343, 4344, 777]);
+        expect(fixture.signalled).toEqual([]);
+        expect(swapSessionCredentialsMock).not.toHaveBeenCalled();
+        expect(seedSessionHomeMock).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(touchAccountUsedMock).not.toHaveBeenCalled();
+        expect(capturePaneAgentProcessesMock).not.toHaveBeenCalled();
+        expect(findForeignAgentProcessesForSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      }
+
+      it("working without force preserves primary account and every old process before side effects", async () => {
+        const fixture = migrationFixture("working");
+        const service = await createDisposedSessionService();
+        await expect(service.switchAuth("api-1", "backup", { reason: "manual" })).rejects.toThrow(
+          /working/,
+        );
+        expectUnchanged(fixture);
+      });
+
+      for (const target of ["unknown", "unready"] as const) {
+        it(`rejects ${target} backup before account or process mutation`, async () => {
+          const fixture = migrationFixture("waiting");
+          if (target === "unready") {
+            testAccounts = testAccounts.map((account) =>
+              account.id === "backup" ? { ...account, authenticated: false } : account,
+            );
+          }
+          const service = await createDisposedSessionService();
+          await expect(
+            service.switchAuth("api-1", target === "unknown" ? "ghost" : "backup", {
+              reason: "manual",
+            }),
+          ).rejects.toThrow(target === "unknown" ? /Unknown claude account/ : /not ready/);
+          expectUnchanged(fixture);
+        });
+      }
+
+      for (const force of [false, true]) {
+        it(`${force ? "working with force" : "idle without force"} migrates through fresh active P1 and cached active P2 only`, async () => {
+          const fixture = migrationFixture(force ? "working" : "waiting");
+          hasUncommittedChangesMock.mockResolvedValue(force);
+          const service = await createDisposedSessionService();
+          const view = await service.switchAuth("api-1", "backup", { reason: "manual", force });
+          expect(view.activeClaudeAccountId).toBe("backup");
+          expect(fixture.sessions.get("api-1")?.claudeAccountId).toBe("backup");
+          expect(fixture.installedAccount()).toBe("backup");
+          expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
+          expect(swapSessionCredentialsMock).toHaveBeenCalledWith(
+            fixture.sessionHome,
+            expect.objectContaining({ id: "backup" }),
+          );
+          expect(seedSessionHomeMock).toHaveBeenCalledWith(
+            fixture.sessionHome,
+            expect.objectContaining({ id: "backup" }),
+          );
+          expect(setupAgentHooksMock).toHaveBeenCalledWith(
+            expect.objectContaining({ claudeConfigDir: fixture.sessionHome }),
+          );
+          expect(terminateAgentProcessesMock.mock.calls.map(([refs]) => refs)).toEqual([
+            fixture.activeRefs,
+            [],
+          ]);
+          expect(fixture.signalled).toEqual([4343, 4344]);
+          expect([...fixture.alive]).toEqual([777, 900]);
+          expect(capturePaneAgentProcessesMock).toHaveBeenCalled();
+          for (const [input] of capturePaneAgentProcessesMock.mock.calls) {
+            expect(input).toEqual(
+              expect.objectContaining({
+                panePid: 4343,
+                paneDead: false,
+                processMatchers: ["claude"],
+              }),
+            );
+            expect(input).not.toHaveProperty("panePids");
+          }
+          expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ excludePanePids: [4242] }),
+          );
+          expect(lookupTmuxSessionPanePidsMock).not.toHaveBeenCalled();
+          expect(lookupTmuxPanePidMock).toHaveBeenCalledWith("api-1", undefined);
+          expect(lookupTmuxPanePidMock).toHaveBeenCalledWith("api-1", { fresh: true });
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          const [createOrder] = createTmuxSessionMock.mock.invocationCallOrder;
+          if (createOrder === undefined) throw new Error("expected replacement launch");
+          for (const order of terminateAgentProcessesMock.mock.invocationCallOrder)
+            expect(order).toBeLessThan(createOrder);
+          expect(removeWorktreeMock).not.toHaveBeenCalled();
+          expect(fixture.sessions.get("api-1")).toEqual(
+            expect.objectContaining({
+              branch: fixture.original.branch,
+              worktreePath: fixture.original.worktreePath,
+              worktree: fixture.original.worktree,
+            }),
+          );
+        });
+      }
+
+      it("forced active survivor refuses replacement after backup credentials and account were persisted", async () => {
+        const fixture = migrationFixture("working", true);
+        const service = await createDisposedSessionService();
+        await expect(
+          service.switchAuth("api-1", "backup", { reason: "manual", force: true }),
+        ).rejects.toThrow(/4344 survived SIGKILL; refusing to launch a replacement/);
+        expect(fixture.sessions.get("api-1")?.claudeAccountId).toBe("backup");
+        expect(fixture.installedAccount()).toBe("backup");
+        expect(touchAccountUsedMock).toHaveBeenCalledWith(TEST_DATA_DIR, "backup");
+        expect(fixture.signalled).toEqual([4343, 4344]);
+        expect([...fixture.alive]).toEqual([4344, 777]);
+        expect(capturePaneAgentProcessesMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ panePid: 4343, paneDead: false }),
+        );
+        expect(terminateAgentProcessesMock).toHaveBeenCalledExactlyOnceWith(fixture.activeRefs);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(findForeignAgentProcessesForSessionMock).not.toHaveBeenCalled();
+        expect(lookupTmuxSessionPanePidsMock).not.toHaveBeenCalled();
+      });
+    });
+
     it("refuses to switch while working without force", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
