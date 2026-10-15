@@ -4,6 +4,7 @@ import { open, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findLatestSessionFile, sessionFileForId, sessionFilePathForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
+import { iterNativeJsonlLines } from "../jsonl-log-io.js";
 import type { NativeUserObservation } from "./index.js";
 
 export interface ClaudeSubmitBaseline {
@@ -146,18 +147,14 @@ async function scanFileForDeliveredText(
         await file.close();
       }
     }
-    const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
+    const input = createReadStream(filePath, { start: startOffset });
     let byteOffset = startOffset;
-    const framing = { lineFeedOnly: true, terminated: false };
-    input.on("data", (chunk: string | Buffer) => {
-      if (chunk.includes("\r")) framing.lineFeedOnly = false;
-      framing.terminated = chunk.at(-1) === (typeof chunk === "string" ? "\n" : 10);
-    });
-    const reader = createInterface({ input, crlfDelay: Infinity });
+    const reader = native ? null : createInterface({ input, crlfDelay: Infinity });
     try {
-      for await (const rawLine of reader) {
+      for await (const record of reader ?? iterNativeJsonlLines(input)) {
+        const rawLine = typeof record === "string" ? record : record.toString("utf8");
         const rowOffset = byteOffset;
-        const rowBytes = Buffer.byteLength(rawLine);
+        const rowBytes = typeof record === "string" ? Buffer.byteLength(record) : record.length;
         byteOffset += rowBytes + 1;
         const trimmed = rawLine.trim();
         if (!trimmed) continue;
@@ -185,7 +182,7 @@ async function scanFileForDeliveredText(
                   typeof parsed["uuid"] === "string"
                     ? parsed["uuid"]
                     : `bytes:${rowOffset}:${rowBytes}`,
-                recordDigest: createHash("sha256").update(rawLine).digest("hex"),
+                recordDigest: createHash("sha256").update(record).digest("hex"),
                 bodyDigest: native.bodyDigest,
               });
             }
@@ -199,13 +196,12 @@ async function scanFileForDeliveredText(
           (normalize(text) === normalizedTarget ||
             normalize(unwrapPastedContent(text)) === normalizedTarget)
         ) {
-          reader.close();
+          reader?.close();
           return true;
         }
       }
-      if (native && (!framing.lineFeedOnly || !framing.terminated)) native.matches.length = 0;
     } finally {
-      reader.close();
+      reader?.close();
     }
   } catch {
     if (native) native.matches.length = 0;

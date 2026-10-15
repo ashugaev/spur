@@ -93,8 +93,49 @@ describe("native accepted input", () => {
         bodyDigest: digest,
       }),
     ]);
+    const row = Buffer.from(
+      JSON.stringify(userTurn(`<timestamp>now</timestamp>\n<user_query>\n${body}\n</user_query>`)),
+    );
+    expect(observations[0]?.recordId).toBe(`bytes:${size}:${row.length}`);
+    expect(observations[0]?.recordDigest).toBe(createHash("sha256").update(row).digest("hex"));
     expect(await observeCursorNativeUsers({ file, size }, digest, "native")).toEqual(observations);
     expect(await observeCursorNativeUsers({ file, size: size - 1 }, digest, "native")).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "rejects malformed raw UTF-8 with a later valid USER=%s",
+    async (later) => {
+      const file = await makeJsonl("native.jsonl", []);
+      const row = Buffer.from(JSON.stringify(userTurn("SENT")));
+      const at = row.indexOf("SENT");
+      const malformed = Buffer.concat([
+        row.subarray(0, at),
+        Buffer.from([0xff]),
+        row.subarray(at + 4),
+        Buffer.from("\n"),
+      ]);
+      await writeFile(
+        file,
+        later
+          ? Buffer.concat([malformed, Buffer.from(JSON.stringify(userTurn(body)) + "\n")])
+          : malformed,
+      );
+      const target = later ? body : "\ufffd";
+      const hash = createHash("sha256").update(target).digest("hex");
+      expect(await observeCursorNativeUsers({ file, size: 0 }, hash, "native")).toEqual([]);
+      expect(
+        (await scanCursorJsonlForMessage({ file, size: 0 }, "\ufffd", "/tmp/worktree")).found,
+      ).toBe(true);
+    },
+  );
+
+  it.each(["", "\r\n"])("rejects unsupported raw record ending %j", async (ending) => {
+    const file = await makeJsonl("native.jsonl", []);
+    await writeFile(file, JSON.stringify(userTurn(body)) + ending);
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+    expect((await scanCursorJsonlForMessage({ file, size: 0 }, body, "/tmp/worktree")).found).toBe(
+      true,
+    );
   });
 
   it("preserves prefix pacing but rejects omitted or changed full caller metadata", async () => {

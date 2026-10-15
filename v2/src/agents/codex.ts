@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { iterNativeJsonlLines } from "../jsonl-log-io.js";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
@@ -862,26 +863,19 @@ export async function scanCodexRolloutForMessage(
     const offset = baseline.get(filePath) ?? 0;
     const matches: NativeUserObservation[] = [];
     try {
-      const input = createReadStream(filePath, { encoding: "utf-8", start: native ? 0 : offset });
+      const input = createReadStream(filePath, { start: native ? 0 : offset });
       let byteOffset = 0;
       const source = {
         headerValid: false,
         conflictingHeader: false,
         boundarySeen: offset === 0,
-        lineFeedOnly: true,
-        terminated: false,
       };
-      if (native) {
-        input.on("data", (chunk: string | Buffer) => {
-          if (chunk.includes("\r")) source.lineFeedOnly = false;
-          source.terminated = chunk.at(-1) === (typeof chunk === "string" ? "\n" : 10);
-        });
-      }
-      const reader = createInterface({ input, crlfDelay: Infinity });
+      const reader = native ? null : createInterface({ input, crlfDelay: Infinity });
       try {
-        for await (const rawLine of reader) {
+        for await (const record of reader ?? iterNativeJsonlLines(input)) {
+          const rawLine = typeof record === "string" ? record : record.toString("utf8");
           const rowOffset = byteOffset;
-          const rowBytes = Buffer.byteLength(rawLine);
+          const rowBytes = typeof record === "string" ? Buffer.byteLength(record) : record.length;
           byteOffset += rowBytes + 1;
           if (rowOffset === offset) source.boundarySeen = true;
           const trimmedLine = rawLine.trim();
@@ -935,7 +929,7 @@ export async function scanCodexRolloutForMessage(
               nativeSessionId: native.sessionId,
               source: filePath,
               recordId: `bytes:${rowOffset}:${rowBytes}`,
-              recordDigest: createHash("sha256").update(rawLine).digest("hex"),
+              recordDigest: createHash("sha256").update(record).digest("hex"),
               bodyDigest: native.bodyDigest,
             });
           }
@@ -944,22 +938,15 @@ export async function scanCodexRolloutForMessage(
             extracted !== null &&
             extracted.trim() === trimmedTarget
           ) {
-            reader.close();
+            reader?.close();
             return { found: true, lastScannedFile: filePath };
           }
         }
-        if (
-          native &&
-          source.headerValid &&
-          !source.conflictingHeader &&
-          source.boundarySeen &&
-          source.lineFeedOnly &&
-          source.terminated
-        ) {
+        if (native && source.headerValid && !source.conflictingHeader && source.boundarySeen) {
           native.matches.push(...matches);
         }
       } finally {
-        reader.close();
+        reader?.close();
       }
     } catch {
       // Ignore unreadable files.

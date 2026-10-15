@@ -124,11 +124,51 @@ describe("native accepted input", () => {
     expect(observations).toEqual([
       expect.objectContaining({ recordId: `bytes:${priorBytes}:${priorBytes - 1}` }),
     ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256")
+        .update(Buffer.from(JSON.stringify(prior)))
+        .digest("hex"),
+    );
     const emojiByteOffset = Buffer.byteLength(JSON.stringify(prior).split("🧪")[0] ?? "");
     for (const size of [5, emojiByteOffset + 1, priorBytes - 1]) {
       expect(await observeClaudeNativeUsers({ file, size }, textDigest, "native")).toEqual([]);
     }
   });
+
+  it.each([false, true])(
+    "rejects malformed raw UTF-8 with a later valid USER=%s",
+    async (later) => {
+      const file = await makeJsonl("current.jsonl", []);
+      const row = Buffer.from(
+        JSON.stringify({
+          type: "user",
+          sessionId: "native",
+          message: { role: "user", content: "SENT" },
+        }),
+      );
+      const at = row.indexOf("SENT");
+      const malformed = Buffer.concat([
+        row.subarray(0, at),
+        Buffer.from([0xff]),
+        row.subarray(at + 4),
+        Buffer.from("\n"),
+      ]);
+      const valid = Buffer.from(
+        JSON.stringify({
+          type: "user",
+          sessionId: "native",
+          message: { role: "user", content: body },
+        }) + "\n",
+      );
+      await writeFile(file, later ? Buffer.concat([malformed, valid]) : malformed);
+      const target = later ? body : "\ufffd";
+      const hash = createHash("sha256").update(target).digest("hex");
+      expect(await observeClaudeNativeUsers({ file, size: 0 }, hash, "native")).toEqual([]);
+      expect(
+        await scanClaudeJsonlForMessage({ file, size: 0 }, "\ufffd", "/tmp/worktree", "native"),
+      ).toBe(true);
+    },
+  );
 
   it.each(["isMeta", "isCompactSummary", "isSidechain"])(
     "does not promote copied %s USER text into a submitted occurrence",

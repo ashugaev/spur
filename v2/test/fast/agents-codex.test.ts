@@ -1167,11 +1167,15 @@ describe("native accepted input", () => {
     payload: { type: "message", role: "user", content: [{ type: "input_text", text: body }] },
   };
 
-  async function nativeRows(rows: unknown[]): Promise<void> {
+  async function nativeRows(rows: unknown[], bytes?: Buffer): Promise<void> {
     const actual = await vi.importActual<typeof Readline>("node:readline");
-    const content = Buffer.from(rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const content = bytes ?? Buffer.from(rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
     mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
-    mockCreateReadStream.mockImplementation(() => Readable.from([content]));
+    // Split a persisted emoji inside its UTF-8 encoding, as stream chunks can.
+    const split = content.indexOf(Buffer.from("🧪")) + 1;
+    mockCreateReadStream.mockImplementation(() =>
+      Readable.from([content.subarray(0, split), content.subarray(split)]),
+    );
     mockCreateInterface.mockImplementation((options: Readline.ReadLineOptions) =>
       actual.createInterface(options),
     );
@@ -1240,6 +1244,11 @@ describe("native accepted input", () => {
         recordId: `bytes:${offset}:${Buffer.byteLength(JSON.stringify(user))}`,
       }),
     ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256")
+        .update(Buffer.from(JSON.stringify(user)))
+        .digest("hex"),
+    );
     expect(
       await observeCodexNativeUsers(
         "/sessions",
@@ -1249,6 +1258,45 @@ describe("native accepted input", () => {
         "/repo",
       ),
     ).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "rejects malformed raw UTF-8 with a later valid USER=%s",
+    async (later) => {
+      const row = Buffer.from(
+        JSON.stringify({
+          ...user,
+          payload: { ...user.payload, content: [{ type: "input_text", text: "SENT" }] },
+        }),
+      );
+      const at = row.indexOf("SENT");
+      const malformed = Buffer.concat([
+        row.subarray(0, at),
+        Buffer.from([0xff]),
+        row.subarray(at + 4),
+        Buffer.from("\n"),
+      ]);
+      const bytes = Buffer.concat([
+        Buffer.from(JSON.stringify(meta) + "\n"),
+        malformed,
+        ...(later ? [Buffer.from(JSON.stringify(user) + "\n")] : []),
+      ]);
+      await nativeRows([], bytes);
+      const target = later ? body : "\ufffd";
+      const hash = createHash("sha256").update(target).digest("hex");
+      expect(
+        await observeCodexNativeUsers("/sessions", new Map(), hash, "native", "/repo"),
+      ).toEqual([]);
+      expect((await scanCodexRolloutForMessage("/sessions", "\ufffd", new Map())).found).toBe(true);
+    },
+  );
+
+  it.each(["", "\r\n"])("rejects unsupported raw record ending %j", async (ending) => {
+    await nativeRows([], Buffer.from(JSON.stringify(meta) + "\n" + JSON.stringify(user) + ending));
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual([]);
+    expect((await scanCodexRolloutForMessage("/sessions", body, new Map())).found).toBe(true);
   });
 });
 
