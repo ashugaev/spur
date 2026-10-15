@@ -260,7 +260,9 @@ export async function resolveTodoMutationActor(args: {
   origin: UserActionOrigin;
   callerHeader: string | string[] | undefined;
   targetSessionId: string;
-  lookup: (sessionId: string) => Promise<{ id: string; agent: AgentName }>;
+  lookup: (
+    sessionId: string,
+  ) => { id: string; agent: AgentName } | Promise<{ id: string; agent: AgentName }>;
 }): Promise<TodoActor> {
   const { origin, callerHeader, targetSessionId, lookup } = args;
   if (Array.isArray(callerHeader))
@@ -1942,7 +1944,7 @@ export async function startServer(
           origin,
           callerHeader,
           targetSessionId,
-          lookup: (callerSessionId) => service.get(callerSessionId),
+          lookup: (callerSessionId) => service.getSessionIdentity(callerSessionId),
         });
         let body: TodoMutationRequest;
         try {

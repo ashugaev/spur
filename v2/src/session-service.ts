@@ -10419,6 +10419,11 @@ export class SessionService {
     return views.filter(included);
   }
 
+  getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
+    const { id, agent } = this.requireSession(sessionId);
+    return { id, agent };
+  }
+
   async get(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
