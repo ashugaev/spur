@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import {
   cp,
@@ -11,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
@@ -20,6 +21,7 @@ import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 import { agentExecutableCommand } from "./executable.js";
 import type { ProviderTokenUsageSample } from "../token-usage.js";
+import type { NativeUserObservation } from "./index.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -757,7 +759,10 @@ interface RolloutEventMsgPayload {
   turnId?: string;
 }
 
-function extractUserTextFromLine(line: string): string | null {
+function extractUserTextFromLine(
+  line: string,
+  inspect?: (record: Record<string, unknown>) => void,
+): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -767,6 +772,7 @@ function extractUserTextFromLine(line: string): string | null {
   if (!isRecord(parsed)) {
     return null;
   }
+  inspect?.(parsed);
   const type = parsed["type"];
   const payload = parsed["payload"];
   if (!isRecord(payload)) {
@@ -830,8 +836,14 @@ function extractAssistantTextFromLine(line: string): string | null {
 
 export async function scanCodexRolloutForMessage(
   sessionsDir: string,
-  messageText: string,
+  messageText: string | null,
   baseline: RolloutBaseline,
+  native?: {
+    sessionId: string;
+    worktreePath: string;
+    bodyDigest: string;
+    matches: NativeUserObservation[];
+  },
 ): Promise<{ found: boolean; lastScannedFile: string | null }> {
   let files: string[];
   try {
@@ -840,22 +852,107 @@ export async function scanCodexRolloutForMessage(
     return { found: false, lastScannedFile: null };
   }
   let lastScannedFile: string | null = null;
-  const trimmedTarget = messageText.trim();
+  const trimmedTarget = messageText?.trim();
   for (const filePath of files) {
     lastScannedFile = filePath;
     const offset = baseline.get(filePath) ?? 0;
+    const matches: NativeUserObservation[] = [];
     try {
-      const input = createReadStream(filePath, { encoding: "utf-8", start: offset });
+      const input = createReadStream(filePath, { encoding: "utf-8", start: native ? 0 : offset });
+      let byteOffset = 0;
+      const source = {
+        headerValid: false,
+        conflictingHeader: false,
+        boundarySeen: offset === 0,
+        lineFeedOnly: true,
+        terminated: false,
+      };
+      if (native) {
+        input.on("data", (chunk: string | Buffer) => {
+          if (chunk.includes("\r")) source.lineFeedOnly = false;
+          source.terminated = chunk.at(-1) === (typeof chunk === "string" ? "\n" : 10);
+        });
+      }
       const reader = createInterface({ input, crlfDelay: Infinity });
       try {
         for await (const rawLine of reader) {
+          const rowOffset = byteOffset;
+          const rowBytes = Buffer.byteLength(rawLine);
+          byteOffset += rowBytes + 1;
+          if (rowOffset === offset) source.boundarySeen = true;
           const trimmedLine = rawLine.trim();
           if (!trimmedLine) continue;
-          const extracted = extractUserTextFromLine(trimmedLine);
-          if (extracted !== null && extracted.trim() === trimmedTarget) {
+          const row = { canonicalUser: false };
+          const extracted = extractUserTextFromLine(
+            trimmedLine,
+            native
+              ? (record) => {
+                  const payload = record["payload"];
+                  if (!isRecord(payload)) return;
+                  if (record["type"] === "session_meta") {
+                    const origin = payload["source"];
+                    const valid =
+                      rowOffset === 0 &&
+                      payload["id"] === native.sessionId &&
+                      typeof payload["cwd"] === "string" &&
+                      resolve(payload["cwd"]) === resolve(native.worktreePath) &&
+                      payload["thread_source"] !== "subagent" &&
+                      !(isRecord(origin) && isRecord(origin["subagent"]));
+                    if (!valid) source.conflictingHeader = true;
+                    else source.headerValid = true;
+                  }
+                  // Codex's first-turn rollout can omit the user_message event.
+                  // Count its persisted USER item once, never its event echo as well.
+                  row.canonicalUser =
+                    record["type"] === "response_item" &&
+                    payload["type"] === "message" &&
+                    payload["role"] === "user" &&
+                    record["isMeta"] !== true &&
+                    record["isCompactSummary"] !== true &&
+                    Array.isArray(payload["content"]) &&
+                    payload["content"].every(
+                      (part: unknown) =>
+                        isRecord(part) &&
+                        part["type"] === "input_text" &&
+                        typeof part["text"] === "string",
+                    );
+                }
+              : undefined,
+          );
+          if (
+            native &&
+            source.headerValid &&
+            row.canonicalUser &&
+            rowOffset >= offset &&
+            extracted !== null &&
+            createHash("sha256").update(extracted.trim()).digest("hex") === native.bodyDigest
+          ) {
+            matches.push({
+              nativeSessionId: native.sessionId,
+              source: filePath,
+              recordId: `bytes:${rowOffset}:${rowBytes}`,
+              recordDigest: createHash("sha256").update(rawLine).digest("hex"),
+              bodyDigest: native.bodyDigest,
+            });
+          }
+          if (
+            trimmedTarget !== undefined &&
+            extracted !== null &&
+            extracted.trim() === trimmedTarget
+          ) {
             reader.close();
             return { found: true, lastScannedFile: filePath };
           }
+        }
+        if (
+          native &&
+          source.headerValid &&
+          !source.conflictingHeader &&
+          source.boundarySeen &&
+          source.lineFeedOnly &&
+          source.terminated
+        ) {
+          native.matches.push(...matches);
         }
       } finally {
         reader.close();
@@ -865,6 +962,23 @@ export async function scanCodexRolloutForMessage(
     }
   }
   return { found: false, lastScannedFile };
+}
+
+export async function observeCodexNativeUsers(
+  sessionsDir: string,
+  baseline: RolloutBaseline,
+  bodyDigest: string,
+  agentSessionId: string,
+  worktreePath: string,
+): Promise<NativeUserObservation[]> {
+  const matches: NativeUserObservation[] = [];
+  await scanCodexRolloutForMessage(sessionsDir, null, baseline, {
+    sessionId: agentSessionId,
+    worktreePath,
+    bodyDigest,
+    matches,
+  });
+  return matches;
 }
 
 export interface CodexRolloutStateRecord {

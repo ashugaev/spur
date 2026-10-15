@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import type * as FsPromises from "node:fs/promises";
+import type * as Readline from "node:readline";
+import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -56,6 +59,7 @@ import {
   linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
+  observeCodexNativeUsers,
   readCodexRolloutState,
 } from "../../src/agents/codex.js";
 
@@ -1151,6 +1155,100 @@ describe("captureCodexRolloutBaseline", () => {
     const result = await captureCodexRolloutBaseline("/sessions");
     expect(result.get("/sessions/a.jsonl")).toBe(100);
     expect(result.get("/sessions/b.jsonl")).toBe(200);
+  });
+});
+
+describe("native accepted input", () => {
+  const body = "Задача 🧪\n\nSession metadata:\ncaller exact suffix";
+  const digest = createHash("sha256").update(body).digest("hex");
+  const meta = { type: "session_meta", payload: { id: "native", cwd: "/repo" } };
+  const user = {
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text: body }] },
+  };
+
+  async function nativeRows(rows: unknown[]): Promise<void> {
+    const actual = await vi.importActual<typeof Readline>("node:readline");
+    const content = Buffer.from(rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockCreateReadStream.mockImplementation(() => Readable.from([content]));
+    mockCreateInterface.mockImplementation((options: Readline.ReadLineOptions) =>
+      actual.createInterface(options),
+    );
+  }
+
+  it("counts mirrored event and response USER records as one canonical occurrence", async () => {
+    await nativeRows([
+      meta,
+      { type: "event_msg", payload: { type: "user_message", message: body } },
+      user,
+    ]);
+    const observations = await observeCodexNativeUsers(
+      "/sessions",
+      new Map(),
+      digest,
+      "native",
+      "/repo",
+    );
+    expect(observations).toEqual([
+      expect.objectContaining({ nativeSessionId: "native", bodyDigest: digest }),
+    ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256").update(JSON.stringify(user)).digest("hex"),
+    );
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual(observations);
+  });
+
+  it("accepts a first-turn USER without an event echo, never an echo alone", async () => {
+    await nativeRows([meta, user]);
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toHaveLength(1);
+    await nativeRows([
+      meta,
+      { type: "event_msg", payload: { type: "user_message", message: body } },
+    ]);
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual([]);
+  });
+
+  it("rejects wrong session_meta identity and worktree", async () => {
+    await nativeRows([meta, user]);
+    expect(await observeCodexNativeUsers("/sessions", new Map(), digest, "old", "/repo")).toEqual(
+      [],
+    );
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/other"),
+    ).toEqual([]);
+  });
+
+  it("retains UTF-8 byte positions and refuses an in-record baseline", async () => {
+    await nativeRows([meta, user, user]);
+    const offset = Buffer.byteLength(JSON.stringify(meta) + "\n" + JSON.stringify(user) + "\n");
+    const observations = await observeCodexNativeUsers(
+      "/sessions",
+      new Map([["/sessions/rollout.jsonl", offset]]),
+      digest,
+      "native",
+      "/repo",
+    );
+    expect(observations).toEqual([
+      expect.objectContaining({
+        recordId: `bytes:${offset}:${Buffer.byteLength(JSON.stringify(user))}`,
+      }),
+    ]);
+    expect(
+      await observeCodexNativeUsers(
+        "/sessions",
+        new Map([["/sessions/rollout.jsonl", offset - 2]]),
+        digest,
+        "native",
+        "/repo",
+      ),
+    ).toEqual([]);
   });
 });
 
