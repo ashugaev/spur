@@ -1067,6 +1067,145 @@ describe("GitHub review batching", () => {
     };
   }
 
+  it.each([
+    { kind: "inline", key: "review-comment:101" },
+    { kind: "issue", key: "comment:101" },
+    { kind: "review", key: "review:101" },
+    { kind: "approval", key: "approved:AndreIntelas" },
+  ])("delivers a quote-only marker in a $kind body", async ({ kind, key }) => {
+    const dataDir = await makeDataDir();
+    const quoted = `${kind === "issue" ? "  " : ""}> [AI-generated, session: a]\n\nPlease fix this`;
+    const item = { databaseId: 101, body: quoted, author: { login: "AndreIntelas" } };
+    const node = fullPrNode(
+      42,
+      kind === "inline"
+        ? { reviewThreads: { nodes: [{ id: "THREAD_Q", comments: { nodes: [item] } }] } }
+        : kind === "issue"
+          ? { comments: { nodes: [item] } }
+          : {
+              reviews: {
+                nodes: [{ ...item, state: kind === "approval" ? "APPROVED" : "COMMENTED" }],
+              },
+            },
+    );
+    const envelope = JSON.stringify({
+      data: {
+        viewer: { login: "AndreIntelas" },
+        rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+        r: { a0: node },
+      },
+    });
+    ghMock.mockResolvedValueOnce(envelope);
+    const results = await collectGitHubSignalsBatch(
+      [boundSession("a", 42)],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
+    const entry = results.get("a");
+    expect(entry?.status).toBe("ok");
+    if (entry?.status !== "ok" || !entry.collected) throw new Error("missing quoted feedback");
+    expect(entry.collected.snapshot.has(key)).toBe(true);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([]);
+  });
+
+  it("delivers quoted A feedback to A while suppressing an unquoted B signature", async () => {
+    const dataDir = await makeDataDir();
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+          r: {
+            a0: fullPrNode(42, {
+              comments: {
+                nodes: [
+                  {
+                    databaseId: 105,
+                    body: "> [AI-generated, session: a]\nB reply [AI-generated, session: b]",
+                    author: { login: "AndreIntelas" },
+                  },
+                ],
+              },
+            }),
+          },
+        },
+      }),
+    );
+    const results = await collectGitHubSignalsBatch(
+      [boundSession("a", 42), boundSession("b", 42)],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
+    const a = results.get("a");
+    const b = results.get("b");
+    expect(a?.status).toBe("ok");
+    expect(b?.status).toBe("ok");
+    if (a?.status !== "ok" || b?.status !== "ok" || !a.collected || !b.collected)
+      throw new Error("missing sibling feedback");
+    expect(a.collected.snapshot.has("comment:105")).toBe(true);
+    expect(b.collected.snapshot.has("comment:105")).toBe(false);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42)]).toEqual([
+      "comment:105",
+    ]);
+  });
+
+  it.each(["\n", "\r\n"])(
+    "preserves multiline markers and quote boundaries with %j endings",
+    async (newline) => {
+      const dataDir = await makeDataDir();
+      const marker = `start${newline}{session}${newline}end`;
+      ghMock.mockResolvedValueOnce(
+        JSON.stringify({
+          data: {
+            viewer: { login: "AndreIntelas" },
+            rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+            r: {
+              a0: fullPrNode(42, {
+                comments: {
+                  nodes: [
+                    {
+                      databaseId: 106,
+                      body: `prefix start${newline}a${newline}end suffix`,
+                      author: { login: "AndreIntelas" },
+                    },
+                    {
+                      databaseId: 107,
+                      body: `start${newline}> copied${newline}a${newline}end`,
+                      author: { login: "AndreIntelas" },
+                    },
+                  ],
+                },
+              }),
+            },
+          },
+        }),
+      );
+      const results = await collectGitHubSignalsBatch(
+        [boundSession("a", 42)],
+        dataDir,
+        "api",
+        "watch",
+        undefined,
+        marker,
+      );
+      const entry = results.get("a");
+      expect(entry?.status).toBe("ok");
+      if (entry?.status !== "ok" || !entry.collected) throw new Error("missing multiline result");
+      expect(entry.collected.snapshot.has("comment:106")).toBe(false);
+      expect(entry.collected.snapshot.has("comment:107")).toBe(true);
+      expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([
+        "comment:106",
+      ]);
+    },
+  );
+
   it("routes shared-login feedback by session marker across all three comment paths", async () => {
     const dataDir = await makeDataDir();
     const marker = "[AI-generated, session: {session}]";

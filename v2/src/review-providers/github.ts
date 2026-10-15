@@ -1041,6 +1041,29 @@ async function refreshSignals(
   );
 }
 
+function hasUnquotedMarker(body: string, marker: string): boolean {
+  let spanStart = 0;
+  let lineStart = 0;
+  while (lineStart < body.length) {
+    let lineEnd = lineStart;
+    while (lineEnd < body.length && body[lineEnd] !== "\r" && body[lineEnd] !== "\n") {
+      lineEnd += 1;
+    }
+    const nextLine =
+      body[lineEnd] === "\r" && body[lineEnd + 1] === "\n"
+        ? lineEnd + 2
+        : lineEnd < body.length
+          ? lineEnd + 1
+          : lineEnd;
+    if (/^\s*>/.test(body.slice(lineStart, lineEnd))) {
+      if (body.slice(spanStart, lineStart).includes(marker)) return true;
+      spanStart = nextLine;
+    }
+    lineStart = nextLine;
+  }
+  return body.slice(spanStart).includes(marker);
+}
+
 function collectSignalsFromNode(
   session: SessionRecord,
   pr: GitHubPrStatusSummary,
@@ -1060,7 +1083,7 @@ function collectSignalsFromNode(
     if (ignored.has(key)) return true;
     const own =
       renderedMarker !== undefined
-        ? body.includes(renderedMarker)
+        ? hasUnquotedMarker(body, renderedMarker)
         : isViewerAuthor(login, viewerLogin);
     if (own) {
       ignored.add(key);
