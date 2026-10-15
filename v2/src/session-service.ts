@@ -17173,7 +17173,9 @@ export class SessionService {
   // instance whose pane P1 could not see, e.g. its tmux pane is already
   // gone). Never blocks on a scan it could not perform — "unavailable" and
   // "no findings" both proceed. `force` bypasses this guard only; it never
-  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check.
+  // bypasses killAgentPaneAndConfirmExit's own P1 survivor check. Callers pass
+  // a fresh pane lookup: a cached row can name a pane that died since, whose
+  // recycled pid would exclude an unrelated process tree from the scan.
   private async assertNoForeignAgentForSession(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "tmuxSession">,
     paneLookup: TmuxSessionPanesLookup,
@@ -17911,7 +17913,7 @@ export class SessionService {
     }
     await this.assertNoForeignAgentForSession(
       session,
-      await this.lookupSessionPanePidsQuietly(session.tmuxSession),
+      await this.lookupSessionPanePidsQuietly(session.tmuxSession, { fresh: true }),
       false,
     );
     await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
@@ -18549,7 +18551,7 @@ export class SessionService {
     });
     await this.assertNoForeignAgentForSession(
       current,
-      await this.lookupSessionPanePidsQuietly(current.tmuxSession),
+      await this.lookupSessionPanePidsQuietly(current.tmuxSession, { fresh: true }),
       request.force === true,
     );
     // Past both gates above (restorability, foreign-process): this restore is

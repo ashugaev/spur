@@ -51955,6 +51955,68 @@ describe("SessionService", () => {
       );
     });
 
+    // A cached pane row (2s TTL) can still list pane 4242 after it died and its
+    // pid was recycled by an unrelated tree holding a same-session foreign
+    // agent (777). Only a fresh read drops the dead pane from the exclusions.
+    const staleUnlessFresh = () => {
+      lookupTmuxSessionPanePidsMock.mockImplementation(async (_name, options) => ({
+        status: "ok",
+        panePids: options?.fresh ? [] : [4242],
+      }));
+      findForeignAgentProcessesForSessionMock.mockImplementation(async (input) => ({
+        status: "ok" as const,
+        pids: input?.excludePanePids.includes(4242) ? [] : [777],
+      }));
+    };
+
+    it("restore's foreign scan reads the pane set fresh, so a stale cached row cannot hide a foreign agent", async () => {
+      mockClaudeJsonlState("waiting");
+      findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
+      createSessionStore(runningSession({ id: "api-1" }));
+      mockExitedThenRestoredProcess();
+      lookupTmuxPanePidMock
+        .mockResolvedValueOnce({ status: "unavailable" })
+        .mockResolvedValue({ status: "ok", panePid: null });
+      staleUnlessFresh();
+
+      const service = await createDisposedSessionService();
+
+      await expect(service.restore("api-1")).rejects.toThrow(/777/);
+      expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ excludePanePids: [] }),
+      );
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("send-path relaunch's foreign scan reads the pane set fresh, so a stale cached row cannot hide a foreign agent", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        agentSessionId: "session-uuid",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      staleUnlessFresh();
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.send("api-1", { message: "resume work" })).rejects.toThrow(/777/);
+      expect(findForeignAgentProcessesForSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({ excludePanePids: [] }),
+      );
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
     it("does not block restore() when the foreign-agent scan is 'unavailable'", async () => {
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
