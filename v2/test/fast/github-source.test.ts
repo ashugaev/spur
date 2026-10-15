@@ -13,6 +13,10 @@ const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
+const readIgnoredGitHubFeedbackMock = vi.fn();
+const recordIgnoredGitHubFeedbackMock = vi.fn();
+const listIgnoredGitHubFeedbackSessionsMock = vi.fn();
+const deleteIgnoredGitHubFeedbackMock = vi.fn();
 const readGitHubReviewPaginationMock = vi.fn();
 const writeGitHubReviewPaginationMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
@@ -44,6 +48,10 @@ vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
   markGitHubPollDisabledChecked: markGitHubPollDisabledCheckedMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readIgnoredGitHubFeedback: readIgnoredGitHubFeedbackMock,
+  recordIgnoredGitHubFeedback: recordIgnoredGitHubFeedbackMock,
+  listIgnoredGitHubFeedbackSessions: listIgnoredGitHubFeedbackSessionsMock,
+  deleteIgnoredGitHubFeedback: deleteIgnoredGitHubFeedbackMock,
   readGitHubPollDisabled: readGitHubPollDisabledMock,
   readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
@@ -266,6 +274,8 @@ describe("github source", () => {
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    readIgnoredGitHubFeedbackMock.mockReturnValue(new Set());
+    listIgnoredGitHubFeedbackSessionsMock.mockReturnValue([]);
     readGitHubReviewPaginationMock.mockReturnValue(new Map());
     readGitHubPollDisabledMock.mockReturnValue(new Map());
     writeGitHubPollDisabledMock.mockReturnValue(undefined);
@@ -1331,12 +1341,21 @@ describe("github source", () => {
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
   // second poll is driven explicitly through runOnStart().
-  async function startRepollable(emit: (name: string, data?: unknown) => void) {
+  async function startRepollable(
+    emit: (name: string, data?: unknown) => void,
+    selfMarker?: string,
+  ) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      config: {
+        type: "github",
+        intervalMs: 3_600_000,
+        runOnStart: true,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -1344,18 +1363,72 @@ describe("github source", () => {
     });
   }
 
-  async function startLifecycle(emit: (name: string, data?: unknown) => void) {
+  async function startLifecycle(emit: (name: string, data?: unknown) => void, selfMarker?: string) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
   }
+
+  async function pollCiSignal(rollup: unknown[]): Promise<ReviewSignal | undefined> {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ statusCheckRollup: rollup }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const handle = await startLifecycle(vi.fn());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    handle.stop();
+    return snapshot.signals.get("ci_failed");
+  }
+  const rolledRun = (
+    conclusion: string,
+    suite: { id: number; createdAt: string; app: number; workflow: number | null },
+  ): unknown => ({
+    name: "Labeler",
+    conclusion,
+    status: "COMPLETED",
+    checkSuite: {
+      databaseId: suite.id,
+      createdAt: suite.createdAt,
+      app: { databaseId: suite.app },
+      workflowRun:
+        suite.workflow === null
+          ? null
+          : { event: "pull_request", workflow: { databaseId: suite.workflow } },
+    },
+  });
+
+  it("emits no ci_failed for a cancelled run superseded by a later suite of the same workflow", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("CANCELLED", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: 7 }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 5, workflow: 7 }),
+    ]);
+    expect(signal).toBeUndefined();
+  });
+
+  it("emits ci_failed when another app publishes a later success under the same name", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("FAILURE", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: null }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 6, workflow: null }),
+    ]);
+    expect(signal?.text).toBe("CI is failing: Labeler.");
+  });
 
   it("emits github:ready_for_review when a draft PR becomes ready", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
@@ -1841,6 +1914,65 @@ describe("github source", () => {
       .filter(([name]) => name === "github:comment")
       .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
     expect(comments.map((signal) => signal.key)).toEqual(["comment:641"]);
+    handle.stop();
+  });
+
+  it("passes the source marker to a shared PR batch and isolates corrupt ignored state", async () => {
+    const a = makeSession({ id: "a", workspaceId: "a" });
+    const b = makeSession({ id: "b", workspaceId: "b" });
+    listSessionsMock.mockReturnValue([a, b]);
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        ["a", storedSnapshot([])],
+        ["b", storedSnapshot([])],
+      ]),
+    );
+    readIgnoredGitHubFeedbackMock.mockImplementation(
+      (_dataDir: string, _project: string, _source: string, sessionId: string) => {
+        if (sessionId === "a") throw new Error("Invalid ignored GitHub feedback");
+        return new Set<string>();
+      },
+    );
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 701, body: "operator feedback", user: { login: "review-bot" } }]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+    const handle = await startLifecycle(emit, "[AI-generated, session: {session}]");
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        sessionId: "b",
+        signals: [expect.objectContaining({ key: "comment:701" })],
+      }),
+    );
+    expect(emit).not.toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({ sessionId: "a" }),
+    );
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "source.poll.error" && entry.sessionId === "a",
+      ),
+    ).toBe(true);
+    handle.stop();
+  });
+
+  it("removes ignored feedback for an absent session even without a snapshot", async () => {
+    listSessionsMock.mockReturnValue([]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listIgnoredGitHubFeedbackSessionsMock.mockReturnValue(["orphan"]);
+    const handle = await startLifecycle(vi.fn());
+    expect(deleteIgnoredGitHubFeedbackMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "orphan",
+    );
     handle.stop();
   });
 

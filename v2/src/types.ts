@@ -269,6 +269,7 @@ export interface GitHubAdaptivePollConfig {
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
+  selfMarker?: string;
   adaptivePoll?: GitHubAdaptivePollConfig;
   // Caps how many sessions one review poll batches into a single GraphQL call.
   // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
