@@ -1341,12 +1341,21 @@ describe("github source", () => {
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
   // second poll is driven explicitly through runOnStart().
-  async function startRepollable(emit: (name: string, data?: unknown) => void, selfMarker?: string) {
+  async function startRepollable(
+    emit: (name: string, data?: unknown) => void,
+    selfMarker?: string,
+  ) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false, ...(selfMarker ? { selfMarker } : {}) },
+      config: {
+        type: "github",
+        intervalMs: 3_600_000,
+        runOnStart: true,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -1359,7 +1368,13 @@ describe("github source", () => {
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false, ...(selfMarker ? { selfMarker } : {}) },
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -1881,9 +1896,12 @@ describe("github source", () => {
     const a = makeSession({ id: "a", workspaceId: "a" });
     const b = makeSession({ id: "b", workspaceId: "b" });
     listSessionsMock.mockReturnValue([a, b]);
-    readReviewSourceSnapshotsMock.mockReturnValue(new Map([
-      ["a", storedSnapshot([])], ["b", storedSnapshot([])],
-    ]));
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        ["a", storedSnapshot([])],
+        ["b", storedSnapshot([])],
+      ]),
+    );
     readIgnoredGitHubFeedbackMock.mockImplementation(
       (_dataDir: string, _project: string, _source: string, sessionId: string) => {
         if (sessionId === "a") throw new Error("Invalid ignored GitHub feedback");
@@ -1894,18 +1912,28 @@ describe("github source", () => {
       .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
-      .mockResolvedValueOnce(JSON.stringify([
-        { id: 701, body: "operator feedback", user: { login: "review-bot" } },
-      ]))
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 701, body: "operator feedback", user: { login: "review-bot" } }]),
+      )
       .mockResolvedValueOnce("[]");
     const emit = vi.fn();
     const handle = await startLifecycle(emit, "[AI-generated, session: {session}]");
-    expect(emit).toHaveBeenCalledWith("github:comment", expect.objectContaining({
-      sessionId: "b",
-      signals: [expect.objectContaining({ key: "comment:701" })],
-    }));
-    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.objectContaining({ sessionId: "a" }));
-    expect(logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "source.poll.error" && entry.sessionId === "a")).toBe(true);
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        sessionId: "b",
+        signals: [expect.objectContaining({ key: "comment:701" })],
+      }),
+    );
+    expect(emit).not.toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({ sessionId: "a" }),
+    );
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "source.poll.error" && entry.sessionId === "a",
+      ),
+    ).toBe(true);
     handle.stop();
   });
 
@@ -1914,7 +1942,12 @@ describe("github source", () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listIgnoredGitHubFeedbackSessionsMock.mockReturnValue(["orphan"]);
     const handle = await startLifecycle(vi.fn());
-    expect(deleteIgnoredGitHubFeedbackMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", "orphan");
+    expect(deleteIgnoredGitHubFeedbackMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "orphan",
+    );
     handle.stop();
   });
 

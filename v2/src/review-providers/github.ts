@@ -793,7 +793,8 @@ function reviewSignalsFromComments(
   const seen = readCommentSeenRegistry(dataDir, projectId, sourceId);
   const signals: ReviewSignal[] = [];
   for (const comment of comments) {
-    if (isOwnFeedback(reviewCommentSeenKey(comment.id), comment.body, comment.user?.login)) continue;
+    if (isOwnFeedback(reviewCommentSeenKey(comment.id), comment.body, comment.user?.login))
+      continue;
     if (seen.has(reviewCommentSeenKey(comment.id))) continue;
     const author = comment.user?.login ?? "unknown";
     const location = comment.path
@@ -876,8 +877,9 @@ function issueCommentSignalsFromComments(
   // snapshot, so the trigger's retry prune() discarded it whenever the worker was busy
   // at first delivery — silently losing the comment. Mirror the inline-comment path.
   return comments
-    .filter((comment) =>
-      !isOwnFeedback(`comment:${String(comment.id)}`, comment.body, comment.user?.login),
+    .filter(
+      (comment) =>
+        !isOwnFeedback(`comment:${String(comment.id)}`, comment.body, comment.user?.login),
     )
     .map((comment) => {
       const author = comment.user?.login ?? "unknown";
@@ -2104,7 +2106,15 @@ export async function collectGitHubSignalsBatch(
       if (selected.length === 0) continue;
       try {
         const admission = await withGhPollBudget(() =>
-          runReviewRepoBatch(selected, dataDir, projectId, sourceId, limit, expectedHeads, selfMarker),
+          runReviewRepoBatch(
+            selected,
+            dataDir,
+            projectId,
+            sourceId,
+            limit,
+            expectedHeads,
+            selfMarker,
+          ),
         );
         if (admission.status === "blocked") {
           for (const target of selected) {

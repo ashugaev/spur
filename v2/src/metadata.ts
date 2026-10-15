@@ -1635,7 +1635,9 @@ export function listIgnoredGitHubFeedbackSessions(
 ): string[] {
   const dir = ignoredGitHubFeedbackDir(dataDir, projectId, sourceId);
   return existsSync(dir)
-    ? readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5))
+    ? readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => name.slice(0, -5))
     : [];
 }
 

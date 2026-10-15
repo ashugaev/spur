@@ -1071,108 +1071,278 @@ describe("GitHub review batching", () => {
     const dataDir = await makeDataDir();
     const marker = "[AI-generated, session: {session}]";
     const node = fullPrNode(42, {
-      reviewThreads: { nodes: [{ id: "THREAD_1", isResolved: false, comments: { nodes: [
-        { databaseId: 1, body: "A reply [AI-generated, session: a]", author: { login: "AndreIntelas" } },
-        { databaseId: 2, body: "B reply [AI-generated, session: b]", author: { login: "AndreIntelas" } },
-        { databaseId: 3, body: "operator inline", author: { login: "AndreIntelas" } },
-      ] } }] },
-      comments: { nodes: [
-        { databaseId: 4, body: "operator issue", author: { login: "AndreIntelas" } },
-        { databaseId: 5, body: "A issue [AI-generated, session: a]", author: { login: "AndreIntelas" } },
-      ] },
-      reviews: { nodes: [
-        { databaseId: 6, state: "COMMENTED", body: "B review [AI-generated, session: b]", author: { login: "AndreIntelas" } },
-        { databaseId: 7, state: "CHANGES_REQUESTED", body: "A review [AI-generated, session: a]", author: { login: "AndreIntelas" } },
-        { databaseId: 8, state: "APPROVED", body: "operator approval", author: { login: "AndreIntelas" } },
-      ] },
+      reviewThreads: {
+        nodes: [
+          {
+            id: "THREAD_1",
+            isResolved: false,
+            comments: {
+              nodes: [
+                {
+                  databaseId: 1,
+                  body: "A reply [AI-generated, session: a]",
+                  author: { login: "AndreIntelas" },
+                },
+                {
+                  databaseId: 2,
+                  body: "B reply [AI-generated, session: b]",
+                  author: { login: "AndreIntelas" },
+                },
+                { databaseId: 3, body: "operator inline", author: { login: "AndreIntelas" } },
+              ],
+            },
+          },
+        ],
+      },
+      comments: {
+        nodes: [
+          { databaseId: 4, body: "operator issue", author: { login: "AndreIntelas" } },
+          {
+            databaseId: 5,
+            body: "A issue [AI-generated, session: a]",
+            author: { login: "AndreIntelas" },
+          },
+        ],
+      },
+      reviews: {
+        nodes: [
+          {
+            databaseId: 6,
+            state: "COMMENTED",
+            body: "B review [AI-generated, session: b]",
+            author: { login: "AndreIntelas" },
+          },
+          {
+            databaseId: 7,
+            state: "CHANGES_REQUESTED",
+            body: "A review [AI-generated, session: a]",
+            author: { login: "AndreIntelas" },
+          },
+          {
+            databaseId: 8,
+            state: "APPROVED",
+            body: "operator approval",
+            author: { login: "AndreIntelas" },
+          },
+        ],
+      },
     });
-    const envelope = JSON.stringify({ data: { viewer: { login: "AndreIntelas" }, rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" }, r: { a0: node } } });
+    const envelope = JSON.stringify({
+      data: {
+        viewer: { login: "AndreIntelas" },
+        rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+        r: { a0: node },
+      },
+    });
     ghMock.mockResolvedValueOnce(envelope);
     const sessions = [boundSession("a", 42), boundSession("b", 42)];
-    const result = await collectGitHubSignalsBatch(sessions, dataDir, "api", "watch", undefined, marker);
+    const result = await collectGitHubSignalsBatch(
+      sessions,
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      marker,
+    );
     const keys = (id: string) => {
       const entry = result.get(id);
       expect(entry?.status).toBe("ok");
       if (entry?.status !== "ok" || !entry.collected) throw new Error("missing feedback");
-      return [...entry.collected.snapshot.keys()].filter((key) => key.startsWith("review-comment:") || key.startsWith("comment:") || key.startsWith("review:") || key.startsWith("approved:"));
+      return [...entry.collected.snapshot.keys()].filter(
+        (key) =>
+          key.startsWith("review-comment:") ||
+          key.startsWith("comment:") ||
+          key.startsWith("review:") ||
+          key.startsWith("approved:"),
+      );
     };
-    expect(keys("a")).toEqual(["review-comment:2", "review-comment:3", "comment:4", "review:6", "approved:AndreIntelas"]);
-    expect(keys("b")).toEqual(["review-comment:1", "review-comment:3", "comment:4", "comment:5", "review:7", "approved:AndreIntelas"]);
-    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)].sort()).toEqual(["comment:5", "review-comment:1", "review:7"]);
-    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42)].sort()).toEqual(["review-comment:2", "review:6"]);
+    expect(keys("a")).toEqual([
+      "review-comment:2",
+      "review-comment:3",
+      "comment:4",
+      "review:6",
+      "approved:AndreIntelas",
+    ]);
+    expect(keys("b")).toEqual([
+      "review-comment:1",
+      "review-comment:3",
+      "comment:4",
+      "comment:5",
+      "review:7",
+      "approved:AndreIntelas",
+    ]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)].sort()).toEqual([
+      "comment:5",
+      "review-comment:1",
+      "review:7",
+    ]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42)].sort()).toEqual([
+      "review-comment:2",
+      "review:6",
+    ]);
     expect(ghMock).toHaveBeenCalledTimes(1);
 
     const legacyDir = await makeDataDir();
     ghMock.mockResolvedValueOnce(envelope);
-    const legacy = await collectGitHubSignalsBatch([boundSession("a", 42)], legacyDir, "api", "watch");
+    const legacy = await collectGitHubSignalsBatch(
+      [boundSession("a", 42)],
+      legacyDir,
+      "api",
+      "watch",
+    );
     const legacyEntry = legacy.get("a");
     expect(legacyEntry?.status).toBe("ok");
-    if (legacyEntry?.status !== "ok" || !legacyEntry.collected) throw new Error("missing legacy result");
-    expect([...legacyEntry.collected.snapshot.keys()].filter((key) => key.startsWith("comment:") || key.startsWith("review:") || key.startsWith("review-comment:"))).toEqual([]);
+    if (legacyEntry?.status !== "ok" || !legacyEntry.collected)
+      throw new Error("missing legacy result");
+    expect(
+      [...legacyEntry.collected.snapshot.keys()].filter(
+        (key) =>
+          key.startsWith("comment:") ||
+          key.startsWith("review:") ||
+          key.startsWith("review-comment:"),
+      ),
+    ).toEqual([]);
   });
 
   it("keeps filtered keys ignored after a body edit and config toggle", async () => {
     const dataDir = await makeDataDir();
     const session = boundSession("a", 42);
-    const envelope = (body: string) => JSON.stringify({ data: { viewer: { login: "AndreIntelas" }, rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" }, r: { a0: fullPrNode(42, { comments: { nodes: [
-      { databaseId: 1, body, author: { login: "AndreIntelas" } },
-      { databaseId: 2, body: "new work", author: { login: "other" } },
-    ] } }) } } });
+    const envelope = (body: string) =>
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+          r: {
+            a0: fullPrNode(42, {
+              comments: {
+                nodes: [
+                  { databaseId: 1, body, author: { login: "AndreIntelas" } },
+                  { databaseId: 2, body: "new work", author: { login: "other" } },
+                ],
+              },
+            }),
+          },
+        },
+      });
     ghMock.mockResolvedValueOnce(envelope("reply [AI-generated, session: a]"));
-    const first = await collectGitHubSignalsBatch([session], dataDir, "api", "watch", undefined, "[AI-generated, session: {session}]");
+    const first = await collectGitHubSignalsBatch(
+      [session],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
     const firstEntry = first.get("a");
     expect(firstEntry?.status).toBe("ok");
-    if (firstEntry?.status !== "ok" || !firstEntry.collected) throw new Error("missing first result");
+    if (firstEntry?.status !== "ok" || !firstEntry.collected)
+      throw new Error("missing first result");
     const firstKeys = [...firstEntry.collected.snapshot.keys()];
     expect(firstKeys).toContain("comment:2");
     expect(firstKeys).not.toContain("comment:1");
     ghMock.mockResolvedValueOnce(envelope("reply marker removed"));
-    const second = await collectGitHubSignalsBatch([session], dataDir, "api", "watch", undefined, "[AI-generated, session: {session}]");
+    const second = await collectGitHubSignalsBatch(
+      [session],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
     const secondEntry = second.get("a");
     expect(secondEntry?.status).toBe("ok");
-    if (secondEntry?.status !== "ok" || !secondEntry.collected) throw new Error("missing second result");
+    if (secondEntry?.status !== "ok" || !secondEntry.collected)
+      throw new Error("missing second result");
     expect(secondEntry.collected.snapshot.has("comment:1")).toBe(false);
     expect(secondEntry.collected.snapshot.has("comment:2")).toBe(true);
     ghMock.mockResolvedValueOnce(envelope("reply marker removed"));
     const toggled = await collectGitHubSignalsBatch([session], dataDir, "api", "watch");
     const toggledEntry = toggled.get("a");
     expect(toggledEntry?.status).toBe("ok");
-    if (toggledEntry?.status !== "ok" || !toggledEntry.collected) throw new Error("missing toggle result");
+    if (toggledEntry?.status !== "ok" || !toggledEntry.collected)
+      throw new Error("missing toggle result");
     expect(toggledEntry.collected.snapshot.has("comment:1")).toBe(false);
   });
 
   it("keeps legacy-filtered feedback ignored after enabling the marker", async () => {
     const dataDir = await makeDataDir();
     const session = boundSession("a", 42);
-    const envelope = (body: string) => JSON.stringify({ data: { viewer: { login: "AndreIntelas" }, rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" }, r: { a0: fullPrNode(42, {
-      comments: { nodes: [{ databaseId: 81, body, author: { login: "AndreIntelas" } }] },
-    }) } } });
+    const envelope = (body: string) =>
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+          r: {
+            a0: fullPrNode(42, {
+              comments: { nodes: [{ databaseId: 81, body, author: { login: "AndreIntelas" } }] },
+            }),
+          },
+        },
+      });
     ghMock.mockResolvedValueOnce(envelope("old same-login note"));
     const legacy = await collectGitHubSignalsBatch([session], dataDir, "api", "watch");
     const legacyEntry = legacy.get("a");
     expect(legacyEntry?.status).toBe("ok");
-    if (legacyEntry?.status !== "ok" || !legacyEntry.collected) throw new Error("missing legacy result");
+    if (legacyEntry?.status !== "ok" || !legacyEntry.collected)
+      throw new Error("missing legacy result");
     expect(legacyEntry.collected.snapshot.has("comment:81")).toBe(false);
     ghMock.mockResolvedValueOnce(envelope("edited operator note"));
-    const configured = await collectGitHubSignalsBatch([session], dataDir, "api", "watch", undefined, "[AI-generated, session: {session}]");
+    const configured = await collectGitHubSignalsBatch(
+      [session],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
     const configuredEntry = configured.get("a");
     expect(configuredEntry?.status).toBe("ok");
-    if (configuredEntry?.status !== "ok" || !configuredEntry.collected) throw new Error("missing configured result");
+    if (configuredEntry?.status !== "ok" || !configuredEntry.collected)
+      throw new Error("missing configured result");
     expect(configuredEntry.collected.snapshot.has("comment:81")).toBe(false);
-    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual(["comment:81"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual([
+      "comment:81",
+    ]);
   });
 
   it("delivers an operator approval while ignoring this session's signed approval", async () => {
     const dataDir = await makeDataDir();
-    ghMock.mockResolvedValueOnce(JSON.stringify({ data: {
-      viewer: { login: "AndreIntelas" },
-      rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
-      r: { a0: fullPrNode(42, { reviews: { nodes: [
-        { databaseId: 90, state: "APPROVED", body: "approved [AI-generated, session: a]", author: { login: "AndreIntelas" } },
-        { databaseId: 91, state: "APPROVED", body: "operator approved", author: { login: "AndreIntelas" } },
-      ] } }) },
-    } }));
-    const result = await collectGitHubSignalsBatch([boundSession("a", 42)], dataDir, "api", "watch", undefined, "[AI-generated, session: {session}]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        data: {
+          viewer: { login: "AndreIntelas" },
+          rateLimit: { cost: 1, remaining: 4900, resetAt: "2099-01-01T00:00:00Z" },
+          r: {
+            a0: fullPrNode(42, {
+              reviews: {
+                nodes: [
+                  {
+                    databaseId: 90,
+                    state: "APPROVED",
+                    body: "approved [AI-generated, session: a]",
+                    author: { login: "AndreIntelas" },
+                  },
+                  {
+                    databaseId: 91,
+                    state: "APPROVED",
+                    body: "operator approved",
+                    author: { login: "AndreIntelas" },
+                  },
+                ],
+              },
+            }),
+          },
+        },
+      }),
+    );
+    const result = await collectGitHubSignalsBatch(
+      [boundSession("a", 42)],
+      dataDir,
+      "api",
+      "watch",
+      undefined,
+      "[AI-generated, session: {session}]",
+    );
     const entry = result.get("a");
     expect(entry?.status).toBe("ok");
     if (entry?.status !== "ok" || !entry.collected) throw new Error("missing review result");

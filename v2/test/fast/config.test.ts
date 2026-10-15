@@ -2602,7 +2602,9 @@ projects:
         type: github
         selfMarker: ${value}
 `;
-    const configured = loadConfig(await writeConfig(source('"[AI-generated, session: {session}]"')));
+    const configured = loadConfig(
+      await writeConfig(source('"[AI-generated, session: {session}]"')),
+    );
     expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
       type: "github",
       selfMarker: "[AI-generated, session: {session}]",

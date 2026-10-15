@@ -173,7 +173,9 @@ describe("ignored GitHub feedback", () => {
     for (const body of ["{bad", '{"prNumber":0,"ids":[]}', '{"prNumber":42,"ids":[3]}']) {
       await writeFile(path, body, "utf8");
       expect(() => readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)).toThrow();
-      expect(() => recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:3"])).toThrow();
+      expect(() =>
+        recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:3"]),
+      ).toThrow();
       expect(readFileSync(path, "utf8")).toBe(body);
     }
   });
