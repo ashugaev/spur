@@ -535,6 +535,29 @@ exec "$REAL_GIT" "$@"
       expect(result.stderr).not.toContain("command not found");
     });
 
+    it("resolves cwd git at an interior empty PATH component", async () => {
+      const inner = await makeWrapper("inner");
+      const tools = await makeToolStub(false);
+      const cwd = await makeToolStub(true);
+      const later = await makeToolStub(true);
+      writeFileSync(join(cwd, "git"), `#!/usr/bin/env bash\necho "git version cwd"\n`, {
+        encoding: "utf8",
+        mode: 0o755,
+      });
+
+      for (const pathValue of [`${inner}:${tools}::${later}`, `${inner}:${tools}::missing`]) {
+        const result = spawnSync(join(inner, "git"), ["--version"], {
+          cwd,
+          encoding: "utf8",
+          timeout: 5000,
+          env: { ...process.env, PATH: pathValue },
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe("git version cwd\n");
+        expect(result.stderr).toBe("");
+      }
+    });
+
     it("blocks a bad-branch push through nested wrappers", async () => {
       const inner = await makeWrapper("inner");
       const outer = await makeWrapper("outer");

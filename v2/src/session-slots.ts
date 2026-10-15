@@ -393,10 +393,7 @@ SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 REAL_GIT=""
 IFS=: read -r -a path_parts <<< "\${PATH:-}"
 for path_part in "\${path_parts[@]}"; do
-  if [[ -z "$path_part" ]]; then
-    continue
-  fi
-  candidate="$path_part/git"
+  candidate="\${path_part:-.}/git"
   if [[ ! -f "$candidate" || ! -x "$candidate" ]]; then
     continue
   fi
