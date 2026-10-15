@@ -157,6 +157,14 @@ export interface AgentSubmitAckContext {
   cursorConfigDir?: string;
 }
 
+export interface NativeUserObservation {
+  nativeSessionId: string;
+  source: string;
+  recordId: string;
+  recordDigest: string;
+  bodyDigest: string;
+}
+
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;

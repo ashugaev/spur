@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findLatestSessionFile, sessionFileForId, sessionFilePathForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
+import type { NativeUserObservation } from "./index.js";
 
 export interface ClaudeSubmitBaseline {
   file: string;
@@ -122,21 +124,56 @@ const normalize = (s: string) =>
 async function scanFileForDeliveredText(
   filePath: string,
   startOffset: number,
-  normalizedTarget: string,
+  normalizedTarget: string | null,
+  native?: {
+    sessionId: string;
+    bodyDigest: string;
+    matches: NativeUserObservation[];
+  },
 ): Promise<boolean> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
+    let byteOffset = startOffset;
+    const framing = { lineFeedOnly: true, terminated: false };
+    input.on("data", (chunk: string | Buffer) => {
+      if (chunk.includes("\r")) framing.lineFeedOnly = false;
+      framing.terminated = chunk.at(-1) === (typeof chunk === "string" ? "\n" : 10);
+    });
     const reader = createInterface({ input, crlfDelay: Infinity });
     try {
       for await (const rawLine of reader) {
+        const rowOffset = byteOffset;
+        const rowBytes = Buffer.byteLength(rawLine);
+        byteOffset += rowBytes + 1;
         const trimmed = rawLine.trim();
         if (!trimmed) continue;
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractDeliveredText(parsed);
+        if (native && parsed["type"] === "user" && parsed["sessionId"] === native.sessionId) {
+          const userText = extractUserMessageText(parsed);
+          if (userText !== null) {
+            const bodyDigests = [userText, unwrapPastedContent(userText)].map((body) =>
+              createHash("sha256").update(normalize(body)).digest("hex"),
+            );
+            if (bodyDigests.includes(native.bodyDigest)) {
+              native.matches.push({
+                nativeSessionId: native.sessionId,
+                source: filePath,
+                recordId:
+                  typeof parsed["uuid"] === "string"
+                    ? parsed["uuid"]
+                    : `bytes:${rowOffset}:${rowBytes}`,
+                recordDigest: createHash("sha256").update(rawLine).digest("hex"),
+                bodyDigest: native.bodyDigest,
+              });
+            }
+          }
+        }
         // Raw first: a short send that is itself a pasted_content block is
         // recorded as typed, so unwrapping alone would miss it.
         if (
+          normalizedTarget !== null &&
           text !== null &&
           (normalize(text) === normalizedTarget ||
             normalize(unwrapPastedContent(text)) === normalizedTarget)
@@ -145,13 +182,29 @@ async function scanFileForDeliveredText(
           return true;
         }
       }
+      if (native && (!framing.lineFeedOnly || !framing.terminated)) native.matches.length = 0;
     } finally {
       reader.close();
     }
   } catch {
+    if (native) native.matches.length = 0;
     return false;
   }
   return false;
+}
+
+export async function observeClaudeNativeUsers(
+  baseline: ClaudeSubmitBaseline,
+  bodyDigest: string,
+  agentSessionId: string,
+): Promise<NativeUserObservation[]> {
+  const matches: NativeUserObservation[] = [];
+  await scanFileForDeliveredText(baseline.file, baseline.size, null, {
+    sessionId: agentSessionId,
+    bodyDigest,
+    matches,
+  });
+  return matches;
 }
 
 export async function scanClaudeJsonlForMessage(
