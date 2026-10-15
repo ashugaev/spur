@@ -951,6 +951,97 @@ describe("claudeUsageMenuOptionOneSelected", () => {
   });
 });
 
+describe("usage-limit menu 20-physical-line tail window", () => {
+  const TAIL = 20;
+  const HEADER = "What do you want to do?";
+  const FOOTER = "Enter to confirm \u00b7 Esc to cancel";
+  const STOP = "   \u276f 1. Stop and wait for limit to reset";
+  const WAIT = "     2. Wait here, then continue automatically shortly";
+  const ADMIN = "     3. Ask your admin for more usage";
+  const blanks = (count: number): string[] => Array.from({ length: count }, () => "");
+  const filler = (count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `earlier output ${i}`);
+  // Menu whose header..footer span is exactly `span` physical lines, the extra
+  // lines being internal blanks right after the header.
+  const menuSpanning = (span: number): string[] => [
+    HEADER,
+    ...blanks(span - 6),
+    STOP,
+    WAIT,
+    ADMIN,
+    "",
+    FOOTER,
+  ];
+  const expectDetected = (lines: string[]): void => {
+    const text = lines.join("\n");
+    expect(detectClaudeUsageLimitMenu(text)).toEqual({
+      limited: true,
+      reason: "claude usage limit menu",
+    });
+    expect(claudeUsageMenuOptionOneSelected(text)).toBe(true);
+  };
+  const expectRejected = (lines: string[]): void => {
+    const text = lines.join("\n");
+    expect(detectClaudeUsageLimitMenu(text)).toBeNull();
+    expect(claudeUsageMenuOptionOneSelected(text)).toBe(false);
+  };
+
+  it("detects a menu whose header is exactly the 20th line from the end", () => {
+    expectDetected([...filler(10), ...menuSpanning(TAIL)]);
+  });
+
+  it("rejects a menu whose header is the 21st line from the end", () => {
+    expectRejected([...filler(10), ...menuSpanning(TAIL + 1)]);
+  });
+
+  it("counts internal blank lines: 7 non-blank lines over 21 physical lines are rejected", () => {
+    expectRejected([
+      HEADER,
+      ...blanks(5),
+      STOP,
+      ...blanks(5),
+      WAIT,
+      ...blanks(5),
+      ADMIN,
+      "",
+      FOOTER,
+    ]);
+  });
+
+  it("counts internal blank lines: the same spacing at 20 physical lines is detected", () => {
+    expectDetected([
+      HEADER,
+      ...blanks(5),
+      STOP,
+      ...blanks(5),
+      WAIT,
+      ...blanks(4),
+      ADMIN,
+      "",
+      FOOTER,
+    ]);
+  });
+
+  it("does not count trailing blank lines after the footer", () => {
+    expectDetected([...filler(5), ...menuSpanning(TAIL), "", "   ", "", "", ""]);
+  });
+
+  it("rejects a wrapped option whose continuation is the first window line and numbered line is outside", () => {
+    const lines = [
+      HEADER,
+      "   \u276f 1. Stop and wait for limit",
+      "     to reset",
+      ...blanks(TAIL - 4),
+      "     2. Upgrade your plan",
+      "",
+      FOOTER,
+    ];
+    // Window = last 20 lines starts exactly at the continuation line.
+    expect(lines.length - TAIL).toBe(lines.indexOf("     to reset"));
+    expectRejected(lines);
+  });
+});
+
 describe("detectClaudeCompacting", () => {
   it("flags a live spinner line", () => {
     const paneText = ["Some earlier output", "✳ Compacting conversation… (18s)", ""].join("\n");
