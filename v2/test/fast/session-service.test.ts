@@ -13943,7 +13943,12 @@ describe("SessionService", () => {
       });
       sessions.set(record.id, record);
       getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
-      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, "diagnostic-ack.jsonl"),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
       probeTmuxProcessMatchMock.mockImplementation(async () =>
         sendMessageToTmuxMock.mock.calls.length > 0
           ? {
@@ -13959,7 +13964,17 @@ describe("SessionService", () => {
         lastScannedFile: null,
       });
       await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
-      expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["first queued"]);
+      expect(sessions.get(record.id)?.queuedMessages).toEqual({
+        messages: [],
+        awaitingPrompt: true,
+      });
+      expect(sessions.get(record.id)?.queuedMessageTyped).toMatchObject({
+        message: "first queued",
+        ackBaseline: baseline,
+      });
+      expect(sessions.get(record.id)?.submitUnconfirmedAt).toBe(
+        sessions.get(record.id)?.queuedMessageTyped?.typedAt,
+      );
       expect(sessions.get(record.id)?.error).toContain("ack process probe denied");
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
@@ -27070,6 +27085,146 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.error).toBeUndefined();
       expect(sessions.get(record.id)?.errorSource).toBeUndefined();
     } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(
+    (["direct", "queued"] as const).flatMap((origin) =>
+      (["late-ack", "no-ack", "new-launch", "completed"] as const).map((ack) => ({ origin, ack })),
+    ),
+  )("retains $origin post-paste baseline: $ack", async ({ origin, ack }) => {
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const text = `post-paste ${origin} ${ack}`;
+    const record = runningSession({
+      agentLaunchId: "late-probe-generation",
+      agentSessionId: "session-uuid",
+      ...(origin === "queued"
+        ? { queuedMessages: { messages: [text], awaitingPrompt: false } }
+        : {}),
+    });
+    sessions.set(record.id, record);
+    mockClaudeJsonlState("waiting");
+    const file = join(TEST_ARTIFACTS_ROOT, `late-probe-${origin}-${ack}.jsonl`);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+    );
+    const originalBaseline = { agent: "claude" as const, file, size: statSync(file).size };
+    const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+    const scans: boolean[] = [];
+    const binding = (baseline: typeof originalBaseline) => ({
+      baseline,
+      async scan(message: string) {
+        const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+        scans.push(found);
+        return { found, lastScannedFile: file };
+      },
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async () =>
+      binding({ agent: "claude", file, size: statSync(file).size }),
+    );
+    resumeAgentSubmitAckBindingMock.mockImplementation(
+      async (_agent: string, _context: unknown, baseline: typeof originalBaseline) =>
+        binding(baseline),
+    );
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+      async (current, message) => current.scan(message),
+    );
+    let releaseProbe: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    let enteredProbe: () => void = () => {};
+    const probing = new Promise<void>((resolve) => {
+      enteredProbe = resolve;
+    });
+    let failed = false;
+    probeTmuxProcessMatchMock.mockImplementation(
+      async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+        if (options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0 && !failed) {
+          failed = true;
+          enteredProbe();
+          await gate;
+          return {
+            alive: false,
+            matchedByName: false,
+            unresponsive: false,
+            diagnostic: "ps failed: malformed process table output after paste",
+          };
+        }
+        return { alive: true, matchedByName: true, unresponsive: false };
+      },
+    );
+    const attempt = (
+      origin === "direct"
+        ? service.send(record.id, { message: text, queue: false, interrupt: false })
+        : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
+    ).catch((error: unknown) => error);
+    try {
+      await probing;
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(scans).toEqual([false]);
+      if (origin === "queued") {
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+      }
+      if (ack === "new-launch" || ack === "completed") {
+        sessions.set(record.id, {
+          ...record,
+          ...(ack === "new-launch"
+            ? { agentLaunchId: "replacement-generation" }
+            : { status: "completed" }),
+          queuedMessages: { messages: ["replacement-head"], awaitingPrompt: false },
+        });
+      }
+      releaseProbe();
+      await attempt;
+      if (ack === "late-ack") {
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+        );
+        vi.setSystemTime(Date.now() + 20_000);
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 5_000 });
+        await service.get(record.id);
+        await vi.waitFor(() => {
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+        });
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(scans).toContain(true);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+      } else if (ack === "no-ack") {
+        mockClaudeJsonlState("waiting");
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeDefined();
+        vi.setSystemTime(Date.now() + 60_000);
+        mockClaudeJsonlState("working");
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeDefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(scans).not.toContain(true);
+      } else {
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["replacement-head"]);
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      }
+      expect(sessions.get(record.id)?.agentLaunchId).toBe(
+        ack === "new-launch" ? "replacement-generation" : record.agentLaunchId,
+      );
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    } finally {
+      releaseProbe();
+      await attempt;
       service.dispose();
     }
   });

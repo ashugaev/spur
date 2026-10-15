@@ -15884,7 +15884,32 @@ export class SessionService {
       } catch (error) {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.delete(sessionId);
         if (options?.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
-          if (intent.kind === "queued-drain" && pane.typed) {
+          if (error instanceof TmuxProbeUnknownError && pane.typed) {
+            const typed = pane.typed;
+            await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (
+                !latest ||
+                !this.lifecycleStateMatches(latest, prepared.stamp) ||
+                !sameSessionRuntimeOwner(latest, prepared.session) ||
+                latest.agentLaunchId !== prepared.session.agentLaunchId ||
+                (intent.kind === "queued-drain" &&
+                  (latest.queuedMessageTyped?.typedAt !== typed.typedAt ||
+                    latest.queuedMessageTyped.message !== message))
+              ) {
+                return;
+              }
+              const remaining =
+                intent.kind === "queued-flush"
+                  ? removeFirstOccurrence(queuedMessages(latest), message)
+                  : queuedMessages(latest);
+              writeSession(
+                this.config.dataDir,
+                this.withSubmitUnconfirmed(withQueuedMessages(latest, remaining, true), typed),
+              );
+              this.stateCache.delete(sessionId);
+            });
+          } else if (intent.kind === "queued-drain" && pane.typed) {
             await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const latest = readSession(this.config.dataDir, sessionId);
               if (
