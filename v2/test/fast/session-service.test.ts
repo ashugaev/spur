@@ -47879,18 +47879,51 @@ describe("SessionService", () => {
       });
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
       reserveNextSessionIdMock.mockResolvedValue("shp-2");
-
-      const result = await service.spawnShepherd({
-        prompt: "Restart Shepherd",
+      const stopped = structuredClone(sessions.get("shp-stopped"));
+      let releaseSend: () => void = () => {};
+      const sendGate = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      let enteredSend: () => void = () => {};
+      const sending = new Promise<void>((resolve) => {
+        enteredSend = resolve;
+      });
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        enteredSend();
+        await sendGate;
       });
 
-      expect(result.disposition).toBe("spawned");
-      expect(result.session.id).toBe("shp-2");
-      expect(result.session.status).toBe("spawning");
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      service.dispose();
+      try {
+        const result = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+        await sending;
+        expect(result.disposition).toBe("spawned");
+        expect(result.session.id).toBe("shp-2");
+        expect(result.session.status).toBe("spawning");
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionName: "shp-2" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith(
+          "shp-2",
+          expect.stringContaining("Restart Shepherd"),
+          { agent: "claude" },
+        );
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        expect(sessions.get("shp-2")?.status).toBe("running");
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+      } finally {
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        service.dispose();
+      }
     });
 
     function seedRunningShepherdSession(sessions: Map<string, SessionRecord>): void {
