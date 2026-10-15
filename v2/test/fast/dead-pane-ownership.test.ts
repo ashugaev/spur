@@ -19,13 +19,16 @@ interface FakeProc {
 const fakeTable: FakeProc[] = [
   { pid: 100, ppid: 1, args: "/usr/bin/claude --resume other", sid: 100, env: {} },
   { pid: 101, ppid: 100, args: "/usr/bin/claude mcp", sid: 100, env: {} },
+  // Carries this launch's exact markers in the dead pane's kernel session: the
+  // SID pass must still never root at a dead pane.
+  { pid: 102, ppid: 1, args: "native-mcp-helper", sid: 100, env: {} },
   { pid: 200, ppid: 1, args: "-zsh", sid: 200, env: {} },
   { pid: 201, ppid: 200, args: "/usr/bin/claude", sid: 200, env: {} },
 ];
 for (const proc of fakeTable) {
   proc.env = {
     SPUR_SESSION: "api-1",
-    SPUR_AGENT_LAUNCH_ID: proc.pid >= 200 ? "launch-1" : "launch-other",
+    SPUR_AGENT_LAUNCH_ID: proc.pid >= 200 || proc.pid === 102 ? "launch-1" : "launch-other",
   };
 }
 let signalled: number[] = [];
@@ -84,7 +87,7 @@ describe("dead pane with a recycled pid", () => {
     signalled = [];
   });
 
-  it("P1 captures and signals only the live pane's agent, never the reused root or its matching child", async () => {
+  it("P1 captures and signals only the live pane's agent, never the reused root, its matching child, or a marked member of the dead pane's kernel session", async () => {
     const capture = await capturePaneAgentProcesses({
       sessionId: "api-1",
       agentLaunchId: "launch-1",
