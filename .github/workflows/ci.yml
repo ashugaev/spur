@@ -12,10 +12,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
 jobs:
+  quality-admission:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: quality
+
   quality:
     name: Quality
     runs-on: self-hosted
+    needs: quality-admission
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.quality-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -34,10 +47,18 @@ jobs:
       - run: bash v2/test/npm-init.test.sh
       - run: bash v2/test/install-and-restart.test.sh
 
+  playwright-admission:
+    needs: quality
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: playwright
+
   playwright:
     name: Playwright E2E
     runs-on: self-hosted
-    needs: quality
+    needs: [quality, playwright-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.playwright-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -54,10 +75,18 @@ jobs:
       # block starts `next start` against an isolated, unbound daemon target.
       - run: pnpm --dir packages/web exec playwright test
 
+  runtime-integration-admission:
+    needs: playwright
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: runtime-integration
+
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
-    needs: playwright
+    needs: [playwright, runtime-integration-admission]
+    if: ${{ !cancelled() && needs.playwright.result == 'success' && (github.event_name != 'pull_request' || needs.runtime-integration-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -72,10 +101,18 @@ jobs:
       - run: pnpm --dir v2 build
       - run: pnpm --dir v2 exec vitest run --config vitest.runtime.config.ts --reporter=verbose
 
+  real-agent-smoke-admission:
+    needs: runtime-integration
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: real-agent-smoke
+
   real-agent-smoke:
     name: Real-Agent Smoke
     runs-on: self-hosted
-    needs: runtime-integration
+    needs: [runtime-integration, real-agent-smoke-admission]
+    if: ${{ !cancelled() && needs.runtime-integration.result == 'success' && (github.event_name != 'pull_request' || needs.real-agent-smoke-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
