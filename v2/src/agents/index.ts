@@ -9,17 +9,24 @@ import {
   ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
-import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
+import {
+  captureClaudeSubmitBaseline,
+  claudeNativeInputDigest,
+  observeClaudeNativeUsers,
+  scanClaudeJsonlForMessage,
+} from "./claude-submit-ack.js";
 import {
   buildCodexPlan,
   buildCodexRestorePlan,
   buildCodexResumePlan,
   captureCodexRolloutBaseline,
   codexCommand,
+  codexNativeInputDigest,
   ensureCodexHooksConfig,
   findCodexSessionId,
   readCodexTranscriptEntries,
   scanCodexRolloutForMessage,
+  observeCodexNativeUsers,
 } from "./codex.js";
 import {
   buildCursorPlan,
@@ -35,6 +42,8 @@ import {
 import { ensureCursorTokenUsageHook } from "../cursor-token-usage.js";
 import {
   captureCursorSubmitBaseline,
+  cursorNativeInputDigest,
+  observeCursorNativeUsers,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -157,6 +166,14 @@ export interface AgentSubmitAckContext {
   cursorConfigDir?: string;
 }
 
+export interface NativeUserObservation {
+  nativeSessionId: string;
+  source: string;
+  recordId: string;
+  recordDigest: string;
+  bodyDigest: string;
+}
+
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
@@ -178,6 +195,10 @@ export interface AgentEarlyResendContext {
 export interface SubmitAckBinding {
   baseline: SubmitAckBaseline;
   scan(text: string): Promise<SubmitAckScanResult>;
+  nativeInput?: {
+    digest(text: string): string;
+    observe(bodyDigest: string): Promise<NativeUserObservation[]>;
+  };
 }
 
 export interface ConversationReadContext {
@@ -533,6 +554,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       }
       return {
         baseline: { agent: "claude", ...baseline },
+        nativeInput: {
+          digest: (text) => claudeNativeInputDigest(text),
+          observe: (digest) =>
+            ctx.agentSessionId
+              ? observeClaudeNativeUsers(baseline, digest, ctx.agentSessionId)
+              : Promise.resolve([]),
+        },
         async scan(text) {
           const found = await scanClaudeJsonlForMessage(
             baseline,
@@ -595,6 +623,19 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
           : await captureCodexRolloutBaseline(ctx.codexSessionsDir);
       return {
         baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
+        nativeInput: {
+          digest: (text) => codexNativeInputDigest(text),
+          observe: (digest) =>
+            ctx.agentSessionId
+              ? observeCodexNativeUsers(
+                  ctx.codexSessionsDir,
+                  baseline,
+                  digest,
+                  ctx.agentSessionId,
+                  ctx.worktreePath,
+                )
+              : Promise.resolve([]),
+        },
         async scan(text) {
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
@@ -659,6 +700,13 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       }
       return {
         baseline: { agent: "cursor", ...persistCursorSubmitBaseline(baseline) },
+        nativeInput: {
+          digest: (text) => cursorNativeInputDigest(text),
+          observe: (digest) =>
+            ctx.agentSessionId
+              ? observeCursorNativeUsers(baseline, digest, ctx.agentSessionId)
+              : Promise.resolve([]),
+        },
         async scan(text) {
           const result = await scanCursorJsonlForMessage(
             baseline,

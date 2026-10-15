@@ -4,7 +4,7 @@
 
 - `GET /info` — `lifecycleInstanceId`: process identity; `v2/src/session-lifecycle.ts`.
 - `POST /release-continuation/affirmations` — registered App lane, current launcher Bearer capability; `v2/src/release-continuation.ts`.
-- `POST /release-continuation/transitions` — registered lane PENDING/BLOCKED intent, current launcher Bearer capability; `v2/src/release-continuation.ts`.
+- `POST /release-continuation/transitions` — unique registered repo/PR/lane/session controller, PENDING/BLOCKED intent, current launcher Bearer capability; no caller-source attestation; `v2/src/release-continuation.ts`.
 - `GET /headroom`
 - `GET /models` — model and default reasoning capabilities; discovery in `v2/src/agents/models.ts`.
 - `GET /user-actions`

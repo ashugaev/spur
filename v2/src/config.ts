@@ -3,6 +3,7 @@ import { homedir, totalmem } from "node:os";
 import { isIP } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { createHash } from "node:crypto";
 import {
   GITHUB_CI_RUN_COMPLETED_EVENT,
   GITHUB_PR_LIFECYCLE_KINDS,
@@ -89,6 +90,21 @@ const PROJECT_ENV_FILE = ".env";
 const MISSING_ENV_SENTINEL = "__SPUR_MISSING_ENV__";
 
 type ConfigMode = "instance" | "project";
+
+export interface ProjectConfigSource {
+  file: string;
+  digest: string;
+}
+const projectConfigSources = new WeakMap<ProjectConfig, ProjectConfigSource>();
+
+export function projectConfigSource(project: ProjectConfig): ProjectConfigSource | null {
+  return projectConfigSources.get(project) ?? null;
+}
+
+export function carryProjectConfigSource(source: ProjectConfig, target: ProjectConfig): void {
+  const observation = projectConfigSources.get(source);
+  if (observation) projectConfigSources.set(target, observation);
+}
 
 interface ConfigDefaults {
   serverHost: string;
@@ -2313,7 +2329,12 @@ function parseConfigFile(
   defaults?: ConfigDefaults,
 ): AppConfig {
   const configDir = dirname(configPath);
-  const raw = parseYaml(readFileSync(configPath, "utf-8")) as unknown;
+  const bytes = readFileSync(configPath);
+  const source = {
+    file: realpathSync(configPath),
+    digest: createHash("sha256").update(bytes).digest("hex"),
+  };
+  const raw = parseYaml(bytes.toString("utf8")) as unknown;
   const root = asObject(raw, "config");
 
   const resolvedDefaults = defaults ?? defaultConfigDefaults(configDir);
@@ -2347,6 +2368,7 @@ function parseConfigFile(
     }
     prefixOwners.set(parsedProject.sessionPrefix, projectId);
     normalizedProjects[projectId] = parsedProject;
+    projectConfigSources.set(parsedProject, source);
   }
   validateTelegramBotTokens(normalizedProjects);
   const serverHost =

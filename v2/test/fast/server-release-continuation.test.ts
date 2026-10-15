@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
+import type * as HttpModule from "node:http";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { loadConfig } from "../../src/config.js";
+import { loadConfig, loadProjectConfig } from "../../src/config.js";
+import { captureConfiguredCaller, type CallerSourceSnapshot } from "../../src/release-caller.js";
 import { EventBus } from "../../src/event-bus.js";
 import {
   startReleaseContinuations,
@@ -15,17 +18,47 @@ import {
   unresolvedReviewTransitions,
   type ReviewReceipt,
 } from "../../src/review-receipt.js";
-import type { SessionRecord, SessionView } from "../../src/types.js";
-import { captureReleaseTaskIdentity } from "../../src/session-service.js";
+import * as receiptWrites from "../../src/review-receipt.js";
+import type { SessionRecord, SessionView, SubmitAckBaseline } from "../../src/types.js";
+import {
+  captureReleaseTaskIdentity,
+  SessionService,
+  SessionAdmissionDeniedError,
+} from "../../src/session-service.js";
+import {
+  annotateLifecycleError,
+  lifecycleErrorReceipt,
+  SessionLifecycleRegister,
+} from "../../src/session-lifecycle.js";
+import { parseContinuationRecord } from "../../src/release-continuation-state.js";
+import { writeSession } from "../../src/metadata.js";
+import * as agents from "../../src/agents/index.js";
+import * as nativeProcesses from "../../src/agent-processes.js";
+import * as tmux from "../../src/runtime-tmux.js";
+import {
+  claudeNativeInputDigest,
+  observeClaudeNativeUsers,
+} from "../../src/agents/claude-submit-ack.js";
 import { object } from "../../src/github-app.js";
 import type * as GateModule from "../../src/review-gate.js";
 import type * as AppModule from "../../src/github-app.js";
+import type * as ContinuationModule from "../../src/release-continuation.js";
+import type * as GhModule from "../../src/gh.js";
 import { stateBody } from "../../src/review-state.js";
 import { createTempDir } from "../helpers/common.js";
 
 const H = "a".repeat(40),
   B = "b".repeat(40);
-const fixture = vi.hoisted(() => ({ reason: "all-gates-pass", merged: false }));
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof filesystem>();
+  return { ...actual, open: vi.fn(actual.open), writeFile: vi.fn(actual.writeFile) };
+});
+const fixture = vi.hoisted(() => ({
+  reason: "all-gates-pass",
+  merged: false,
+  head: "a".repeat(40),
+  base: "b".repeat(40),
+}));
 vi.mock("../../src/review-gate.js", async (original) => {
   const actual = await original<typeof GateModule>();
   return {
@@ -65,8 +98,8 @@ function gateSnapshot(): GateModule.GateSnapshot {
       merged: fixture.merged,
       merge_commit_sha: "e".repeat(40),
       user: { id: 9 },
-      head: { sha: H, ref: "feature/task", repo: { full_name: "owner/repo" } },
-      base: { sha: B, ref: "main", repo: { full_name: "owner/repo" } },
+      head: { sha: fixture.head, ref: "feature/task", repo: { full_name: "owner/repo" } },
+      base: { sha: fixture.base, ref: "main", repo: { full_name: "owner/repo" } },
     },
     reviews: [1, 2].map((id) => ({
       id: id * 11,
@@ -211,8 +244,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   fixture.reason = "all-gates-pass";
   fixture.merged = false;
+  fixture.head = H;
+  fixture.base = B;
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  const actual = await vi.importActual<typeof filesystem>("node:fs/promises");
+  vi.mocked(filesystem.open).mockReset().mockImplementation(actual.open);
+  vi.mocked(filesystem.writeFile).mockReset().mockImplementation(actual.writeFile);
 });
 async function setup(recovery?: unknown) {
   const root = await createTempDir("release-controller-");
@@ -350,7 +389,9 @@ async function setup(recovery?: unknown) {
     restore: vi.fn(),
     complete: vi.fn(),
     reviewerEvidence: vi.fn(
-      async (): Promise<{
+      async (
+        _id: string,
+      ): Promise<{
         nativeAgentAlive: boolean | null;
         historyAvailable: boolean;
         initialAcknowledged: boolean | null;
@@ -802,6 +843,717 @@ test.each(["current", "task", "head", "base", "launch", "tool", "checkout"])(
     expect(f.send.mock.calls.some((call) => call[0] === "browser-session")).toBe(false);
   },
 );
+async function configuredLaneFixture(mode: string) {
+  const f = await setup(recoveryBounds());
+  const sourceFile = await f.pin(
+    "review-source.yaml",
+    `projects:\n  reviewers:\n    path: ${join(f.root, "review-checkout")}\n    sources:\n      gh:\n        type: github\n        query: repo:owner/repo\n    triggers:\n      review:\n        source: gh\n        event: github:work_item.new\n        spawn:\n          blocks:\n            - agent: codex\n              prompt: task\n            - agent: codex\n              prompt: task\n`,
+  );
+  const sourceConfig = loadProjectConfig(sourceFile.file);
+  const project = sourceConfig.projects["reviewers"];
+  if (!project) throw new Error("missing source project");
+  f.config.projects["reviewers"] = project;
+  const facts = await Promise.all(
+    [0, 1].map((blockIndex) =>
+      captureConfiguredCaller(sourceConfig, {
+        projectId: "reviewers",
+        sourceId: "gh",
+        triggerId: "review",
+        blockIndex,
+        repository: "owner/repo",
+        pr: 4,
+        prompt: "task",
+      }),
+    ),
+  );
+  expect(facts.every(Boolean)).toBe(true);
+  // Capture happens without a caller policy or future designated session IDs.
+  const runtime = await f.pin("runtime", "owned runtime");
+  const snapshot: CallerSourceSnapshot = {
+    kind: "configured-source",
+    generation: mode === "generation" ? 2 : 1,
+    projectId: "reviewers",
+    sourceId: "gh",
+    triggerId: "review",
+    config: sourceFile,
+    effectiveDigest: digest({
+      source: project.sources["gh"],
+      trigger: project.triggers["review"],
+    }),
+    blocks: { code: 0, browser: 1 },
+    runtime,
+    modules: [runtime],
+  };
+  const source = await f.pin("root-source-snapshot", snapshot);
+  const claim = await f.pin("caller-singleton", {
+    lane: "code",
+    session: "code-session",
+    source,
+  });
+  await revisePolicy(f, (policy) => {
+    const registrations = policy.registrations;
+    if (!Array.isArray(registrations)) throw new Error("missing registrations");
+    object(object(registrations[0]).reviewerRecovery).callerCurrent = claim;
+  });
+  for (const lane of ["code", "browser"] as const) {
+    const session = f.sessions.get(`${lane}-session`);
+    if (!session) throw new Error("missing session");
+    session.project = "reviewers";
+    if (mode === "task") session.prompt = "different task";
+    await writeFile(
+      join(f.receiptDir, `${lane}.json`),
+      JSON.stringify({
+        ...f.receipt,
+        lane,
+        session: session.id,
+        appId: lane === "code" ? 10 : 20,
+        status: "PENDING",
+        reviewId: null,
+        H: mode === "head" ? "f".repeat(40) : H,
+        B: mode === "base" ? "f".repeat(40) : B,
+      }),
+    );
+  }
+  if (mode === "no-record") facts.fill(null);
+  if (mode === "wrong-block") for (const fact of facts) if (fact) fact.blockIndex = 4;
+  if (mode === "pins") await writeFile(runtime.file, "changed runtime");
+  const readback = vi.fn(async () => ({
+    version: "observed",
+    processes: [{ pid: 40, identity: "40" }],
+    statusDigest: "f".repeat(64),
+  }));
+  Object.assign(f.deps, { callerReadback: readback });
+  f.deps.reviewerEvidence.mockImplementation(async (id) => ({
+    nativeAgentAlive: true,
+    historyAvailable: true,
+    initialAcknowledged: true,
+    configuredCaller: facts[id === "code-session" ? 0 : 1] ?? undefined,
+  }));
+  return { f, readback };
+}
+async function assertConfiguredLanes(mode: string) {
+  const { f, readback } = await configuredLaneFixture(mode);
+  const controller = await f.start();
+  if (mode !== "current") {
+    if (mode === "no-record") {
+      const receipt = await readReviewReceipt(join(f.receiptDir, "code.json"));
+      await controller.ingress(
+        {
+          repo: "owner/repo",
+          pr: 4,
+          lane: "code",
+          session: "code-session",
+          attempt: receipt.attempt,
+          H,
+          B,
+          contractDigest: receipt.contractDigest,
+          receipt: join(f.receiptDir, "code.json"),
+          invocation: (await f.readState()).invocation,
+          appId: 10,
+          receiptDigest: digest(receipt),
+          id: "direct-http",
+          challenge: null,
+          status: "PENDING",
+          pid: process.pid,
+          runtime: "copied runtime",
+          callerAccepted: true,
+        },
+        "code-session-capability",
+        false,
+      );
+      await controller.settled();
+    }
+    expect(readback).not.toHaveBeenCalled();
+    expect(f.deps.restore).not.toHaveBeenCalled();
+    return;
+  }
+  expect(readback).toHaveBeenCalledTimes(2);
+  expect((await f.readState()).reason).not.toBe("reviewer-caller-claim-mismatch");
+  // Restart reuses only the same source/task/launch/attempt/generation observation.
+  await controller.stop();
+  await f.start();
+  expect(readback).toHaveBeenCalledTimes(2);
+  expect(f.deps.restore).not.toHaveBeenCalled();
+}
+test.each(["current", "no-record", "generation", "wrong-block", "task", "head", "base", "pins"])(
+  "separately captured lanes qualify only with current Root designation (%s)",
+  assertConfiguredLanes,
+);
+async function reviewerRestoreFixture() {
+  const { f } = await configuredLaneFixture("current");
+  await writeFile(join(f.receiptDir, "code.json"), JSON.stringify(f.receipt));
+  const browser = f.sessions.get("browser-session");
+  if (!browser) throw new Error("missing browser");
+  browser.status = "stopped";
+  const lifecycle = new SessionLifecycleRegister();
+  const originalView = f.deps.view.getMockImplementation();
+  const originalEvidence = f.deps.reviewerEvidence.getMockImplementation();
+  if (!originalView || !originalEvidence) throw new Error("missing observers");
+  f.deps.view.mockImplementation(async (id) => ({
+    ...(await originalView(id)),
+    lifecycle: lifecycle.snapshot(id),
+    runtimeAlive: f.sessions.get(id)?.status === "running",
+  }));
+  f.deps.reviewerEvidence.mockImplementation(async (id) => ({
+    ...(await originalEvidence(id)),
+    nativeAgentAlive: f.sessions.get(id)?.status === "running",
+    initialAcknowledged: id === "code-session",
+  }));
+  const capacity = { instanceId: lifecycle.instanceId, enabled: true, cap: 2, liveCount: 2 };
+  const restore = vi.fn(async (id: string, operationId: string): Promise<SessionView> => {
+    const operation = lifecycle.begin("restore", [id], operationId);
+    const receipt = lifecycle.settle(
+      operation,
+      false,
+      () => "failed",
+      () => true,
+    );
+    const error = new SessionAdmissionDeniedError("capacity denied", "cap");
+    annotateLifecycleError(error, receipt);
+    throw error;
+  });
+  const capability = { restore, capacity: vi.fn(async () => ({ ...capacity })) };
+  Object.assign(f.deps, { reviewerRestore: capability });
+  const statePath = join(f.config.dataDir, "release-continuation", "sandbox", "4.json");
+  const state = async () => {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(statePath, "utf8")) as unknown;
+    } catch {
+      throw new Error("invalid fixture state");
+    }
+    return parseContinuationRecord(value);
+  };
+  const restart = async (controller: ReleaseContinuationController) => {
+    await controller.stop();
+    return f.start();
+  };
+  return { ...f, browser, lifecycle, capacity, capability, restore, state, statePath, restart };
+}
+test.each([false, true])(
+  "reviewer startup syncs complete state ancestry before restore (precreated=%s)",
+  async (precreated) => {
+    const f = await reviewerRestoreFixture();
+    const project = join(f.config.dataDir, "release-continuation", "sandbox");
+    if (precreated) await mkdir(join(project, "owners"), { recursive: true });
+    const synced: string[] = [];
+    const actual = await vi.importActual<typeof filesystem>("node:fs/promises");
+    vi.mocked(filesystem.open).mockImplementation(async (path, flags, mode) => {
+      const handle = await actual.open(path, flags, mode);
+      const sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => {
+        await sync();
+        synced.push(String(path));
+      });
+      return handle;
+    });
+    const restore = f.restore.getMockImplementation();
+    if (!restore) throw new Error("missing restore");
+    let syncedAtRestore: string[] = [];
+    f.restore.mockImplementation(async (...args) => {
+      syncedAtRestore = [...synced];
+      return restore(...args);
+    });
+    await f.start();
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    for (const path of [
+      f.root,
+      f.config.dataDir,
+      join(f.config.dataDir, "release-continuation"),
+      project,
+      join(project, "owners"),
+    ])
+      expect(syncedAtRestore).toContain(path);
+  },
+);
+test.each(["ancestor", "project", "file"])(
+  "reviewer startup %s durability failure prevents restore",
+  async (failure) => {
+    const f = await reviewerRestoreFixture();
+    const project = join(f.config.dataDir, "release-continuation", "sandbox");
+    await mkdir(join(project, "owners"), { recursive: true });
+    const actual = await vi.importActual<typeof filesystem>("node:fs/promises");
+    if (failure === "file")
+      vi.mocked(filesystem.writeFile).mockImplementation(async (path, data, options) => {
+        if (typeof options === "object" && options !== null && "flush" in options && options.flush)
+          throw new Error("injected file flush failure");
+        return actual.writeFile(path, data, options);
+      });
+    else
+      vi.mocked(filesystem.open).mockImplementation(async (path, flags, mode) => {
+        const handle = await actual.open(path, flags, mode);
+        if (String(path) === (failure === "ancestor" ? f.root : project))
+          vi.spyOn(handle, "sync").mockRejectedValue(new Error("injected directory sync failure"));
+        return handle;
+      });
+    await expect(f.start()).rejects.toThrow(
+      failure === "file" ? "continuation-claim-denied" : "failure",
+    );
+    expect(f.restore).not.toHaveBeenCalled();
+    expect(f.deps.restore).not.toHaveBeenCalled();
+  },
+);
+test.each(["decrease", "still-full", "unchanged", "reverted", "usable", "cap-up"])(
+  "reviewer retry requires fresh usable CAP progress (%s)",
+  async (mode) => {
+    const f = await reviewerRestoreFixture();
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const controller = await f.start();
+    const first = (await f.state()).reviewerRestores?.browser;
+    now += 61_000;
+    if (mode === "decrease") f.capacity.cap = 1;
+    if (mode === "still-full") {
+      f.capacity.cap = 3;
+      f.capacity.liveCount = 3;
+    }
+    if (mode === "usable" || mode === "reverted") f.capacity.liveCount = 1;
+    if (mode === "cap-up") f.capacity.cap = 3;
+    if (mode === "reverted") {
+      const observer = f.capability.capacity.getMockImplementation();
+      if (!observer) throw new Error("missing capacity");
+      f.capability.capacity.mockImplementationOnce(observer).mockImplementation(async () => {
+        f.capacity.liveCount = 2;
+        return { ...f.capacity };
+      });
+    }
+    await f.restart(controller);
+    const usable = mode === "usable" || mode === "cap-up";
+    expect(f.restore).toHaveBeenCalledTimes(usable ? 2 : 1);
+    if (!usable) {
+      const latest = (await f.state()).reviewerRestores?.browser;
+      expect(latest?.operationId).toBe(first?.operationId);
+      expect(latest?.attempt).toBe(1);
+    }
+  },
+);
+test("reviewer outcome flush failure retains durable unresolved operation across restart", async () => {
+  const f = await reviewerRestoreFixture();
+  const restore = f.restore.getMockImplementation();
+  if (!restore) throw new Error("missing restore");
+  let attempted = false;
+  let failed = false;
+  f.restore.mockImplementation(async (...args) => {
+    try {
+      return await restore(...args);
+    } finally {
+      attempted = true;
+    }
+  });
+  const actual = await vi.importActual<typeof filesystem>("node:fs/promises");
+  vi.mocked(filesystem.writeFile).mockImplementation(async (path, data, options) => {
+    if (
+      attempted &&
+      !failed &&
+      String(path).includes("/reviewer-") &&
+      typeof options === "object" &&
+      options !== null &&
+      "flush" in options &&
+      options.flush
+    ) {
+      failed = true;
+      throw new Error("injected outcome file flush failure");
+    }
+    return actual.writeFile(path, data, options);
+  });
+  const controller = await f.start();
+  expect(failed).toBe(true);
+  const original = (await f.state()).reviewerRestores?.browser;
+  expect(original?.phase).toBe("intent");
+  expect(original?.attempt).toBe(1);
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 300_000);
+  f.capacity.liveCount = 0;
+  await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  expect((await f.state()).reviewerRestores?.browser).toEqual(original);
+});
+test("server assembles direct reviewer restore and fresh same-service capacity without a listener", async () => {
+  const f = await reviewerRestoreFixture();
+  await appendFile(
+    join(f.root, "spur.yaml"),
+    `server:\n  port: 4329\nworktreeDir: ${join(f.root, "worktrees")}\n`,
+  );
+  type Binding = Parameters<typeof startReleaseContinuations>[0];
+  let binding: Binding | undefined;
+  const boundary = new Error("captured automation assembly");
+  vi.doMock("node:http", async () => {
+    const actual = await vi.importActual<typeof HttpModule>("node:http");
+    return {
+      ...actual,
+      createServer: () => ({
+        once: vi.fn(),
+        off: vi.fn(),
+        listen: (_port: number, _host: string, ready: () => void) => ready(),
+        close: (closed: () => void) => closed(),
+        closeAllConnections: vi.fn(),
+      }),
+    };
+  });
+  vi.doMock("../../src/release-continuation.js", async () => {
+    const actual = await vi.importActual<typeof ContinuationModule>(
+      "../../src/release-continuation.js",
+    );
+    return {
+      ...actual,
+      startReleaseContinuations: async (deps: Binding) => {
+        binding = deps;
+        throw boundary;
+      },
+    };
+  });
+  vi.doMock("../../src/gh.js", async () => {
+    const actual = await vi.importActual<typeof GhModule>("../../src/gh.js");
+    return { ...actual, initializeGhPath: vi.fn(async () => ({ status: "available" })) };
+  });
+  vi.spyOn(SessionService.prototype, "startBackgroundLoops").mockImplementation(() => undefined);
+  const serviceRestore = vi
+    .spyOn(SessionService.prototype, "restore")
+    .mockImplementation(async (id, request) => f.restore(id, request?.operationId ?? "missing"));
+  const capacity = vi
+    .spyOn(SessionService.prototype, "getAdmissionStartupSummary")
+    .mockImplementation(() => ({
+      enabled: f.capacity.enabled,
+      cap: { global: f.capacity.cap, source: f.config.admission.maxLiveSessionsSource },
+      liveCount: f.capacity.liveCount,
+    }));
+  const info = SessionService.prototype.info;
+  vi.spyOn(SessionService.prototype, "info").mockImplementation(function (this: SessionService) {
+    return { ...info.call(this), lifecycleInstanceId: f.lifecycle.instanceId };
+  });
+  try {
+    const { startServer } = await import("../../src/server.js");
+    await expect(
+      startServer(join(f.root, "spur.yaml"), { info: () => undefined, warn: () => undefined }),
+    ).rejects.toBe(boundary);
+    if (!binding?.reviewerRestore) throw new Error("missing assembled reviewer binding");
+    const reviewer = binding.reviewerRestore;
+    const operation = f.lifecycle.begin("restore", ["browser-session"], "identity-probe");
+    const receipt = f.lifecycle.settle(
+      operation,
+      false,
+      () => "failed",
+      () => true,
+    );
+    const denial = new SessionAdmissionDeniedError("current cap", "cap");
+    annotateLifecycleError(denial, receipt);
+    serviceRestore.mockRejectedValueOnce(denial);
+    let caught: unknown;
+    try {
+      await reviewer.restore("browser-session", "identity-probe");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(denial);
+    expect(lifecycleErrorReceipt(caught)).toBe(receipt);
+    expect(serviceRestore).toHaveBeenLastCalledWith("browser-session", {
+      operationId: "identity-probe",
+    });
+    expect(await reviewer.capacity()).toEqual(f.capacity);
+    f.capacity.liveCount = 1;
+    expect(await reviewer.capacity()).toEqual(f.capacity);
+    expect(capacity).toHaveBeenCalledTimes(2);
+    f.capacity.liveCount = 2;
+    Object.assign(f.deps, { reviewerRestore: reviewer });
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let controller = await f.start();
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    const first = (await f.state()).reviewerRestores?.browser;
+    now += 61_000;
+    f.capacity.cap = 1;
+    controller = await f.restart(controller);
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    expect((await f.state()).reviewerRestores?.browser?.operationId).toBe(first?.operationId);
+    f.capacity.cap = 3;
+    await f.restart(controller);
+    expect(f.restore).toHaveBeenCalledTimes(2);
+    expect(serviceRestore).toHaveBeenLastCalledWith("browser-session", {
+      operationId: (await f.state()).reviewerRestores?.browser?.operationId,
+    });
+    expect((await f.state()).reviewerRestores?.browser?.operationId).not.toBe(first?.operationId);
+    expect(f.deps.restore).not.toHaveBeenCalled();
+  } finally {
+    vi.doUnmock("node:http");
+    vi.doUnmock("../../src/release-continuation.js");
+    vi.doUnmock("../../src/gh.js");
+  }
+});
+test("reviewer restore known-zero retry uses new operation on same ID, persisted cooldown and peer approval", async () => {
+  const f = await reviewerRestoreFixture();
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const approval = await readFile(join(f.receiptDir, "code.json"), "utf8");
+  let controller = await f.start();
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  const first = (await f.state()).reviewerRestores?.browser;
+  expect((await f.state()).reason).toBe("reviewer-restore-admission-denied");
+  expect(first?.phase).toBe("zero-denied");
+  expect(first?.attempt).toBe(1);
+  expect(() => f.lifecycle.begin("restore", ["browser-session"], first?.operationId)).toThrow(
+    "owns this session",
+  );
+  controller = await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  now += 61_000;
+  controller = await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  f.capacity.liveCount = 1;
+  controller = await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(2);
+  const second = (await f.state()).reviewerRestores?.browser;
+  expect(second?.operationId).not.toBe(first?.operationId);
+  expect(second?.session).toBe("browser-session");
+  expect(second?.attempt).toBe(2);
+  now += 300_000;
+  f.capacity.liveCount = 0;
+  await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(2);
+  expect(f.deps.restore).not.toHaveBeenCalled();
+  expect(await readFile(join(f.receiptDir, "code.json"), "utf8")).toBe(approval);
+  expect(f.send.mock.calls.filter(([id]) => id === "browser-session")).toEqual([]);
+});
+test.each([
+  "PENDING",
+  "500",
+  "timeout",
+  "bare429",
+  "wrong-operation",
+  "wrong-instance",
+  "wrong-target",
+  "wrong-action",
+  "wrong-revision",
+  "memory",
+])(
+  "reviewer restore %s keeps ambiguous operations fenced and never blindly retries existing reviewers",
+  async (mode) => {
+    const f = await reviewerRestoreFixture();
+    if (mode !== "memory")
+      f.restore.mockImplementation(async (id, operationId) => {
+        const operation = f.lifecycle.begin("restore", [id], operationId);
+        if (mode === "PENDING") throw new Error("pending response");
+        const receipt = f.lifecycle.settle(
+          operation,
+          false,
+          () => "failed",
+          () => true,
+        );
+        const error = mode.startsWith("wrong-")
+          ? new SessionAdmissionDeniedError("wrong correlation", "cap")
+          : Object.assign(new Error(mode), { statusCode: mode === "bare429" ? 429 : 500 });
+        annotateLifecycleError(error, {
+          ...receipt,
+          ...(mode === "wrong-instance" ? { instanceId: "different-instance" } : {}),
+          ...(mode === "wrong-revision" ? { revision: 0 } : {}),
+          operation:
+            receipt.operation === null
+              ? null
+              : {
+                  ...receipt.operation,
+                  ...(mode === "wrong-operation" ? { operationId: "different-operation" } : {}),
+                  ...(mode === "wrong-target" ? { targetIds: ["another-session"] } : {}),
+                  ...(mode === "wrong-action" ? { action: "complete" as const } : {}),
+                },
+        });
+        throw error;
+      });
+    else
+      f.restore.mockImplementation(async (id, operationId) => {
+        const operation = f.lifecycle.begin("restore", [id], operationId);
+        const error = new SessionAdmissionDeniedError("memory denied", "memory_guard");
+        annotateLifecycleError(
+          error,
+          f.lifecycle.settle(
+            operation,
+            false,
+            () => "failed",
+            () => true,
+          ),
+        );
+        throw error;
+      });
+    const controller = await f.start();
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    const first = (await f.state()).reviewerRestores?.browser;
+    expect(first?.phase).toBe(mode === "memory" ? "zero-denied" : "unknown");
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 300_000);
+    f.capacity.liveCount = 0;
+    await f.restart(controller);
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    expect((await f.state()).reviewerRestores?.browser?.operationId).toBe(first?.operationId);
+  },
+);
+test("reviewer restore absent optional capability never uses legacy owner restore", async () => {
+  const f = await reviewerRestoreFixture();
+  Object.assign(f.deps, { reviewerRestore: undefined });
+  await f.start();
+  expect(f.restore).not.toHaveBeenCalled();
+  expect(f.deps.restore).not.toHaveBeenCalled();
+  expect((await f.state()).reviewerRestores?.browser).toBeUndefined();
+});
+test("reviewer restore handles only the two registered unavailable lanes independently", async () => {
+  const f = await reviewerRestoreFixture();
+  const code = f.sessions.get("code-session");
+  if (!code) throw new Error("missing code reviewer");
+  code.status = "stopped";
+  await writeFile(
+    join(f.receiptDir, "code.json"),
+    JSON.stringify({ ...f.receipt, status: "PENDING" }),
+  );
+  const controller = await f.start();
+  expect(f.restore.mock.calls.map(([id]) => id)).toEqual(["code-session", "browser-session"]);
+  const stable = (await f.state()).reviewerRestores;
+  expect(stable?.code?.phase).toBe("zero-denied");
+  expect(stable?.browser?.phase).toBe("zero-denied");
+  await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(2);
+});
+test.each(["head", "base", "generation", "task", "launch", "service-restart", "approved"])(
+  "reviewer restore unknown fence survives %s before receipt or budget selection",
+  async (mode) => {
+    const f = await reviewerRestoreFixture();
+    f.restore.mockRejectedValue(new Error("delivery uncertain"));
+    const controller = await f.start();
+    const first = (await f.state()).reviewerRestores?.browser;
+    if (mode === "head") fixture.head = "c".repeat(40);
+    if (mode === "base") fixture.base = "c".repeat(40);
+    if (mode === "generation")
+      await revisePolicy(f, (policy) => {
+        if (!Array.isArray(policy.registrations)) throw new Error("missing registration");
+        object(policy.registrations[0]).generation = 2;
+      });
+    if (mode === "task") f.browser.prompt = "unrelated task";
+    if (mode === "launch") f.browser.agentLaunchId = "unrelated new launch";
+    if (mode === "service-restart") {
+      const view = f.deps.view.getMockImplementation();
+      if (!view) throw new Error("missing view");
+      f.deps.view.mockImplementation(async (id) => ({
+        ...(await view(id)),
+        lifecycle: {
+          instanceId: "new-service-instance",
+          revision: 0,
+          operation: null,
+        },
+      }));
+    }
+    if (mode === "approved")
+      await writeFile(
+        join(f.receiptDir, "browser.json"),
+        JSON.stringify({
+          ...f.receipt,
+          lane: "browser",
+          session: "browser-session",
+          appId: 20,
+          reviewId: 22,
+        }),
+      );
+    await f.restart(controller);
+    expect(f.restore).toHaveBeenCalledTimes(1);
+    expect((await f.state()).reviewerRestores?.browser).toEqual(first);
+  },
+);
+test.each(["stable", "budget", "outcome", "settlement"])(
+  "reviewer restore %s write failure never refunds or blindly resubmits",
+  async (stage) => {
+    const f = await reviewerRestoreFixture();
+    const write = receiptWrites.atomicReceiptWrite;
+    let failed = false;
+    const spy = vi
+      .spyOn(receiptWrites, "atomicReceiptWrite")
+      .mockImplementation(async (path, value) => {
+        const row = object(value);
+        const attempts = row.restoreAttempts;
+        const last = Array.isArray(attempts) ? object(attempts.at(-1)) : null;
+        const lane =
+          row.reviewerRestores === undefined ? null : object(object(row.reviewerRestores).browser);
+        const target =
+          (stage === "stable" && lane?.phase === "intent") ||
+          (stage === "budget" && last?.phase === "intent") ||
+          (stage === "outcome" && last?.phase === "zero-denied") ||
+          (stage === "settlement" && lane?.phase === "zero-denied");
+        if (!failed && target) {
+          failed = true;
+          throw new Error("injected durable write failure");
+        }
+        await write(path, value);
+      });
+    const controller = await f.start();
+    expect(failed).toBe(true);
+    expect(f.restore).toHaveBeenCalledTimes(stage === "stable" || stage === "budget" ? 0 : 1);
+    spy.mockRestore();
+    await f.restart(controller);
+    if (stage === "stable") expect(f.restore).toHaveBeenCalledTimes(1);
+    else expect(f.restore).toHaveBeenCalledTimes(stage === "budget" ? 0 : 1);
+    const stable = (await f.state()).reviewerRestores?.browser;
+    expect(stable?.attempt).toBe(1);
+    if (stage === "budget" || stage === "outcome") expect(stable?.phase).toBe("intent");
+    if (stage === "settlement") expect(stable?.phase).toBe("zero-denied");
+  },
+);
+test("reviewer restore actual same-operation success proves lifecycle only", async () => {
+  const f = await reviewerRestoreFixture();
+  f.restore.mockImplementation(async (id, operationId) => {
+    const operation = f.lifecycle.begin("restore", [id], operationId);
+    f.browser.status = "running";
+    f.browser.agentLaunchId = "actual-restored-launch";
+    f.lifecycle.settle(
+      operation,
+      true,
+      () => "succeeded",
+      () => true,
+    );
+    return f.deps.view(id);
+  });
+  const controller = await f.start();
+  expect((await f.state()).reviewerRestores?.browser?.phase).toBe("observed");
+  await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  expect((await f.state()).reason).toBe("reviewer-current-launch-ack-unavailable");
+  expect(f.send.mock.calls.filter(([id]) => id === "browser-session")).toEqual([]);
+});
+test("reviewer restore concurrent controllers cannot duplicate a submission", async () => {
+  const f = await reviewerRestoreFixture();
+  const outcomes = await Promise.allSettled([f.start(), f.start()]);
+  expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+});
+test.each(["task", "launch", "native"])(
+  "reviewer restore fences %s drift during caller readback",
+  async (mode) => {
+    const f = await reviewerRestoreFixture();
+    f.browser.agentSessionId = "original-native";
+    Object.assign(f.deps, {
+      callerReadback: async () => {
+        if (mode === "task") f.browser.prompt = "unrelated replacement task";
+        if (mode === "launch") f.browser.agentLaunchId = "replacement-launch";
+        if (mode === "native") f.browser.agentSessionId = "replacement-native";
+        return {
+          version: "observed",
+          processes: [{ pid: 40, identity: "40" }],
+          statusDigest: "f".repeat(64),
+        };
+      },
+    });
+    await f.start();
+    expect(f.restore).not.toHaveBeenCalled();
+    expect((await f.state()).reviewerRestores?.browser).toBeUndefined();
+  },
+);
+test("reviewer restore stale result cannot replace a newer lane fence or refund budget", async () => {
+  const f = await reviewerRestoreFixture();
+  f.restore.mockImplementation(async () => {
+    const state = await f.state();
+    const fence = state.reviewerRestores?.browser;
+    if (!fence) throw new Error("missing intent");
+    state.reviewerRestores = { browser: { ...fence, operationId: "newer-operation" } };
+    await writeFile(f.statePath, JSON.stringify(state));
+    throw new Error("stale uncertain result");
+  });
+  const controller = await f.start();
+  expect((await f.state()).reviewerRestores?.browser?.operationId).toBe("newer-operation");
+  await f.restart(controller);
+  expect(f.restore).toHaveBeenCalledTimes(1);
+  expect((await f.state()).reviewerRestores?.browser?.operationId).toBe("newer-operation");
+});
 test("live BLOCKED fixture requests named diagnosis once and cannot spend attempts or replace code approval", async () => {
   const f = await setup(recoveryBounds());
   const path = join(f.receiptDir, "browser.json");
@@ -916,6 +1668,96 @@ test("unknown current-launch acknowledgement cannot be replaced by old healthy n
   expect((await f.readState()).reason).toBe("reviewer-current-launch-ack-unavailable");
   expect(f.deps.restore).not.toHaveBeenCalled();
   expect(f.send.mock.calls.some((call) => call[0] === "browser-session")).toBe(false);
+});
+test("actual producer USER advances current acknowledgement only to the caller-source hold", async () => {
+  const f = await setup(recoveryBounds());
+  await rm(join(f.receiptDir, "browser.json"));
+  const prior = f.sessions.get("browser-session");
+  if (!prior) throw new Error("browser fixture missing");
+  const nativeId = "current-native-fixture";
+  const session: SessionRecord = {
+    ...prior,
+    agent: "claude",
+    launchCommand: "claude",
+    agentSessionId: nativeId,
+  };
+  f.sessions.set(session.id, session);
+  writeSession(f.config.dataDir, session);
+  const file = join(f.root, "native-user.jsonl");
+  await writeFile(file, "");
+  const bind = (baseline: SubmitAckBaseline): agents.SubmitAckBinding => {
+    if (baseline.agent !== "claude") throw new Error("unexpected provider");
+    return {
+      baseline,
+      nativeInput: {
+        digest: claudeNativeInputDigest,
+        observe: (body) => observeClaudeNativeUsers(baseline, body, nativeId),
+      },
+      scan: async () => ({ found: true, lastScannedFile: file }),
+    };
+  };
+  const spies = [
+    vi
+      .spyOn(agents, "createAgentSubmitAckBinding")
+      .mockImplementation(async () =>
+        bind({ agent: "claude", file, size: (await stat(file)).size }),
+      ),
+    vi
+      .spyOn(agents, "resumeAgentSubmitAckBinding")
+      .mockImplementation(async (_agent, _context, baseline) => bind(baseline)),
+    vi.spyOn(nativeProcesses, "captureAgentProcessesForLaunch").mockResolvedValue({
+      status: "ok",
+      processes: [{ pid: 42, identity: "fixture-start" }],
+    }),
+    vi
+      .spyOn(tmux, "probeTmuxProcessMatch")
+      .mockResolvedValue({ alive: true, matchedByName: true, unresponsive: false }),
+    vi.spyOn(tmux, "sendMessageToTmux").mockImplementation(async (_pane, body) => {
+      await appendFile(
+        file,
+        `${JSON.stringify({ type: "user", sessionId: session.agentSessionId, uuid: "current-user", message: { role: "user", content: [{ type: "text", text: body }] } })}\n`,
+      );
+    }),
+  ];
+  try {
+    const service = new SessionService(join(f.root, "spur.yaml"), session.createdAt, {
+      deferBackgroundLoops: true,
+    });
+    vi.spyOn(service, "getConversation").mockResolvedValue({
+      messages: [],
+      entries: [{ kind: "message", role: "user", text: session.prompt }],
+      durationMs: 0,
+      state: "waiting",
+      startIndex: 0,
+      totalEntries: 1,
+    });
+    f.deps.reviewerEvidence.mockImplementation((id) => service.releaseReviewerEvidence(id));
+    expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+      initialAcknowledged: null,
+    });
+    const controller = await f.start();
+    expect((await f.readState()).reason).toBe("reviewer-current-launch-ack-unavailable");
+    await controller.stop();
+    controllers.splice(controllers.indexOf(controller), 1);
+    const producer = service as unknown as {
+      sendAgentMessage(
+        record: SessionRecord,
+        body: string,
+        options: { freshLaunch: true },
+      ): Promise<unknown>;
+    };
+    await producer.sendAgentMessage(session, "Привет 🦊 exact caller task", { freshLaunch: true });
+    expect(await service.releaseReviewerEvidence(session.id)).toMatchObject({
+      initialAcknowledged: true,
+    });
+    await f.start();
+    expect((await f.readState()).reason).toBe("reviewer-caller-current-source-unavailable");
+    expect(f.deps.restore).not.toHaveBeenCalled();
+    expect(f.send.mock.calls.some((call) => call[0] === session.id)).toBe(false);
+    expect(tmux.sendMessageToTmux).toHaveBeenCalledTimes(1);
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+  }
 });
 test("startup recovers existing approvals once and restart does not resend", async () => {
   const f = await setup(),
@@ -1044,16 +1886,26 @@ test("external merge without completed current owner gate is never publication p
     "blocked:continuation-external-merge-unverified",
   );
 });
-test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock", async () => {
-  const f = await setup(),
-    controller = await f.start();
-  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+async function assertRegisteredIngress(mode: string) {
+  const f = await setup();
+  if (mode === "cross-project") {
+    const session = f.sessions.get("code-session");
+    if (!session) throw new Error("missing session");
+    session.project = "review-desk";
+  }
+  if (mode === "collision") {
+    const project = f.config.projects["sandbox"];
+    if (!project) throw new Error("missing project");
+    f.config.projects["other-controller"] = { ...project };
+  }
+  const controller = await f.start();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(mode === "collision" ? 6 : 3));
   const state = await f.readState();
   const request = {
     repo: "owner/repo",
     pr: 4,
     lane: "code",
-    session: "code-session",
+    session: mode === "unregistered" ? "unregistered-session" : "code-session",
     attempt: "attempt",
     H,
     B,
@@ -1066,6 +1918,12 @@ test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock
     challenge: state.affirmations.code.challenge,
     status: "APPROVED",
   };
+  if (mode === "unregistered" || mode === "collision") {
+    await expect(controller.ingress(request, "code-session-capability", true)).rejects.toThrow(
+      "continuation-unregistered",
+    );
+    return;
+  }
   await expect(controller.ingress(request, "browser-session-capability", true)).rejects.toThrow(
     "launch-mismatch",
   );
@@ -1086,7 +1944,11 @@ test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock
   } finally {
     await release();
   }
-});
+}
+test.each(["same-project", "cross-project", "unregistered", "collision"])(
+  "registered ingress retains launch and receipt guards (%s)",
+  assertRegisteredIngress,
+);
 test.each(["ci-not-success", "native-approval-missing", "unresolved-threads", "consent-missing"])(
   "blocked %s sends owner repair work only",
   async (reason) => {

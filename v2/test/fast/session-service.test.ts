@@ -1,4 +1,8 @@
 import type * as cryptoModule from "node:crypto";
+import type * as configModule from "../../src/config.js";
+import type * as nativeInputModule from "../../src/native-input.js";
+import type * as claudeSubmitModule from "../../src/agents/claude-submit-ack.js";
+import type * as cursorSubmitModule from "../../src/agents/cursor-submit-ack.js";
 import { createHash, randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
@@ -66,6 +70,7 @@ import {
   type SessionStateTransition,
   type SessionView,
   type StateSource,
+  type SubmitAckBaseline,
   type TodoProjection,
 } from "../../src/types.js";
 // Type-only, so it never bypasses the mocked module registry below.
@@ -529,6 +534,7 @@ vi.mock("../../src/claude-accounts.js", () => ({
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
   captureCursorRestoreBoundary: vi.fn().mockResolvedValue(null),
+  findCursorAckTranscriptFile: vi.fn().mockResolvedValue(null),
   readCursorJsonlState: readCursorJsonlStateMock,
   configureCursorTurnEndedStore: configureCursorTurnEndedStoreMock,
   resolveCursorBuild: () => "test-build",
@@ -596,28 +602,34 @@ vi.mock("../../src/agents/index.js", () => ({
   setupAgentHooks: setupAgentHooksMock,
 }));
 
-vi.mock("../../src/config.js", () => ({
-  buildSidecarLinkUrl: (template: string, reservedPort: number) =>
-    template.includes("{port}")
-      ? template.replaceAll("{port}", String(reservedPort))
-      : `${template}:${reservedPort}`,
-  loadConfig: loadConfigMock,
-  loadProjectConfig: loadProjectConfigMock,
-  validateWebhookSourceBindings: () => undefined,
-  findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
-  loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
-  expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
-  PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
-  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
-  deriveProjectIdFromDisplayName: (value: string) =>
-    value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-+/, "")
-      .replace(/-+$/, "") || "project",
-}));
+vi.mock("../../src/config.js", async () => {
+  const actual = await vi.importActual<typeof configModule>("../../src/config.js");
+  return {
+    carryProjectConfigSource: actual.carryProjectConfigSource,
+    projectConfigSource: actual.projectConfigSource,
+    buildSidecarLinkUrl: (template: string, reservedPort: number) =>
+      template.includes("{port}")
+        ? template.replaceAll("{port}", String(reservedPort))
+        : `${template}:${reservedPort}`,
+    loadConfig: loadConfigMock,
+    loadProjectConfig: loadProjectConfigMock,
+    validateWebhookSourceBindings: () => undefined,
+    findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
+    loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
+    expandHome: (value: string) =>
+      value.startsWith("~/") ? join(homedir(), value.slice(2)) : value,
+    PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
+    DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
+    deriveProjectIdFromDisplayName: (value: string) =>
+      value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-+/, "")
+        .replace(/-+$/, "") || "project",
+  };
+});
 
 vi.mock("../../src/preflight.js", () => ({
   PreflightBranchValidationError: MockPreflightBranchValidationError,
@@ -689,7 +701,9 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: reserveNextSessionIdMock,
 }));
 
-vi.mock("../../src/metadata.js", () => ({
+vi.mock("../../src/metadata.js", async (importOriginal) => ({
+  normalizeSubmitAckBaseline: (await importOriginal<typeof metadataModule>())
+    .normalizeSubmitAckBaseline,
   readInterfaceConsent: readInterfaceConsentMock,
   writeInterfaceConsent: writeInterfaceConsentMock,
   writeTelegramOffer: writeTelegramOfferMock,
@@ -1387,6 +1401,17 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  runDeliveryTransaction(
+    id: string,
+    message: string,
+    intent: { kind: "queued-drain"; message: string },
+  ): Promise<unknown>;
+  requeueTypedMessageAtHead(id: string, message: string): void;
+  beginAgentMessage(
+    session: SessionRecord,
+    message: string,
+    options?: { skipSubmitAck?: boolean; freshLaunch?: boolean },
+  ): Promise<unknown>;
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
   lastSuccessfulTodoNudgeAt: Map<string, number>;
@@ -9329,6 +9354,7 @@ describe("SessionService", () => {
     };
 
     async function claudeService() {
+      createSessionStore(sessionRecord({ ...claudeSession }));
       createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
         agent === "claude" ? { scan: vi.fn() } : null,
       );
@@ -29690,6 +29716,584 @@ describe("SessionService", () => {
         artifacts,
       };
     }
+
+    async function nativeInputSetup() {
+      const fixture = await setup();
+      const session = {
+        ...fixture.session,
+        agent: "claude" as const,
+        agentSessionId: "native-current",
+      };
+      fixture.sessions.set(session.id, session);
+      const file = join(TEST_DATA_DIR, "native-current.jsonl");
+      writeFileSync(file, "");
+      const provider = await vi.importActual<typeof claudeSubmitModule>(
+        "../../src/agents/claude-submit-ack.js",
+      );
+      const nativeInput = await vi.importActual<typeof nativeInputModule>(
+        "../../src/native-input.js",
+      );
+      const bind = (baseline: SubmitAckBaseline, nativeId: string) => {
+        if (baseline.agent !== "claude") throw new Error("unexpected provider");
+        return {
+          baseline,
+          nativeInput: {
+            digest: provider.claudeNativeInputDigest,
+            observe: (digest: string) =>
+              provider.observeClaudeNativeUsers(baseline, digest, nativeId),
+          },
+          scan: async () => ({ found: true, lastScannedFile: file }),
+        };
+      };
+      createAgentSubmitAckBindingMock.mockImplementation(
+        async (_agent: string, context: { agentSessionId?: string }) =>
+          bind({ agent: "claude", file, size: statSync(file).size }, context.agentSessionId ?? ""),
+      );
+      resumeAgentSubmitAckBindingMock.mockImplementation(
+        async (_agent: string, context: { agentSessionId?: string }, baseline: SubmitAckBaseline) =>
+          bind(baseline, context.agentSessionId ?? ""),
+      );
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [{ pid: 42, identity: "native-start" }],
+      });
+      let rows = 0;
+      const appendUser = (message: string) => {
+        appendFileSync(
+          file,
+          `${JSON.stringify({ type: "user", sessionId: session.agentSessionId, uuid: `user-${++rows}`, message: { role: "user", content: [{ type: "text", text: message }] } })}\n`,
+        );
+      };
+      sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) =>
+        appendUser(message),
+      );
+      const readJournal = async (currentSession: SessionRecord = session) => {
+        const { updatedAt: _updatedAt, ...identity } =
+          fixture.captureReleaseTaskIdentity(currentSession);
+        if (!identity.launchDigest) throw new Error("launch missing");
+        return nativeInput.readNativeInputJournal(TEST_DATA_DIR, {
+          ...identity,
+          launchDigest: identity.launchDigest,
+          agent: currentSession.agent,
+        });
+      };
+      return { ...fixture, session, file, provider, appendUser, readJournal };
+    }
+
+    it("native accepted input travels from actual paste boundary through raw provider USER to reviewer evidence", async () => {
+      const fixture = await nativeInputSetup();
+      sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) => {
+        const intent = await fixture.readJournal();
+        expect(intent?.occurrences).toHaveLength(1);
+        expect(intent?.occurrences[0]?.state.kind).toBe("intent");
+        fixture.appendUser(message);
+      });
+      const { agentLaunchId: _reducedLaunch, ...reducedTarget } = fixture.session;
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        reducedTarget,
+        "Привет 🦊 full task suffix",
+        { freshLaunch: true },
+      );
+      const dispatched = await fixture.readJournal();
+      expect(dispatched?.occurrences[0]?.state.kind).toBe("dispatched");
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        nativeAgentAlive: true,
+        initialAcknowledged: true,
+      });
+      const accepted = await fixture.readJournal();
+      expect(accepted?.occurrences[0]?.state).toMatchObject({
+        kind: "accepted",
+        user: {
+          nativeSessionId: fixture.session.agentSessionId,
+          source: fixture.file,
+          recordId: "user-1",
+        },
+      });
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: true,
+      });
+      const restarted = new fixture.SessionService("/tmp/spur.yaml", fixture.session.createdAt, {
+        deferBackgroundLoops: true,
+      });
+      vi.spyOn(restarted, "getConversation").mockImplementation((id, options) =>
+        fixture.service.getConversation(id, options),
+      );
+      expect(await restarted.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: true,
+      });
+      expect((await fixture.readJournal())?.occurrences).toHaveLength(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it("native accepted input retains queue-only acknowledgement and wrong caller suffix as unknown", async () => {
+      const fixture = await nativeInputSetup();
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        appendFileSync(
+          fixture.file,
+          `${JSON.stringify({ type: "queue-operation", operation: "enqueue", content: "expected suffix" })}\n`,
+        );
+        fixture.appendUser("expected DIFFERENT caller suffix");
+      });
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        fixture.session,
+        "expected suffix",
+        { freshLaunch: true },
+      );
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect((await fixture.readJournal())?.occurrences[0]?.state.kind).toBe("dispatched");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("native accepted input leaves one delayed USER ambiguous between two identical pastes", async () => {
+      const fixture = await nativeInputSetup();
+      let pasted = 0;
+      sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) => {
+        if (++pasted === 2) fixture.appendUser(message);
+        else
+          appendFileSync(
+            fixture.file,
+            `${JSON.stringify({ type: "queue-operation", operation: "enqueue", content: message })}\n`,
+          );
+      });
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        fixture.session,
+        "same body",
+        { freshLaunch: true },
+      );
+      await sessionServiceInternals(fixture.service).sendAgentMessage(fixture.session, "same body");
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      const journal = await fixture.readJournal();
+      expect(journal?.occurrences.map((input) => input.state.kind)).toEqual([
+        "ambiguous",
+        "ambiguous",
+      ]);
+      expect(new Set(journal?.occurrences.map((input) => input.id)).size).toBe(2);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it("native accepted input keeps transport on pre-action source loss with an opaque intent", async () => {
+      const fixture = await nativeInputSetup();
+      const observe = vi.fn();
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        baseline: { agent: "claude", file: fixture.file, size: 1 },
+        nativeInput: { digest: fixture.provider.claudeNativeInputDigest, observe },
+        scan: async () => ({ found: true, lastScannedFile: fixture.file }),
+      });
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        fixture.session,
+        "source unavailable",
+        { freshLaunch: true },
+      );
+      expect((await fixture.readJournal())?.occurrences[0]).toMatchObject({
+        baseline: null,
+        bodyDigest: null,
+        state: { kind: "unobservable", reason: "native_input_source_unavailable" },
+      });
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect(observe).not.toHaveBeenCalled();
+      expect(createAgentSubmitAckBindingMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("native accepted input performs zero paste after failed durable intent publication", async () => {
+      const fixture = await nativeInputSetup();
+      const receipt = await import("../../src/review-receipt.js");
+      const write = vi
+        .spyOn(receipt, "atomicReceiptWrite")
+        .mockRejectedValueOnce(new Error("intent fsync failed"));
+      try {
+        await expect(
+          sessionServiceInternals(fixture.service).sendAgentMessage(
+            fixture.session,
+            "never paste",
+            { freshLaunch: true },
+          ),
+        ).rejects.toThrow("intent fsync failed");
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        write.mockRestore();
+      }
+    });
+
+    it.each(["intent", "dispatch", "fresh-launch"])(
+      "native accepted input preserves queued delivery on %s journal publication failure",
+      async (phase) => {
+        const fixture = await nativeInputSetup();
+        const message = "queued caller boundary";
+        if (phase !== "fresh-launch")
+          fixture.sessions.set(fixture.session.id, {
+            ...fixture.session,
+            queuedMessages: { messages: [message], awaitingPrompt: false },
+          });
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        const internals = sessionServiceInternals(fixture.service);
+        const ack = vi.spyOn(internals, "waitForSubmitAck");
+        const requeue = vi.spyOn(internals, "requeueTypedMessageAtHead");
+        vi.spyOn(internals, "captureAgentSessionId").mockImplementation(async (record) => record);
+        const receipt = await import("../../src/review-receipt.js");
+        const actualWrite = receipt.atomicReceiptWrite;
+        let writes = 0;
+        const publication = vi
+          .spyOn(receipt, "atomicReceiptWrite")
+          .mockImplementation(async (path, value) => {
+            if (path.endsWith("/inputs.json") && ++writes === (phase === "intent" ? 1 : 2))
+              throw new Error("native publication failed");
+            await actualWrite(path, value);
+          });
+        try {
+          const delivery =
+            phase === "fresh-launch"
+              ? internals.sendAgentMessage(fixture.session, message, { freshLaunch: true })
+              : internals.runDeliveryTransaction(fixture.session.id, message, {
+                  kind: "queued-drain",
+                  message,
+                });
+          if (phase === "intent") {
+            await expect(delivery).rejects.toThrow("native publication failed");
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect(ack).not.toHaveBeenCalled();
+            expect(fixture.sessions.get(fixture.session.id)?.queuedMessages?.messages).toEqual([
+              message,
+            ]);
+          } else {
+            await expect(delivery).resolves.toBeDefined();
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+            expect(ack).toHaveBeenCalledTimes(1);
+            expect(
+              fixture.sessions.get(fixture.session.id)?.queuedMessages?.messages ?? [],
+            ).toEqual([]);
+            expect(fixture.sessions.get(fixture.session.id)?.queuedMessageTyped).toBeUndefined();
+            expect((await fixture.readJournal())?.occurrences[0]?.state.kind).toBe("intent");
+            expect(logSpurEventMock).toHaveBeenCalledWith(
+              TEST_DATA_DIR,
+              expect.objectContaining({
+                event: "session.message.native_input_unavailable",
+                level: "warn",
+              }),
+            );
+          }
+          expect(requeue).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          publication.mockRestore();
+        }
+      },
+    );
+
+    it("native accepted input cannot reuse a prior launch or recycled process", async () => {
+      const fixture = await nativeInputSetup();
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        fixture.session,
+        "current initial",
+        { freshLaunch: true },
+      );
+      captureAgentProcessesForLaunchMock.mockResolvedValue({
+        status: "ok",
+        processes: [{ pid: 42, identity: "recycled-start" }],
+      });
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      fixture.sessions.set(fixture.session.id, {
+        ...fixture.session,
+        agentLaunchId: "next-launch",
+      });
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("native accepted input keeps a failed paste uncertain across restart without replay", async () => {
+      const fixture = await nativeInputSetup();
+      sendMessageToTmuxMock.mockImplementation(async (_pane: string, message: string) => {
+        fixture.appendUser(message);
+        throw new Error("paste result uncertain");
+      });
+      await expect(
+        sessionServiceInternals(fixture.service).sendAgentMessage(
+          fixture.session,
+          "possibly pasted initial",
+          { freshLaunch: true },
+        ),
+      ).rejects.toThrow("paste result uncertain");
+      expect((await fixture.readJournal())?.occurrences[0]?.state.kind).toBe("intent");
+      const restarted = new fixture.SessionService("/tmp/spur.yaml", fixture.session.createdAt, {
+        deferBackgroundLoops: true,
+      });
+      vi.spyOn(restarted, "getConversation").mockImplementation((id, options) =>
+        fixture.service.getConversation(id, options),
+      );
+      expect(await restarted.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it("native accepted input preserves null-binding transport and never upgrades an opaque occurrence", async () => {
+      const fixture = await nativeInputSetup();
+      createAgentSubmitAckBindingMock.mockResolvedValue(null);
+      await sessionServiceInternals(fixture.service).sendAgentMessage(
+        fixture.session,
+        "opaque initial",
+        { freshLaunch: true },
+      );
+      const opaque = await fixture.readJournal();
+      expect(opaque?.occurrences[0]).toMatchObject({
+        baseline: null,
+        bodyDigest: null,
+        sources: [],
+        state: { kind: "unobservable", reason: "native_input_baseline_unavailable" },
+      });
+      expect(createAgentSubmitAckBindingMock).toHaveBeenCalledTimes(1);
+      expect(await fixture.service.releaseReviewerEvidence(fixture.session.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect((await fixture.readJournal())?.occurrences[0]).toEqual(opaque?.occurrences[0]);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it("native accepted input preserves legacy transport without creating a synthetic launch journal", async () => {
+      const fixture = await nativeInputSetup();
+      const { agentLaunchId: _oldLaunch, ...legacy } = fixture.session;
+      fixture.sessions.set(legacy.id, legacy);
+      await sessionServiceInternals(fixture.service).sendAgentMessage(legacy, "legacy input");
+      expect(existsSync(join(TEST_DATA_DIR, "native-inputs"))).toBe(false);
+      expect(await fixture.service.releaseReviewerEvidence(legacy.id)).toMatchObject({
+        initialAcknowledged: null,
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["fresh-cursor", "skip-ack", "codex-env"])(
+      "native accepted input preserves actual %s missing-boundary transport",
+      async (mode) => {
+        const fixture = await nativeInputSetup();
+        const { agentSessionId: _priorNative, ...fresh } = fixture.session;
+        const session: SessionRecord = {
+          ...fresh,
+          agent: mode === "fresh-cursor" ? "cursor" : "codex",
+          launchCommand: mode === "fresh-cursor" ? "cursor-agent" : "codex",
+        };
+        fixture.sessions.set(session.id, session);
+        sendMessageToTmuxMock.mockResolvedValue(undefined);
+        createAgentSubmitAckBindingMock.mockImplementation(
+          async (_agent: string, context: { worktreePath: string; cursorConfigDir?: string }) => {
+            const cursor = await vi.importActual<typeof cursorSubmitModule>(
+              "../../src/agents/cursor-submit-ack.js",
+            );
+            expect(
+              await cursor.captureCursorSubmitBaseline(
+                context.worktreePath,
+                undefined,
+                context.cursorConfigDir ? { cursorConfigDir: context.cursorConfigDir } : undefined,
+              ),
+            ).toBeNull();
+            return null;
+          },
+        );
+        const previous = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+        if (mode === "codex-env") process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = "1";
+        try {
+          expect(
+            await sessionServiceInternals(fixture.service).beginAgentMessage(
+              session,
+              "unavailable input",
+              { skipSubmitAck: mode === "skip-ack", freshLaunch: true },
+            ),
+          ).toEqual({ kind: "complete", outcome: "submitted" });
+        } finally {
+          if (previous === undefined) delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
+          else process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"] = previous;
+        }
+        expect((await fixture.readJournal(session))?.occurrences[0]).toMatchObject({
+          baseline: null,
+          bodyDigest: null,
+          state: { kind: "unobservable", reason: "native_input_baseline_unavailable" },
+        });
+        expect(createAgentSubmitAckBindingMock).toHaveBeenCalledTimes(
+          mode === "fresh-cursor" ? 1 : 0,
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      "spawn",
+      "background",
+      "configured-source",
+      "configured-source-launch",
+      "configured-source-native",
+      "configured-source-learned",
+    ])(
+      "native accepted input publishes embedded %s intent before actual launch and fences source provenance",
+      async (mode) => {
+        const fixture = await nativeInputSetup();
+        buildAgentLaunchPlanMock.mockImplementation((agent: string, prompt: string) => ({
+          agent,
+          launchCommand: `codex -- ${JSON.stringify(prompt)}`,
+          initialMessage: "",
+          initialMessageDeliveredOnLaunch: true,
+          readyMarkers: ["OpenAI Codex"],
+        }));
+        tmuxSessionExistsMock.mockResolvedValue(false);
+        let launched = 0;
+        createTmuxSessionMock.mockImplementation(
+          async (options: { env: Record<string, string> }) => {
+            const marker = options.env["SPUR_AGENT_LAUNCH_ID"];
+            if (!marker) throw new Error("missing actual launch marker");
+            const digest = createHash("sha256").update(marker).digest("hex");
+            const file = join(
+              TEST_DATA_DIR,
+              "native-inputs",
+              "api",
+              "api-1",
+              digest,
+              "inputs.json",
+            );
+            let journal: unknown;
+            try {
+              journal = JSON.parse(readFileSync(file, "utf8")) as unknown;
+            } catch {
+              throw new Error("intent not durably published before launch");
+            }
+            expect(journal).toMatchObject({
+              occurrences: [
+                {
+                  initial: true,
+                  baseline: null,
+                  bodyDigest: null,
+                  state: { kind: "unobservable" },
+                },
+              ],
+            });
+            launched += 1;
+          },
+        );
+        const request = {
+          project: "api",
+          agent: "codex" as const,
+          prompt: "embedded initial",
+          worktree: false,
+        };
+        if (mode.startsWith("configured-source-")) {
+          const native = await import("../../src/native-input.js");
+          if (mode.endsWith("native") || mode.endsWith("learned"))
+            vi.spyOn(
+              sessionServiceInternals(fixture.service),
+              "captureAgentSessionId",
+            ).mockImplementation(async (record) => {
+              const { agentSessionId: _native, ...unknown } = record;
+              return mode.endsWith("native")
+                ? { ...record, agentSessionId: "original-native" }
+                : unknown;
+            });
+          vi.spyOn(
+            fixture.service as unknown as { enrich(record: SessionRecord): Promise<unknown> },
+            "enrich",
+          ).mockImplementation(async (record) => {
+            const journal = await fixture.readJournal(record);
+            if (!journal) throw new Error("missing source launch journal");
+            const replacement = {
+              ...record,
+              ...(mode.endsWith("launch") ? { agentLaunchId: "replacement-launch" } : {}),
+              ...(mode.endsWith("native") || mode.endsWith("learned")
+                ? { agentSessionId: "replacement-native" }
+                : {}),
+            };
+            fixture.sessions.set(record.id, replacement);
+            const { updatedAt: _updatedAt, ...identity } = (
+              await loadSessionServiceModule()
+            ).captureReleaseTaskIdentity(replacement);
+            if (!identity.launchDigest) throw new Error("missing replacement launch");
+            await native.writeNativeInputJournal(TEST_DATA_DIR, {
+              ...journal,
+              identity: { ...identity, launchDigest: identity.launchDigest, agent: record.agent },
+              nativeSessionId: replacement.agentSessionId ?? null,
+            });
+            return record;
+          });
+        }
+        if (mode.startsWith("configured-source")) {
+          await fixture.service.spawn(request, {
+            configuredCaller: {
+              config: { file: "/fixture/source.yaml", digest: "a".repeat(64) },
+              effectiveDigest: "b".repeat(64),
+              projectId: "api",
+              sourceId: "github",
+              triggerId: "review",
+              blockIndex: 0,
+              repository: "fixture/repository",
+              pr: 42,
+              promptDigest: createHash("sha256").update(request.prompt).digest("hex"),
+            },
+          });
+        } else if (mode === "spawn") await fixture.service.spawn(request);
+        else {
+          await fixture.service.spawnInBackground(request);
+          await vi.waitFor(() => expect(fixture.sessions.get("api-1")?.status).toBe("running"));
+        }
+        const current = fixture.sessions.get("api-1");
+        if (!current) throw new Error("spawned canonical session missing");
+        expect(launched).toBe(1);
+        expect((await fixture.readJournal(current))?.occurrences[0]?.state.kind).toBe(
+          "unobservable",
+        );
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
+        const journal = await fixture.readJournal(current);
+        if (mode === "configured-source" || mode === "configured-source-learned")
+          expect(journal?.caller?.blockIndex).toBe(0);
+        else expect(journal?.caller).toBeUndefined();
+      },
+    );
+
+    it.each(["missing", "launch", "task", "provider", "legacy-assignment"])(
+      "native accepted input rejects %s drift before paste",
+      async (change) => {
+        const fixture = await nativeInputSetup();
+        if (change === "legacy-assignment") {
+          const { agentLaunchId: _oldLaunch, ...legacy } = fixture.session;
+          fixture.sessions.set(legacy.id, legacy);
+        }
+        createAgentSubmitAckBindingMock.mockImplementation(async () => {
+          if (change === "missing") fixture.sessions.delete(fixture.session.id);
+          else if (change === "launch") {
+            const { agentLaunchId: _priorLaunch, ...unmarked } = fixture.session;
+            fixture.sessions.set(fixture.session.id, unmarked);
+          } else
+            fixture.sessions.set(fixture.session.id, {
+              ...fixture.session,
+              ...(change === "task"
+                ? { prompt: "unrelated task" }
+                : change === "provider"
+                  ? { agent: "cursor" as const }
+                  : {}),
+            });
+          return null;
+        });
+        await expect(
+          sessionServiceInternals(fixture.service).sendAgentMessage(
+            fixture.session,
+            "must not paste",
+          ),
+        ).rejects.toThrow();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(existsSync(join(TEST_DATA_DIR, "native-inputs"))).toBe(false);
+      },
+    );
 
     it("requires an archive before any destructive action", async () => {
       const { service, session, guard, artifacts } = await setup();

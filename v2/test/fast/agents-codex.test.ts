@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import type * as FsPromises from "node:fs/promises";
+import type * as Readline from "node:readline";
+import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("node:fs", () => ({
@@ -56,6 +59,7 @@ import {
   linkCodexAuth,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
+  observeCodexNativeUsers,
   readCodexRolloutState,
 } from "../../src/agents/codex.js";
 
@@ -1151,6 +1155,148 @@ describe("captureCodexRolloutBaseline", () => {
     const result = await captureCodexRolloutBaseline("/sessions");
     expect(result.get("/sessions/a.jsonl")).toBe(100);
     expect(result.get("/sessions/b.jsonl")).toBe(200);
+  });
+});
+
+describe("native accepted input", () => {
+  const body = "Задача 🧪\n\nSession metadata:\ncaller exact suffix";
+  const digest = createHash("sha256").update(body).digest("hex");
+  const meta = { type: "session_meta", payload: { id: "native", cwd: "/repo" } };
+  const user = {
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text: body }] },
+  };
+
+  async function nativeRows(rows: unknown[], bytes?: Buffer): Promise<void> {
+    const actual = await vi.importActual<typeof Readline>("node:readline");
+    const content = bytes ?? Buffer.from(rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    // Split a persisted emoji inside its UTF-8 encoding, as stream chunks can.
+    const split = content.indexOf(Buffer.from("🧪")) + 1;
+    mockCreateReadStream.mockImplementation(() =>
+      Readable.from([content.subarray(0, split), content.subarray(split)]),
+    );
+    mockCreateInterface.mockImplementation((options: Readline.ReadLineOptions) =>
+      actual.createInterface(options),
+    );
+  }
+
+  it("counts mirrored event and response USER records as one canonical occurrence", async () => {
+    await nativeRows([
+      meta,
+      { type: "event_msg", payload: { type: "user_message", message: body } },
+      user,
+    ]);
+    const observations = await observeCodexNativeUsers(
+      "/sessions",
+      new Map(),
+      digest,
+      "native",
+      "/repo",
+    );
+    expect(observations).toEqual([
+      expect.objectContaining({ nativeSessionId: "native", bodyDigest: digest }),
+    ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256").update(JSON.stringify(user)).digest("hex"),
+    );
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual(observations);
+  });
+
+  it("accepts a first-turn USER without an event echo, never an echo alone", async () => {
+    await nativeRows([meta, user]);
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toHaveLength(1);
+    await nativeRows([
+      meta,
+      { type: "event_msg", payload: { type: "user_message", message: body } },
+    ]);
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual([]);
+  });
+
+  it("rejects wrong session_meta identity and worktree", async () => {
+    await nativeRows([meta, user]);
+    expect(await observeCodexNativeUsers("/sessions", new Map(), digest, "old", "/repo")).toEqual(
+      [],
+    );
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/other"),
+    ).toEqual([]);
+  });
+
+  it("retains UTF-8 byte positions and refuses an in-record baseline", async () => {
+    await nativeRows([meta, user, user]);
+    const offset = Buffer.byteLength(JSON.stringify(meta) + "\n" + JSON.stringify(user) + "\n");
+    const observations = await observeCodexNativeUsers(
+      "/sessions",
+      new Map([["/sessions/rollout.jsonl", offset]]),
+      digest,
+      "native",
+      "/repo",
+    );
+    expect(observations).toEqual([
+      expect.objectContaining({
+        recordId: `bytes:${offset}:${Buffer.byteLength(JSON.stringify(user))}`,
+      }),
+    ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256")
+        .update(Buffer.from(JSON.stringify(user)))
+        .digest("hex"),
+    );
+    expect(
+      await observeCodexNativeUsers(
+        "/sessions",
+        new Map([["/sessions/rollout.jsonl", offset - 2]]),
+        digest,
+        "native",
+        "/repo",
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "rejects malformed raw UTF-8 with a later valid USER=%s",
+    async (later) => {
+      const row = Buffer.from(
+        JSON.stringify({
+          ...user,
+          payload: { ...user.payload, content: [{ type: "input_text", text: "SENT" }] },
+        }),
+      );
+      const at = row.indexOf("SENT");
+      const malformed = Buffer.concat([
+        row.subarray(0, at),
+        Buffer.from([0xff]),
+        row.subarray(at + 4),
+        Buffer.from("\n"),
+      ]);
+      const bytes = Buffer.concat([
+        Buffer.from(JSON.stringify(meta) + "\n"),
+        malformed,
+        ...(later ? [Buffer.from(JSON.stringify(user) + "\n")] : []),
+      ]);
+      await nativeRows([], bytes);
+      const target = later ? body : "\ufffd";
+      const hash = createHash("sha256").update(target).digest("hex");
+      expect(
+        await observeCodexNativeUsers("/sessions", new Map(), hash, "native", "/repo"),
+      ).toEqual([]);
+      expect((await scanCodexRolloutForMessage("/sessions", "\ufffd", new Map())).found).toBe(true);
+    },
+  );
+
+  it.each(["", "\r\n"])("rejects unsupported raw record ending %j", async (ending) => {
+    await nativeRows([], Buffer.from(JSON.stringify(meta) + "\n" + JSON.stringify(user) + ending));
+    expect(
+      await observeCodexNativeUsers("/sessions", new Map(), digest, "native", "/repo"),
+    ).toEqual([]);
+    expect((await scanCodexRolloutForMessage("/sessions", body, new Map())).found).toBe(true);
   });
 });
 
