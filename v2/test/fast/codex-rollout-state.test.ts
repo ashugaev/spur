@@ -781,6 +781,28 @@ describe("readCodexRolloutState", () => {
     expect(result).toEqual({ rollout: null, rateLimit: null, model: "gpt-5.5-codex" });
   });
 
+  it("retains Codex authority through pinned cached and incremental rate-limit reads", async () => {
+    const native = "authority-thread";
+    const token = (limits: unknown, timestamp: string) => JSON.stringify({ timestamp, type: "event_msg",
+      payload: { type: "token_count", info: null, rate_limits: limits } });
+    const sessionsDir = await makeSessionsDir([
+      sessionMeta(native), token({ primary: { used_percent: 100 } }, "2026-06-28T09:00:00.000Z"),
+    ].join("\n") + "\n");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    for (let i = 0; i < 2; i += 1) {
+      expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
+        limited: true, reason: "codex 5h window exhausted", codexAuthority: "soft",
+      });
+    }
+    await writeFile(join(sessionsDir, "2026", "04", "19", "rollout-test.jsonl"),
+      token({ rate_limit_reached_type: "5h window exhausted" }, "2026-06-28T09:00:01.000Z") + "\n",
+      { encoding: "utf8", flag: "a" });
+    expect((await readCodexRolloutState(sessionsDir, reader, native)).rateLimit).toEqual({
+      limited: true, reason: "codex 5h window exhausted", codexAuthority: "hard",
+    });
+    expect((await readCodexRolloutState(sessionsDir, reader, "foreign-thread")).rateLimit).toBeNull();
+  });
+
   it("keeps a sibling's rate limit when the newest file carries only a turn_context model", async () => {
     const sessionsDir = await makeMultiFileSessionsDir([
       {
@@ -808,7 +830,7 @@ describe("readCodexRolloutState", () => {
 
     const result = await readCodexRolloutState(sessionsDir);
 
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
     expect(result.model).toBe("gpt-5.5-codex");
   });
 
@@ -972,7 +994,7 @@ describe("readCodexRolloutState", () => {
     expect(result.rollout).toMatchObject({
       turnId: "019e0000-0000-7000-9000-0000000curnt",
     });
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
   });
 
   it("returns the selected file's null rate-limit rather than a stale sibling's", async () => {
@@ -1042,7 +1064,7 @@ describe("readCodexRolloutState", () => {
     const result = await readCodexRolloutState(sessionsDir);
 
     expect(result.rollout).toBeNull();
-    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary" });
+    expect(result.rateLimit).toEqual({ limited: true, reason: "codex primary", codexAuthority: "hard" });
   });
 
   it("breaks equal in-content timestamps by picking the newer-mtime file", async () => {

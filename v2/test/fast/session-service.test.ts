@@ -1387,6 +1387,31 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
+async function useActualCodexLimits(
+  rateLimits: unknown,
+  session = runningSession({ agent: "codex" }),
+): Promise<string> {
+  const sessionsDir = join(TEST_DATA_DIR, "session-tools", session.id, "codex-home", "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const path = join(sessionsDir, "rollout-authority.jsonl");
+  writeFileSync(path, [
+    JSON.stringify({ type: "session_meta", payload: { id: session.agentSessionId ?? "mcp-thread" } }),
+    JSON.stringify({ timestamp: new Date(Date.now()).toISOString(), type: "event_msg",
+      payload: { type: "token_count", info: null, rate_limits: rateLimits } }),
+  ].join("\n") + "\n");
+  const actual = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
+  readCodexRolloutStateMock.mockImplementation(actual.readCodexRolloutState);
+  return path;
+}
+
+const CODEX_MCP_PANE = [
+  'Allow the playwright MCP server to run tool "browser_navigate"?',
+  "› 1. Allow                   Run the tool and continue.",
+  "2. Allow for this session  Run the tool and remember this choice for this session.",
+  "3. Always allow            Run the tool and remember this choice for future tool calls.",
+  "4. Cancel                  Cancel this tool call",
+].join("\n");
+
 type SessionServiceInternals = {
   captureAgentSessionId(session: SessionRecord, timeoutMs: number): Promise<SessionRecord>;
   agentSessionIdPersistBackoffUntil: Map<string, number>;
@@ -1422,7 +1447,11 @@ type SessionServiceInternals = {
     options?: { scanPane?: boolean },
   ): Promise<{ state: SessionState; session: SessionRecord }>;
   classifySessionState(session: SessionRecord): Promise<SessionState>;
-  codexMcpDialogOverrides: Map<string, number>;
+  codexMcpDialogOverrides: Map<string, {
+    nativeId: string | undefined;
+    launchId: string | undefined;
+    startedAt: number | null;
+  } & ({ kind: "mcp"; expiresAt: number } | { kind: "hard"; observedAt: number; detection: { limited: boolean; reason: string } })>;
   claudeCompactingOverrides: Map<string, number>;
   cursorPaneReadyOverrides: Map<string, number>;
   lastClassifiedLogStates: Map<string, SessionState>;
@@ -7376,6 +7405,215 @@ describe("SessionService", () => {
     );
     expect(cursorCall?.[0]?.env).toBeDefined();
     expect(cursorCall?.[0]?.env).not.toHaveProperty("SPUR_CURSOR_RESTRICT_WRITES");
+  });
+
+  it.each([
+    { background: false, failReady: false },
+    { background: false, failReady: true },
+    { background: true, failReady: false },
+    { background: true, failReady: true },
+  ])("persists the Codex launch owner before creation and after readiness $background/$failReady", async ({ background, failReady }) => {
+    const sessions = createSessionStore();
+    const attempts: SessionRecord[] = [];
+    createTmuxSessionMock.mockImplementation(async () => {
+      const record = sessions.get("api-1");
+      if (!record) throw new Error("Missing launch fixture record");
+      expect(record?.codexRestoreLaunchId).toBe(record?.agentLaunchId);
+      expect(record?.codexRestoreStartedAt).toBe(new Date(Date.now()).toISOString());
+      attempts.push({ ...record });
+    });
+    if (failReady) waitForTmuxReadyMock.mockRejectedValueOnce(new Error("ready failure"));
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: null,
+    });
+    const request = { project: "api", prompt: "hello", agent: "codex" as const };
+    if (background) {
+      await service.spawnInBackground(request);
+      await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("running"));
+      if (failReady) await vi.waitFor(() => expect(sessions.get("api-1")?.error).toBe("ready failure"));
+      else await vi.waitFor(() => expect(
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.spawn.completed"),
+      ).toHaveLength(1));
+    } else if (failReady) {
+      await expect(service.spawn(request)).rejects.toThrow("ready failure");
+    } else {
+      const view = await service.spawn(request);
+      expect(view).not.toHaveProperty("codexRestoreLaunchId");
+      expect(view).not.toHaveProperty("codexRestoreStartedAt");
+    }
+    expect(attempts).toHaveLength(1);
+    expect(sessions.get("api-1")).toMatchObject({
+      agentLaunchId: attempts[0]?.agentLaunchId,
+      codexRestoreLaunchId: attempts[0]?.codexRestoreLaunchId,
+      codexRestoreStartedAt: attempts[0]?.codexRestoreStartedAt,
+    });
+    expect(await service.get("api-1")).not.toHaveProperty("codexRestoreLaunchId");
+    const persisted = sessions.get("api-1");
+    if (!persisted) throw new Error("Missing launch fixture record");
+    const dashboard = await sessionServiceInternals(service).enrichDashboard(persisted);
+    expect(dashboard).not.toHaveProperty("codexRestoreLaunchId");
+    expect(dashboard).not.toHaveProperty("codexRestoreStartedAt");
+    service.dispose();
+  });
+
+  it.each(["same launch retry", "new launch", "legacy launch"])(
+    "retains the latest Codex launch owner after a stale attempt error: %s",
+    async (mode) => {
+      const attempt = runningSession({
+        agent: "codex",
+        agentSessionId: "root-thread",
+        agentLaunchId: "attempt-launch",
+        codexRestoreLaunchId: "attempt-launch",
+        codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
+      });
+      const { codexRestoreLaunchId: _owner, codexRestoreStartedAt: _startedAt, ...base } = attempt;
+      const latest: SessionRecord = {
+        ...base,
+        agentLaunchId: mode === "same launch retry" ? "attempt-launch" : "latest-launch",
+        ...(mode !== "legacy launch" ? {
+          codexRestoreLaunchId: mode === "same launch retry" ? "attempt-launch" : "latest-launch",
+          codexRestoreStartedAt: "2026-03-18T10:04:00.000Z",
+        } : {}),
+        queuedMessages: { messages: ["original intent"], awaitingPrompt: true },
+      };
+      const sessions = createSessionStore(latest);
+      const service = await createDisposedSessionService();
+      const retained = await (service as unknown as {
+        retainLaunchedError(session: SessionRecord, error: unknown): Promise<SessionRecord>;
+      }).retainLaunchedError(attempt, new Error("attempt failed"));
+      expect(retained.agentLaunchId).toBe(latest.agentLaunchId);
+      expect(retained.codexRestoreLaunchId).toBe(latest.codexRestoreLaunchId);
+      expect(retained.codexRestoreStartedAt).toBe(latest.codexRestoreStartedAt);
+      expect(sessions.get(attempt.id)?.queuedMessages?.messages).toEqual(["original intent"]);
+    },
+  );
+
+  it.each([false, true])("refreshes the Codex launch owner for in-place recovery and fallback %s", async (fallback) => {
+    const original = runningSession({
+      agent: "codex",
+      agentSessionId: "root-thread",
+      agentLaunchId: "old-launch",
+      codexRestoreLaunchId: "old-launch",
+      codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
+      queuedMessages: { messages: ["original intent"], awaitingPrompt: true },
+    });
+    const sessions = createSessionStore(original);
+    const attempts: SessionRecord[] = [];
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+    getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: false });
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    buildAgentResumePlanMock.mockReturnValue({
+      agent: "codex",
+      launchCommand: "codex resume root-thread",
+      readyMarkers: ["›"],
+    });
+    createTmuxSessionMock.mockImplementation(async () => {
+      const record = sessions.get(original.id);
+      if (!record) throw new Error("Missing recovery fixture record");
+      expect(record.codexRestoreLaunchId).toBe(record.agentLaunchId);
+      expect(record.codexRestoreStartedAt).toBe(new Date(Date.now()).toISOString());
+      expect(record.queuedMessages?.messages).toEqual(["original intent"]);
+      attempts.push({ ...record });
+      if (fallback && attempts.length === 1) {
+        vi.setSystemTime(Date.now() + 1_000);
+        throw new Error("resume failed before creation");
+      }
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+      getTmuxPanePresenceMock.mockResolvedValue({ dead: false, unresponsive: false });
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+    });
+    const service = await createDisposedSessionService();
+    const internals = service as unknown as {
+      withPaneWriteLock<T>(pane: string, task: () => Promise<T>): Promise<T>;
+      relaunchSessionInPlace(session: SessionRecord, project: ReturnType<typeof baseConfig>["projects"]["api"], options: { paneAlreadyOwned: boolean }):
+        Promise<{ session: SessionRecord }>;
+    };
+    const result = await internals.withPaneWriteLock(original.tmuxSession, () =>
+      internals.relaunchSessionInPlace(original, baseConfig().projects.api, { paneAlreadyOwned: true }),
+    );
+    expect(attempts).toHaveLength(fallback ? 2 : 1);
+    const last = attempts.at(-1);
+    if (!last) throw new Error("Missing recovery fixture attempt");
+    expect(result.session).toMatchObject({
+      agentLaunchId: last.agentLaunchId,
+      codexRestoreLaunchId: last.codexRestoreLaunchId,
+      codexRestoreStartedAt: last.codexRestoreStartedAt,
+    });
+    expect(last.agentLaunchId).not.toBe(original.agentLaunchId);
+    if (fallback) {
+      expect(last.agentLaunchId).not.toBe(attempts[0]?.agentLaunchId);
+      expect(last.codexRestoreStartedAt).not.toBe(attempts[0]?.codexRestoreStartedAt);
+    }
+  });
+
+  it("refreshes the Codex launch owner on a background create retry", async () => {
+    const sessions = createSessionStore();
+    const attempts: SessionRecord[] = [];
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+    getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: false });
+    probeTmuxProcessMatchMock.mockResolvedValue({ alive: false, matchedByName: false, unresponsive: false });
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    createTmuxSessionMock.mockImplementation(async () => {
+      const record = sessions.get("api-1");
+      if (!record) throw new Error("Missing background fixture record");
+      expect(record.codexRestoreLaunchId).toBe(record.agentLaunchId);
+      expect(record.codexRestoreStartedAt).toBe(new Date(Date.now()).toISOString());
+      attempts.push({ ...record });
+      if (attempts.length === 1) {
+        vi.setSystemTime(Date.now() + 1_000);
+        throw new Error("first create failed");
+      }
+      tmuxSessionExistsMock.mockResolvedValue(true);
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: true, unresponsive: false });
+      getTmuxPanePresenceMock.mockResolvedValue({ dead: false, unresponsive: false });
+      probeTmuxProcessMatchMock.mockResolvedValue({ alive: true, matchedByName: true, unresponsive: false });
+      isProcessRunningInTmuxMock.mockResolvedValue(true);
+    });
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: null,
+    });
+    await service.spawnInBackground({ project: "api", prompt: "hello", agent: "codex" });
+    await vi.waitFor(() => expect(
+      logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.spawn.completed"),
+    ).toHaveLength(1));
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.agentLaunchId).not.toBe(attempts[0]?.agentLaunchId);
+    expect(attempts[1]?.codexRestoreStartedAt).not.toBe(attempts[0]?.codexRestoreStartedAt);
+    expect(sessions.get("api-1")).toMatchObject({
+      agentLaunchId: attempts[1]?.agentLaunchId,
+      codexRestoreLaunchId: attempts[1]?.codexRestoreLaunchId,
+      codexRestoreStartedAt: attempts[1]?.codexRestoreStartedAt,
+    });
+  });
+
+  it("does not stamp a Codex launch owner before a failed prelaunch stage", async () => {
+    const sessions = createSessionStore();
+    setupAgentHooksMock.mockRejectedValueOnce(new Error("hooks failed before launch"));
+    const service = await createDisposedSessionService();
+    await expect(service.spawn({ project: "api", prompt: "hello", agent: "codex" }))
+      .rejects.toThrow("hooks failed before launch");
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")).not.toHaveProperty("codexRestoreLaunchId");
+    expect(sessions.get("api-1")).not.toHaveProperty("codexRestoreStartedAt");
+  });
+
+  it("does not stamp a Codex launch owner for another agent", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    await service.spawn({ project: "api", prompt: "hello" });
+    expect(sessions.get("api-1")).not.toHaveProperty("codexRestoreLaunchId");
+    expect(sessions.get("api-1")).not.toHaveProperty("codexRestoreStartedAt");
+    service.dispose();
   });
 
   it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {
@@ -16528,13 +16766,15 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it.each(["credited", "unknown cap", "hard banner"] as const)(
+  it.each(["credited", "no telemetry", "unknown cap", "hard banner"] as const)(
     "uses actual Codex rollout %s classification for the original FIFO intent",
     async (mode) => {
       const session = runningSession({
         agent: "codex",
         agentSessionId: "credit-thread",
         agentLaunchId: "credit-launch",
+        codexRestoreLaunchId: "credit-launch",
+        codexRestoreStartedAt: "2026-03-18T10:03:00.000Z",
         workspaceId: "api-1",
         closeoutOwner: true,
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
@@ -16582,6 +16822,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
       try {
+        await service.settleBackgroundSpawns();
         expect((await service.get(session.id)).state).toBe("rate_limited");
         const episode = sessions.get(session.id)?.rateLimitedAt;
         expect(episode).toBeDefined();
@@ -16590,9 +16831,8 @@ describe("SessionService", () => {
           "original credit recovery intent",
         ]);
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-        appendFileSync(
-          rolloutPath,
-          [
+        await service.settleBackgroundSpawns();
+        const recoveredLines = [
             tokenCount(
               {
                 primary: { used_percent: 100, window_minutes: 300 },
@@ -16601,24 +16841,37 @@ describe("SessionService", () => {
                 credits: { has_credits: true, unlimited: false },
                 ...(mode === "unknown cap" ? { individual_limit: {} } : {}),
               },
-              "2026-03-18T10:04:01.000Z",
+              new Date(Date.now() + 1).toISOString(),
             ),
             JSON.stringify({
-              timestamp: "2026-03-18T10:04:02.000Z",
+              timestamp: new Date(Date.now() + 2).toISOString(),
               type: "event_msg",
               payload: { type: "task_complete", turn_id: "credit-turn" },
             }),
-          ].join("\n") + "\n",
-        );
+          ];
+        if (mode === "no telemetry") {
+          writeFileSync(join(sessionsDir, "rollout-completed-without-telemetry.jsonl"),
+            JSON.stringify({ type: "session_meta", payload: { id: session.agentSessionId } }) + "\n" +
+            recoveredLines[1] + "\n");
+        } else appendFileSync(rolloutPath, recoveredLines.join("\n") + "\n");
         if (mode === "hard banner") {
           captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits");
           captureTmuxPaneOrEmptyMock.mockResolvedValue("■ Your workspace is out of credits");
+        } else {
+          captureTmuxPaneMock.mockResolvedValue("› Ready for the next task");
         }
-        if (mode !== "hard banner") await advanceSeconds(6);
+        await advanceSeconds(6);
+        const recovered = mode === "credited" || mode === "no telemetry";
+        const current = sessions.get(session.id);
+        if (!current) throw new Error("Missing FIFO fixture record");
+        expect(current.rateLimitedAt ?? episode).toBe(episode);
+        expect((await sessionServiceInternals(service).classifySessionRecord(
+          current,
+        )).state).toBe(recovered ? "waiting" : "rate_limited");
         expect((await service.get(session.id)).state).toBe(
-          mode === "credited" ? "waiting" : "rate_limited",
+          recovered ? "waiting" : "rate_limited",
         );
-        if (mode === "credited") {
+        if (recovered) {
           await waitForRealTime(() => {
             expect(
               sendMessageToTmuxMock.mock.calls.filter(
@@ -16641,6 +16894,11 @@ describe("SessionService", () => {
             "original credit recovery intent",
           ]);
           expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          await advanceSeconds(16);
+          expect((await service.get(session.id)).state).toBe("rate_limited");
+          expect(sessions.get(session.id)?.rateLimitedAt).toBe(episode);
+          expect(sessions.get(session.id)?.queuedMessages?.messages).toEqual(["original credit recovery intent"]);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         }
         expect(sessions.get(session.id)).toMatchObject({
           id: session.id,
@@ -16658,6 +16916,257 @@ describe("SessionService", () => {
       }
     },
   );
+
+  it.each([
+    ...["missing rollout", "malformed rollout", "unreadable rollout"].flatMap((mode) =>
+      [null, "", "› Ready"].map((pane) => ({ mode, pane }))),
+    ...["no completion",
+    "unknown telemetry", "null pane", "blank pane", "old completion", "legacy owner",
+    "mismatched owner", "future boundary", "same UUID pre-restore", "new native",
+    "warmup", "static hard banner", "cache loss", "daemon restart", "boundary changed during clear",
+    ].map((mode) => ({ mode, pane: mode === "null pane" ? null : mode === "blank pane" ? "" :
+      mode === "static hard banner" ? "■ Your workspace is out of credits" : "› Ready" })),
+  ])("Codex hard-limit episode recovery holds the original FIFO through $mode / $pane", async ({ mode, pane }) => {
+    const session = runningSession({ agent: "codex", agentSessionId: "episode-thread",
+      agentLaunchId: "episode-launch", codexRestoreLaunchId: "episode-launch",
+      codexRestoreStartedAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const sessions = createSessionStore(session);
+    const paneHard = mode === "static hard banner" || mode === "cache loss";
+    const path = await useActualCodexLimits(paneHard ? null : { rate_limit_reached_type: "hard cap" }, session);
+    captureTmuxPaneMock.mockResolvedValue(paneHard ? "■ Your workspace is out of credits" : "› Ready");
+    let service = await createDisposedSessionService();
+    expect((await service.get(session.id)).state).toBe("rate_limited");
+    const episode = sessions.get(session.id)?.rateLimitedAt;
+    expect(episode).toBeDefined();
+    if (!episode) throw new Error("Missing held fixture episode");
+    await service.send(session.id, { message: "original held intent", queue: true });
+    await advanceSeconds(1);
+    captureTmuxPaneMock.mockResolvedValue(pane);
+    const completionAt = mode === "old completion" ? Date.parse(episode) - 1 : Date.now();
+    const lines = [JSON.stringify({ type: "session_meta", payload: { id: session.agentSessionId } }),
+      JSON.stringify({ timestamp: new Date(Date.now()).toISOString(), type: "event_msg",
+        payload: { type: "token_count", info: null, rate_limits: mode === "unknown telemetry" ? {} :
+          { primary: { used_percent: 0 } } } }),
+    ];
+    if (!["no completion", "unknown telemetry", "cache loss"].includes(mode)) {
+      lines.push(JSON.stringify({ timestamp: new Date(completionAt).toISOString(), type: "event_msg",
+        payload: { type: "task_complete", turn_id: "episode-turn" } }));
+    }
+    writeFileSync(join(join(TEST_DATA_DIR, "session-tools", session.id, "codex-home", "sessions"),
+      "rollout-current.jsonl"), lines.join("\n") + "\n");
+    if (mode === "missing rollout" || mode === "daemon restart") {
+      rmSync(join(TEST_DATA_DIR, "session-tools", session.id, "codex-home", "sessions"), { recursive: true });
+    } else if (mode === "malformed rollout") {
+      writeFileSync(path, "{broken\n");
+      rmSync(join(TEST_DATA_DIR, "session-tools", session.id, "codex-home", "sessions", "rollout-current.jsonl"));
+    } else if (mode === "unreadable rollout") {
+      readCodexRolloutStateMock.mockRejectedValue(new Error("rollout read unavailable"));
+    }
+    const current = sessions.get(session.id);
+    if (!current) throw new Error("Missing held fixture record");
+    if (mode === "legacy owner") {
+      const { codexRestoreLaunchId: _owner, ...legacy } = current;
+      sessions.set(session.id, legacy);
+    } else if (mode === "mismatched owner") {
+      sessions.set(session.id, { ...current, codexRestoreLaunchId: "old launch" });
+    } else if (mode === "future boundary") {
+      sessions.set(session.id, { ...current, codexRestoreStartedAt: new Date(Date.now() + 60_000).toISOString() });
+    } else if (mode === "same UUID pre-restore") {
+      sessions.set(session.id, { ...current, agentLaunchId: "restored-launch", codexRestoreLaunchId: "restored-launch",
+        codexRestoreStartedAt: new Date(completionAt + 1).toISOString() });
+    } else if (mode === "new native") {
+      sessions.set(session.id, { ...current, agentSessionId: "replacement-thread" });
+    }
+    if (mode === "boundary changed during clear") captureTmuxPaneMock.mockImplementationOnce(async () => {
+      const latest = sessions.get(session.id);
+      if (!latest) throw new Error("Missing changed-boundary fixture record");
+      sessions.set(session.id, { ...latest,
+        codexRestoreStartedAt: new Date(Date.now()).toISOString() });
+      return "› Ready";
+    });
+    if (mode === "cache loss") sessionServiceInternals(service).codexMcpDialogOverrides.clear();
+    if (mode === "warmup") (service as unknown as { restoreWarmupUntil: Map<string, number> })
+      .restoreWarmupUntil.set(session.id, Date.now() + 60_000);
+    if (mode === "daemon restart") {
+      service.dispose();
+      service = await createDisposedSessionService();
+    }
+    for (const elapsed of [6, 16]) {
+      await advanceSeconds(elapsed);
+      expect((await service.get(session.id)).state).toBe("rate_limited");
+      expect(await sessionServiceInternals(service).tryDeliverQueuedMessage(session.id)).toBe(false);
+      expect(sessions.get(session.id)?.rateLimitedAt).toBe(episode);
+      expect(sessions.get(session.id)?.queuedMessages?.messages).toEqual(["original held intent"]);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    }
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it.each([
+    { label: "soft meter", raw: { primary: { used_percent: 100 } }, state: "needs_input" },
+    { label: "hard meter collision", raw: { rate_limit_reached_type: "5h window exhausted" }, state: "rate_limited" },
+    { label: "hard credit collision", raw: { rate_limit_reached_type: "out of credits" }, state: "rate_limited" },
+    { label: "unknown hard type", raw: { rate_limit_reached_type: "unknown native cap" }, state: "rate_limited" },
+    { label: "whitespace hard type", raw: { rate_limit_reached_type: " " }, state: "rate_limited" },
+    { label: "complete credit denial", raw: { primary: null, secondary: null, rate_limit_reached_type: null,
+      individual_limit: null, spend_control_reached: null, credits: { has_credits: false, unlimited: false } }, state: "rate_limited" },
+    { label: "unknown cap", raw: { primary: { used_percent: 100 }, individual_limit: {} }, state: "rate_limited" },
+    { label: "unknown flag", raw: { primary: { used_percent: 100 }, credits: { has_credits: null } }, state: "rate_limited" },
+    { label: "incomplete credit denial", raw: { credits: { has_credits: false } }, state: "rate_limited" },
+    { label: "no telemetry", raw: null, state: "needs_input" },
+    { label: "unknown nonlimited", raw: {}, state: "needs_input" },
+  ])("uses actual Codex rollout $label authority for codex MCP startup", async ({ raw, state }) => {
+    const session = runningSession({ agent: "codex", agentSessionId: "authority-thread" });
+    createSessionStore(session);
+    await useActualCodexLimits(raw, session);
+    captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+    const service = await createDisposedSessionService();
+    expect((await service.get(session.id)).state).toBe(state);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["foreground", "null capture", "background"])(
+    "keeps actual Codex rollout hard authority above cached codex MCP evidence on %s",
+    async (mode) => {
+      const session = runningSession({ agent: "codex", agentSessionId: "authority-thread" });
+      const sessions = createSessionStore(session);
+      const path = await useActualCodexLimits({ primary: { used_percent: 100 } }, session);
+      captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+      const service = await createDisposedSessionService();
+      expect((await service.get(session.id)).state).toBe("needs_input");
+      expect(sessions.get(session.id)?.rateLimitedAt).toBeUndefined();
+      appendFileSync(path, JSON.stringify({ timestamp: new Date(Date.now() + 1).toISOString(),
+        type: "event_msg", payload: { type: "token_count", info: null,
+          rate_limits: { rate_limit_reached_type: "5h window exhausted" } } }) + "\n");
+      if (mode === "null capture") captureTmuxPaneMock.mockResolvedValue(null);
+      const current = sessions.get(session.id);
+      if (!current) throw new Error("Missing MCP fixture record");
+      const classified = await sessionServiceInternals(service).classifySessionRecord(
+        current, { scanPane: mode !== "background" },
+      );
+      expect(classified.state).toBe("rate_limited");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps downlevel UNKNOWN limited evidence above a codex MCP dialog", async () => {
+    const session = runningSession({ agent: "codex", agentSessionId: "authority-thread" });
+    createSessionStore(session);
+    await useActualCodexLimits({ primary: { used_percent: 100 } }, session);
+    const actual = await vi.importActual<typeof codexModule>("../../src/agents/codex.js");
+    readCodexRolloutStateMock.mockImplementation(async (...args: Parameters<typeof actual.readCodexRolloutState>) => {
+      const read = await actual.readCodexRolloutState(...args);
+      if (!read.rateLimit) return read;
+      const { codexAuthority: _authority, ...legacy } = read.rateLimit;
+      return { ...read, rateLimit: legacy };
+    });
+    captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+    const service = await createDisposedSessionService();
+    expect((await service.get(session.id)).state).toBe("rate_limited");
+  });
+
+  it.each(["same launch new attempt", "new launch", "new native"])(
+    "invalidates codex MCP evidence when its owned boundary changes: %s",
+    async (mode) => {
+      const session = runningSession({ agent: "codex", agentSessionId: "authority-thread",
+        agentLaunchId: "old-launch", codexRestoreLaunchId: "old-launch",
+        codexRestoreStartedAt: new Date(Date.now() - 2_000).toISOString() });
+      const sessions = createSessionStore(session);
+      await useActualCodexLimits({ primary: { used_percent: 100 } }, session);
+      captureTmuxPaneMock.mockResolvedValue(CODEX_MCP_PANE);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      expect((await internals.classifySessionRecord(session)).state).toBe("needs_input");
+      const changed = { ...session,
+        codexRestoreStartedAt: new Date(Date.now() - 1_000).toISOString(),
+        ...(mode === "new launch" ? { agentLaunchId: "new-launch", codexRestoreLaunchId: "new-launch" } : {}),
+        ...(mode === "new native" ? { agentSessionId: "replacement-thread" } : {}),
+      };
+      sessions.set(session.id, changed);
+      captureTmuxPaneMock.mockClear();
+      expect((await internals.classifySessionRecord(changed, { scanPane: false })).state).not.toBe("needs_input");
+      expect(internals.codexMcpDialogOverrides.has(session.id)).toBe(false);
+      expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not fork a pane for a healthy actual Codex rollout without a prior episode", async () => {
+    const session = runningSession({ agent: "codex", agentSessionId: "healthy-thread" });
+    createSessionStore(session);
+    const path = await useActualCodexLimits({ primary: { used_percent: 0 } }, session);
+    appendFileSync(path, JSON.stringify({ timestamp: new Date(Date.now()).toISOString(), type: "event_msg",
+      payload: { type: "task_started", turn_id: "healthy-turn" } }) + "\n");
+    captureTmuxPaneMock.mockClear();
+    const service = await createDisposedSessionService();
+    expect((await service.get(session.id)).state).toBe("working");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
+  it("Codex legacy owner lifecycle ends an episode on pause and silently restores one original intent", async () => {
+    const session = runningSession({ agent: "codex", agentSessionId: "lifecycle-thread",
+      agentLaunchId: "legacy-launch", codexRestoreStartedAt: "2026-03-18T10:00:00.000Z",
+      launchCommand: "codex resume lifecycle-thread", workspaceId: "api-1" });
+    const sessions = createSessionStore(session);
+    const path = await useActualCodexLimits({ rate_limit_reached_type: "hard cap" }, session);
+    await useRealTodoLedger();
+    const todo = await vi.importActual<typeof todoModule>("../../src/todo.js");
+    const actor = { kind: "agent", agent: "codex", sessionId: session.id } as const;
+    const projection = todo.mutateTodo(TEST_DATA_DIR, session,
+      { action: "add", text: "Resolved lifecycle fixture", reason: "Preserve owned ledger" }, actor);
+    const item = projection.items[0];
+    if (!item) throw new Error("Missing lifecycle ledger item");
+    todo.mutateTodo(TEST_DATA_DIR, session, { action: "complete", itemId: item.id, reason: "Fixture resolved" }, actor);
+    const ledgerPath = join(TEST_DATA_DIR, "sessions", session.id, "todo.jsonl");
+    const ledger = readFileSync(ledgerPath, "utf8");
+    captureTmuxPaneMock.mockResolvedValue("› Ready");
+    const service = await createDisposedSessionService();
+    expect((await service.get(session.id)).state).toBe("rate_limited");
+    await service.send(session.id, { message: "original lifecycle intent", queue: true });
+    await advanceSeconds(1);
+    appendFileSync(path, [
+      JSON.stringify({ timestamp: new Date(Date.now()).toISOString(), type: "event_msg",
+        payload: { type: "token_count", info: null, rate_limits: { primary: { used_percent: 100 },
+          credits: { has_credits: true, unlimited: false } } } }),
+      JSON.stringify({ timestamp: new Date(Date.now()).toISOString(), type: "event_msg",
+        payload: { type: "task_complete", turn_id: "lifecycle-turn" } }),
+    ].join("\n") + "\n");
+    expect((await service.get(session.id)).state).toBe("rate_limited");
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    const paused = await service.pause(session.id);
+    expect(paused).toMatchObject({ status: "stopped", state: "stopped", stopReason: "manual_pause" });
+    expect(sessions.get(session.id)?.rateLimitedAt).toBeUndefined();
+    expect(sessions.get(session.id)?.queuedMessages?.messages).toEqual(["original lifecycle intent"]);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledger);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    mockExitedThenRestoredProcess();
+    buildAgentResumePlanMock.mockImplementation((agent: string, native: string) => ({
+      agent, launchCommand: `codex resume ${native}`, readyMarkers: ["›"],
+    }));
+    const restored = await service.restore(session.id);
+    expect(restored.status).toBe("running");
+    const current = sessions.get(session.id);
+    if (!current) throw new Error("Missing restored lifecycle fixture record");
+    expect(current.agentSessionId).toBe(session.agentSessionId);
+    expect(current.agentLaunchId).not.toBe(session.agentLaunchId);
+    expect(current.codexRestoreLaunchId).toBe(current.agentLaunchId);
+    expect(current.codexRestoreStartedAt).toBeDefined();
+    expect(current.workspaceId).toBe(session.workspaceId);
+    expect(buildAgentRestorePlanMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    await advanceSeconds(36);
+    expect((await service.get(session.id)).state).toBe("waiting");
+    await waitForRealTime(() => expect(sendMessageToTmuxMock.mock.calls.filter(
+      ([, text]) => text === "original lifecycle intent",
+    )).toHaveLength(1));
+    expect(sessions.get(session.id)?.queuedMessages?.messages ?? []).toEqual([]);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledger);
+    await advanceSeconds(6);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    service.dispose();
+  });
 
   it("classifies rate_limited for codex when the rollout reports out of credits", async () => {
     readSessionMock.mockReturnValue({
@@ -16691,6 +17200,7 @@ describe("SessionService", () => {
   });
 
   it("classifies needs_input for codex when the pane shows a live MCP permission dialog despite a soft rate-limit signal (hook-independent)", async () => {
+    await useActualCodexLimits({ primary: { used_percent: 100 } });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -16709,10 +17219,6 @@ describe("SessionService", () => {
       state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
       hookEvent: "PostToolUse",
-    });
-    readCodexRolloutStateMock.mockResolvedValue({
-      rollout: null,
-      rateLimit: { limited: true, reason: "codex out of credits" },
     });
     captureTmuxPaneMock.mockResolvedValue(
       [
@@ -18163,6 +18669,7 @@ describe("SessionService", () => {
 
   it("propagates a codex MCP dialog override into the dashboard tick after a live scan confirms it", async () => {
     const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
     sessions.set("api-1", {
       id: "api-1",
       project: "api",
@@ -18182,10 +18689,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:04:59.000Z",
       hookEvent: "PostToolUse",
     });
-    readCodexRolloutStateMock.mockResolvedValue({
-      rollout: null,
-      rateLimit: { limited: true, reason: "codex out of credits" },
-    });
+    await useActualCodexLimits({ primary: { used_percent: 100 } });
     captureTmuxPaneMock.mockResolvedValue(
       [
         "  Field 1/1",
@@ -18196,20 +18700,6 @@ describe("SessionService", () => {
         "    4. Cancel                  Cancel this tool call",
       ].join("\n"),
     );
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    // Drain construction's baseline dashboard + attention ticks first so they
-    // don't race with the deliberate live classify below.
-    const internals = service as unknown as {
-      attentionMonitorRunning: boolean;
-      dashboardCacheReady: Promise<void> | null;
-    };
-    await internals.dashboardCacheReady;
-    for (let i = 0; i < 100 && internals.attentionMonitorRunning; i += 1) {
-      await Promise.resolve();
-    }
-
     // A live (scanPane:true) classify — e.g. the on-demand viewed-session
     // enrich, or the 5s attention monitor — detects the dialog and records
     // the override.
@@ -18221,6 +18711,7 @@ describe("SessionService", () => {
     // of forking a fresh capture-pane, and must still surface needs_input
     // rather than reverting to the soft-signal-driven rate_limited.
     await vi.advanceTimersByTimeAsync(2_000);
+    await (service as unknown as { runDashboardCacheTick(): Promise<void> }).runDashboardCacheTick();
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
 
     const dashboardListed = await service.list({ view: "dashboard" });
@@ -18644,7 +19135,10 @@ describe("SessionService", () => {
       const codexSession = runningSession({ id: "api-2", agent: "codex" });
       sessions.set(codexSession.id, codexSession);
       internals.lastClassifiedLogStates.set("api-2", "waiting");
-      internals.codexMcpDialogOverrides.set("api-2", Date.now() + 10_000);
+      internals.codexMcpDialogOverrides.set("api-2", {
+        nativeId: undefined, launchId: undefined, startedAt: null,
+        kind: "mcp", expiresAt: Date.now() + 10_000,
+      });
       readAgentHookStateMock.mockReturnValue({
         state: "working",
         updatedAt: "2026-03-18T10:04:59.000Z",
@@ -23474,6 +23968,8 @@ describe("SessionService", () => {
       id: "codex-restored",
       agent: "codex",
       agentSessionId: "root-thread",
+      agentLaunchId: "restore-launch",
+      codexRestoreLaunchId: "restore-launch",
       codexRestoreStartedAt: new Date(restoreStartedAtMs).toISOString(),
     });
     readSessionMock.mockReturnValue(session);
@@ -23496,6 +23992,23 @@ describe("SessionService", () => {
     expect((await internals.classifySessionRecord(session)).state).toBe("waiting");
     const { codexRestoreStartedAt: _restoreAt, ...withoutRestore } = session;
     expect((await internals.classifySessionRecord(withoutRestore)).state).toBe("working");
+    const { codexRestoreLaunchId: _restoreOwner, ...legacyRestore } = session;
+    expect((await internals.classifySessionRecord(legacyRestore)).state).toBe("working");
+    expect((await internals.classifySessionRecord({
+      ...session,
+      agentLaunchId: "new-launch",
+    })).state).toBe("working");
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(markerAtMs).toISOString(),
+        timestampMs: markerAtMs,
+        filePath: "/tmp/codex-rollout.jsonl",
+        reason: "thread_settings_applied",
+      },
+      rateLimit: null,
+    });
+    expect((await internals.classifySessionRecord(session)).state).toBe("working");
     readCodexRolloutStateMock.mockResolvedValue({
       rollout: {
         state: "working",
@@ -35760,9 +36273,9 @@ describe("SessionService", () => {
     },
   );
 
-  it("restores Codex from the stored native session id without newest-session discovery", async () => {
+  it("persists the Codex launch owner while restoring the stored native session id", async () => {
     const nativeSessionId = "codex-main-thread";
-    createSessionStore(
+    const sessions = createSessionStore(
       runningSession({
         agent: "codex",
         agentSessionId: nativeSessionId,
@@ -35783,9 +36296,25 @@ describe("SessionService", () => {
     }));
     findAgentSessionIdMock.mockResolvedValue("codex-wrong-newest-subagent");
     mockExitedThenRestoredProcess();
+    const create = createTmuxSessionMock.getMockImplementation();
+    let launch: SessionRecord | undefined;
+    createTmuxSessionMock.mockImplementation(async () => {
+      launch = sessions.get("api-1");
+      expect(launch?.codexRestoreLaunchId).toBe(launch?.agentLaunchId);
+      expect(launch?.codexRestoreStartedAt).toBe(new Date(Date.now()).toISOString());
+      expect(launch?.agentSessionId).toBe(nativeSessionId);
+      await create?.();
+    });
 
     const service = await createDisposedSessionService();
-    await service.restore("api-1");
+    const view = await service.restore("api-1");
+    expect(view).not.toHaveProperty("codexRestoreLaunchId");
+    expect(sessions.get("api-1")).toMatchObject({
+      agentSessionId: nativeSessionId,
+      agentLaunchId: launch?.agentLaunchId,
+      codexRestoreLaunchId: launch?.codexRestoreLaunchId,
+      codexRestoreStartedAt: launch?.codexRestoreStartedAt,
+    });
 
     expect(buildAgentRestorePlanMock).not.toHaveBeenCalled();
     expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
@@ -52192,7 +52721,7 @@ describe("SessionService", () => {
 
   describe("session-scoped state pruning", () => {
     type SessionScopedStateInternals = {
-      codexMcpDialogOverrides: Map<string, number>;
+      codexMcpDialogOverrides: SessionServiceInternals["codexMcpDialogOverrides"];
       claudeCompactingOverrides: Map<string, number>;
       cursorPaneReadyOverrides: Map<string, number>;
       lastClassifiedLogStates: Map<string, SessionState>;
@@ -52321,7 +52850,10 @@ describe("SessionService", () => {
 
       const seededIds = ["api-1", "api-2", "api-3"];
       for (const id of seededIds) {
-        internals.codexMcpDialogOverrides.set(id, Date.now());
+        internals.codexMcpDialogOverrides.set(id, {
+          nativeId: undefined, launchId: undefined, startedAt: null,
+          kind: "mcp", expiresAt: Date.now(),
+        });
         internals.claudeCompactingOverrides.set(id, Date.now());
         internals.cursorPaneReadyOverrides.set(id, Date.now());
         internals.lastClassifiedLogStates.set(id, "waiting");
@@ -52664,7 +53196,10 @@ describe("SessionService", () => {
 
       // api-2 is terminal (absent from the attention monitor's liveIds) —
       // seed a scoped-state entry the sweep is responsible for reclaiming.
-      internals.codexMcpDialogOverrides.set("api-2", Date.now());
+      internals.codexMcpDialogOverrides.set("api-2", {
+        nativeId: undefined, launchId: undefined, startedAt: null,
+        kind: "mcp", expiresAt: Date.now(),
+      });
 
       // Hold api-1's probe through the sweep assertion: a sweep after the
       // sequential enrichment loop could not reclaim api-2 while blocked.

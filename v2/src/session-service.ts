@@ -1564,6 +1564,32 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function codexLaunchAttempt(
+  agent: AgentName,
+  agentLaunchId: string,
+): Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> {
+  return agent === "codex"
+    ? { codexRestoreStartedAt: nowIso(), codexRestoreLaunchId: agentLaunchId }
+    : {};
+}
+
+function codexLaunchStartedAt(
+  session: Pick<SessionRecord, "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt">,
+): number | null {
+  if (!session.agentLaunchId || session.codexRestoreLaunchId !== session.agentLaunchId) return null;
+  const at = session.codexRestoreStartedAt ? Date.parse(session.codexRestoreStartedAt) : NaN;
+  return Number.isFinite(at) && at <= Date.now() ? at : null;
+}
+
+type CodexPaneOverride = {
+  nativeId: string | undefined;
+  launchId: string | undefined;
+  startedAt: number | null;
+} & (
+  | { kind: "mcp"; expiresAt: number }
+  | { kind: "hard"; observedAt: number; detection: RateLimitDetection }
+);
+
 function canonicalSubscriptionStates(states: SessionState[]): SessionState[] {
   const requested = new Set(states);
   return SESSION_STATES.filter((state) => requested.has(state));
@@ -3321,11 +3347,8 @@ export class SessionService {
   >();
   private readonly attentionStates = new Map<string, AttentionState>();
   private readonly lastObservedRunStates = new Map<string, SessionState>();
-  // Last live (scanPane:true) pane-scan confirmation of an active codex MCP
-  // permission dialog, keyed by session id, value = expiry epoch ms. Lets the
-  // scanPane:false dashboard tick apply the same needs_input demotion without
-  // forking a capture-pane (the tick's whole reason for existing).
-  private readonly codexMcpDialogOverrides = new Map<string, number>();
+  // Current Codex pane evidence; hard hits survive unavailable/background reads.
+  private readonly codexMcpDialogOverrides = new Map<string, CodexPaneOverride>();
   // Same pattern for an active claude compaction spinner. Compaction never
   // reaches the persisted claude status (it stays idle throughout, which the
   // scanPane:false dashboard tick maps to waiting), so without this the tick's
@@ -12264,6 +12287,12 @@ export class SessionService {
 
         stage = "tmux.create";
         this.assertSpawnNotKilled(launchSessionId);
+        runningRecord = { ...runningRecord, ...codexLaunchAttempt(launchAgent, agentLaunchId) };
+        if (launchAgent === "codex") {
+          const latest = readSession(this.config.dataDir, launchSessionId);
+          if (latest) runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
+          writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        }
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: tmuxSession,
@@ -12527,6 +12556,13 @@ export class SessionService {
             worktreePath: workspacePath,
             tmuxSession: sessionId,
             launchCommand: "",
+            ...(launchCandidate?.agent === "codex"
+              ? {
+                  agentLaunchId: launchCandidate.agentLaunchId,
+                  codexRestoreLaunchId: launchCandidate.codexRestoreLaunchId,
+                  codexRestoreStartedAt: launchCandidate.codexRestoreStartedAt,
+                }
+              : {}),
             status: "errored",
             preflightTokenUsage,
             createdAt: createdAt ?? nowIso(),
@@ -13476,6 +13512,18 @@ export class SessionService {
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
         this.assertSpawnNotKilled(sessionId);
+        const codexAttempt = codexLaunchAttempt(launchAgent, agentLaunchId);
+        runningRecord = { ...runningRecord, ...codexAttempt };
+        if (launchAgent === "codex") {
+          const latest = readSession(this.config.dataDir, launchSessionId);
+          if (latest) runningRecord = withQueuedMessages(runningRecord, queuedMessages(latest), true);
+          prepared.placeholder = {
+            ...prepared.placeholder,
+            agentLaunchId,
+            ...codexAttempt,
+          };
+          writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        }
         launchCandidate = runningRecord;
         await createTmuxSession({
           sessionName: launchSessionId,
@@ -18034,6 +18082,7 @@ export class SessionService {
       });
     let agentLaunchId = newAgentLaunchId();
     let env = buildLaunchEnv(agentLaunchId);
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
 
     // True whenever this relaunch ends up starting a brand-new agent process
     // with no native resume (no agentSessionId to resume from, or the resume
@@ -18135,6 +18184,15 @@ export class SessionService {
       await launchFreshOpenCode();
     } else {
       try {
+        codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+        if (session.agent === "codex") {
+          writeSession(this.config.dataDir, {
+            ...sessionWithAgentId,
+            ...readSession(this.config.dataDir, session.id),
+            agentLaunchId,
+            ...codexAttempt,
+          });
+        }
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
@@ -18151,6 +18209,7 @@ export class SessionService {
               status: "running",
               launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
               agentLaunchId,
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           ),
@@ -18179,6 +18238,7 @@ export class SessionService {
             ...sessionWithAgentId,
             launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
           },
           mcpSidecarUpdate,
         );
@@ -18225,6 +18285,15 @@ export class SessionService {
           const freshLaunchCommand = freshPlan.launchCommand;
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
+          codexAttempt = codexLaunchAttempt(session.agent, agentLaunchId);
+          if (session.agent === "codex") {
+            writeSession(this.config.dataDir, {
+              ...sessionWithAgentId,
+              ...readSession(this.config.dataDir, session.id),
+              agentLaunchId,
+              ...codexAttempt,
+            });
+          }
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
@@ -18240,6 +18309,7 @@ export class SessionService {
                 status: "running",
                 launchCommand: freshLaunchCommand,
                 agentLaunchId,
+                ...codexAttempt,
                 ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
                 updatedAt: nowIso(),
               },
@@ -18347,6 +18417,7 @@ export class SessionService {
             ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
             launchCommand: persistedLaunchCommand,
             agentLaunchId,
+            ...codexAttempt,
             status: "running",
             updatedAt: nowIso(),
           },
@@ -18591,7 +18662,7 @@ export class SessionService {
         ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
         : null;
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
-    const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
+    let codexAttempt: Pick<SessionRecord, "codexRestoreStartedAt" | "codexRestoreLaunchId"> = {};
     // Set before startMcpSidecars below: the on-disk status stays
     // stopped/errored until the restore completes (~50 lines down), so the
     // sidecar reaper's normal running|spawning filter would not protect the
@@ -18779,6 +18850,19 @@ export class SessionService {
         ...(sessionAgentConfig.env ? { extraEnv: sessionAgentConfig.env } : {}),
       });
 
+      codexAttempt = codexLaunchAttempt(current.agent, restoreAgentLaunchId);
+      if (current.agent === "codex") {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest || reopenInvalidated() || !this.lifecycleStateMatches(latest, claim)) {
+          throw new Error(`Session ${sessionId} changed before restore launch`);
+        }
+        writeSession(this.config.dataDir, {
+          ...latest,
+          launchCommand: restoredLaunchCommand,
+          agentLaunchId: restoreAgentLaunchId,
+          ...codexAttempt,
+        });
+      }
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
@@ -18805,6 +18889,7 @@ export class SessionService {
             status: "running",
             launchCommand: restoredLaunchCommand,
             ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+            ...codexAttempt,
             updatedAt: nowIso(),
           },
           mcpSidecarUpdate,
@@ -18987,7 +19072,7 @@ export class SessionService {
               status: "running",
               updatedAt: nowIso(),
               ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-              ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+              ...codexAttempt,
             },
             mcpSidecarUpdate,
           );
@@ -19032,6 +19117,7 @@ export class SessionService {
           ...current,
           launchCommand: restoredLaunchCommand,
           ...(restoreAgentLaunchId ? { agentLaunchId: restoreAgentLaunchId } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -19108,7 +19194,7 @@ export class SessionService {
           status: "running",
           updatedAt: nowIso(),
           ...(cursorRestoreBoundary ? { cursorRestoreBoundary } : {}),
-          ...(codexRestoreStartedAt ? { codexRestoreStartedAt } : {}),
+          ...codexAttempt,
         },
         mcpSidecarUpdate,
       );
@@ -20958,7 +21044,7 @@ export class SessionService {
   }
 
   private async classifyCodexState(
-    session: Pick<SessionRecord, "id" | "agentSessionId" | "codexRestoreStartedAt">,
+    session: Pick<SessionRecord, "id" | "agentSessionId" | "agentLaunchId" | "codexRestoreLaunchId" | "codexRestoreStartedAt">,
   ): Promise<{
     state: SessionState;
     source: StateSource;
@@ -20982,20 +21068,22 @@ export class SessionService {
     let state: SessionState = hookState?.state ?? "waiting";
     let source: StateSource = hookState ? "hook" : "status";
 
-    const restoreStartedAtMs = session.codexRestoreStartedAt
-      ? Date.parse(session.codexRestoreStartedAt)
-      : NaN;
+    const restoreStartedAtMs = codexLaunchStartedAt(session);
     const restoreMarkerReady =
       rolloutState?.reason === "thread_settings_applied" &&
-      Number.isFinite(restoreStartedAtMs) &&
+      session.agentSessionId !== undefined &&
+      restoreStartedAtMs !== null &&
       rolloutState.timestampMs >= restoreStartedAtMs &&
-      (rolloutState.precedingState?.timestampMs ?? 0) < restoreStartedAtMs &&
+      rolloutState.precedingState !== undefined &&
+      rolloutState.precedingState.timestampMs < restoreStartedAtMs &&
       (!hookState ||
         hookState.state === "waiting" ||
         new Date(hookState.updatedAt).getTime() < restoreStartedAtMs);
     if (restoreMarkerReady) {
       state = "waiting";
       source = "jsonl";
+    } else if (rolloutState?.reason === "thread_settings_applied") {
+      state = rolloutState.precedingState?.state ?? hookState?.state ?? "working";
     } else if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
       state = rolloutState.state;
       source = "jsonl";
@@ -22063,7 +22151,7 @@ export class SessionService {
         probeUnresponsive: true,
         diagnostic,
       },
-      state: "error",
+      state: this.hasCodexLimitEpisode(retained) ? "rate_limited" : "error",
       source: "status",
       workspacePresent: false,
       serverError: false,
@@ -22106,9 +22194,14 @@ export class SessionService {
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
     const latest = readSession(this.config.dataDir, session.id);
     if (latest?.status === "killed") return latest;
+    const retentionCandidate = { ...session, ...latest, launchCommand: session.launchCommand };
+    if (session.agent === "codex" && latest) {
+      if (latest.codexRestoreLaunchId === undefined) delete retentionCandidate.codexRestoreLaunchId;
+      if (latest.codexRestoreStartedAt === undefined) delete retentionCandidate.codexRestoreStartedAt;
+    }
     const retained: SessionRecord = {
       ...withQueuedMessages(
-        { ...session, ...latest, launchCommand: session.launchCommand },
+        retentionCandidate,
         queuedMessages(latest ?? session),
         true,
       ),
@@ -22144,6 +22237,38 @@ export class SessionService {
     }
   }
 
+  private codexPaneOverride(session: SessionRecord): CodexPaneOverride | undefined {
+    const entry = this.codexMcpDialogOverrides.get(session.id);
+    if (entry && (entry.nativeId !== session.agentSessionId ||
+      entry.launchId !== session.agentLaunchId || entry.startedAt !== codexLaunchStartedAt(session))) {
+      this.codexMcpDialogOverrides.delete(session.id);
+      return undefined;
+    }
+    return entry;
+  }
+
+  private hasCodexLimitEpisode(session: SessionRecord): boolean {
+    return session.agent === "codex" &&
+      (session.status === "running" || session.status === "spawning") &&
+      (session.rateLimitedAt !== undefined || this.codexPaneOverride(session)?.kind === "hard");
+  }
+
+  private codexCompletionAfterLimit(
+    session: SessionRecord,
+    rollout: CodexRolloutStateRecord | null,
+    rateLimit: RateLimitDetection | null,
+    override: CodexPaneOverride | undefined,
+  ): boolean {
+    const startedAt = codexLaunchStartedAt(session);
+    const episodeAt = session.rateLimitedAt === undefined ? 0 : Date.parse(session.rateLimitedAt);
+    return Boolean(session.agentSessionId) && startedAt !== null &&
+      Number.isFinite(episodeAt) && rollout?.reason === "task_complete" &&
+      rollout.state === "waiting" && Number.isFinite(rollout.timestampMs) &&
+      rollout.timestampMs <= Date.now() &&
+      rollout.timestampMs > Math.max(startedAt, episodeAt, override?.kind === "hard" ? override.observedAt : 0) &&
+      (!rateLimit?.limited || rateLimit.codexAuthority === "soft");
+  }
+
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
@@ -22164,7 +22289,7 @@ export class SessionService {
           tmuxActivityAt: null,
           probeUnresponsive: false,
         },
-        state: "working",
+        state: this.hasCodexLimitEpisode(session) ? "rate_limited" : "working",
         source: "status",
         historySourcePath: null,
         workspacePresent: probeWorkspace(session.worktreePath).exists,
@@ -22289,6 +22414,9 @@ export class SessionService {
     }
 
     let rateLimit: RateLimitDetection | null = null;
+    let codexRolloutState: CodexRolloutStateRecord | null = null;
+    let codexCompletionSelected = false;
+    let codexEpisodeRecovered = false;
     let hasServerErrorRecord = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
@@ -22385,6 +22513,8 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         rateLimit = codexState.rateLimit;
+        codexRolloutState = codexState.rolloutState;
+        codexCompletionSelected = codexState.source === "jsonl" && codexState.state === "waiting";
         agentActivityAt = activityAtFromMs(codexState.activityMs);
         liveModel = codexState.model;
         tokenUsage = codexState.tokenUsage;
@@ -22586,55 +22716,57 @@ export class SessionService {
           compactingApplied = true;
           classifiedDetail = "State: working (claude compacting)";
         }
-      } else if (scanPane && strategy === "hook") {
-        // Codex-specific: a hard rate-limit banner always wins. Otherwise,
-        // whenever the pane shows a live MCP tool-permission dialog (whether or
-        // not a soft rate-limit signal is also present) the session is
-        // promoted to needs_input.
-        const paneText = await captureTmuxPane(session.tmuxSession);
-        if (paneText === null) {
-          // A failed fork never mutates codexMcpDialogOverrides (no hard-hit
-          // promotion, no delete) — only reapply the stored entry if
-          // unexpired, the same read the scanPane:false branch below does.
-          // Reapplying does NOT refresh the expiry: only the live "detected
-          // dialog" branch below writes it.
-          const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-          if (expiresAt !== undefined && expiresAt > Date.now()) {
-            state = "needs_input";
-            rateLimit = null;
-            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
-          }
-        } else {
+      } else if (strategy === "hook") {
+        const override = this.codexPaneOverride(session);
+        const unresolved = this.hasCodexLimitEpisode(session);
+        const mayDemote = !unresolved && (!rateLimit?.limited || rateLimit.codexAuthority === "soft");
+        const mayRecover = this.codexCompletionAfterLimit(
+          session, codexCompletionSelected ? codexRolloutState : null, rateLimit, override,
+        );
+        const paneFallback = unresolved ? mayRecover :
+          mayDemote && (codexRolloutState === null || rateLimit?.limited || override?.kind === "mcp");
+        const paneText = scanPane && paneFallback ? await captureTmuxPane(session.tmuxSession) : null;
+        if (paneText !== null && paneText.length > 0) {
           const hardHit = scanTmuxRateLimit(paneText);
           if (hardHit?.limited) {
             rateLimit = hardHit;
-            this.codexMcpDialogOverrides.delete(session.id);
-          } else if (detectCodexMcpPermissionDialog(paneText)) {
-            state = "needs_input";
-            rateLimit = null;
-            this.codexMcpDialogOverrides.set(
-              session.id,
-              Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
-            );
-            classifiedDetail = "State: needs_input (codex MCP permission dialog)";
-          } else {
+            this.codexMcpDialogOverrides.set(session.id, {
+              nativeId: session.agentSessionId,
+              launchId: session.agentLaunchId,
+              startedAt: codexLaunchStartedAt(session),
+              kind: "hard",
+              observedAt: Date.now(),
+              detection: hardHit,
+            });
+          } else if (unresolved && mayRecover) {
+            const latest = readSession(this.config.dataDir, session.id);
+            if (latest && latest.status === "running" && sameSessionRuntimeOwner(latest, session) &&
+              latest.agentLaunchId === session.agentLaunchId &&
+              codexLaunchStartedAt(latest) === codexLaunchStartedAt(session) &&
+              latest.rateLimitedAt === session.rateLimitedAt &&
+              this.codexCompletionAfterLimit(latest, codexRolloutState, rateLimit, this.codexPaneOverride(latest))) {
+              this.codexMcpDialogOverrides.delete(session.id);
+              this.stateCache.delete(session.id);
+              codexEpisodeRecovered = true;
+              rateLimit = null;
+              state = "waiting";
+              classifiedDetail = "State: waiting (codex current-launch completion and clear pane)";
+            }
+          } else if (mayDemote && detectCodexMcpPermissionDialog(paneText)) {
+            this.codexMcpDialogOverrides.set(session.id, {
+              nativeId: session.agentSessionId,
+              launchId: session.agentLaunchId,
+              startedAt: codexLaunchStartedAt(session),
+              kind: "mcp",
+              expiresAt: Date.now() + CODEX_MCP_DIALOG_OVERRIDE_TTL_MS,
+            });
+          } else if (override?.kind === "mcp") {
             this.codexMcpDialogOverrides.delete(session.id);
           }
         }
-      } else if (!scanPane && strategy === "hook") {
-        // The scanPane:false dashboard tick can't afford its own capture-pane
-        // fork (see enrichDashboard), but it can still reuse the last live
-        // pane-scan's dialog confirmation while it's fresh, so the dashboard
-        // doesn't keep showing rate_limited (or working) for a session the 5s
-        // attention monitor already knows is parked on a live MCP permission
-        // dialog. The override can be live with no rate-limit signal at all
-        // (the pane-scan branch above sets it independent of rateLimit), so
-        // this reuse branch must not require rateLimit?.limited either, or it
-        // misses that case on 2s ticks. The override-presence + expiry check
-        // below is the real gate; this branch is just a cheap Map.get when
-        // there's nothing to reuse.
-        const expiresAt = this.codexMcpDialogOverrides.get(session.id);
-        if (expiresAt !== undefined && expiresAt > Date.now()) {
+        const current = this.codexPaneOverride(session);
+        if (current?.kind === "hard") rateLimit = current.detection;
+        else if (mayDemote && current?.kind === "mcp" && current.expiresAt > nowMs) {
           state = "needs_input";
           rateLimit = null;
           classifiedDetail = "State: needs_input (codex MCP permission dialog)";
@@ -22732,6 +22864,10 @@ export class SessionService {
       }
     }
 
+    if (this.hasCodexLimitEpisode(effectiveSession) && !codexEpisodeRecovered) {
+      state = "rate_limited";
+      classifiedDetail = "State: rate_limited (codex unresolved current-launch episode)";
+    }
     if (!readSession(this.config.dataDir, session.id) || classifiedDetail === undefined) {
       this.lastClassifiedLogStates.delete(session.id);
     } else {
@@ -22803,6 +22939,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
       launchCommand: _launchCommand,
       stateSubscriptions: _stateSubscriptions,
       allowedTriggers: _allowedTriggers,
@@ -22815,7 +22952,7 @@ export class SessionService {
     } = session;
     const state = this.stabilizeState(
       session.id,
-      hasRetainedSessionError(session) ? "error" : classified.state,
+      hasRetainedSessionError(session) && !this.hasCodexLimitEpisode(session) ? "error" : classified.state,
     );
     await this.updateStateHistory(
       session,
@@ -23129,7 +23266,7 @@ export class SessionService {
     const sidecars = await this.sidecarViews(session, project);
     session = this.withReportingError(session);
     classified.session = session;
-    if (hasRetainedSessionError(session)) classified.state = "error";
+    if (hasRetainedSessionError(session) && !this.hasCodexLimitEpisode(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);
     await this.updateStateHistory(
       session,
@@ -23164,6 +23301,7 @@ export class SessionService {
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
+      codexRestoreLaunchId: _codexRestoreLaunchId,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,

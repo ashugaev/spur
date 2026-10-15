@@ -82,7 +82,7 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `authRotation.{autoRotateOnRateLimit false, cooldownMinutes 60, maxRotationsPerEpisode 2}`: instance only.
 - `diskRetention.warnFreeGb` (`10`, instance only, drives `doctor`'s `home-disk-headroom`).
 - `rateLimitReactivation.afterHours` (`0`, instance only).
-- Codex usable/unlimited credits: usage meters alone do not imply exhaustion; `v2/src/rate-limit-detect.ts`.
+- Codex limit authority, MCP precedence and current-launch episode recovery: `v2/src/rate-limit-detect.ts`, `v2/src/session-service.ts`, `v2/src/metadata.ts`.
 - `staleAfterMinutes` (`720`, instance/per-project). See [Stale mode](#stale-mode).
 - `autoUpdate` (`false`, instance only). See [Auto update](#auto-update).
 - `sessionGc.{enabled false, olderThanDays 30, intervalMinutes 360, maxGroupsPerSweep 20, statuses [completed,killed,stopped]}`: [`spur gc`](commands.md#gc).

@@ -1188,6 +1188,10 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     Number.isFinite(Date.parse(normalizedSession.codexRestoreStartedAt))
       ? { codexRestoreStartedAt: normalizedSession.codexRestoreStartedAt }
       : {}),
+    ...(typeof normalizedSession.codexRestoreLaunchId === "string" &&
+    normalizedSession.codexRestoreLaunchId.trim().length > 0
+      ? { codexRestoreLaunchId: normalizedSession.codexRestoreLaunchId }
+      : {}),
     prompt: normalizedSession.prompt,
     ...(normalizedSession.originalTaskPrompt
       ? { originalTaskPrompt: normalizedSession.originalTaskPrompt }
