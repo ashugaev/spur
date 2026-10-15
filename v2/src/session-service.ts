@@ -15179,7 +15179,15 @@ export class SessionService {
             if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
               return false;
             }
-            return (await this.classifySessionState(current)) !== "waiting";
+            const classified = await this.classifySessionRecord(current);
+            if (current.agent !== "codex") return classified.state !== "waiting";
+            // Idle Ctrl-C can exit Codex. Retained errors and status fallbacks
+            // do not prove a cancellable turn; needs_input still cancels menus.
+            return (
+              classified.state === "needs_input" ||
+              (classified.state === "working" &&
+                (classified.source === "hook" || classified.source === "jsonl"))
+            );
           })) === true;
       }
 
