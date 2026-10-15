@@ -1742,7 +1742,7 @@ describe("runtime-tmux", () => {
     });
   });
 
-  it("R1 lookupTmuxSessionPanePids keeps dead panes out of livePanePids, per pane row", async () => {
+  it("R1 lookupTmuxSessionPanePids leaves dead panes out, per pane row, so a recycled pid never roots capture", async () => {
     execFileAsyncMock.mockImplementation(async (_file, args) => {
       if (args[0] === "list-panes") {
         return {
@@ -1758,13 +1758,11 @@ describe("runtime-tmux", () => {
 
     expect(await lookupTmuxSessionPanePids("api-1", { fresh: true })).toEqual({
       status: "ok",
-      panePids: [4242, 4244],
-      livePanePids: [4244],
+      panePids: [4244],
     });
     expect(await lookupTmuxSessionPanePids("live-1", { fresh: true })).toEqual({
       status: "ok",
       panePids: [4243],
-      livePanePids: [4243],
     });
   });
 
@@ -1788,13 +1786,8 @@ describe("runtime-tmux", () => {
     expect(await lookupTmuxSessionPanePids("api-1")).toEqual({
       status: "ok",
       panePids: [4242, 4343],
-      livePanePids: [4242, 4343],
     });
-    expect(await lookupTmuxSessionPanePids("absent-1")).toEqual({
-      status: "ok",
-      panePids: [],
-      livePanePids: [],
-    });
+    expect(await lookupTmuxSessionPanePids("absent-1")).toEqual({ status: "ok", panePids: [] });
   });
 
   it("lookupTmuxSessionPanePids reports unavailable when the tmux probe fails", async () => {

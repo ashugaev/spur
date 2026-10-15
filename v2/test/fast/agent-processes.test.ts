@@ -177,7 +177,6 @@ describe("capturePaneAgentProcesses", () => {
       await capturePaneAgentProcesses({
         sessionId: "api-1",
         panePids: [],
-        livePanePids: [],
         processMatchers: ["claude"],
       }),
     ).toEqual({
@@ -196,7 +195,6 @@ describe("capturePaneAgentProcesses", () => {
       await capturePaneAgentProcesses({
         sessionId: "api-1",
         panePids: [1],
-        livePanePids: [1],
         processMatchers: ["claude"],
       }),
     ).toEqual({
@@ -217,7 +215,6 @@ describe("capturePaneAgentProcesses", () => {
     const capture = await capturePaneAgentProcesses({
       sessionId: "api-1",
       panePids: [1],
-      livePanePids: [1],
       processMatchers: ["claude"],
     });
     expect(snapshotProcessesMock).toHaveBeenCalledTimes(2);
@@ -233,7 +230,6 @@ describe("capturePaneAgentProcesses", () => {
     const capture = await capturePaneAgentProcesses({
       sessionId: "api-1",
       panePids: [1],
-      livePanePids: [1],
       processMatchers: ["claude"],
     });
     expect(capture).toEqual({ status: "ok", processes: [{ pid: 2, identity: "starttime-2" }] });
@@ -250,7 +246,6 @@ describe("capturePaneAgentProcesses", () => {
     const capture = await capturePaneAgentProcesses({
       sessionId: "api-1",
       panePids: [1, 10],
-      livePanePids: [1, 10],
       processMatchers: ["claude"],
     });
     expect(capture.status).toBe("ok");
@@ -273,7 +268,6 @@ describe("capturePaneAgentProcesses", () => {
     const capture = await capturePaneAgentProcesses({
       sessionId: "api-1",
       panePids: [1],
-      livePanePids: [1],
       processMatchers: ["claude"],
     });
     expect(capture.status).toBe("ok");
@@ -292,11 +286,10 @@ describe("capturePaneAgentProcesses", () => {
       sid,
       env: { SPUR_SESSION: "api-1", SPUR_AGENT_LAUNCH_ID: "launch-1" },
     });
-    const pane = (paneDead = false): Parameters<typeof capturePaneAgentProcesses>[0] => ({
+    const pane = (): Parameters<typeof capturePaneAgentProcesses>[0] => ({
       sessionId: "api-1",
       agentLaunchId: "launch-1",
       panePids: [100],
-      livePanePids: paneDead ? [] : [100],
       processMatchers: ["codex"],
     });
     const capturedPids = async (
@@ -352,7 +345,6 @@ describe("capturePaneAgentProcesses", () => {
           sessionId: "api-1",
           agentLaunchId: "launch-1",
           panePids: [],
-          livePanePids: [],
           processMatchers: ["x"],
         }),
       ).toEqual({ status: "ok", processes: [] });
@@ -415,17 +407,7 @@ describe("capturePaneAgentProcesses", () => {
       });
     });
 
-    it("T10 never runs the session pass for a dead pane even when a live leader holds its pid", async () => {
-      identities = new Map([
-        [100, "s100"],
-        [901, "s901"],
-      ]);
-      fakeTable = [row(100, 1, "-zsh", 100), row(901, 1, "other-session-member", 100)];
-      expect(await capturedPids(pane(true))).toEqual([]);
-      expect(listSessionMemberPidsMock).not.toHaveBeenCalled();
-    });
-
-    it("T11 runs the session pass for every live pane, skipping a dead one", async () => {
+    it("T11 runs the session pass for every pane pid it is given", async () => {
       identities = new Map([
         [100, "s100"],
         [200, "s200"],
@@ -438,10 +420,8 @@ describe("capturePaneAgentProcesses", () => {
         row(200, 1, "-zsh", 200),
         row(902, 1, "native-mcp-helper", 200),
       ];
-      expect(await capturedPids({ ...pane(), panePids: [100, 200], livePanePids: [200] })).toEqual([
-        902,
-      ]);
-      expect(listSessionMemberPidsMock).toHaveBeenCalledExactlyOnceWith(200);
+      expect(await capturedPids({ ...pane(), panePids: [100, 200] })).toEqual([901, 902]);
+      expect(listSessionMemberPidsMock.mock.calls).toEqual([[100], [200]]);
     });
 
     const captureAndTerminate = async (input = pane()): Promise<number[]> => {

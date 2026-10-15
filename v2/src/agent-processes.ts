@@ -183,13 +183,14 @@ export type PaneAgentCapture =
 
 const CAPTURE_RETRY_DELAY_MS = 100;
 
-// P1, pane-rooted and exact: descendants of every pane pid of the session
+// P1, pane-rooted and exact: descendants of every live pane pid of the session
 // whose args match this session's own agent matchers, plus members of each
-// live pane's kernel session (sid === pane pid) carrying this exact launch's
+// pane's kernel session (sid === pane pid) carrying this exact launch's
 // markers. The session pass catches processes re-parented to init after the
 // agent wrapper died, and MCP children that never match an agent matcher. It
-// runs only over `livePanePids` (panes tmux does not report dead), each a live
-// session leader. Each added member must keep its identity and SID across both
+// runs only for a pane pid that is still a live session leader. `panePids`
+// must hold live panes only (lookupTmuxSessionPanePids): a dead pane's pid can
+// be recycled. Each added member must keep its identity and SID across both
 // marker reads. Empty `panePids` (panes already gone, or the caller never
 // resolved any) reads as an empty capture — never throws.
 //
@@ -204,7 +205,6 @@ export async function capturePaneAgentProcesses(input: {
   sessionId: string;
   agentLaunchId?: string | undefined;
   panePids: readonly number[];
-  livePanePids: readonly number[];
   processMatchers: readonly string[];
 }): Promise<PaneAgentCapture> {
   if (input.panePids.length === 0) {
@@ -237,7 +237,7 @@ export async function capturePaneAgentProcesses(input: {
     return { status: "ok", processes: refs };
   }
   const captured = new Set(refs.map((ref) => ref.pid));
-  for (const panePid of input.livePanePids) {
+  for (const panePid of input.panePids) {
     if (panePid <= 1 || (await readProcessStat(panePid))?.sid !== panePid) {
       continue;
     }
@@ -365,7 +365,8 @@ export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; pids:
 
 // P2, env-rooted and heuristic launch guard: processes carrying
 // SPUR_SESSION === sessionId that are not this session's own pane children
-// (descendants of every excludePanePids entry), collapsed to their shallowest ancestor.
+// (descendants of every excludePanePids entry, live panes only), collapsed to
+// their shallowest ancestor.
 // "unavailable" when this platform cannot read process environments — the
 // caller MUST treat that as "no finding", never as "duplicate".
 export async function findForeignAgentProcessesForSession(input: {

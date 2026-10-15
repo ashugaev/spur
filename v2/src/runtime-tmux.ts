@@ -275,7 +275,7 @@ interface FleetPaneEntry {
   // parentage (ppid is a pane pid) when name matching misses (issue #806).
   allPanePids: number[];
   // allPanePids minus panes tmux reports dead (remain-on-exit): a dead pane's
-  // pid can be recycled, so only these may root a kernel-session scan.
+  // pid can be recycled, so only these may root ownership capture.
   livePanePids: number[];
 }
 
@@ -778,13 +778,15 @@ export async function lookupTmuxPanePid(
 }
 
 export type TmuxSessionPanesLookup =
-  | { status: "ok"; panePids: readonly number[]; livePanePids: readonly number[] }
+  | { status: "ok"; panePids: readonly number[] }
   | { status: "unavailable" };
 
-// Every pane pid of the session (all windows), the same set liveness reads.
-// Ownership capture and the foreign-agent guard use this instead of the
-// active pane so an agent left in a non-active pane stays owned. "ok" with
-// `panePids: []` means tmux replied and the session has no panes.
+// Every live pane pid of the session (all windows). Ownership capture and the
+// foreign-agent guard use this instead of the active pane so an agent left in
+// a non-active pane stays owned. Dead (remain-on-exit) panes are left out: a
+// dead pane's pid can be recycled by an unrelated process, whose descendants
+// must never be captured, signalled, or excluded as this session's own. "ok"
+// with `panePids: []` means tmux replied and the session has no live pane.
 export async function lookupTmuxSessionPanePids(
   sessionName: string,
   options?: { fresh?: boolean },
@@ -796,12 +798,7 @@ export async function lookupTmuxSessionPanePids(
   if (!readable) {
     return { status: "unavailable" };
   }
-  const entry = panes.get(sessionName);
-  return {
-    status: "ok",
-    panePids: entry?.allPanePids ?? [],
-    livePanePids: entry?.livePanePids ?? [],
-  };
+  return { status: "ok", panePids: panes.get(sessionName)?.livePanePids ?? [] };
 }
 
 interface PsRow {

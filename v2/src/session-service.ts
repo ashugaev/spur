@@ -17097,7 +17097,6 @@ export class SessionService {
       sessionId: session.id,
       agentLaunchId: session.agentLaunchId,
       panePids: paneLookup.status === "ok" ? paneLookup.panePids : [],
-      livePanePids: paneLookup.status === "ok" ? paneLookup.livePanePids : [],
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {

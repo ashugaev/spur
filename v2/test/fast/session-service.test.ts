@@ -223,13 +223,9 @@ const lookupTmuxPanePidMock = vi.fn((_sessionName?: string, _options?: { fresh?:
 );
 const lookupTmuxSessionPanePidsMock = vi.fn(
   (_sessionName?: string, _options?: { fresh?: boolean }) =>
-    Promise.resolve<
-      | { status: "ok"; panePids: readonly number[]; livePanePids: readonly number[] }
-      | { status: "unavailable" }
-    >({
+    Promise.resolve<{ status: "ok"; panePids: readonly number[] } | { status: "unavailable" }>({
       status: "ok",
       panePids: [],
-      livePanePids: [],
     }),
 );
 const getFleetSessionRssBytesMock = vi
@@ -2404,8 +2400,7 @@ describe("SessionService", () => {
     lookupTmuxSessionPanePidsMock.mockReset().mockImplementation(async (name, options) => {
       const lookup = await lookupTmuxPanePidMock(name, options);
       if (lookup.status !== "ok") return { status: "unavailable" };
-      const panePids = lookup.panePid === null ? [] : [lookup.panePid];
-      return { status: "ok", panePids, livePanePids: panePids };
+      return { status: "ok", panePids: lookup.panePid === null ? [] : [lookup.panePid] };
     });
     getFleetSessionRssBytesMock.mockReset().mockResolvedValue(new Map());
     readHostMemoryMock.mockReset().mockReturnValue(null);
@@ -34115,7 +34110,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("S1 killAgentPaneAndConfirmExit looks up the session panes fresh and forwards only live panes for the SID pass", async () => {
+  it("S1 killAgentPaneAndConfirmExit looks up the session's live panes fresh and captures from all of them", async () => {
     createSessionStore({
       id: "api-1",
       project: "api",
@@ -34131,11 +34126,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    lookupTmuxSessionPanePidsMock.mockResolvedValue({
-      status: "ok",
-      panePids: [4242, 4343],
-      livePanePids: [4343],
-    });
+    lookupTmuxSessionPanePidsMock.mockResolvedValue({ status: "ok", panePids: [4242, 4343] });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -34148,7 +34139,6 @@ describe("SessionService", () => {
         sessionId: "api-1",
         agentLaunchId: "stored-launch",
         panePids: [4242, 4343],
-        livePanePids: [4343],
       }),
     );
   });
@@ -51946,11 +51936,7 @@ describe("SessionService", () => {
       mockExitedThenRestoredProcess();
       // Pane 4242 holds the agent; the active pane is a user-split shell.
       lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4343 });
-      lookupTmuxSessionPanePidsMock.mockResolvedValue({
-        status: "ok",
-        panePids: [4242, 4343],
-        livePanePids: [4242, 4343],
-      });
+      lookupTmuxSessionPanePidsMock.mockResolvedValue({ status: "ok", panePids: [4242, 4343] });
       findForeignAgentProcessesForSessionMock.mockImplementation(async (input) => ({
         status: "ok" as const,
         pids: input?.excludePanePids.includes(4242) ? [] : [777],
