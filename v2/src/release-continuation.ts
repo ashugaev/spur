@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, realpath, mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { EventBus } from "./event-bus.js";
 import {
   GitHubApp,
@@ -56,6 +57,14 @@ import {
   type ReleaseCompletionResult,
 } from "./session-service.js";
 import type { AppConfig, SessionRecord, SessionView } from "./types.js";
+import {
+  callerSourceMatches,
+  parseCallerSourceSnapshot,
+  type CallerPin,
+  type CallerReadback,
+  type CallerSourceSnapshot,
+  type ConfiguredCallerBootstrap,
+} from "./release-caller.js";
 
 export interface ReleaseContinuationConfig {
   policyFile: string;
@@ -115,7 +124,15 @@ interface Dependencies {
     nativeAgentAlive: boolean | null;
     historyAvailable: boolean;
     initialAcknowledged: boolean | null;
+    configuredCaller?: ConfiguredCallerBootstrap;
   }>;
+  callerReadback?: (
+    snapshot: CallerSourceSnapshot,
+    tool: CallerPin,
+    apps: CallerPin,
+    repository: string,
+    verify: (pin: CallerPin) => Promise<unknown>,
+  ) => Promise<CallerReadback>;
   warn(message: string): void;
   transport?: typeof fetch;
 }
@@ -242,11 +259,11 @@ async function privateFile(path: string, checkouts: string[]): Promise<string> {
   return canonical;
 }
 async function pinnedBytes(binding: Pin, checkouts: string[]): Promise<string> {
-  const bytes = await readFile(await privateFile(binding.file, checkouts), "utf8");
+  const bytes = await readFile(await privateFile(binding.file, checkouts));
   // Pins bind bytes, not parsed JSON or normalized whitespace.
   if (createHash("sha256").update(bytes).digest("hex") !== binding.digest)
     throw new ReviewAppError("continuation-pin-changed");
-  return bytes;
+  return bytes.toString("utf8");
 }
 function parseJson(bytes: string): unknown {
   try {
@@ -427,6 +444,38 @@ class ProjectContinuation {
       await privateFile(validated.apps[lane].keyPath, roots);
     return validated;
   }
+  private async callerSnapshot(
+    loaded: LoadedPolicy,
+    registration: Registration,
+  ): Promise<{
+    snapshot: CallerSourceSnapshot;
+    digest: string;
+  } | null> {
+    const claim = registration.reviewerRecovery?.callerCurrent;
+    if (!claim) return null;
+    const envelope = object(parseJson(await pinnedBytes(claim, loaded.checkouts)));
+    if (envelope.source === undefined) return null;
+    const source = pin(envelope.source);
+    const value = object(parseJson(await pinnedBytes(source, loaded.checkouts)));
+    if (value.kind !== "configured-source") return null;
+    const snapshot = parseCallerSourceSnapshot(value);
+    if (
+      snapshot.generation !== registration.generation ||
+      !callerSourceMatches(this.deps.config, snapshot)
+    )
+      return null;
+    await pinnedBytes(snapshot.config, loaded.checkouts);
+    return { snapshot, digest: source.digest };
+  }
+  async designates(request: ContinuationIngress): Promise<boolean> {
+    const loaded = await this.loaded();
+    return (
+      loaded.gate.repository === request.repo &&
+      loaded.policy.registrations.some(
+        (item) => item.active && item.pr === request.pr && item[request.lane] === request.session,
+      )
+    );
+  }
   private statePath(pr: number): string {
     return join(this.root, `${pr}.json`);
   }
@@ -505,6 +554,7 @@ class ProjectContinuation {
     const bounds = registration.reviewerRecovery;
     if (!bounds) return null;
     let blocked: ReviewReceipt | null = null;
+    let currentAttempt: string | null = null;
     const receiptPath = join(
       expandReceiptPath(loaded.apps.receiptRoot),
       loaded.gate.repository.toLowerCase(),
@@ -513,6 +563,17 @@ class ProjectContinuation {
     );
     try {
       const receipt = await readReviewReceipt(receiptPath);
+      if (
+        receipt.repository === loaded.gate.repository &&
+        receipt.PR === registration.pr &&
+        receipt.session === registration[lane] &&
+        receipt.lane === lane &&
+        receipt.H === H &&
+        receipt.B === B &&
+        receipt.contractDigest === loaded.policy.contract.digest &&
+        receipt.appId === loaded.apps[lane].appId
+      )
+        currentAttempt = receipt.attempt;
       if (
         receipt.status === "BLOCKED" &&
         receipt.repository === loaded.gate.repository &&
@@ -609,7 +670,21 @@ class ProjectContinuation {
         claim.launchDigest === identity.launchDigest
       );
     };
-    if (bounds.callerCurrent) {
+    const source = await this.callerSnapshot(loaded, registration);
+    const bootstrap = native.configuredCaller;
+    const authenticated =
+      source !== null &&
+      bootstrap !== undefined &&
+      isDeepStrictEqual(bootstrap.config, source.snapshot.config) &&
+      bootstrap.projectId === source.snapshot.projectId &&
+      bootstrap.sourceId === source.snapshot.sourceId &&
+      bootstrap.triggerId === source.snapshot.triggerId &&
+      bootstrap.effectiveDigest === source.snapshot.effectiveDigest &&
+      bootstrap.blockIndex === source.snapshot.blocks[lane] &&
+      bootstrap.repository === loaded.gate.repository &&
+      bootstrap.pr === registration.pr &&
+      bootstrap.promptDigest === createHash("sha256").update(session.prompt).digest("hex");
+    if (bounds.callerCurrent && !authenticated) {
       const claim = object(parseJson(await pinnedBytes(bounds.callerCurrent, loaded.checkouts)));
       if (
         !matchesClaim(claim) ||
@@ -678,6 +753,56 @@ class ProjectContinuation {
         "reviewer-current-launch-ack-unavailable",
         "retained native identity/history cannot prove current acceptance",
       );
+    if (authenticated && currentAttempt && this.deps.callerReadback) {
+      const prerequisite = digest({
+        key,
+        launch: identity.launchDigest,
+        source: source.digest,
+        attempt: currentAttempt,
+        tool: loaded.policy.tool.digest,
+        apps: loaded.policy.apps.digest,
+        contract: loaded.policy.contract.digest,
+        protocol: loaded.policy.protocol.digest,
+      });
+      for (const binding of [source.snapshot.runtime, ...source.snapshot.modules])
+        await pinnedBytes(binding, loaded.checkouts);
+      if (recovery.prerequisite === prerequisite && recovery.reason === "configured-caller-current")
+        return null;
+      const readback = await this.deps.callerReadback(
+        source.snapshot,
+        loaded.policy.tool,
+        loaded.policy.apps,
+        loaded.gate.repository,
+        (binding) => pinnedBytes(binding, loaded.checkouts),
+      );
+      const current = this.deps.session(session.id);
+      if (!current || !isDeepStrictEqual(captureReleaseTaskIdentity(current), identity))
+        return hold("reviewer-task-mismatch", "task changed during owned caller readback");
+      const after = await this.deps.reviewerEvidence(session.id);
+      const receipt = await readReviewReceipt(receiptPath);
+      if (
+        after.initialAcknowledged !== true ||
+        after.nativeAgentAlive !== true ||
+        !isDeepStrictEqual(after.configuredCaller, bootstrap) ||
+        receipt.attempt !== currentAttempt ||
+        receipt.H !== H ||
+        receipt.B !== B ||
+        receipt.session !== session.id ||
+        receipt.lane !== lane
+      )
+        return hold(
+          "reviewer-caller-current-source-unavailable",
+          "caller inputs changed during readback",
+        );
+      const latestSource = await this.callerSnapshot(loaded, registration);
+      if (!latestSource || latestSource.digest !== source.digest)
+        return hold("reviewer-caller-current-source-unavailable", "source changed during readback");
+      recovery.prerequisite = prerequisite;
+      recovery.source = JSON.stringify(readback);
+      recovery.reason = "configured-caller-current";
+      await save();
+      return null;
+    }
     return hold(
       "reviewer-caller-current-source-unavailable",
       "policy.tool has no invocation/readback contract",
@@ -1221,12 +1346,12 @@ export async function startReleaseContinuations(
       for (const controller of controllers.reverse()) await controller.stop();
     },
     ingress: async (value, capability, affirmation) => {
-      const row = object(value),
-        session = deps.session(string(row.session));
-      const index = Object.entries(deps.config.projects)
-        .filter(([, project]) => project.releaseContinuation)
-        .findIndex(([id]) => id === session?.project);
-      const controller = controllers[index];
+      const request = parseContinuationIngress(value);
+      const matches: ProjectContinuation[] = [];
+      for (const controller of controllers)
+        if (await controller.designates(request)) matches.push(controller);
+      if (matches.length !== 1) throw new ReviewAppError("continuation-unregistered");
+      const controller = matches[0];
       if (!controller) throw new ReviewAppError("continuation-unregistered");
       await controller.ingress(value, capability, affirmation);
     },

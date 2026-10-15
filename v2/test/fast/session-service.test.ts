@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import type * as configModule from "../../src/config.js";
 import type * as nativeInputModule from "../../src/native-input.js";
 import type * as claudeSubmitModule from "../../src/agents/claude-submit-ack.js";
 import type * as cursorSubmitModule from "../../src/agents/cursor-submit-ack.js";
@@ -601,28 +602,34 @@ vi.mock("../../src/agents/index.js", () => ({
   setupAgentHooks: setupAgentHooksMock,
 }));
 
-vi.mock("../../src/config.js", () => ({
-  buildSidecarLinkUrl: (template: string, reservedPort: number) =>
-    template.includes("{port}")
-      ? template.replaceAll("{port}", String(reservedPort))
-      : `${template}:${reservedPort}`,
-  loadConfig: loadConfigMock,
-  loadProjectConfig: loadProjectConfigMock,
-  validateWebhookSourceBindings: () => undefined,
-  findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
-  loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
-  expandHome: (value: string) => (value.startsWith("~/") ? join(homedir(), value.slice(2)) : value),
-  PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
-  DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
-  deriveProjectIdFromDisplayName: (value: string) =>
-    value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-+/, "")
-      .replace(/-+$/, "") || "project",
-}));
+vi.mock("../../src/config.js", async () => {
+  const actual = await vi.importActual<typeof configModule>("../../src/config.js");
+  return {
+    carryProjectConfigSource: actual.carryProjectConfigSource,
+    projectConfigSource: actual.projectConfigSource,
+    buildSidecarLinkUrl: (template: string, reservedPort: number) =>
+      template.includes("{port}")
+        ? template.replaceAll("{port}", String(reservedPort))
+        : `${template}:${reservedPort}`,
+    loadConfig: loadConfigMock,
+    loadProjectConfig: loadProjectConfigMock,
+    validateWebhookSourceBindings: () => undefined,
+    findProjectConfigPathInDirectory: findProjectConfigPathInDirectoryMock,
+    loadInstanceConfigReadOnly: loadInstanceConfigReadOnlyMock,
+    expandHome: (value: string) =>
+      value.startsWith("~/") ? join(homedir(), value.slice(2)) : value,
+    PROJECT_ID_PATTERN: /^[a-zA-Z0-9_-]+$/,
+    DEFAULT_PROJECT_CONFIG_FILES: ["spur.yaml", "spur.yml"] as const,
+    deriveProjectIdFromDisplayName: (value: string) =>
+      value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-+/, "")
+        .replace(/-+$/, "") || "project",
+  };
+});
 
 vi.mock("../../src/preflight.js", () => ({
   PreflightBranchValidationError: MockPreflightBranchValidationError,
@@ -30123,7 +30130,7 @@ describe("SessionService", () => {
       },
     );
 
-    it.each(["spawn", "background"])(
+    it.each(["spawn", "background", "configured-source"])(
       "native accepted input publishes embedded %s intent before actual launch",
       async (mode) => {
         const fixture = await nativeInputSetup();
@@ -30174,7 +30181,21 @@ describe("SessionService", () => {
           prompt: "embedded initial",
           worktree: false,
         };
-        if (mode === "spawn") await fixture.service.spawn(request);
+        if (mode === "configured-source") {
+          await fixture.service.spawn(request, {
+            configuredCaller: {
+              config: { file: "/fixture/source.yaml", digest: "a".repeat(64) },
+              effectiveDigest: "b".repeat(64),
+              projectId: "api",
+              sourceId: "github",
+              triggerId: "review",
+              blockIndex: 0,
+              repository: "fixture/repository",
+              pr: 42,
+              promptDigest: createHash("sha256").update(request.prompt).digest("hex"),
+            },
+          });
+        } else if (mode === "spawn") await fixture.service.spawn(request);
         else {
           await fixture.service.spawnInBackground(request);
           await vi.waitFor(() => expect(fixture.sessions.get("api-1")?.status).toBe("running"));
@@ -30187,6 +30208,9 @@ describe("SessionService", () => {
         );
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         expect(createAgentSubmitAckBindingMock).not.toHaveBeenCalled();
+        const journal = await fixture.readJournal(current);
+        if (mode === "configured-source") expect(journal?.caller?.blockIndex).toBe(0);
+        else expect(journal?.caller).toBeUndefined();
       },
     );
 

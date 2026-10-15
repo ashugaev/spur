@@ -43,6 +43,7 @@ import {
   startReleaseContinuations,
   type ReleaseContinuationController,
 } from "./release-continuation.js";
+import { readConfiguredCaller } from "./release-caller.js";
 import { readSession } from "./metadata.js";
 import { ReviewAppError } from "./github-app.js";
 import { spawnableProjects, startConfiguredSources } from "./event-sources/index.js";
@@ -877,6 +878,7 @@ export async function startServer(
       restore: (id) => service.restore(id),
       complete: (id, guard) => service.completeForRelease(id, guard),
       reviewerEvidence: (id) => service.releaseReviewerEvidence(id),
+      callerReadback: readConfiguredCaller,
       warn: logger.warn ?? writeStderr,
     });
     const nextTriggers = startConfiguredTriggers({

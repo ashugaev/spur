@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { ConfiguredCallerBootstrap } from "./release-caller.js";
 import {
   consentPolicy,
   proposeConsent,
@@ -11830,6 +11831,8 @@ export class SessionService {
       receiptToken?: symbol;
       /** Internal: set by a source adapter, never from the HTTP body. */
       telegramOrigin?: TelegramSpawnOrigin;
+      /** Internal: Root-validated source observation, never an HTTP input. */
+      configuredCaller?: ConfiguredCallerBootstrap;
     },
   ): Promise<SessionView> {
     request = normalizeShepherdSpawnRequest(request);
@@ -12464,7 +12467,42 @@ export class SessionService {
         this.scheduleDeliveryRunner(updatedRecord.id);
       }
 
-      return await this.enrich(updatedRecord);
+      const enriched = await this.enrich(updatedRecord);
+      if (options?.configuredCaller) {
+        const bootstrap = options.configuredCaller;
+        try {
+          await this.withWorkspaceLifecycleLocks(updatedRecord.id, async () => {
+            const current = readSession(this.config.dataDir, updatedRecord.id);
+            if (!current) return;
+            const identity = this.nativeInputIdentity(current);
+            if (
+              !identity ||
+              current.prompt !== request.prompt ||
+              createHash("sha256").update(current.prompt).digest("hex") !== bootstrap.promptDigest
+            )
+              return;
+            const journal = await readNativeInputJournal(this.config.dataDir, identity);
+            if (
+              !journal ||
+              journal.caller ||
+              journal.occurrences.filter((input) => input.initial).length !== 1
+            )
+              return;
+            journal.caller = bootstrap;
+            await writeNativeInputJournal(this.config.dataDir, journal);
+          });
+        } catch {
+          // Input already reached the native agent. Missing provenance must not
+          // turn successful delivery into a source-trigger retry.
+          this.logEvent("session.message.native_input_unavailable", {
+            level: "warn",
+            sessionId: updatedRecord.id,
+            projectId: updatedRecord.project,
+            message: "Configured caller provenance unavailable",
+          });
+        }
+      }
+      return enriched;
     } catch (error) {
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
@@ -16850,6 +16888,7 @@ export class SessionService {
     nativeAgentAlive: boolean | null;
     historyAvailable: boolean;
     initialAcknowledged: boolean | null;
+    configuredCaller?: ConfiguredCallerBootstrap;
   }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session?.agentLaunchId)
@@ -16865,9 +16904,14 @@ export class SessionService {
         processMatchers: sessionProcessMatchers(current),
       });
       let initialAcknowledged: boolean | null = null;
+      let configuredCaller: ConfiguredCallerBootstrap | undefined;
       if (capture.status === "ok") {
         try {
           initialAcknowledged = await this.observeNativeInputsLocked(current, capture.processes);
+          const identity = this.nativeInputIdentity(current);
+          if (identity)
+            configuredCaller = (await readNativeInputJournal(this.config.dataDir, identity))
+              ?.caller;
         } catch {
           // Missing/corrupt source or interrupted journal publication supplies no proof.
           initialAcknowledged = null;
@@ -16877,6 +16921,7 @@ export class SessionService {
         nativeAgentAlive: capture.status === "ok" ? capture.processes.length > 0 : null,
         historyAvailable: history.entries.length > 0,
         initialAcknowledged,
+        ...(configuredCaller ? { configuredCaller } : {}),
       };
     });
   }

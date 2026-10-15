@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { loadConfig } from "../../src/config.js";
+import { loadConfig, loadProjectConfig } from "../../src/config.js";
+import { captureConfiguredCaller, type CallerSourceSnapshot } from "../../src/release-caller.js";
 import { EventBus } from "../../src/event-bus.js";
 import {
   startReleaseContinuations,
@@ -812,6 +813,138 @@ test.each(["current", "task", "head", "base", "launch", "tool", "checkout"])(
     expect(f.send.mock.calls.some((call) => call[0] === "browser-session")).toBe(false);
   },
 );
+async function assertConfiguredLanes(mode: string) {
+  const f = await setup(recoveryBounds());
+  const sourceFile = await f.pin(
+    "review-source.yaml",
+    `projects:\n  reviewers:\n    path: ${join(f.root, "review-checkout")}\n    sources:\n      gh:\n        type: github\n        query: repo:owner/repo\n    triggers:\n      review:\n        source: gh\n        event: github:work_item.new\n        spawn:\n          blocks:\n            - agent: codex\n              prompt: task\n            - agent: codex\n              prompt: task\n`,
+  );
+  const sourceConfig = loadProjectConfig(sourceFile.file);
+  const project = sourceConfig.projects["reviewers"];
+  if (!project) throw new Error("missing source project");
+  f.config.projects["reviewers"] = project;
+  const facts = await Promise.all(
+    [0, 1].map((blockIndex) =>
+      captureConfiguredCaller(sourceConfig, {
+        projectId: "reviewers",
+        sourceId: "gh",
+        triggerId: "review",
+        blockIndex,
+        repository: "owner/repo",
+        pr: 4,
+        prompt: "task",
+      }),
+    ),
+  );
+  expect(facts.every(Boolean)).toBe(true);
+  // Capture happens without a caller policy or future designated session IDs.
+  const runtime = await f.pin("runtime", "owned runtime");
+  const snapshot: CallerSourceSnapshot = {
+    kind: "configured-source",
+    generation: mode === "generation" ? 2 : 1,
+    projectId: "reviewers",
+    sourceId: "gh",
+    triggerId: "review",
+    config: sourceFile,
+    effectiveDigest: digest({
+      source: project.sources["gh"],
+      trigger: project.triggers["review"],
+    }),
+    blocks: { code: 0, browser: 1 },
+    runtime,
+    modules: [runtime],
+  };
+  const source = await f.pin("root-source-snapshot", snapshot);
+  const claim = await f.pin("caller-singleton", {
+    lane: "code",
+    session: "code-session",
+    source,
+  });
+  await revisePolicy(f, (policy) => {
+    const registrations = policy.registrations;
+    if (!Array.isArray(registrations)) throw new Error("missing registrations");
+    object(object(registrations[0]).reviewerRecovery).callerCurrent = claim;
+  });
+  for (const lane of ["code", "browser"] as const) {
+    const session = f.sessions.get(`${lane}-session`);
+    if (!session) throw new Error("missing session");
+    session.project = "reviewers";
+    if (mode === "task") session.prompt = "different task";
+    await writeFile(
+      join(f.receiptDir, `${lane}.json`),
+      JSON.stringify({
+        ...f.receipt,
+        lane,
+        session: session.id,
+        appId: lane === "code" ? 10 : 20,
+        status: "PENDING",
+        reviewId: null,
+        H: mode === "head" ? "f".repeat(40) : H,
+        B: mode === "base" ? "f".repeat(40) : B,
+      }),
+    );
+  }
+  if (mode === "no-record") facts.fill(null);
+  if (mode === "wrong-block") for (const fact of facts) if (fact) fact.blockIndex = 4;
+  if (mode === "pins") await writeFile(runtime.file, "changed runtime");
+  const readback = vi.fn(async () => ({
+    version: "observed",
+    processes: [{ pid: 40, identity: "40" }],
+    statusDigest: "f".repeat(64),
+  }));
+  Object.assign(f.deps, { callerReadback: readback });
+  f.deps.reviewerEvidence.mockImplementation(async (id) => ({
+    nativeAgentAlive: true,
+    historyAvailable: true,
+    initialAcknowledged: true,
+    configuredCaller: facts[id === "code-session" ? 0 : 1] ?? undefined,
+  }));
+  const controller = await f.start();
+  if (mode !== "current") {
+    if (mode === "no-record") {
+      const receipt = await readReviewReceipt(join(f.receiptDir, "code.json"));
+      await controller.ingress(
+        {
+          repo: "owner/repo",
+          pr: 4,
+          lane: "code",
+          session: "code-session",
+          attempt: receipt.attempt,
+          H,
+          B,
+          contractDigest: receipt.contractDigest,
+          receipt: join(f.receiptDir, "code.json"),
+          invocation: (await f.readState()).invocation,
+          appId: 10,
+          receiptDigest: digest(receipt),
+          id: "direct-http",
+          challenge: null,
+          status: "PENDING",
+          pid: process.pid,
+          runtime: "copied runtime",
+          callerAccepted: true,
+        },
+        "code-session-capability",
+        false,
+      );
+      await controller.settled();
+    }
+    expect(readback).not.toHaveBeenCalled();
+    expect(f.deps.restore).not.toHaveBeenCalled();
+    return;
+  }
+  expect(readback).toHaveBeenCalledTimes(2);
+  expect((await f.readState()).reason).not.toBe("reviewer-caller-claim-mismatch");
+  // Restart reuses only the same source/task/launch/attempt/generation observation.
+  await controller.stop();
+  await f.start();
+  expect(readback).toHaveBeenCalledTimes(2);
+  expect(f.deps.restore).not.toHaveBeenCalled();
+}
+test.each(["current", "no-record", "generation", "wrong-block", "task", "head", "base", "pins"])(
+  "separately captured lanes qualify only with current Root designation (%s)",
+  assertConfiguredLanes,
+);
 test("live BLOCKED fixture requests named diagnosis once and cannot spend attempts or replace code approval", async () => {
   const f = await setup(recoveryBounds());
   const path = join(f.receiptDir, "browser.json");
@@ -1144,16 +1277,26 @@ test("external merge without completed current owner gate is never publication p
     "blocked:continuation-external-merge-unverified",
   );
 });
-test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock", async () => {
-  const f = await setup(),
-    controller = await f.start();
-  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(3));
+async function assertRegisteredIngress(mode: string) {
+  const f = await setup();
+  if (mode === "cross-project") {
+    const session = f.sessions.get("code-session");
+    if (!session) throw new Error("missing session");
+    session.project = "review-desk";
+  }
+  if (mode === "collision") {
+    const project = f.config.projects["sandbox"];
+    if (!project) throw new Error("missing project");
+    f.config.projects["other-controller"] = { ...project };
+  }
+  const controller = await f.start();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(mode === "collision" ? 6 : 3));
   const state = await f.readState();
   const request = {
     repo: "owner/repo",
     pr: 4,
     lane: "code",
-    session: "code-session",
+    session: mode === "unregistered" ? "unregistered-session" : "code-session",
     attempt: "attempt",
     H,
     B,
@@ -1166,6 +1309,12 @@ test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock
     challenge: state.affirmations.code.challenge,
     status: "APPROVED",
   };
+  if (mode === "unregistered" || mode === "collision") {
+    await expect(controller.ingress(request, "code-session-capability", true)).rejects.toThrow(
+      "continuation-unregistered",
+    );
+    return;
+  }
   await expect(controller.ingress(request, "browser-session-capability", true)).rejects.toThrow(
     "launch-mismatch",
   );
@@ -1186,7 +1335,11 @@ test("launch spoof, consumed affirmation and post-affirm BLOCKED under held lock
   } finally {
     await release();
   }
-});
+}
+test.each(["same-project", "cross-project", "unregistered", "collision"])(
+  "registered ingress retains launch and receipt guards (%s)",
+  assertRegisteredIngress,
+);
 test.each(["ci-not-success", "native-approval-missing", "unresolved-threads", "consent-missing"])(
   "blocked %s sends owner repair work only",
   async (reason) => {

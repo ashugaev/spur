@@ -36,6 +36,7 @@ import {
   type WorkItemEventData,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
+import { captureConfiguredCaller } from "./release-caller.js";
 import {
   getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
@@ -283,6 +284,7 @@ async function runSpawnTrigger(
   deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
+  config?: AppConfig,
 ): Promise<void> {
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
     level: "info",
@@ -376,7 +378,21 @@ async function runSpawnTrigger(
             ? { reuseWorkspaceSessionId: anchorSessionId }
             : {}),
         };
-        const session = await service.spawn(spawnRequest);
+        const configuredCaller =
+          workItemData && config
+            ? await captureConfiguredCaller(config, {
+                projectId,
+                sourceId,
+                triggerId,
+                blockIndex,
+                repository: workItemData.repo,
+                pr: workItemData.number,
+                prompt: renderedPrompt,
+              })
+            : null;
+        const session = configuredCaller
+          ? await service.spawn(spawnRequest, { configuredCaller })
+          : await service.spawn(spawnRequest);
         if (isAnchorBlock) {
           anchorSessionId = session.id;
         }
@@ -1791,6 +1807,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             trigger.spawnDeskGroup,
             event.data,
             logger,
+            deps.config,
           );
         };
         if (workItemData) {

@@ -45,7 +45,7 @@ DOCS
   Commands, session tools and variables: docs/commands.md
   Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
   Config, reviewer App and consent policy: docs/configuration.md; source/diagnostic events: docs/configuration.md#events
-  Authorized release/reviewer recovery, task cleanup/operator report and launch-bound App ingress: docs/configuration.md, docs/daemon-api.md.
+  Authorized release/reviewer recovery, configured-source caller provenance, task cleanup/operator report and launch-bound App ingress: docs/configuration.md, docs/daemon-api.md.
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
 

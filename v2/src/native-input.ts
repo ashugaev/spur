@@ -9,6 +9,10 @@ import type { NativeUserObservation } from "./agents/index.js";
 import type { AgentProcessRef } from "./agent-processes.js";
 import type { ReleaseTaskIdentity } from "./session-service.js";
 import type { AgentName, SubmitAckBaseline } from "./types.js";
+import {
+  parseConfiguredCallerBootstrap,
+  type ConfiguredCallerBootstrap,
+} from "./release-caller.js";
 
 export type NativeInputIdentity = Omit<ReleaseTaskIdentity, "updatedAt"> & {
   agent: AgentName;
@@ -60,6 +64,7 @@ export interface NativeInputJournal {
   nativeSessionId: string | null;
   processes: AgentProcessRef[] | null;
   occurrences: NativeInputOccurrence[];
+  caller?: ConfiguredCallerBootstrap;
 }
 
 export class NativeInputError extends Error {
@@ -386,6 +391,7 @@ export async function readNativeInputJournal(
     nativeSessionId: row.nativeSessionId === null ? null : string(row.nativeSessionId),
     processes,
     occurrences,
+    ...(row.caller === undefined ? {} : { caller: parseConfiguredCallerBootstrap(row.caller) }),
   };
 }
 
@@ -395,6 +401,8 @@ export async function writeNativeInputJournal(
 ): Promise<void> {
   const previous = await readNativeInputJournal(dataDir, journal.identity);
   if (previous) {
+    if (previous.caller && !isDeepStrictEqual(previous.caller, journal.caller))
+      throw new NativeInputError("caller-bootstrap-immutable");
     if (
       (previous.nativeSessionId !== null && previous.nativeSessionId !== journal.nativeSessionId) ||
       (previous.processes !== null && !isDeepStrictEqual(previous.processes, journal.processes)) ||
