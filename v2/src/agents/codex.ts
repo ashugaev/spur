@@ -262,6 +262,40 @@ export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[
   return files;
 }
 
+function strictSessionMeta(line: unknown): { cwd: string; threadId: string } | null | undefined {
+  if (!isRecord(line)) return null;
+  if (line["type"] !== "session_meta") return undefined;
+  const payload = line["payload"];
+  if (payload !== undefined && !isRecord(payload)) return null;
+  const ids = [line["threadId"], isRecord(payload) ? payload["id"] : undefined].filter(
+    (value) => value !== undefined,
+  );
+  const cwds = [line["cwd"], isRecord(payload) ? payload["cwd"] : undefined].filter(
+    (value) => value !== undefined,
+  );
+  const threadId = ids[0];
+  const cwd = cwds[0];
+  if (
+    typeof threadId !== "string" ||
+    !threadId.trim() ||
+    typeof cwd !== "string" ||
+    !cwd.trim() ||
+    ids.some((value) => value !== threadId) ||
+    cwds.some((value) => value !== cwd)
+  )
+    return null;
+  if (
+    line["thread_source"] === "subagent" ||
+    (isRecord(payload) && payload["thread_source"] === "subagent")
+  )
+    return null;
+  for (const source of [line["source"], isRecord(payload) ? payload["source"] : undefined]) {
+    if (source === "subagent" || (isRecord(source) && source["subagent"] !== undefined))
+      return null;
+  }
+  return { cwd, threadId };
+}
+
 async function readSessionMeta(
   filePath: string,
   originalRange?: { fd: number; end: number },
@@ -274,17 +308,31 @@ async function readSessionMeta(
     const reader = createInterface({ input, crlfDelay: Infinity });
     let linesRead = 0;
     let threadId: string | null = null;
+    let originalCwd: string | null = null;
     for await (const line of reader) {
-      if (linesRead >= 10) {
+      if (!originalRange && linesRead >= 10) {
         break;
       }
       linesRead += 1;
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        const raw: unknown = JSON.parse(trimmed);
+        const parsed = raw as CodexSessionLine;
+        if (originalRange) {
+          const meta = strictSessionMeta(raw);
+          if (meta === null) return null;
+          if (meta === undefined) continue;
+          if (
+            (threadId !== null && threadId !== meta.threadId) ||
+            (originalCwd !== null && originalCwd !== meta.cwd)
+          )
+            return null;
+          threadId = meta.threadId;
+          originalCwd = meta.cwd;
+          continue;
+        }
         if (isExplicitSubagentSessionMeta(parsed)) {
-          if (originalRange) return null;
           continue;
         }
         const cwd = sessionMetaCwd(parsed);
@@ -308,6 +356,8 @@ async function readSessionMeta(
         // Ignore malformed lines and keep scanning the file header.
       }
     }
+    if (originalRange && originalCwd && threadId)
+      return { cwd: originalCwd, threadId, isSubagent: false };
   } catch {
     return null;
   }
@@ -766,16 +816,31 @@ interface RolloutEventMsgPayload {
   turnId?: string;
 }
 
-function extractUserTextFromLine(line: string, rejectMalformed = false): string | null {
+interface CodexSubmitAckScope {
+  nativeSessionId: string;
+  worktreePath: string;
+}
+
+function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch (error) {
-    if (rejectMalformed) throw error;
+    if (strict) throw error;
     return null;
   }
   if (!isRecord(parsed)) {
+    if (strict) throw new Error("Malformed original rollout record");
     return null;
+  }
+  if (strict) {
+    const meta = strictSessionMeta(parsed);
+    if (
+      meta === null ||
+      (meta !== undefined &&
+        (meta.threadId !== strict.nativeSessionId || meta.cwd !== strict.worktreePath))
+    )
+      throw new Error("Conflicting original rollout metadata");
   }
   const type = parsed["type"];
   const payload = parsed["payload"];
@@ -842,7 +907,7 @@ export async function scanCodexRolloutForMessage(
   sessionsDir: string,
   messageText: string,
   baseline: RolloutBaseline,
-  strict?: { nativeSessionId: string; worktreePath: string },
+  strict?: CodexSubmitAckScope,
 ): Promise<{ found: boolean; lastScannedFile: string | null }> {
   let files: string[];
   try {
@@ -901,7 +966,7 @@ export async function scanCodexRolloutForMessage(
         for await (const rawLine of reader) {
           const trimmedLine = rawLine.trim();
           if (!trimmedLine) continue;
-          const extracted = extractUserTextFromLine(trimmedLine, strict !== undefined);
+          const extracted = extractUserTextFromLine(trimmedLine, strict);
           if (
             extracted !== null &&
             (strict ? extracted === messageText : extracted.trim() === trimmedTarget)

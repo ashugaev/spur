@@ -1165,6 +1165,17 @@ describe("scanCodexRolloutForMessage", () => {
     "response-item",
     "whitespace",
     "wrong-uuid",
+    "mixed-record-uuid",
+    "conflicting-single-uuid",
+    "conflicting-single-cwd",
+    "conflicting-later-uuid",
+    "conflicting-late-prefix",
+    "conflicting-later-cwd",
+    "conflicting-suffix-uuid",
+    "conflicting-after-ack",
+    "later-subagent",
+    "source-conflict",
+    "coherent-duplicate",
     "wrong-cwd",
     "subagent",
     "missing-meta",
@@ -1198,9 +1209,15 @@ describe("scanCodexRolloutForMessage", () => {
     const message = "  held text\n";
     const meta = JSON.stringify({
       type: "session_meta",
+      ...(guard === "conflicting-single-uuid" ? { threadId: "native" } : {}),
+      ...(guard === "conflicting-single-cwd" ? { cwd: "/worktree" } : {}),
+      ...(guard === "source-conflict" ? { source: { subagent: {} } } : {}),
       payload: {
-        id: guard === "wrong-uuid" ? "foreign" : "native",
-        cwd: guard === "wrong-cwd" ? "/foreign" : "/worktree",
+        id: ["wrong-uuid", "mixed-record-uuid", "conflicting-single-uuid"].includes(guard)
+          ? "foreign"
+          : "native",
+        cwd: guard === "wrong-cwd" || guard === "conflicting-single-cwd" ? "/foreign" : "/worktree",
+        ...(guard === "source-conflict" ? { source: "cli" } : {}),
         ...(guard === "subagent"
           ? { source: { subagent: { thread_spawn: { parent_thread_id: "parent" } } } }
           : {}),
@@ -1218,10 +1235,26 @@ describe("scanCodexRolloutForMessage", () => {
           }
         : { type: "event_msg", payload: { type: "user_message", message } },
     );
+    const conflictingMeta =
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id:
+            guard === "conflicting-later-cwd" || guard === "later-subagent" ? "native" : "foreign",
+          cwd: guard === "conflicting-later-cwd" ? "/foreign" : "/worktree",
+          ...(guard === "later-subagent" ? { source: { subagent: {} } } : {}),
+        },
+      }) + "\n";
     const prefix =
+      (guard === "mixed-record-uuid" ? JSON.stringify({ threadId: "native" }) + "\n" : "") +
       (guard === "malformed-prefix" ? "{broken}\n" : "") +
       (guard === "missing-meta" ? "{}" : meta) +
-      "\n";
+      "\n" +
+      (guard === "coherent-duplicate" ? meta + "\n" : "") +
+      (["conflicting-later-uuid", "conflicting-later-cwd", "later-subagent"].includes(guard)
+        ? conflictingMeta
+        : "") +
+      (guard === "conflicting-late-prefix" ? "{}\n".repeat(12) + conflictingMeta : "");
     await realPromises.writeFile(file, prefix + (guard === "before-offset" ? user + "\n" : ""));
     let offset = (await realPromises.stat(file)).size;
     if (guard === "negative-offset") offset = -1;
@@ -1230,13 +1263,16 @@ describe("scanCodexRolloutForMessage", () => {
     if (guard === "past-eof") offset = 1_000_000;
     await realPromises.appendFile(
       file,
-      guard === "malformed"
-        ? "{broken}\n"
-        : guard === "before-offset"
-          ? "{}\n"
-          : user + (guard === "partial-line" ? "" : "\n"),
+      guard === "conflicting-suffix-uuid"
+        ? conflictingMeta + user + "\n"
+        : guard === "malformed"
+          ? "{broken}\n"
+          : guard === "before-offset"
+            ? "{}\n"
+            : user + (guard === "partial-line" ? "" : "\n"),
     );
     if (guard === "malformed-after-ack") await realPromises.appendFile(file, "{broken}\n");
+    if (guard === "conflicting-after-ack") await realPromises.appendFile(file, conflictingMeta);
     if (guard === "unlisted-file") {
       await realPromises.writeFile(file, prefix);
       await realPromises.writeFile(join(root, "new.jsonl"), prefix + user + "\n");
@@ -1291,7 +1327,9 @@ describe("scanCodexRolloutForMessage", () => {
         baseline,
         { nativeSessionId: "native", worktreePath: "/worktree" },
       );
-      expect(result.found).toBe(guard === "exact" || guard === "response-item");
+      expect(result.found).toBe(
+        guard === "exact" || guard === "response-item" || guard === "coherent-duplicate",
+      );
       if (["replacement", "truncation", "append-during-scan"].includes(guard))
         expect(changed).toBe(true);
     } finally {
