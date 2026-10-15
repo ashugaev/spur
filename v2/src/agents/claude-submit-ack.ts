@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { findLatestSessionFile, sessionFileForId, sessionFilePathForId } from "./claude.js";
 import { extractTextContent } from "../claude-jsonl-state.js";
@@ -132,6 +132,16 @@ async function scanFileForDeliveredText(
   },
 ): Promise<boolean> {
   try {
+    if (native && startOffset > 0) {
+      const file = await open(filePath, "r");
+      try {
+        const boundary = Buffer.alloc(1);
+        const read = await file.read(boundary, 0, 1, startOffset - 1);
+        if (read.bytesRead !== 1 || boundary[0] !== 10) return false;
+      } finally {
+        await file.close();
+      }
+    }
     const input = createReadStream(filePath, { encoding: "utf-8", start: startOffset });
     let byteOffset = startOffset;
     const framing = { lineFeedOnly: true, terminated: false };
@@ -150,7 +160,14 @@ async function scanFileForDeliveredText(
         const parsed = tryParseJson(trimmed);
         if (!parsed) continue;
         const text = extractDeliveredText(parsed);
-        if (native && parsed["type"] === "user" && parsed["sessionId"] === native.sessionId) {
+        if (
+          native &&
+          parsed["type"] === "user" &&
+          parsed["sessionId"] === native.sessionId &&
+          parsed["isMeta"] !== true &&
+          parsed["isCompactSummary"] !== true &&
+          parsed["isSidechain"] !== true
+        ) {
           const userText = extractUserMessageText(parsed);
           if (userText !== null) {
             const bodyDigests = [userText, unwrapPastedContent(userText)].map((body) =>

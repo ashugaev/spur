@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ vi.mock("../../src/agents/cursor.js", () => ({
 
 import {
   captureCursorSubmitBaseline,
+  observeCursorNativeUsers,
   persistCursorSubmitBaseline,
   restoreCursorSubmitBaseline,
   scanCursorJsonlForMessage,
@@ -71,6 +73,66 @@ async function appendJsonl(filePath: string, lines: Array<Record<string, unknown
 function userTurn(text: string): Record<string, unknown> {
   return { role: "user", message: { content: [{ type: "text", text }] } };
 }
+
+describe("native accepted input", () => {
+  const body = "Задача 🧪\n\nSession metadata:\ncaller exact suffix";
+  const digest = createHash("sha256").update(body).digest("hex");
+
+  it("retains complete wrapped USER bytes after the pinned baseline", async () => {
+    const file = await makeJsonl("native.jsonl", [userTurn("старое 🧪")]);
+    const size = (await stat(file)).size;
+    await appendJsonl(file, [
+      userTurn(`<timestamp>now</timestamp>\n<user_query>\n${body}\n</user_query>`),
+    ]);
+    const observations = await observeCursorNativeUsers({ file, size }, digest, "native");
+    expect(observations).toEqual([
+      expect.objectContaining({
+        nativeSessionId: "native",
+        source: file,
+        recordId: expect.stringMatching(new RegExp(`^bytes:${size}:\\d+$`)),
+        bodyDigest: digest,
+      }),
+    ]);
+    expect(await observeCursorNativeUsers({ file, size }, digest, "native")).toEqual(observations);
+    expect(await observeCursorNativeUsers({ file, size: size - 1 }, digest, "native")).toEqual([]);
+  });
+
+  it("preserves prefix pacing but rejects omitted or changed full caller metadata", async () => {
+    const file = await makeJsonl("native.jsonl", [userTurn(body.split("\n\n")[0] ?? "")]);
+    expect((await scanCursorJsonlForMessage({ file, size: 0 }, body, "/tmp/worktree")).found).toBe(
+      true,
+    );
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+    await appendJsonl(file, [userTurn(`${body} changed`)]);
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+
+  it("rejects a source bound to another native session", async () => {
+    const file = await makeJsonl("old.jsonl", [userTurn(body)]);
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+
+  it("requires the persisted send-time offset of a verified rotated source", async () => {
+    const file = await makeJsonl("old.jsonl", []);
+    const rotated = await makeJsonl("native.jsonl", [userTurn(body)]);
+    const size = (await stat(rotated)).size;
+    const baseline = { file, size: 0, rotationOffsets: new Map([[rotated, size]]) };
+    expect(await observeCursorNativeUsers(baseline, digest, "native")).toEqual([]);
+    await appendJsonl(rotated, [userTurn(body)]);
+    expect(await observeCursorNativeUsers(baseline, digest, "native")).toHaveLength(1);
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+
+  it("does not promote assistant, tool or summary copies to a submitted USER", async () => {
+    const file = await makeJsonl("native.jsonl", [
+      { ...userTurn(body), role: "assistant" },
+      { ...userTurn(body), role: "tool" },
+      { ...userTurn(body), type: "summary" },
+      { ...userTurn(body), isMeta: true },
+    ]);
+    expect(await observeCursorNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+});
 
 describe("captureCursorSubmitBaseline", () => {
   it("returns null when no transcript exists and no id is given", async () => {
