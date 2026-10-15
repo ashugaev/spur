@@ -46,6 +46,7 @@ import {
   type MonitorRef,
   type RollbackState,
   type UpdateInProgress,
+  type UpdateFailure,
 } from "./update-state.js";
 import { getVersion, resolvePackageVersion } from "./version.js";
 
@@ -409,8 +410,43 @@ export async function runUpdate(
       level: "info",
       details: { from: deps.currentVersion, to: target, force },
     });
-    deps.installVersion(target);
-    deps.reinit();
+    let stage: UpdateFailure["stage"] = "install";
+    try {
+      deps.installVersion(target);
+      stage = "reinit";
+      deps.reinit();
+    } catch (error) {
+      let installedVersion: string | null = null;
+      try {
+        const observed = deps.readInstalledVersion();
+        if (isReleaseVersion(observed)) installedVersion = observed;
+      } catch {
+        // A partial install may leave package metadata unreadable.
+      }
+      const exitCode =
+        typeof error === "object" &&
+        error !== null &&
+        "status" in error &&
+        typeof error.status === "number" &&
+        Number.isInteger(error.status)
+          ? error.status
+          : null;
+      deps.writeState({
+        version: 1,
+        lastKnownGood,
+        inProgress: null,
+        lastFailure: {
+          fromVersion: inProgress.fromVersion,
+          toVersion: inProgress.toVersion,
+          startedAt,
+          finishedAt: new Date(deps.now()).toISOString(),
+          stage,
+          installedVersion,
+          exitCode,
+        },
+      });
+      throw error;
+    }
 
     const monitor = deps.launch();
     deps.writeState({

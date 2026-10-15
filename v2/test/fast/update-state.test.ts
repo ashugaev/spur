@@ -84,6 +84,33 @@ describe("update-state", () => {
     expect(isMonitorLive(ref, { pidAlive: () => true, unitActive: () => false })).toBe(false);
   });
 
+  it("round-trips terminal failure without changing active-phase or anchor compatibility", async () => {
+    const path = await tempStatePath();
+    const state: RollbackState = {
+      version: 1,
+      lastKnownGood: { version: "0.1.5", healthyAt: "2026-07-12T00:00:00.000Z" },
+      inProgress: null,
+      lastFailure: {
+        fromVersion: "0.1.5",
+        toVersion: "0.2.0",
+        startedAt: "2026-07-12T00:00:01.000Z",
+        finishedAt: "2026-07-12T00:01:01.000Z",
+        stage: "reinit",
+        installedVersion: "0.2.0",
+        exitCode: 1,
+      },
+    };
+    writeState(path, state);
+    expect(readState(path)).toEqual(state);
+    const invalid = { ...state, lastFailure: { ...state.lastFailure, stage: "monitor-launch" } };
+    await writeFile(path, JSON.stringify(invalid), "utf-8");
+    expect(readState(path)).toEqual({
+      version: state.version,
+      lastKnownGood: state.lastKnownGood,
+      inProgress: null,
+    });
+  });
+
   it("isMonitorLive resolves process refs via pidAlive", () => {
     const ref = { kind: "process" as const, pid: 99 };
     expect(isMonitorLive(ref, { pidAlive: () => true, unitActive: () => false })).toBe(true);
