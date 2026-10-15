@@ -147,6 +147,9 @@ function extractUserMessageText(parsed: Record<string, unknown>): string | null 
 }
 
 const normalize = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+export function cursorNativeInputDigest(text: string): string {
+  return createHash("sha256").update(normalize(text)).digest("hex");
+}
 const SUBMIT_ACK_MATCH_PREFIX_LEN = 512;
 
 function submitAckMatchText(text: string): string {
@@ -218,9 +221,7 @@ async function scanFileForUserText(
               normalized,
             );
           const fullBody = wrapped?.[1] ?? normalized;
-          if (
-            createHash("sha256").update(normalize(fullBody)).digest("hex") === native.bodyDigest
-          ) {
+          if (cursorNativeInputDigest(fullBody) === native.bodyDigest) {
             native.matches.push({
               nativeSessionId: native.sessionId,
               source: filePath,

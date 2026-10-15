@@ -834,6 +834,10 @@ function extractAssistantTextFromLine(line: string): string | null {
   return null;
 }
 
+export function codexNativeInputDigest(text: string): string {
+  return createHash("sha256").update(text.trim()).digest("hex");
+}
+
 export async function scanCodexRolloutForMessage(
   sessionsDir: string,
   messageText: string | null,
@@ -925,7 +929,7 @@ export async function scanCodexRolloutForMessage(
             row.canonicalUser &&
             rowOffset >= offset &&
             extracted !== null &&
-            createHash("sha256").update(extracted.trim()).digest("hex") === native.bodyDigest
+            codexNativeInputDigest(extracted) === native.bodyDigest
           ) {
             matches.push({
               nativeSessionId: native.sessionId,

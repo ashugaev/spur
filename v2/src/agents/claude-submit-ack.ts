@@ -121,6 +121,10 @@ function stripLeadingCtrlU(value: string): string {
 const normalize = (s: string) =>
   stripLeadingCtrlU(s).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 
+export function claudeNativeInputDigest(text: string): string {
+  return createHash("sha256").update(normalize(text)).digest("hex");
+}
+
 async function scanFileForDeliveredText(
   filePath: string,
   startOffset: number,
@@ -170,8 +174,8 @@ async function scanFileForDeliveredText(
         ) {
           const userText = extractUserMessageText(parsed);
           if (userText !== null) {
-            const bodyDigests = [userText, unwrapPastedContent(userText)].map((body) =>
-              createHash("sha256").update(normalize(body)).digest("hex"),
+            const bodyDigests = [userText, unwrapPastedContent(userText)].map(
+              claudeNativeInputDigest,
             );
             if (bodyDigests.includes(native.bodyDigest)) {
               native.matches.push({
