@@ -7,6 +7,7 @@ import {
   GateGitHub,
   readGateSnapshot,
   evaluateSnapshot,
+  changedEvidenceCategories,
   workflowPath,
   type GatePolicy,
 } from "./review-gate.js";
@@ -143,7 +144,8 @@ export async function produceGates(
         const result = evaluateSnapshot(policy, number, before);
         phase = "snapshot-after";
         progress();
-        const after = evaluateSnapshot(policy, number, await readGateSnapshot(api, policy, number));
+        const finalSnapshot = await readGateSnapshot(api, policy, number);
+        const after = evaluateSnapshot(policy, number, finalSnapshot);
         active();
         const fresh =
           result.fingerprint === after.fingerprint &&
@@ -152,7 +154,9 @@ export async function produceGates(
           result.H === after.H &&
           result.B === after.B;
         approved = fresh && result.status === "APPROVED" && after.status === "APPROVED";
-        summary = fresh ? after.reason : "Evidence changed during evaluation";
+        summary = fresh
+          ? after.reason
+          : `Evidence changed during evaluation: ${changedEvidenceCategories(before, finalSnapshot)}`;
       }
       phase = "completion-write";
       progress();
