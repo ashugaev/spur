@@ -50989,6 +50989,48 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("delivers a queued send after a usage-limit menu clears to a non-menu pane", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockClaudeSessionStatus("needs_input", "waiting");
+      mockClaudeJsonlState("waiting");
+      captureTmuxPaneMock.mockResolvedValue(
+        [
+          "   What do you want to do?",
+          "   ❯ 1. Stop and wait for limit to reset",
+          "     2. Wait here, then continue automatically shortly",
+          "     3. Ask your admin for more usage",
+          "   Enter to confirm · Esc to cancel",
+        ].join("\n"),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const view = await service.get("api-1");
+      expect(view.state).toBe("rate_limited");
+      sendMessageToTmuxMock.mockClear();
+      mockTimerPromisesSleepWithFakeTimers();
+
+      await service.send("api-1", { message: "hello" });
+      await advanceSeconds(5);
+
+      // Menu still showing: the send stays queued, nothing is pasted.
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual(["hello"]);
+
+      // Menu dismissed: a genuine non-empty pane with no menu.
+      mockClaudeSessionStatus("waiting", "idle");
+      captureTmuxPaneMock.mockResolvedValue("● Resumed the task.\n\n❯ ");
+      await advanceSeconds(10);
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello", {
+        agent: "claude",
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+      service.dispose();
+    });
+
     it("queues an attachments-only send() message while live state is rate_limited instead of delivering it immediately", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());
