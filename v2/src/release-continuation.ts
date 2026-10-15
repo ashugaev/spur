@@ -45,6 +45,8 @@ import {
   type ContinuationAction,
   type ContinuationFence,
   type ContinuationRecord,
+  type ReviewerRecoveryRecord,
+  type ReviewerRestoreFence,
 } from "./release-continuation-state.js";
 import {
   continueReleasePost,
@@ -53,9 +55,11 @@ import {
 } from "./release-post.js";
 import {
   captureReleaseTaskIdentity,
+  SessionAdmissionDeniedError,
   type ReleaseCompletionGuard,
   type ReleaseCompletionResult,
 } from "./session-service.js";
+import { lifecycleErrorReceipt } from "./session-lifecycle.js";
 import type { AppConfig, SessionRecord, SessionView } from "./types.js";
 import {
   callerSourceMatches,
@@ -119,6 +123,11 @@ interface Dependencies {
   view(id: string): Promise<SessionView>;
   send(id: string, message: string): Promise<unknown>;
   restore(id: string): Promise<unknown>;
+  reviewerRestore?: {
+    restore(id: string, operationId: string): Promise<SessionView>;
+    // Invoke the current service observer; cached startup data cannot qualify a retry.
+    capacity(): Promise<{ instanceId: string; enabled: boolean; cap: number; liveCount: number }>;
+  };
   complete(id: string, guard: ReleaseCompletionGuard): Promise<ReleaseCompletionResult>;
   reviewerEvidence(id: string): Promise<{
     nativeAgentAlive: boolean | null;
@@ -494,10 +503,337 @@ class ProjectContinuation {
     outcome = record.reason,
   ): Promise<void> {
     if (!this.fence || this.stopped) throw new ReviewAppError("continuation-fenced");
+    const current = await this.previous(pr);
+    if (current?.reviewerRestores) record.reviewerRestores = current.reviewerRestores;
     const outcomes = record.outcomes ?? [];
     if (outcomes.at(-1) !== outcome) outcomes.push(outcome);
     record.outcomes = outcomes.slice(-16);
     await saveContinuationRecord(this.statePath(pr), record, this.fence);
+  }
+  private async saveReviewerRestore(
+    registration: Registration,
+    lane: ReviewLane,
+    expected: ReviewerRestoreFence | undefined,
+    next: ReviewerRestoreFence,
+  ): Promise<void> {
+    if (!this.fence || this.stopped) throw new ReviewAppError("continuation-fenced");
+    await this.fence.assertCurrent();
+    const record = await this.previous(registration.pr);
+    if (!isDeepStrictEqual(record?.reviewerRestores?.[lane], expected))
+      throw new ReviewAppError("reviewer-restore-fenced");
+    const updated: ContinuationRecord = record ?? {
+      version: 1,
+      authorityGeneration: registration.generation,
+      invocation: digest({
+        pr: registration.pr,
+        H: next.H,
+        B: next.B,
+        generation: registration.generation,
+      }),
+      H: next.H,
+      B: next.B,
+      reason: "reviewer-restore-pending",
+      affirmations: {},
+      actions: [],
+      mergeSha: null,
+      publishedProofDigest: null,
+    };
+    updated.reviewerRestores = { ...updated.reviewerRestores, [lane]: next };
+    await saveContinuationRecord(this.statePath(registration.pr), updated, this.fence);
+  }
+  private async settleReviewerRestore(
+    registration: Registration,
+    lane: ReviewLane,
+  ): Promise<string | null> {
+    const stable = (await this.previous(registration.pr))?.reviewerRestores?.[lane];
+    if (!stable) return null;
+    const path = join(this.root, `reviewer-${stable.budgetKey}.json`);
+    const persisted = await readReviewerRecovery(path, stable.budgetKey);
+    if (stable.phase !== "intent" && stable.phase !== "unknown") {
+      const recorded = persisted?.restoreAttempts?.find(
+        (attempt) => attempt.operationId === stable.operationId,
+      );
+      return recorded &&
+        isDeepStrictEqual(recorded, stable) &&
+        persisted &&
+        persisted.attempts >= stable.attempt
+        ? null
+        : "reviewer-restore-budget-unknown";
+    }
+    const budget = persisted ?? {
+      key: stable.budgetKey,
+      attempts: 0,
+      attemptedAt: 0,
+      launch: stable.launchDigest,
+      state: "blocked" as const,
+      reason: "reviewer-restore-uncertain",
+      source: "",
+      actions: [],
+      prerequisite: null,
+      restoreAttempts: [],
+    };
+    const attempts = budget.restoreAttempts ?? [];
+    const stored = attempts.find((attempt) => attempt.operationId === stable.operationId);
+    if (budget.attempts < stable.attempt || !stored) {
+      if (attempts.length !== stable.attempt - 1) return "reviewer-restore-budget-unknown";
+      budget.attempts = Math.max(budget.attempts, stable.attempt);
+      budget.attemptedAt = Math.max(budget.attemptedAt, stable.attemptedAt);
+      budget.restoreAttempts = [...attempts, stable];
+      await this.fence?.assertCurrent();
+      await atomicReceiptWrite(path, budget);
+    }
+    if (stored && (stored.phase === "zero-denied" || stored.phase === "observed")) {
+      const { phase: _phase, receipt: _receipt, denial: _denial, ...storedIdentity } = stored;
+      const {
+        phase: _oldPhase,
+        receipt: _oldReceipt,
+        denial: _oldDenial,
+        ...stableIdentity
+      } = stable;
+      if (!isDeepStrictEqual(storedIdentity, stableIdentity)) return "reviewer-restore-uncertain";
+      await this.saveReviewerRestore(registration, lane, stable, stored);
+      return null;
+    }
+    if (!this.deps.reviewerRestore) return "reviewer-restore-capability-unavailable";
+    const session = this.deps.session(stable.session);
+    if (!session) return "reviewer-restore-uncertain";
+    const view = await this.deps.view(stable.session);
+    const operation = view.lifecycle.operation;
+    const identity = captureReleaseTaskIdentity(session);
+    if (
+      view.lifecycle.instanceId !== stable.instanceId ||
+      operation?.operationId !== stable.operationId ||
+      operation.action !== "restore" ||
+      operation.phase !== "succeeded" ||
+      operation.targetIds.length !== 1 ||
+      operation.targetIds[0] !== stable.session ||
+      operation.outcomes.length !== 1 ||
+      operation.outcomes[0]?.sessionId !== stable.session ||
+      operation.outcomes[0].phase !== "succeeded" ||
+      identity.taskDigest !== stable.taskDigest ||
+      identity.repository !== stable.repository ||
+      identity.pr !== stable.PR ||
+      !identity.launchDigest ||
+      identity.launchDigest === stable.launchDigest ||
+      !view.runtimeAlive
+    )
+      return "reviewer-restore-uncertain";
+    const native = await this.deps.reviewerEvidence(stable.session);
+    if (native.nativeAgentAlive !== true || !native.historyAvailable)
+      return "reviewer-restore-uncertain";
+    const observed: ReviewerRestoreFence = {
+      ...stable,
+      phase: "observed",
+      receipt: view.lifecycle,
+    };
+    budget.restoreAttempts = (budget.restoreAttempts ?? []).map((attempt) =>
+      attempt.operationId === stable.operationId ? observed : attempt,
+    );
+    await this.fence?.assertCurrent();
+    await atomicReceiptWrite(path, budget);
+    await this.saveReviewerRestore(registration, lane, stable, observed);
+    return null;
+  }
+  private async restoreReviewer(
+    loaded: LoadedPolicy,
+    registration: Registration,
+    lane: ReviewLane,
+    H: string,
+    B: string,
+    session: SessionRecord,
+    view: SessionView,
+    recovery: ReviewerRecoveryRecord,
+    source: { snapshot: CallerSourceSnapshot; digest: string },
+    save: () => Promise<void>,
+  ): Promise<string> {
+    const identity = captureReleaseTaskIdentity(session);
+    const knownNative = session.agentSessionId;
+    const capability = this.deps.reviewerRestore;
+    if (
+      !capability ||
+      typeof capability.restore !== "function" ||
+      typeof capability.capacity !== "function"
+    )
+      return "reviewer-restore-capability-unavailable";
+    const bounds = registration.reviewerRecovery;
+    if (!bounds || !this.deps.callerReadback) return "reviewer-caller-current-source-unavailable";
+    if (
+      view.runtimeAlive ||
+      !view.workspaceExists ||
+      view.state !== "stopped" ||
+      view.lifecycle.operation?.phase === "pending"
+    )
+      return "reviewer-restore-prerequisite-unavailable";
+    const history = recovery.restoreAttempts ?? [];
+    if (recovery.attempts >= bounds.maxAttempts) return "reviewer-restore-exhausted";
+    if (history.length !== recovery.attempts) return "reviewer-restore-budget-unknown";
+    const prior = history.at(-1);
+    if (prior && prior.phase !== "zero-denied") return "reviewer-restore-prerequisite-unavailable";
+    if (prior && Date.now() < prior.deadline) return "reviewer-restore-cooldown";
+    const usableCapacity = (capacity: Awaited<ReturnType<typeof capability.capacity>>) =>
+      capacity.instanceId === view.lifecycle.instanceId &&
+      capacity.enabled &&
+      Number.isSafeInteger(capacity.cap) &&
+      capacity.cap >= 0 &&
+      Number.isSafeInteger(capacity.liveCount) &&
+      capacity.liveCount >= 0 &&
+      (!prior ||
+        (prior.denial === "cap" &&
+          capacity.cap >= prior.capacity.cap &&
+          capacity.cap - capacity.liveCount >
+            Math.max(0, prior.capacity.cap - prior.capacity.liveCount)));
+    if (!usableCapacity(await capability.capacity()))
+      return "reviewer-restore-prerequisite-unchanged";
+    for (const binding of [source.snapshot.runtime, ...source.snapshot.modules])
+      await pinnedBytes(binding, loaded.checkouts);
+    const readback = await this.deps.callerReadback(
+      source.snapshot,
+      loaded.policy.tool,
+      loaded.policy.apps,
+      loaded.gate.repository,
+      (binding) => pinnedBytes(binding, loaded.checkouts),
+    );
+    const current = this.deps.session(session.id);
+    const freshView = await this.deps.view(session.id);
+    if (
+      !current ||
+      !isDeepStrictEqual(captureReleaseTaskIdentity(current), identity) ||
+      (knownNative !== undefined && current.agentSessionId !== knownNative) ||
+      freshView.lifecycle.instanceId !== view.lifecycle.instanceId ||
+      freshView.lifecycle.operation?.phase === "pending"
+    )
+      return "reviewer-task-mismatch";
+    const capacity = await capability.capacity();
+    if (!usableCapacity(capacity)) return "reviewer-restore-prerequisite-unchanged";
+    const stable = (await this.previous(registration.pr))?.reviewerRestores?.[lane];
+    if (stable && (stable.phase === "intent" || stable.phase === "unknown"))
+      return "reviewer-restore-uncertain";
+    const attemptedAt = Date.now();
+    const attempt: ReviewerRestoreFence = {
+      repository: loaded.gate.repository,
+      PR: registration.pr,
+      lane,
+      session: session.id,
+      taskDigest: identity.taskDigest,
+      authorityGeneration: registration.generation,
+      H,
+      B,
+      launchDigest: identity.launchDigest ?? "unknown",
+      nativeId: session.agentSessionId ?? null,
+      operationId: randomUUID(),
+      budgetKey: recovery.key,
+      attempt: recovery.attempts + 1,
+      attemptedAt,
+      deadline: attemptedAt + bounds.cooldownSeconds * 1000 * 2 ** recovery.attempts,
+      prerequisiteDigest: digest({
+        source: source.digest,
+        tool: loaded.policy.tool,
+        contract: loaded.policy.contract,
+        protocol: loaded.policy.protocol,
+        version: readback.version,
+      }),
+      capacity: { enabled: capacity.enabled, cap: capacity.cap, liveCount: capacity.liveCount },
+      instanceId: view.lifecycle.instanceId,
+      phase: "intent",
+      denial: null,
+    };
+    await this.saveReviewerRestore(registration, lane, stable, attempt);
+    recovery.attempts = attempt.attempt;
+    recovery.attemptedAt = attemptedAt;
+    recovery.restoreAttempts = [...history, attempt];
+    recovery.reason = "reviewer-restore-intent";
+    recovery.source = JSON.stringify(readback);
+    await save();
+    await this.fence?.assertCurrent();
+    const latest = this.deps.session(session.id);
+    const policy = await this.loaded();
+    const active = policy.policy.registrations.find((item) => item.pr === registration.pr);
+    const api = new GateGitHub(
+      policy.token,
+      this.deps.transport ?? fetch,
+      AbortSignal.timeout(45_000),
+    );
+    const snapshot = await readGateSnapshot(api, policy.gate, registration.pr);
+    const latestSource = await this.callerSnapshot(policy, registration);
+    if (
+      !latest ||
+      !isDeepStrictEqual(captureReleaseTaskIdentity(latest), identity) ||
+      !isDeepStrictEqual(active, registration) ||
+      policy.policy.tool.digest !== loaded.policy.tool.digest ||
+      policy.policy.contract.digest !== loaded.policy.contract.digest ||
+      policy.policy.protocol.digest !== loaded.policy.protocol.digest ||
+      policy.policy.apps.digest !== loaded.policy.apps.digest ||
+      !latestSource ||
+      latestSource.digest !== source.digest ||
+      object(snapshot.pr.head).sha !== H ||
+      object(snapshot.pr.base).sha !== B
+    )
+      return "reviewer-restore-uncertain";
+    for (const binding of [source.snapshot.runtime, ...source.snapshot.modules])
+      await pinnedBytes(binding, loaded.checkouts);
+    if (!usableCapacity(await capability.capacity())) return "reviewer-restore-uncertain";
+    await this.fence?.assertCurrent();
+    const target = this.deps.session(session.id);
+    if (
+      this.stopped ||
+      !target ||
+      target.status !== "stopped" ||
+      target.stopReason ||
+      !isDeepStrictEqual(captureReleaseTaskIdentity(target), identity) ||
+      (target.agentSessionId ?? null) !== attempt.nativeId
+    )
+      return "reviewer-restore-uncertain";
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        capability.restore(session.id, attempt.operationId),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new ReviewAppError("reviewer-restore-timeout")),
+            120_000,
+          );
+        }),
+      ]);
+    } catch (error) {
+      const receipt = lifecycleErrorReceipt(error);
+      const operation = receipt?.operation;
+      const after = this.deps.session(session.id);
+      const afterView = await this.deps.view(session.id);
+      const evidence = await this.deps.reviewerEvidence(session.id);
+      const zero =
+        error instanceof SessionAdmissionDeniedError &&
+        receipt?.instanceId === attempt.instanceId &&
+        operation?.operationId === attempt.operationId &&
+        operation.action === "restore" &&
+        operation.phase === "failed" &&
+        operation.targetIds.length === 1 &&
+        operation.targetIds[0] === session.id &&
+        operation.outcomes.length === 1 &&
+        operation.outcomes[0]?.sessionId === session.id &&
+        operation.outcomes[0].phase === "failed" &&
+        after !== null &&
+        isDeepStrictEqual(captureReleaseTaskIdentity(after), identity) &&
+        (after.agentSessionId ?? null) === attempt.nativeId &&
+        receipt.revision > view.lifecycle.revision &&
+        afterView.lifecycle.instanceId === receipt.instanceId &&
+        afterView.lifecycle.revision === receipt.revision &&
+        isDeepStrictEqual(afterView.lifecycle.operation, operation) &&
+        !afterView.runtimeAlive &&
+        evidence.nativeAgentAlive === false;
+      const outcome: ReviewerRestoreFence = zero
+        ? { ...attempt, phase: "zero-denied", denial: error.reason, receipt }
+        : { ...attempt, phase: "unknown" };
+      recovery.restoreAttempts = [...history, outcome];
+      await save();
+      await this.saveReviewerRestore(registration, lane, attempt, outcome);
+      return zero ? "reviewer-restore-admission-denied" : "reviewer-restore-uncertain";
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+    return (
+      (await this.settleReviewerRestore(registration, lane)) ??
+      "reviewer-restored-current-proof-required"
+    );
   }
   private async deliver(
     pr: number,
@@ -551,6 +887,8 @@ class ProjectContinuation {
     B: string,
     snapshot: GateSnapshot,
   ): Promise<string | null> {
+    const unresolved = await this.settleReviewerRestore(registration, lane);
+    if (unresolved) return unresolved;
     const bounds = registration.reviewerRecovery;
     if (!bounds) return null;
     let blocked: ReviewReceipt | null = null;
@@ -622,7 +960,7 @@ class ProjectContinuation {
     });
     const path = join(this.root, `reviewer-${key}.json`);
     const prior = await readReviewerRecovery(path, key);
-    const recovery = prior ?? {
+    const recovery: ReviewerRecoveryRecord = prior ?? {
       key,
       attempts: 0,
       attemptedAt: 0,
@@ -632,10 +970,21 @@ class ProjectContinuation {
       source: "",
       actions: [],
       prerequisite: null,
+      restoreAttempts: [],
     };
     const save = async () => {
       if (!this.fence || this.stopped) throw new ReviewAppError("continuation-fenced");
       await this.fence.assertCurrent();
+      const attempt = recovery.restoreAttempts?.at(-1);
+      if (attempt) {
+        const stable = (await this.previous(registration.pr))?.reviewerRestores?.[lane];
+        const current = await readReviewerRecovery(path, key);
+        if (
+          stable?.operationId !== attempt.operationId ||
+          (current?.attempts ?? 0) > recovery.attempts
+        )
+          throw new ReviewAppError("reviewer-restore-fenced");
+      }
       await atomicReceiptWrite(path, recovery);
     };
     const view = await this.deps.view(session.id);
@@ -643,11 +992,7 @@ class ProjectContinuation {
     const native = await this.deps.reviewerEvidence(session.id);
     if (native.nativeAgentAlive === null) return "reviewer-native-evidence-unknown";
     if (recovery.state === "intent") {
-      if (recovery.launch === identity.launchDigest) return "reviewer-restore-uncertain";
-      recovery.state = "confirmed";
-      recovery.launch = identity.launchDigest ?? "unknown";
-      recovery.reason = "restored-generation";
-      await save();
+      return "reviewer-restore-uncertain";
     }
     const hold = async (reason: string, source: string): Promise<string> => {
       recovery.reason = reason;
@@ -730,6 +1075,26 @@ class ProjectContinuation {
             "unchanged prerequisite or nonindependent challenger",
           );
       }
+    }
+    if (
+      !blocked &&
+      session.status === "stopped" &&
+      native.nativeAgentAlive === false &&
+      native.historyAvailable &&
+      authenticated
+    ) {
+      return this.restoreReviewer(
+        loaded,
+        registration,
+        lane,
+        H,
+        B,
+        session,
+        view,
+        recovery,
+        source,
+        save,
+      );
     }
     if (blocked || (!native.historyAvailable && !native.initialAcknowledged)) {
       const reason = "reviewer-fixture-challenge-source-unavailable";
