@@ -816,7 +816,7 @@ function normalizeQueuedMessageTyped(
   };
 }
 
-function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefined {
+export function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const { agent } = record;

@@ -17,6 +17,15 @@ import {
 } from "./review-interface-consent.js";
 import { isDeepStrictEqual } from "node:util";
 import {
+  bindNativeInputUsers,
+  captureNativeInputSources,
+  nativeUserKey,
+  readNativeInputJournal,
+  verifyNativeInputSources,
+  writeNativeInputJournal,
+  type NativeInputIdentity,
+} from "./native-input.js";
+import {
   annotateLifecycleError,
   SessionLifecycleError,
   SessionLifecycleRegister,
@@ -51,6 +60,7 @@ import {
   type AgentSubmitAckContext,
   type SubmitAckBinding,
   type SubmitAckScanResult,
+  type NativeUserObservation,
 } from "./agents/index.js";
 import {
   captureOpenCodeSessionBaseline,
@@ -66,6 +76,7 @@ import {
   capturePaneAgentProcesses,
   findForeignAgentProcessesForSession,
   terminateAgentProcesses,
+  type AgentProcessRef,
 } from "./agent-processes.js";
 import { BUILTIN_SIDECARS } from "./sidecars/builtins.js";
 import {
@@ -16509,6 +16520,103 @@ export class SessionService {
     });
   }
 
+  private nativeInputIdentity(session: SessionRecord): NativeInputIdentity | null {
+    const { updatedAt: _updatedAt, ...identity } = captureReleaseTaskIdentity(session);
+    return identity.launchDigest
+      ? { ...identity, launchDigest: identity.launchDigest, agent: session.agent }
+      : null;
+  }
+
+  // Caller owns the existing session/workspace lifecycle locks. Observation is
+  // independent of transport acknowledgement and never requests another send.
+  private async observeNativeInputsLocked(
+    session: SessionRecord,
+    processes: AgentProcessRef[],
+  ): Promise<boolean | null> {
+    const identity = this.nativeInputIdentity(session);
+    if (
+      !identity ||
+      !session.agentLaunchId ||
+      !session.agentSessionId ||
+      processes.length === 0 ||
+      processes.some((ref) => ref.identity === null)
+    )
+      return null;
+    const journal = await readNativeInputJournal(this.config.dataDir, identity);
+    if (!journal) return null;
+    const sorted = [...processes].sort((a, b) => a.pid - b.pid);
+    if (journal.processes && !isDeepStrictEqual(journal.processes, sorted)) return null;
+    if (journal.nativeSessionId && journal.nativeSessionId !== session.agentSessionId) return null;
+    if (
+      !journal.processes &&
+      !journal.occurrences.some((input) => input.initial && input.state.kind === "dispatched")
+    )
+      return null;
+    const original = JSON.stringify(journal);
+    const fresh = await createAgentSubmitAckBinding(session.agent, this.submitAckContext(session));
+    if (!fresh?.nativeInput) return null;
+    const currentSources = await captureNativeInputSources(fresh.baseline);
+    const paths = new Set(currentSources.map((source) => source.path));
+    const candidates = new Map<string, NativeUserObservation[]>();
+    for (const input of journal.occurrences) {
+      if (input.baseline === null) continue;
+      if (input.state.kind !== "dispatched" && input.state.kind !== "accepted") continue;
+      if (input.sources.some((source) => !paths.has(source.path))) return null;
+      await verifyNativeInputSources(input.sources);
+      const binding = await resumeAgentSubmitAckBinding(
+        session.agent,
+        this.submitAckContext(session),
+        input.baseline,
+      );
+      if (!binding?.nativeInput) continue;
+      const users = await binding.nativeInput.observe(input.bodyDigest);
+      if (users.some((user) => !paths.has(resolvePath(user.source)))) return null;
+      const repeated = await binding.nativeInput.observe(input.bodyDigest);
+      if (!isDeepStrictEqual(users, repeated)) return null;
+      await verifyNativeInputSources(input.sources);
+      candidates.set(input.id, users);
+    }
+    await verifyNativeInputSources(currentSources);
+    const after = await captureAgentProcessesForLaunch({
+      sessionId: session.id,
+      agentLaunchId: session.agentLaunchId,
+      processMatchers: sessionProcessMatchers(session),
+    });
+    if (
+      after.status !== "ok" ||
+      !isDeepStrictEqual(
+        sorted,
+        [...after.processes].sort((a, b) => a.pid - b.pid),
+      )
+    )
+      return null;
+    const current = readSession(this.config.dataDir, session.id);
+    if (
+      !current ||
+      current.agentSessionId !== session.agentSessionId ||
+      !isDeepStrictEqual(this.nativeInputIdentity(current), identity)
+    )
+      return null;
+    journal.nativeSessionId = session.agentSessionId;
+    journal.processes = sorted;
+    bindNativeInputUsers(journal, candidates);
+    if (JSON.stringify(journal) !== original)
+      await writeNativeInputJournal(this.config.dataDir, journal);
+    const initial = journal.occurrences.filter(
+      (input) => input.initial && input.state.kind === "accepted",
+    );
+    if (initial.length !== 1) return null;
+    const input = initial[0];
+    if (!input || input.state.kind !== "accepted") return null;
+    const accepted = input.state.user;
+    return (candidates.get(input.id) ?? []).some(
+      (user) =>
+        nativeUserKey(user) === nativeUserKey(accepted) && isDeepStrictEqual(user, accepted),
+    )
+      ? true
+      : null;
+  }
+
   async releaseReviewerEvidence(sessionId: string): Promise<{
     nativeAgentAlive: boolean | null;
     historyAvailable: boolean;
@@ -16517,19 +16625,31 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session?.agentLaunchId)
       return { nativeAgentAlive: null, historyAvailable: false, initialAcknowledged: null };
-    const capture = await captureAgentProcessesForLaunch({
-      sessionId,
-      agentLaunchId: session.agentLaunchId,
-      processMatchers: sessionProcessMatchers(session),
-    });
     const history = await this.getConversation(sessionId, { from: 0 });
-    return {
-      nativeAgentAlive: capture.status === "ok" ? capture.processes.length > 0 : null,
-      historyAvailable: history.entries.length > 0,
-      // Retained native IDs/history do not prove acceptance of this launch.
-      // The submit scanner exposes queue acceptance, not a durable native input identity.
-      initialAcknowledged: null,
-    };
+    return this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const current = readSession(this.config.dataDir, sessionId);
+      if (!current?.agentLaunchId)
+        return { nativeAgentAlive: null, historyAvailable: false, initialAcknowledged: null };
+      const capture = await captureAgentProcessesForLaunch({
+        sessionId,
+        agentLaunchId: current.agentLaunchId,
+        processMatchers: sessionProcessMatchers(current),
+      });
+      let initialAcknowledged: boolean | null = null;
+      if (capture.status === "ok") {
+        try {
+          initialAcknowledged = await this.observeNativeInputsLocked(current, capture.processes);
+        } catch {
+          // Missing/corrupt source or interrupted journal publication supplies no proof.
+          initialAcknowledged = null;
+        }
+      }
+      return {
+        nativeAgentAlive: capture.status === "ok" ? capture.processes.length > 0 : null,
+        historyAvailable: history.entries.length > 0,
+        initialAcknowledged,
+      };
+    });
   }
 
   async mutateTodo(
