@@ -16037,7 +16037,20 @@ export class SessionService {
       });
       this.recordPaneWrite(session, pastedAt);
       options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
-      if (input) await this.finishNativeInputDispatchLocked(input);
+      if (input) {
+        try {
+          await this.finishNativeInputDispatchLocked(input);
+        } catch (error) {
+          // The paste already happened. An observer publication failure cannot
+          // turn it into another transport attempt or supply native acceptance.
+          this.logEvent("session.message.native_input_unavailable", {
+            level: "warn",
+            sessionId: session.id,
+            projectId: current.project,
+            message: error instanceof Error ? error.message : "Native input publication failed",
+          });
+        }
+      }
     };
     if (options?.authorizeInput) {
       if (!(await options.authorizeInput(send))) {

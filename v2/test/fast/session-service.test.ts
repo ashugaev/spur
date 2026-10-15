@@ -1394,6 +1394,12 @@ function runningSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 type SessionServiceInternals = {
+  runDeliveryTransaction(
+    id: string,
+    message: string,
+    intent: { kind: "queued-drain"; message: string },
+  ): Promise<unknown>;
+  requeueTypedMessageAtHead(id: string, message: string): void;
   beginAgentMessage(
     session: SessionRecord,
     message: string,
@@ -29909,6 +29915,72 @@ describe("SessionService", () => {
         write.mockRestore();
       }
     });
+
+    it.each(["intent", "dispatch", "fresh-launch"])(
+      "native accepted input preserves queued delivery on %s journal publication failure",
+      async (phase) => {
+        const fixture = await nativeInputSetup();
+        const message = "queued caller boundary";
+        if (phase !== "fresh-launch")
+          fixture.sessions.set(fixture.session.id, {
+            ...fixture.session,
+            queuedMessages: { messages: [message], awaitingPrompt: false },
+          });
+        lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+        const internals = sessionServiceInternals(fixture.service);
+        const ack = vi.spyOn(internals, "waitForSubmitAck");
+        const requeue = vi.spyOn(internals, "requeueTypedMessageAtHead");
+        vi.spyOn(internals, "captureAgentSessionId").mockImplementation(async (record) => record);
+        const receipt = await import("../../src/review-receipt.js");
+        const actualWrite = receipt.atomicReceiptWrite;
+        let writes = 0;
+        const publication = vi
+          .spyOn(receipt, "atomicReceiptWrite")
+          .mockImplementation(async (path, value) => {
+            if (path.endsWith("/inputs.json") && ++writes === (phase === "intent" ? 1 : 2))
+              throw new Error("native publication failed");
+            await actualWrite(path, value);
+          });
+        try {
+          const delivery =
+            phase === "fresh-launch"
+              ? internals.sendAgentMessage(fixture.session, message, { freshLaunch: true })
+              : internals.runDeliveryTransaction(fixture.session.id, message, {
+                  kind: "queued-drain",
+                  message,
+                });
+          if (phase === "intent") {
+            await expect(delivery).rejects.toThrow("native publication failed");
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect(ack).not.toHaveBeenCalled();
+            expect(fixture.sessions.get(fixture.session.id)?.queuedMessages?.messages).toEqual([
+              message,
+            ]);
+          } else {
+            await expect(delivery).resolves.toBeDefined();
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+            expect(ack).toHaveBeenCalledTimes(1);
+            expect(
+              fixture.sessions.get(fixture.session.id)?.queuedMessages?.messages ?? [],
+            ).toEqual([]);
+            expect(fixture.sessions.get(fixture.session.id)?.queuedMessageTyped).toBeUndefined();
+            expect((await fixture.readJournal())?.occurrences[0]?.state.kind).toBe("intent");
+            expect(logSpurEventMock).toHaveBeenCalledWith(
+              TEST_DATA_DIR,
+              expect.objectContaining({
+                event: "session.message.native_input_unavailable",
+                level: "warn",
+              }),
+            );
+          }
+          expect(requeue).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          publication.mockRestore();
+        }
+      },
+    );
 
     it("native accepted input cannot reuse a prior launch or recycled process", async () => {
       const fixture = await nativeInputSetup();
