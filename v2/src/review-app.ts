@@ -1,10 +1,18 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
 import { digest, parseAssessment, type InterfaceAssessment } from "./review-interface.js";
 import { publishLaneState } from "./review-state.js";
+import {
+  atomicReceiptWrite,
+  admitReviewTransition,
+  canonicalReceipt,
+  closeReviewTransition,
+  lockReviewReceipt,
+  parseReviewReceipt,
+  type ReviewTransitionIntent,
+} from "./review-receipt.js";
+import { createBaseUrl } from "./client.js";
 import {
   GitHubApp,
   ReviewAppError,
@@ -17,7 +25,7 @@ import {
 } from "./github-app.js";
 
 type Lane = "code" | "browser";
-interface Config {
+export interface Config {
   repositories: string[];
   receiptRoot: string;
   code: AppCredentials;
@@ -27,7 +35,7 @@ interface Row {
   status: "passed" | "failed";
   evidence: string;
 }
-interface Attempt {
+export interface Attempt {
   repo: string;
   pr: number;
   lane: Lane;
@@ -187,42 +195,18 @@ async function transitionReview(
   if (session !== request.session) throw new ReviewAppError("session-mismatch");
   const app = client(config, request.repo, request.lane, transport);
   const path = `/repos/${request.repo}/pulls/${request.pr}`;
-  const expand = (path: string) =>
-    resolve(path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
-  let canonical: string;
-  try {
-    const root = expand(config.receiptRoot);
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    canonical = join(
-      await realpath(root),
-      request.repo.toLowerCase(),
-      String(request.pr),
-      `${request.lane}.json`,
-    );
-    await mkdir(dirname(canonical), { recursive: true, mode: 0o700 });
-    const requested = join(
-      await realpath(dirname(expand(request.receipt))),
-      request.receipt.split("/").at(-1) ?? "",
-    );
-    if (requested !== canonical) throw new ReviewAppError("receipt-path-mismatch");
-  } catch {
-    throw new ReviewAppError("receipt-path-mismatch");
-  }
-  const lock = `${canonical}.lock`;
-  let handle;
-  try {
-    handle = await open(lock, "wx", 0o600);
-  } catch {
-    throw new ReviewAppError("attempt-locked");
-  }
-  const release = async () => {
-    try {
-      await handle.close();
-      await rm(lock);
-    } catch {
-      throw new ReviewAppError("receipt-lock-cleanup");
-    }
-  };
+  const canonical = await canonicalReceipt(config.receiptRoot, request);
+  const intent: ReviewTransitionIntent | null =
+    action === "publish"
+      ? null
+      : {
+          ...request,
+          id: randomUUID(),
+          appId: config[request.lane].appId,
+          status: action === "block" ? "BLOCKED" : "PENDING",
+        };
+  if (intent) await admitReviewTransition(canonical, intent);
+  const release = await lockReviewReceipt(canonical);
   const receipt = {
     repository: request.repo,
     PR: request.pr,
@@ -253,23 +237,10 @@ async function transitionReview(
   };
   let ownsAttempt = false;
   const save = async () => {
-    let stage: string | undefined;
     try {
-      stage = await mkdtemp(join(dirname(canonical), ".review-"));
-      const temp = join(stage, "receipt.json");
-      await writeFile(temp, JSON.stringify(receipt, null, 2), {
-        mode: 0o600,
-        flag: "wx",
-        flush: true,
-      });
-      await rename(temp, canonical);
+      await atomicReceiptWrite(canonical, receipt);
     } catch {
       throw new ReviewAppError("receipt-write");
-    } finally {
-      if (stage)
-        await rm(stage, { recursive: true, force: true }).catch(() => {
-          throw new ReviewAppError("receipt-temp-cleanup");
-        });
     }
   };
   const announce = async () => {
@@ -307,79 +278,11 @@ async function transitionReview(
         throw new ReviewAppError("receipt-state-invalid");
     }
     if (previous !== undefined) {
-      const prior = object(previous);
+      const prior = parseReviewReceipt(previous);
       if (
         prior.repository !== request.repo ||
         prior.PR !== request.pr ||
-        prior.lane !== request.lane ||
-        !Array.isArray(prior.supersededAttempts) ||
-        !prior.supersededAttempts.every(
-          (value) => typeof value === "string" && /^[a-zA-Z0-9_.-]+$/.test(value),
-        ) ||
-        new Set(prior.supersededAttempts).size !== prior.supersededAttempts.length ||
-        prior.supersededAttempts.includes(prior.attempt) ||
-        typeof prior.attempt !== "string" ||
-        !/^[a-zA-Z0-9_.-]+$/.test(prior.attempt) ||
-        typeof prior.session !== "string" ||
-        !/^[a-zA-Z0-9_.-]+$/.test(prior.session) ||
-        typeof prior.H !== "string" ||
-        !/^[a-f0-9]{40}$/.test(prior.H) ||
-        typeof prior.B !== "string" ||
-        !/^[a-f0-9]{40}$/.test(prior.B) ||
-        typeof prior.contractDigest !== "string" ||
-        !/^[a-f0-9]{64}$/.test(prior.contractDigest) ||
-        typeof prior.reviewBlocked !== "boolean" ||
-        typeof prior.mutationStarted !== "boolean" ||
-        typeof prior.reason !== "string" ||
-        (prior.localVerdict !== null &&
-          prior.localVerdict !== "APPROVED" &&
-          prior.localVerdict !== "CHANGES_REQUESTED") ||
-        !Array.isArray(prior.evidence) ||
-        !prior.evidence.every((value) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-          const row = object(value);
-          return (
-            (row.status === "passed" || row.status === "failed") &&
-            typeof row.evidence === "string" &&
-            row.evidence.length > 0
-          );
-        }) ||
-        (prior.coverage !== null &&
-          (() => {
-            if (
-              !prior.coverage ||
-              typeof prior.coverage !== "object" ||
-              Array.isArray(prior.coverage)
-            )
-              return true;
-            const coverage = object(prior.coverage);
-            return (
-              typeof coverage.challenger !== "string" ||
-              !/^[a-zA-Z0-9_.-]+$/.test(coverage.challenger) ||
-              coverage.challenger === prior.session ||
-              typeof coverage.output !== "string" ||
-              !coverage.output ||
-              coverage.omissionsClosed !== true
-            );
-          })()) ||
-        (prior.reviewId !== null &&
-          (!Number.isSafeInteger(prior.reviewId) || Number(prior.reviewId) <= 0)) ||
-        !Number.isSafeInteger(prior.appId) ||
-        Number(prior.appId) <= 0 ||
-        (prior.mutationStarted && prior.inputDigest === null) ||
-        (prior.reviewId !== null && !prior.mutationStarted) ||
-        (prior.reviewBlocked && prior.status !== "BLOCKED") ||
-        (prior.status === "APPROVED" &&
-          prior.evidence.some((value) => object(value).status !== "passed")) ||
-        (["APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status)) &&
-          (prior.inputDigest === null ||
-            prior.reviewId === null ||
-            prior.localVerdict !== prior.status ||
-            prior.coverage === null ||
-            prior.evidence.length === 0)) ||
-        (prior.inputDigest !== null &&
-          (typeof prior.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(prior.inputDigest))) ||
-        !["PENDING", "BLOCKED", "APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status))
+        prior.lane !== request.lane
       )
         throw new ReviewAppError("receipt-state-invalid");
       receipt.supersededAttempts = prior.supersededAttempts;
@@ -419,6 +322,7 @@ async function transitionReview(
     }
     await save();
     await announce();
+    if (intent) await closeReviewTransition(canonical, intent);
     if (action !== "publish") return receipt;
     if (!("body" in request)) throw new ReviewAppError("invalid-request");
     const access = await app.authenticate();
@@ -528,6 +432,24 @@ export function registerReviewApp(program: Command): void {
   const command = program
     .command("review-app")
     .description("Authenticate reviewer Apps and publish pinned native reviews.");
+  command
+    .command("affirm")
+    .requiredOption("--app-config <file>")
+    .requiredOption("--request <file>")
+    .option("--json")
+    .action(async (options: { appConfig: string; request: string }) => {
+      const config = parseConfig(await readJson(options.appConfig));
+      const value = object(await readJson(options.request));
+      const request = parseAttempt(value);
+      if (
+        process.env["SPUR_SESSION"] !== request.session ||
+        config[request.lane].appId !== value.appId
+      )
+        throw new ReviewAppError("session-mismatch");
+      await client(config, request.repo, request.lane).authenticate();
+      await continuationRequest(value, true);
+      process.stdout.write(`${JSON.stringify({ status: "accepted" })}\n`);
+    });
   for (const action of ["prepare", "block"] as const) {
     command
       .command(action)
@@ -536,8 +458,30 @@ export function registerReviewApp(program: Command): void {
       .option("--json")
       .action(async (options: { appConfig: string; request: string }) => {
         const config = parseConfig(await readJson(options.appConfig));
-        const request = parseAttempt(await readJson(options.request));
+        const value = object(await readJson(options.request));
+        const request = parseAttempt(value);
+        let intent: ReviewTransitionIntent | undefined;
+        if (value.invocation !== undefined) {
+          if (
+            process.env["SPUR_SESSION"] !== request.session ||
+            config[request.lane].appId !== value.appId
+          )
+            throw new ReviewAppError("session-mismatch");
+          await client(config, request.repo, request.lane).authenticate();
+          const status = action === "block" ? "BLOCKED" : "PENDING";
+          if (value.status !== status) throw new ReviewAppError("continuation-transition-invalid");
+          await continuationRequest(value, false);
+          const { parseContinuationIngress } = await import("./release-continuation.js");
+          intent = {
+            ...parseContinuationIngress(value),
+            id: string(value.id),
+            appId: integer(value.appId),
+            status,
+          };
+        }
         const result = await transitionReview(config, request, process.env["SPUR_SESSION"], action);
+        if (intent && result.status === intent.status)
+          await closeReviewTransition(await canonicalReceipt(config.receiptRoot, request), intent);
         process.stdout.write(`${JSON.stringify(result)}\n`);
         if (
           (action === "prepare" && result.status !== "PENDING") ||
@@ -570,4 +514,26 @@ export function registerReviewApp(program: Command): void {
       process.stdout.write(`${JSON.stringify(result)}\n`);
       if (result.status === "BLOCKED") process.exitCode = 1;
     });
+}
+
+async function continuationRequest(value: unknown, affirmation: boolean): Promise<void> {
+  const capability = process.env["SPUR_AGENT_LAUNCH_ID"];
+  if (!capability) throw new ReviewAppError("continuation-launch-missing");
+  const { baseUrl } = createBaseUrl(process.env["SPUR_CONFIG"]);
+  let response: Response;
+  try {
+    response = await fetch(
+      `${baseUrl}/release-continuation/${affirmation ? "affirmations" : "transitions"}`,
+      {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${capability}`, "Content-Type": "application/json" },
+        body: JSON.stringify(value),
+      },
+    );
+  } catch {
+    throw new ReviewAppError("continuation-transport-uncertain");
+  }
+  if (!response.ok) throw new ReviewAppError(`continuation-http-${response.status}`);
 }

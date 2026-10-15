@@ -11,6 +11,7 @@ import {
   blockReview,
   publishReview,
 } from "../../src/review-app.js";
+import { unresolvedReviewTransitions } from "../../src/review-receipt.js";
 
 const dirs: string[] = [];
 const faults = vi.hoisted(() => ({ approvedWrite: false }));
@@ -53,6 +54,21 @@ const draft = {
     dispositions: [],
   },
 };
+test("block intent persists before receipt lock denial", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "spur-block-intent-"));
+  dirs.push(dir);
+  const config = parseConfig({
+    repositories: [draft.repo],
+    receiptRoot: dir,
+    code: { appId: 1, keyPath: "missing" },
+    browser: { appId: 2, keyPath: "missing" },
+  });
+  const request = parseRequest({ ...draft, receipt: join(dir, "owner", "repo", "4", "code.json") });
+  await prepareReview(config, request, draft.session);
+  await writeFile(`${request.receipt}.lock`, "unknown-owner");
+  await expect(blockReview(config, request, draft.session)).rejects.toThrow("attempt-locked");
+  expect(await unresolvedReviewTransitions(request.receipt)).toBe(true);
+});
 test("blocks absent independent challenge and failed approval rows", () => {
   expect(() =>
     parseRequest({

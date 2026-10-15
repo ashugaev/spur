@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality
@@ -89,3 +92,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir v2 build
       - run: pnpm --dir v2 test:smoke
+
+  strict-success:
+    name: Spur Strict CI
+    if: ${{ always() }}
+    needs: [quality, playwright, runtime-integration, real-agent-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require successful execution of every required job
+        env:
+          REQUIRED_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node <<'NODE'
+          const required = ['quality', 'playwright', 'runtime-integration', 'real-agent-smoke'];
+          const results = JSON.parse(process.env.REQUIRED_RESULTS);
+          if (Object.keys(results).length !== required.length ||
+              required.some(job => results[job]?.result !== 'success')) {
+            console.error('Required CI execution did not succeed');
+            process.exitCode = 1;
+          }
+          NODE

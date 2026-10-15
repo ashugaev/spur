@@ -6,6 +6,11 @@ projects:
     sessionPrefix: refproj
     worktree: true
     restoreAfterReboot: false
+    # Optional caller-owned release recovery policy; omit to disable.
+    # releaseContinuation:
+    #   policyFile: ~/release-policy.json
+    #   policyDigest: <sha256>
+    #   intervalSeconds: 60
     maxLiveSessions: 3
     symlinks:
       - .env

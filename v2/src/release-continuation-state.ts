@@ -1,0 +1,301 @@
+import { randomUUID } from "node:crypto";
+import { link, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { object, integer, string, ReviewAppError } from "./github-app.js";
+import { atomicReceiptWrite, receiptIdentifier } from "./review-receipt.js";
+import { readProcStarttime, type StarttimeProbe } from "./sidecars/reap.js";
+
+interface OwnerClaim {
+  generation: number;
+  holder: string;
+  predecessor: string | null;
+  boot: string;
+  pid: number;
+  starttime: number;
+}
+export interface ContinuationFence {
+  generation: number;
+  holder: string;
+  assertCurrent(): Promise<void>;
+  retire(): Promise<void>;
+}
+export interface ClaimProbes {
+  boot(): Promise<string>;
+  process(pid: number): Promise<StarttimeProbe>;
+}
+const defaultProbes: ClaimProbes = {
+  boot: async () => string((await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim()),
+  process: readProcStarttime,
+};
+function parseClaim(value: unknown): OwnerClaim {
+  const row = object(value);
+  return {
+    generation: integer(row.generation),
+    holder: receiptIdentifier(row.holder),
+    predecessor: row.predecessor === null ? null : receiptIdentifier(row.predecessor),
+    boot: string(row.boot),
+    pid: integer(row.pid),
+    starttime: integer(row.starttime),
+  };
+}
+async function readClaims(root: string): Promise<OwnerClaim[]> {
+  const names = (await readdir(root)).filter((name) => name.endsWith(".claim"));
+  const claims: OwnerClaim[] = [];
+  for (const name of names) {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(join(root, name), "utf8")) as unknown;
+    } catch {
+      throw new ReviewAppError("continuation-claim-invalid");
+    }
+    const claim = parseClaim(value);
+    if (name !== `${claim.generation}.claim`)
+      throw new ReviewAppError("continuation-claim-invalid");
+    claims.push(claim);
+  }
+  claims.sort((a, b) => a.generation - b.generation);
+  if (
+    claims.some(
+      (claim, index) =>
+        claim.generation !== index + 1 || claim.predecessor !== (claims[index - 1]?.holder ?? null),
+    )
+  )
+    throw new ReviewAppError("continuation-claim-chain-invalid");
+  return claims;
+}
+async function durableDirectory(root: string): Promise<void> {
+  const handle = await open(root, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+export async function claimContinuation(
+  root: string,
+  probes: ClaimProbes = defaultProbes,
+): Promise<ContinuationFence> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const boot = await probes.boot();
+  const self = await probes.process(process.pid);
+  if (self.kind !== "ok" || self.state === "Z" || self.state === "X")
+    throw new ReviewAppError("continuation-identity-unknown");
+  const previous = (await readClaims(root)).at(-1);
+  if (previous) {
+    let retired = false;
+    try {
+      const marker = await readFile(join(root, `${previous.generation}.retired`), "utf8");
+      if (marker !== previous.holder) throw new ReviewAppError("continuation-retirement-invalid");
+      retired = true;
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT")
+        throw error;
+    }
+    if (!retired && previous.boot === boot) {
+      const probe = await probes.process(previous.pid);
+      if (probe.kind === "unknown") throw new ReviewAppError("continuation-identity-unknown");
+      if (
+        probe.kind === "ok" &&
+        probe.starttime === previous.starttime &&
+        probe.state !== "Z" &&
+        probe.state !== "X"
+      )
+        throw new ReviewAppError("continuation-owner-live");
+    }
+  }
+  const claim: OwnerClaim = {
+    generation: (previous?.generation ?? 0) + 1,
+    holder: randomUUID(),
+    predecessor: previous?.holder ?? null,
+    boot,
+    pid: process.pid,
+    starttime: self.starttime,
+  };
+  const stage = join(root, `${claim.holder}.stage`);
+  try {
+    await writeFile(stage, JSON.stringify(claim), { mode: 0o600, flag: "wx", flush: true });
+    await link(stage, join(root, `${claim.generation}.claim`));
+    await durableDirectory(root);
+  } catch {
+    throw new ReviewAppError("continuation-claim-denied");
+  } finally {
+    await rm(stage, { force: true });
+  }
+  let retired = false;
+  const assertCurrent = async (): Promise<void> => {
+    const current = (await readClaims(root)).at(-1);
+    if (
+      retired ||
+      current?.holder !== claim.holder ||
+      current.generation !== claim.generation ||
+      (await probes.boot()) !== claim.boot
+    )
+      throw new ReviewAppError("continuation-fenced");
+    const probe = await probes.process(claim.pid);
+    if (
+      probe.kind !== "ok" ||
+      probe.starttime !== claim.starttime ||
+      probe.state === "Z" ||
+      probe.state === "X"
+    )
+      throw new ReviewAppError("continuation-fenced");
+  };
+  return {
+    generation: claim.generation,
+    holder: claim.holder,
+    assertCurrent,
+    retire: async () => {
+      await assertCurrent();
+      await writeFile(join(root, `${claim.generation}.retired`), claim.holder, {
+        mode: 0o600,
+        flag: "wx",
+        flush: true,
+      });
+      await durableDirectory(root);
+      retired = true;
+    },
+  };
+}
+export interface ContinuationAction {
+  kind: "send" | "restore";
+  key: string;
+  session: string;
+  message: string;
+  state: "intent" | "confirmed";
+  launch: string;
+}
+function parseAction(value: unknown): ContinuationAction {
+  const action = object(value);
+  if (
+    (action.kind !== "send" && action.kind !== "restore") ||
+    (action.state !== "intent" && action.state !== "confirmed")
+  )
+    throw new ReviewAppError("continuation-state-invalid");
+  return {
+    kind: action.kind,
+    key: string(action.key),
+    session: receiptIdentifier(action.session),
+    message: string(action.message),
+    state: action.state,
+    launch: string(action.launch),
+  };
+}
+export interface ContinuationRecord {
+  version: 1;
+  authorityGeneration: number;
+  invocation: string;
+  H: string;
+  B: string;
+  reason: string;
+  outcomes?: string[];
+  affirmations: Partial<
+    Record<
+      "code" | "browser",
+      { challenge: string; launch: string; receiptDigest: string; accepted: boolean }
+    >
+  >;
+  actions: ContinuationAction[];
+  mergeSha: string | null;
+  publishedProofDigest: string | null;
+}
+export function parseContinuationOutcomes(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16)
+    throw new ReviewAppError("continuation-outcomes-invalid");
+  return value.map((value: unknown) => {
+    const outcome = string(value);
+    if (outcome.length > 160 || /[\r\n]/.test(outcome))
+      throw new ReviewAppError("continuation-outcomes-invalid");
+    return outcome;
+  });
+}
+export function parseContinuationRecord(value: unknown): ContinuationRecord {
+  const row = object(value);
+  if (row.version !== 1 || !Array.isArray(row.actions))
+    throw new ReviewAppError("continuation-state-invalid");
+  const affirmations: ContinuationRecord["affirmations"] = {};
+  const raw = object(row.affirmations);
+  for (const lane of ["code", "browser"] as const) {
+    if (raw[lane] === undefined) continue;
+    const affirmation = object(raw[lane]);
+    if (typeof affirmation.accepted !== "boolean")
+      throw new ReviewAppError("continuation-state-invalid");
+    affirmations[lane] = {
+      challenge: string(affirmation.challenge),
+      launch: string(affirmation.launch),
+      receiptDigest: string(affirmation.receiptDigest),
+      accepted: affirmation.accepted,
+    };
+  }
+  return {
+    version: 1,
+    authorityGeneration: integer(row.authorityGeneration),
+    invocation: string(row.invocation),
+    H: string(row.H),
+    B: string(row.B),
+    reason: string(row.reason),
+    outcomes: parseContinuationOutcomes(row.outcomes),
+    affirmations,
+    actions: row.actions.map(parseAction),
+    mergeSha: row.mergeSha === null ? null : string(row.mergeSha),
+    publishedProofDigest:
+      row.publishedProofDigest === null ? null : string(row.publishedProofDigest),
+  };
+}
+export async function saveContinuationRecord(
+  path: string,
+  record: ContinuationRecord,
+  fence: ContinuationFence,
+): Promise<void> {
+  await fence.assertCurrent();
+  await atomicReceiptWrite(path, record);
+}
+
+export interface ReviewerRecoveryRecord {
+  key: string;
+  attempts: number;
+  attemptedAt: number;
+  launch: string;
+  state: "intent" | "confirmed" | "blocked";
+  reason: string;
+  source: string;
+  actions: ContinuationAction[];
+  prerequisite: string | null;
+}
+export async function readReviewerRecovery(
+  path: string,
+  key: string,
+): Promise<ReviewerRecoveryRecord | null> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+      return null;
+    throw new ReviewAppError("reviewer-recovery-invalid");
+  }
+  const row = object(value);
+  if (
+    row.key !== key ||
+    !Number.isSafeInteger(row.attempts) ||
+    Number(row.attempts) < 0 ||
+    typeof row.attemptedAt !== "number" ||
+    !Number.isFinite(row.attemptedAt) ||
+    row.attemptedAt < 0 ||
+    (row.state !== "intent" && row.state !== "confirmed" && row.state !== "blocked") ||
+    typeof row.reason !== "string" ||
+    !Array.isArray(row.actions)
+  )
+    throw new ReviewAppError("reviewer-recovery-invalid");
+  return {
+    key,
+    attempts: Number(row.attempts),
+    attemptedAt: row.attemptedAt,
+    launch: string(row.launch),
+    state: row.state,
+    reason: row.reason,
+    source: row.source === undefined ? "" : string(row.source),
+    actions: row.actions.map(parseAction),
+    prerequisite: row.prerequisite === null ? null : string(row.prerequisite),
+  };
+}

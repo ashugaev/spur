@@ -107,7 +107,7 @@ ALWAYS-ON RULES
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
-  Default close-out: push existing PR branch or create open PR for human merge. Auto-merge stays OFF unless separate user authorization, admin configuration and activation proof satisfy agent-protocol.md. Never merge with failing CI; pre-existing failures remain your responsibility.
+  Default close-out: push existing PR branch or create open PR for human merge. Scoped authorized release owners follow agent-protocol.md; generic vote auto-merge stays OFF. Never merge with failing CI; pre-existing failures remain your responsibility.
   Query CI status or review comments only on explicit user request or bounded verification in a user-authorized review workflow; approval/completion wakes resume that authority, never grant it. Other Spur notifications do not authorize queries.
   Use `Spur` in code, config, docs, and CLI surfaces.
   Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.

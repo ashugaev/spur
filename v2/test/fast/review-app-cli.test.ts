@@ -29,6 +29,7 @@ test("registers daemon-free required status and publish inputs", () => {
   if (!command) throw new Error("missing review-app command");
   expect(command.name()).toBe("review-app");
   expect(command.commands.map((child) => child.name())).toEqual([
+    "affirm",
     "prepare",
     "block",
     "status",
