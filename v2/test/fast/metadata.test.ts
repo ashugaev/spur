@@ -15,6 +15,10 @@ import {
   listGitHubPollDisabledSourceIds,
   markGitHubPollDisabledChecked,
   readCommentSeenRegistry,
+  readIgnoredGitHubFeedback,
+  recordIgnoredGitHubFeedback,
+  listIgnoredGitHubFeedbackSessions,
+  deleteIgnoredGitHubFeedback,
   readGitHubPollDisabled,
   recordGitHubPollDisabledSession,
   writeGitHubPollDisabled,
@@ -143,6 +147,35 @@ describe("comment-seen registry", () => {
     expect(ids.size).toBe(2);
     expect(ids.has("101")).toBe(true);
     expect(ids.has("102")).toBe(true);
+  });
+});
+
+describe("ignored GitHub feedback", () => {
+  it("persists per session and PR, then removes orphaned state without a snapshot", async () => {
+    const dataDir = await newDataDir();
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:1"]);
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42, ["comment:2"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual(["comment:1"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42)]).toEqual(["comment:2"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43)]).toEqual([]);
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43, ["comment:3"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43)]).toEqual(["comment:3"]);
+    expect(listIgnoredGitHubFeedbackSessions(dataDir, "api", "watch").sort()).toEqual(["a", "b"]);
+    deleteIgnoredGitHubFeedback(dataDir, "api", "watch", "a");
+    expect(listIgnoredGitHubFeedbackSessions(dataDir, "api", "watch")).toEqual(["b"]);
+  });
+
+  it("fails closed on malformed present metadata without rewriting bytes", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-ignored-feedback", "api", "watch");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "a.json");
+    for (const body of ["{bad", '{"prNumber":0,"ids":[]}', '{"prNumber":42,"ids":[3]}']) {
+      await writeFile(path, body, "utf8");
+      expect(() => readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)).toThrow();
+      expect(() => recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:3"])).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(body);
+    }
   });
 });
 

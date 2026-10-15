@@ -97,6 +97,19 @@ function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceI
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
 
+function ignoredGitHubFeedbackDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-ignored-feedback", projectId, sourceId);
+}
+
+function ignoredGitHubFeedbackFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(ignoredGitHubFeedbackDir(dataDir, projectId, sourceId), `${sessionId}.json`);
+}
+
 function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-review-pagination", projectId, `${sourceId}.json`);
 }
@@ -1570,6 +1583,69 @@ function readIdRegistry(path: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+export function readIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+): Set<string> {
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`, { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.prNumber !== "number" ||
+    !Number.isSafeInteger(parsed.prNumber) ||
+    parsed.prNumber <= 0 ||
+    !Array.isArray(parsed.ids) ||
+    !parsed.ids.every((id: unknown) => typeof id === "string")
+  ) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`);
+  }
+  return parsed.prNumber === prNumber ? new Set<string>(parsed.ids) : new Set();
+}
+
+export function recordIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  ids: readonly string[],
+): void {
+  if (ids.length === 0) return;
+  const known = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, sessionId, prNumber);
+  for (const id of ids) known.add(id);
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  writeJsonFile(path, { prNumber, ids: [...known].sort() });
+}
+
+export function listIgnoredGitHubFeedbackSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string[] {
+  const dir = ignoredGitHubFeedbackDir(dataDir, projectId, sourceId);
+  return existsSync(dir)
+    ? readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5))
+    : [];
+}
+
+export function deleteIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId), { force: true });
 }
 
 export function readAvailableBacklogItems(

@@ -2592,6 +2592,27 @@ projects:
     });
   });
 
+  it("accepts a GitHub session marker and rejects unusable templates", async () => {
+    const source = (value: string) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        selfMarker: ${value}
+`;
+    const configured = loadConfig(await writeConfig(source('"[AI-generated, session: {session}]"')));
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      selfMarker: "[AI-generated, session: {session}]",
+    });
+    for (const value of ['"static"', '""', "42"]) {
+      const path = await writeConfig(source(value));
+      expect(() => loadConfig(path)).toThrow();
+    }
+  });
+
   it("parses the github emitExisting flag", async () => {
     const configPath = await writeConfig(`
 projects:
