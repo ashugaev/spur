@@ -220,13 +220,17 @@ function ciProvenance(
   );
 }
 export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
-  const blocked = (reason: string) => ({
-    status: "BLOCKED" as const,
-    reason,
-    H: string(object(snapshot.pr.head).sha),
-    B: string(object(snapshot.pr.base).sha),
-    fingerprint: digest({ domain: "gate-blocked-v1", snapshot }),
-  });
+  const blocked = (reason: string) => {
+    const H = string(object(snapshot.pr.head).sha),
+      B = string(object(snapshot.pr.base).sha);
+    return {
+      status: "BLOCKED" as const,
+      reason,
+      H,
+      B,
+      fingerprint: digest({ domain: "gate-blocked-v1", reason, H, B }),
+    };
+  };
   try {
     const pr = snapshot.pr,
       head = object(pr.head),
