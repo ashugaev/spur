@@ -56,8 +56,15 @@ export function writeFileAtomic(path: string, contents: string): void {
 
 // Residue of a writer that died between write and rename: same key, dead pid.
 function removeDeadTmpSiblings(dir: string, name: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // Directory write permission can allow atomic writes without read permission.
+    return;
+  }
   const prefix = `${name}.tmp.`;
-  for (const entry of readdirSync(dir)) {
+  for (const entry of entries) {
     if (!entry.startsWith(prefix)) {
       continue;
     }

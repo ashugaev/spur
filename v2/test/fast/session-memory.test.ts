@@ -12,12 +12,22 @@ import {
 } from "../../src/session-memory.js";
 import { createTempDir } from "../helpers/common.js";
 
-const fsFault = vi.hoisted(() => ({ failWrite: false, failUnlink: false }));
+const fsFault = vi.hoisted(() => ({
+  failWrite: false,
+  failUnlink: false,
+  failReaddir: false,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
+    readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
+      if (fsFault.failReaddir) {
+        throw Object.assign(new Error("readdir denied"), { code: "EACCES" });
+      }
+      return actual.readdirSync(...args);
+    }) as typeof actual.readdirSync,
     writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
       if (fsFault.failWrite) {
         actual.writeFileSync(args[0], "partial", "utf-8");
@@ -39,6 +49,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   fsFault.failWrite = false;
   fsFault.failUnlink = false;
+  fsFault.failReaddir = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -147,6 +158,31 @@ describe("session memory storage", () => {
 });
 
 describe("writeFileAtomic temp file hygiene", () => {
+  it("commits the write when stale tmp enumeration is denied", async () => {
+    const dir = await newDataDir();
+    const target = join(dir, "key.md");
+    writeFileSync(target, "old body");
+    fsFault.failReaddir = true;
+
+    writeFileAtomic(target, "new body");
+
+    expect(readFileSync(target, "utf-8")).toBe("new body");
+    fsFault.failReaddir = false;
+    expect(readdirSync(dir)).toEqual(["key.md"]);
+  });
+
+  it("cleans the failed write and preserves its error when enumeration is denied", async () => {
+    const dir = await newDataDir();
+    fsFault.failReaddir = true;
+    fsFault.failWrite = true;
+
+    expect(() => writeFileAtomic(join(dir, "key.md"), "body")).toThrow(
+      expect.objectContaining({ code: "ENOSPC" }),
+    );
+    fsFault.failReaddir = false;
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it("removes the tmp file and rethrows when rename fails", async () => {
     const dir = await newDataDir();
     const target = join(dir, "key.md");
