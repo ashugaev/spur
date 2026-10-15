@@ -15181,12 +15181,43 @@ export class SessionService {
             }
             const classified = await this.classifySessionRecord(current);
             if (current.agent !== "codex") return classified.state !== "waiting";
-            // Idle Ctrl-C can exit Codex. Retained errors and status fallbacks
-            // do not prove a cancellable turn; needs_input still cancels menus.
+            let { state, source } = classified;
+            if (state === "error") {
+              const uncertainInput = `Cannot safely determine Codex input state for ${sessionId}; message not sent`;
+              if (
+                classified.runtime.probeUnresponsive ||
+                !classified.runtime.processAlive ||
+                !classified.runtime.paneUsable ||
+                !classified.workspacePresent
+              ) {
+                throw new Error(uncertainInput);
+              }
+              // Retained errors hide pending dialogs. Read native evidence
+              // without clearing the error or typing into an unanswered menu.
+              const native = await this.classifyCodexState(current);
+              const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
+              if (paneText === null) throw new Error(uncertainInput);
+              if (
+                rateLimitActive(native.rateLimit, Date.now()) ||
+                rateLimitActive(scanTmuxRateLimit(paneText), Date.now())
+              ) {
+                throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+              }
+              state = native.state;
+              source = native.source;
+              if (detectCodexMcpPermissionDialog(paneText)) {
+                state = "needs_input";
+              } else if (
+                source === "status" ||
+                (state !== "working" && state !== "waiting" && state !== "needs_input")
+              ) {
+                throw new Error(uncertainInput);
+              }
+            }
+            // Idle Ctrl-C can exit Codex; only native work or input cancels.
             return (
-              classified.state === "needs_input" ||
-              (classified.state === "working" &&
-                (classified.source === "hook" || classified.source === "jsonl"))
+              state === "needs_input" ||
+              (state === "working" && (source === "hook" || source === "jsonl"))
             );
           })) === true;
       }
