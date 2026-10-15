@@ -9,8 +9,8 @@ on:
     branches: [main]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   quality:
@@ -57,7 +57,7 @@ jobs:
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
-    needs: playwright
+    needs: quality
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -75,7 +75,7 @@ jobs:
   real-agent-smoke:
     name: Real-Agent Smoke
     runs-on: self-hosted
-    needs: runtime-integration
+    needs: quality
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
