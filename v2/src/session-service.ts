@@ -5367,6 +5367,9 @@ export class SessionService {
               if (
                 !current?.serverErrorAt ||
                 current.status !== "running" ||
+                this.restoreOwnsRuntimeRecovery(session.id) ||
+                this.isInRestoreWarmup(session.id) ||
+                this.paneWriteLocks.has(current.tmuxSession) ||
                 this.memoryHold.engaged ||
                 now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
                 (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
@@ -5390,11 +5393,22 @@ export class SessionService {
               return true;
             });
             if (claimed) {
+              let suppressed = false;
+              const allowDelivery = () => {
+                suppressed ||=
+                  this.restoreOwnsRuntimeRecovery(session.id) || this.isInRestoreWarmup(session.id);
+                return !suppressed;
+              };
               try {
-                await this.send(session.id, {
-                  message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
-                  queue: false,
-                });
+                await this.deliverPrepared(
+                  session.id,
+                  this.prepareSendMessage(session, {
+                    message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                    queue: false,
+                  }),
+                  { entryPoint: "send", allowDelivery },
+                );
+                if (!allowDelivery()) continue;
                 this.logEvent("session.server_error.reactivated", {
                   level: "info",
                   sessionId: session.id,
@@ -15254,12 +15268,15 @@ export class SessionService {
     message: string,
     typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null,
     recovered: SubmitAckTimeoutError | null,
+    allowWrite?: () => boolean,
   ): Promise<SessionRecord | null> {
     return this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+      if (allowWrite?.() === false) return null;
       const beforeProbe = readSession(this.config.dataDir, prepared.session.id);
       if (!beforeProbe || workspaceIdOf(beforeProbe) !== workspaceIdOf(prepared.session))
         return null;
       const generationMatches = await this.paneGenerationMatches(beforeProbe, prepared.generation);
+      if (allowWrite?.() === false) return null;
       const latest = readSession(this.config.dataDir, prepared.session.id);
       if (
         !latest ||
@@ -15318,7 +15335,12 @@ export class SessionService {
     sessionId: string,
     message: string,
     intent: DeliveryIntent,
-    options?: { interrupt?: boolean; recoverOnLiveAckTimeout?: boolean; interactive?: boolean },
+    options?: {
+      interrupt?: boolean;
+      recoverOnLiveAckTimeout?: boolean;
+      interactive?: boolean;
+      allowDelivery?: () => boolean;
+    },
   ): Promise<{
     record: SessionRecord | null;
     recovered: SubmitAckTimeoutError | null;
@@ -15327,9 +15349,12 @@ export class SessionService {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     const result = await this.withPaneWriteLock(hint.tmuxSession, async () => {
+      if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
       const lifecycleIds = this.lifecycleIdsFor(hint);
       const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
-        this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
+        options?.allowDelivery?.() === false
+          ? Promise.resolve(null)
+          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
       );
       if (!prepared) return { record: null, recovered: null };
 
@@ -15344,6 +15369,7 @@ export class SessionService {
           if (!current || !(await this.paneGenerationMatches(current, prepared.generation)))
             return false;
           const state = this.queuedDeliveryState(await this.classifySessionRecord(current));
+          if (options.allowDelivery?.() === false) return false;
           if (state === "waiting") return false;
           await this.queueAheadOfBusyTurn(current, message, state);
           return true;
@@ -15366,24 +15392,32 @@ export class SessionService {
               this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
                 const current = readSession(this.config.dataDir, sessionId);
                 if (
+                  options?.allowDelivery?.() === false ||
                   !current ||
                   !this.lifecycleStateMatches(current, prepared.stamp) ||
                   !(await this.paneGenerationMatches(current, prepared.generation))
                 ) {
                   return false;
                 }
+                if (options?.allowDelivery?.() === false) return false;
                 await send();
                 return true;
               }),
           },
         );
         const recoveryOutcome = await this.completeAgentMessage(recoverySubmission, {
+          ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           authorizeResend: (send) =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
-              if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+              if (
+                options?.allowDelivery?.() === false ||
+                !current ||
+                !(await this.paneGenerationMatches(current, prepared.generation))
+              ) {
                 return false;
               }
+              if (options?.allowDelivery?.() === false) return false;
               await send();
               return true;
             }),
@@ -15391,10 +15425,13 @@ export class SessionService {
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               return Boolean(
-                current && (await this.paneGenerationMatches(current, prepared.generation)),
+                options?.allowDelivery?.() !== false &&
+                current &&
+                (await this.paneGenerationMatches(current, prepared.generation)),
               );
             }),
         });
+        if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
         if (recoveryOutcome === "stale") {
           throw new Error(`Session ${sessionId} changed during recovery context delivery`);
         }
@@ -15438,15 +15475,22 @@ export class SessionService {
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
           return Boolean(
-            current && (await this.paneGenerationMatches(current, prepared.generation)),
+            options?.allowDelivery?.() !== false &&
+            current &&
+            (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
-          if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+          if (
+            options?.allowDelivery?.() === false ||
+            !current ||
+            !(await this.paneGenerationMatches(current, prepared.generation))
+          ) {
             return false;
           }
+          if (options?.allowDelivery?.() === false) return false;
           await send();
           return true;
         });
@@ -15488,12 +15532,14 @@ export class SessionService {
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               if (
+                options?.allowDelivery?.() === false ||
                 !current ||
                 !this.lifecycleStateMatches(current, prepared.stamp) ||
                 !(await this.paneGenerationMatches(current, prepared.generation))
               ) {
                 return false;
               }
+              if (options?.allowDelivery?.() === false) return false;
               await send();
               return true;
             }),
@@ -15501,6 +15547,7 @@ export class SessionService {
         const outcome = await this.completeAgentMessage(submission, {
           authorizeResend: authorizeGenerationResend,
           recoveryGenerationMatches: generationStillMatches,
+          ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
         });
         if (outcome === "stale") {
           throw new Error(`Session ${sessionId} changed during message delivery`);
@@ -15527,11 +15574,22 @@ export class SessionService {
       } finally {
         this.queuedDeliveryTyped.delete(sessionId);
       }
-      const record = await this.commitPreparedDelivery(prepared, message, pane.typed, recovered);
+      const record = await this.commitPreparedDelivery(
+        prepared,
+        message,
+        pane.typed,
+        recovered,
+        options?.allowDelivery,
+      );
       return { record, recovered };
     });
-    if (result.record) {
-      await this.captureAgentSessionId(result.record, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+    if (result.record && options?.allowDelivery?.() !== false) {
+      await this.captureAgentSessionId(
+        result.record,
+        AGENT_SESSION_ID_REFRESH_WAIT_MS,
+        undefined,
+        options?.allowDelivery,
+      );
       result.record = readSession(this.config.dataDir, sessionId) ?? result.record;
     }
     return result;
@@ -15592,6 +15650,7 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
+      allowDelivery?: () => boolean;
     },
   ): Promise<SessionView> {
     // send and flush are user-driven: short ack pacing, and a live-process ack
@@ -15625,10 +15684,12 @@ export class SessionService {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
           recoverOnLiveAckTimeout: interactive,
           interactive,
+          ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
         },
       );
       const persisted = result.record ?? readSession(this.config.dataDir, sessionId);
       if (!persisted) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (options.allowDelivery?.() === false) return await this.enrich(persisted);
       if (result.queuedAhead) {
         return { ...(await this.enrich(persisted)), queuedAheadReason: "no_interrupt" };
       }
@@ -15662,6 +15723,9 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
+      if (initialSession && options.allowDelivery?.() === false) {
+        return this.enrich(readSession(this.config.dataDir, sessionId) ?? initialSession);
+      }
       if (error instanceof TmuxProbeUnknownError && initialSession) {
         this.retainDetectionError(initialSession, error.message, "other");
       }
@@ -16205,6 +16269,7 @@ export class SessionService {
     started: StartedAgentMessage,
     options?: {
       operation?: RestoreOperationContext;
+      allowDelivery?: () => boolean;
       authorizeResend?: (send: () => Promise<void>) => Promise<boolean>;
       recoveryGenerationMatches?: () => Promise<boolean>;
     },
@@ -16253,6 +16318,7 @@ export class SessionService {
         earlyWindow ? firstWindowMs : ackWindowMs,
       );
       options?.operation?.assertActive();
+      if (options?.allowDelivery?.() === false) return "stale";
       if (lastResult.found) {
         this.paneWriteFenceAt.set(session.id, lastMissAt);
         return "submitted";
@@ -16323,6 +16389,7 @@ export class SessionService {
     }
     const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
     options?.operation?.assertActive();
+    if (options?.allowDelivery?.() === false) return "stale";
     const elapsedMs = Date.now() - startedAt;
     // Interactive callers own the live-timeout policy (delivered + warn), so
     // they get the typed timeout, never this silent cursor pass. Neither does
@@ -17910,8 +17977,10 @@ export class SessionService {
     session: SessionRecord,
     timeoutMs: number,
     operation?: RestoreOperationContext,
+    allowWrite?: () => boolean,
   ): Promise<SessionRecord> {
     operation?.assertActive();
+    if (allowWrite?.() === false) return readSession(this.config.dataDir, session.id) ?? session;
     if (!session.worktreePath) {
       return session;
     }
@@ -17942,6 +18011,7 @@ export class SessionService {
       });
       const agentSessionId = await (operation?.wait(pending) ?? pending);
       operation?.assertActive();
+      if (allowWrite?.() === false) return readSession(this.config.dataDir, session.id) ?? session;
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
           return session;

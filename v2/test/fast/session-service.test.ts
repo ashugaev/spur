@@ -51622,6 +51622,254 @@ describe("SessionService", () => {
       });
     }
 
+    it.each(["readiness", "binding"] as const)(
+      "restores runtime_lost server errors without a scheduled reminder during %s",
+      async (seam) => {
+        const sessions = createSessionStore();
+        mockServerError();
+        const service = await createDisposedSessionService();
+        const record = runningSession({
+          status: "stopped",
+          stopReason: "runtime_lost",
+          error: "retained provider error",
+          errorSource: "other",
+          serverErrorAt: "2026-03-18T09:00:00.000Z",
+        });
+        sessions.set(record.id, record);
+        await service.get(record.id);
+        let entered!: () => void;
+        let release!: () => void;
+        const enteredGate = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        if (seam === "readiness") {
+          waitForTmuxReadyMock.mockImplementationOnce(async () => {
+            entered();
+            await gate;
+          });
+        } else {
+          createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
+            entered();
+            await gate;
+            return null;
+          });
+        }
+        const restoring = service.restore(record.id);
+        const restoreOutcome = restoring.catch((error: unknown) => error);
+        const internals = service as unknown as { processScheduledWakes(): Promise<void> };
+        let waking: Promise<void> | undefined;
+        try {
+          await enteredGate;
+          const beforeReminder = sessions.get(record.id);
+          waking = internals.processScheduledWakes();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sessions.get(record.id)).toEqual(beforeReminder);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          release();
+          const restored = await restoring;
+          await waking;
+          expect(restored.lifecycle.operation?.phase).toBe("succeeded");
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get(record.id)?.serverErrorReactivationAttempts).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(31_000);
+          await service.get(record.id);
+          await internals.processScheduledWakes();
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter(
+              ([, message]) => message === SERVER_ERROR_REACTIVATION_PROMPT,
+            ),
+          ).toHaveLength(1);
+          expect(sessions.get(record.id)?.serverErrorReactivationAttempts).toBe(1);
+        } finally {
+          release();
+          await restoreOutcome;
+          await waking;
+          service.dispose();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      "rechecks a queued server-error claim under its workspace lock (restore=%s)",
+      async (restore) => {
+        const sessions = createSessionStore();
+        mockServerError();
+        const service = await createDisposedSessionService();
+        const record = runningSession({
+          serverErrorAt: "2026-03-18T09:00:00.000Z",
+          error: "retained",
+          errorSource: "other",
+        });
+        sessions.set(record.id, record);
+        await service.get(record.id);
+        const internals = service as unknown as {
+          processScheduledWakes(): Promise<void>;
+          withWorkspaceLifecycleLocks<T>(id: string, task: () => Promise<T>): Promise<T>;
+        };
+        let enterLock!: () => void;
+        let releaseLock!: () => void;
+        const lockEntered = new Promise<void>((resolve) => {
+          enterLock = resolve;
+        });
+        const lockGate = new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        });
+        const blocking = internals.withWorkspaceLifecycleLocks(record.id, async () => {
+          enterLock();
+          await lockGate;
+        });
+        await lockEntered;
+        const waking = internals.processScheduledWakes();
+        let mainAlive = false;
+        let enterProbe!: () => void;
+        let releaseProbe!: () => void;
+        const probeEntered = new Promise<void>((resolve) => {
+          enterProbe = resolve;
+        });
+        const probeGate = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        let restoring: Promise<SessionView> | undefined;
+        if (restore) {
+          tmuxSessionExistsMock.mockImplementation(async () => mainAlive);
+          isProcessRunningInTmuxMock.mockImplementation(async () => mainAlive);
+          createTmuxSessionMock.mockImplementation(async () => {
+            mainAlive = true;
+          });
+          lookupTmuxPanePidMock.mockImplementationOnce(async () => {
+            enterProbe();
+            await probeGate;
+            return { status: "ok", panePid: null };
+          });
+          restoring = service.restore(record.id);
+        }
+        const snapshot = sessions.get(record.id);
+        try {
+          releaseLock();
+          await blocking;
+          if (restoring) {
+            await probeEntered;
+            await waking;
+            expect(sessions.get(record.id)).toEqual(snapshot);
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect(reactivatedEventCount()).toBe(0);
+            releaseProbe();
+            expect((await restoring).lifecycle.operation?.phase).toBe("succeeded");
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          } else {
+            await waking;
+            expect(sessions.get(record.id)?.serverErrorReactivationAttempts).toBe(1);
+            expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+              record.id,
+              SERVER_ERROR_REACTIVATION_PROMPT,
+              { agent: "claude" },
+            );
+            expect(reactivatedEventCount()).toBe(1);
+          }
+        } finally {
+          releaseLock();
+          releaseProbe();
+          await Promise.allSettled([blocking, waking, ...(restoring ? [restoring] : [])]);
+          service.dispose();
+        }
+      },
+    );
+
+    it.each([false, true, "resend"] as const)(
+      "fences an already-typed server-error reminder after a restore claims its ACK (found=%s)",
+      async (found) => {
+        const sessions = createSessionStore();
+        mockServerError();
+        const service = await createDisposedSessionService();
+        const record = runningSession({
+          serverErrorAt: "2026-03-18T09:00:00.000Z",
+          error: "retained",
+          errorSource: "other",
+        });
+        sessions.set(record.id, record);
+        await service.get(record.id);
+        let enterAck!: () => void;
+        let releaseAck!: () => void;
+        const ackEntered = new Promise<void>((resolve) => {
+          enterAck = resolve;
+        });
+        const ackGate = new Promise<void>((resolve) => {
+          releaseAck = resolve;
+        });
+        createAgentSubmitAckBindingMock.mockImplementationOnce(async () => ({
+          scan: async () => {
+            enterAck();
+            await ackGate;
+            return { found: found === true, lastScannedFile: null };
+          },
+        }));
+        agentSubmitAckPacingMock.mockReturnValue({ windowMs: 1, maxResends: 1 });
+        const internals = service as unknown as { processScheduledWakes(): Promise<void> };
+        const waking = internals.processScheduledWakes();
+        await ackEntered;
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        let mainAlive = false;
+        tmuxSessionExistsMock.mockImplementation(async () => mainAlive);
+        isProcessRunningInTmuxMock.mockImplementation(async () => mainAlive);
+        createTmuxSessionMock.mockImplementation(async () => {
+          mainAlive = true;
+        });
+        let enterProbe!: () => void;
+        let releaseProbe!: () => void;
+        const probeEntered = new Promise<void>((resolve) => {
+          enterProbe = resolve;
+        });
+        const probeGate = new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        lookupTmuxPanePidMock.mockImplementationOnce(async () => {
+          enterProbe();
+          await probeGate;
+          return { status: "ok", panePid: null };
+        });
+        let restoring: Promise<SessionView> | undefined;
+        if (found === "resend") {
+          probeTmuxProcessMatchMock.mockImplementation(async () => {
+            restoring ??= service.restore(record.id);
+            return { alive: true, matchedByName: true, unresponsive: false };
+          });
+        } else {
+          restoring = service.restore(record.id);
+        }
+        const snapshot = sessions.get(record.id);
+        try {
+          await vi.advanceTimersByTimeAsync(2);
+          releaseAck();
+          await waking;
+          await probeEntered;
+          expect(sessions.get(record.id)).toEqual(snapshot);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(reactivatedEventCount()).toBe(0);
+          releaseProbe();
+          expect((await restoring)?.lifecycle.operation?.phase).toBe("succeeded");
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+          await vi.advanceTimersByTimeAsync(1_800_001);
+          await service.get(record.id);
+          await internals.processScheduledWakes();
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter(
+              ([, message]) => message === SERVER_ERROR_REACTIVATION_PROMPT,
+            ),
+          ).toHaveLength(2);
+          expect(reactivatedEventCount()).toBe(1);
+        } finally {
+          releaseAck();
+          releaseProbe();
+          await Promise.allSettled([waking, ...(restoring ? [restoring] : [])]);
+          service.dispose();
+        }
+      },
+    );
+
     it("caps server-error reactivation across 100 intervals and reconstruction", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ serverErrorAt: "2026-03-18T09:00:00Z" }));
