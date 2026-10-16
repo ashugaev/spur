@@ -152,7 +152,7 @@ test.each(["clean", "race", "denial", "ambiguous", "wrong-actor"])(
   },
 );
 
-async function lifecycleFixture() {
+async function lifecycleFixture(ci: "pending" | "failure" = "pending") {
   const dir = await mkdtemp(join(tmpdir(), "spur-lifecycle-"));
   dirs.push(dir);
   const keyPath = join(dir, "key.pem");
@@ -181,11 +181,23 @@ async function lifecycleFixture() {
     user: { login: string };
   }
   const history: Review[] = [];
+  const endpoints: string[] = [];
   let deny = false,
     posts = 0;
   let pause: (() => Promise<void>) | undefined;
   const transport: typeof fetch = async (url, options) => {
     const path = new URL(String(url)).pathname;
+    endpoints.push(path);
+    if (path === `/repos/owner/repo/commits/${draft.H}/status`) return Response.json({ state: ci });
+    if (path === `/repos/owner/repo/commits/${draft.H}/check-runs`)
+      return Response.json({
+        check_runs: [
+          {
+            status: ci === "pending" ? "in_progress" : "completed",
+            conclusion: ci === "failure" ? "failure" : null,
+          },
+        ],
+      });
     if (path === "/app") {
       if (pause) await pause();
       return Response.json({ id: 1, slug: "code" });
@@ -205,7 +217,7 @@ async function lifecycleFixture() {
         base: { sha: draft.B },
         user: { login: "human" },
       });
-    if (options?.method === "POST") {
+    if (path === "/repos/owner/repo/pulls/4/reviews" && options?.method === "POST") {
       posts++;
       if (deny) return new Response("denial", { status: 422 });
       const payload = JSON.parse(String(options.body)) as {
@@ -225,13 +237,16 @@ async function lifecycleFixture() {
       return Response.json(review);
     }
     if (path.endsWith("/reviews")) return Response.json(history);
-    return Response.json(history.find((review) => String(review.id) === path.split("/").at(-1)));
+    if (/^\/repos\/owner\/repo\/pulls\/4\/reviews\/\d+$/.test(path))
+      return Response.json(history.find((review) => String(review.id) === path.split("/").at(-1)));
+    throw new Error(`unexpected endpoint: ${path}`);
   };
   return {
     dir,
     config,
     request,
     history,
+    endpoints,
     transport,
     posts: () => posts,
     deny: () => {
@@ -245,6 +260,44 @@ async function lifecycleFixture() {
     },
   };
 }
+
+test.each([
+  { ci: "pending", verdict: "APPROVED" },
+  { ci: "failure", verdict: "APPROVED" },
+  { ci: "pending", verdict: "CHANGES_REQUESTED" },
+  { ci: "failure", verdict: "CHANGES_REQUESTED" },
+] as const)("publishes $verdict with CI $ci without reading CI", async ({ ci, verdict }) => {
+  const f = await lifecycleFixture(ci);
+  const request = parseRequest({
+    ...f.request,
+    verdict,
+    rows: [
+      { status: verdict === "APPROVED" ? "passed" : "failed", evidence: "targeted-check.txt" },
+    ],
+  });
+  const result = await publishReview(f.config, request, draft.session, f.transport);
+  expect(result.status).toBe(verdict);
+  expect(result.localVerdict).toBe(verdict);
+  expect(f.history).toHaveLength(1);
+  expect(f.history[0]).toMatchObject({ state: verdict, commit_id: draft.H });
+  expect(JSON.parse(await readFile(request.receipt, "utf8"))).toMatchObject({
+    status: verdict,
+    localVerdict: verdict,
+    reviewId: 1,
+  });
+  expect(f.endpoints.some((path) => /\/(status|check-runs|actions)(\/|$)/.test(path))).toBe(false);
+  expect(new Set(f.endpoints)).toEqual(
+    new Set([
+      "/app",
+      "/repos/owner/repo/installation",
+      "/app/installations/2/access_tokens",
+      "/repos/owner/repo",
+      "/repos/owner/repo/pulls/4",
+      "/repos/owner/repo/pulls/4/reviews",
+      "/repos/owner/repo/pulls/4/reviews/1",
+    ]),
+  );
+});
 
 test("superseded attempt cannot overwrite newer BLOCKED; new reviewed attempt can recover", async () => {
   const f = await lifecycleFixture();
