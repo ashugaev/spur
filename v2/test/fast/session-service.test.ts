@@ -62373,6 +62373,7 @@ describe("SessionService", () => {
             typedAt: PENDING_LAUNCH_AT,
             ackBaseline: holdBaselines[agent],
           },
+          agentLaunchId: "held-launch",
           queuedMessages: { messages: ["later"], awaitingPrompt: true },
           ...extra,
         }),
@@ -62394,8 +62395,12 @@ describe("SessionService", () => {
       );
     }
 
-    function mockHoldAckScan(found: boolean) {
-      const scan = vi.fn().mockResolvedValue({ found, lastScannedFile: null });
+    function mockHoldAckScan(found: boolean, qualifiedNoMatch = false) {
+      const scan = vi.fn().mockResolvedValue({
+        found,
+        lastScannedFile: null,
+        ...(qualifiedNoMatch ? { qualifiedNoMatch: true as const } : {}),
+      });
       resumeAgentSubmitAckBindingMock.mockImplementation(
         async (_agent: string, _ctx: unknown, baseline: unknown) => ({ baseline, scan }),
       );
@@ -62493,6 +62498,178 @@ describe("SessionService", () => {
         },
       };
     }
+
+    it.each(["no-activity", "historical-other"] as const)(
+      "qualifies a healthy held Codex receipt before activity fallback: %s",
+      async (state) => {
+        const fixture = await historicalAckFixture(`healthy-${state}`);
+        const { service, sessions } = fixture;
+        try {
+          agentStateStrategyMock.mockReturnValue("hook");
+          if (state === "historical-other") {
+            const current = sessions.get("api-1");
+            if (!current) throw new Error("Expected persisted unit hold");
+            sessions.set("api-1", {
+              ...current,
+              error: "Session status detection failed: ps failed: malformed process table output",
+              errorSource: "other",
+            });
+          }
+          const before = sessions.get("api-1");
+          await service.get("api-1");
+
+          expect.soft(resumeAgentSubmitAckBindingMock).toHaveBeenCalledWith(
+            "codex",
+            expect.objectContaining({
+              agentSessionId: "observer-native",
+              codexAckScope: "current-native-baseline",
+            }),
+            fixture.baseline,
+          );
+          expect.soft(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+          expect.soft(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
+          expect.soft(sessions.get("api-1")?.error).toBe(before?.error);
+          expect.soft(sessions.get("api-1")?.errorSource).toBe(before?.errorSource);
+          expect.soft(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+          expect
+            .soft(eventsNamed("session.submit.confirmed"))
+            .toEqual([expect.objectContaining({ details: { evidence: "ack" } })]);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          fixture.close();
+        }
+      },
+    );
+
+    it.each(["wrong-uuid", "unlisted-root-file"] as const)(
+      "retains a healed Codex hold when only legacy scanning accepts: %s",
+      async (source) => {
+        const fixture = await historicalAckFixture(`healed-${source}`);
+        const { service, sessions } = fixture;
+        try {
+          const header = JSON.stringify({
+            type: "session_meta",
+            payload: { id: "outsider-native", cwd: fixture.record.worktreePath },
+          });
+          const user = JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "typed" }],
+            },
+          });
+          if (source === "wrong-uuid") {
+            // Same-size header keeps the original baseline on its exact LF boundary.
+            expect(Buffer.byteLength(`${header}\n`)).toBe(fixture.baseline.offsets[fixture.file]);
+            writeFileSync(fixture.file, `${header}\n${user}\n`);
+          } else {
+            writeFileSync(
+              fixture.file,
+              readFileSync(fixture.file).subarray(0, fixture.baseline.offsets[fixture.file]),
+            );
+            writeFileSync(join(fixture.root, "unlisted.jsonl"), `${header}\n${user}\n`);
+          }
+          // Both observations use the real adapter and scanner over ordinary unit files.
+          const ctx = {
+            worktreePath: fixture.record.worktreePath,
+            codexSessionsDir: fixture.root,
+            agentSessionId: "observer-native",
+          };
+          const strict = await fixture.realAgents.resumeAgentSubmitAckBinding(
+            "codex",
+            { ...ctx, codexAckScope: "current-native-baseline" },
+            fixture.baseline,
+          );
+          expect(await strict?.scan("typed")).toMatchObject({ found: false });
+          const legacy = await fixture.realAgents.resumeAgentSubmitAckBinding(
+            "codex",
+            ctx,
+            fixture.baseline,
+          );
+          expect(await legacy?.scan("typed")).toMatchObject({ found: true });
+
+          // Model the later healthy tick, after an independently owned healer cleared
+          // its diagnostic. Do not transplant or emulate that helper here.
+          const before = sessions.get("api-1");
+          expect(before?.error).toBeUndefined();
+          mockAgentActivity("codex", afterHold);
+          await service.get("api-1");
+          await service.get("api-1");
+
+          expect
+            .soft(resumeAgentSubmitAckBindingMock)
+            .toHaveBeenCalledWith(
+              "codex",
+              expect.objectContaining({ codexAckScope: "current-native-baseline" }),
+              fixture.baseline,
+            );
+          expect.soft(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+          expect
+            .soft(sessions.get("api-1")?.queuedMessageTyped)
+            .toEqual(before?.queuedMessageTyped);
+          expect.soft(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(eventsNamed("session.submit.released")).toHaveLength(0);
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          fixture.close();
+        }
+      },
+    );
+
+    it.each([
+      "qualified-empty",
+      "partial",
+      "unlisted-empty",
+      "unlisted-malformed",
+      "scan-depth",
+      "before-hold",
+      "no-activity",
+    ] as const)(
+      "keeps healthy no-ACK grace separate from unqualified evidence: %s",
+      async (evidence) => {
+        const fixture = await historicalAckFixture(`healthy-negative-${evidence}`);
+        try {
+          writeFileSync(
+            fixture.file,
+            readFileSync(fixture.file).subarray(0, fixture.baseline.offsets[fixture.file]),
+          );
+          if (evidence === "partial") appendFileSync(fixture.file, '{"type":');
+          if (evidence === "unlisted-empty") writeFileSync(join(fixture.root, "new.jsonl"), "");
+          if (evidence === "unlisted-malformed")
+            writeFileSync(join(fixture.root, "new.jsonl"), '{"type":');
+          if (evidence === "scan-depth")
+            mkdirSync(join(fixture.root, ...Array.from({ length: 10 }, () => "nested")), {
+              recursive: true,
+            });
+          if (evidence !== "no-activity")
+            mockAgentActivity(
+              "codex",
+              evidence === "before-hold" ? Date.parse(PENDING_LAUNCH_AT) - 1_000 : afterHold,
+            );
+          await fixture.service.get("api-1");
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(
+            evidence === "qualified-empty" ? 1 : 0,
+          );
+          if (evidence !== "qualified-empty") {
+            expect(fixture.sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+            expect(fixture.sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
+          }
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          fixture.close();
+        }
+      },
+    );
 
     it.each(["throw", "diagnostic"] as const)(
       "confirms historical Codex ACK during a %s probe failure",
@@ -62785,7 +62962,7 @@ describe("SessionService", () => {
         const sessions = createSessionStore();
         seedSendHold(sessions, agent);
         mockAgentActivity(agent, afterHold, "waiting");
-        mockHoldAckScan(false);
+        mockHoldAckScan(false, agent === "codex");
         const service = await deferredService();
 
         await service.get("api-1");
@@ -62811,7 +62988,7 @@ describe("SessionService", () => {
         const sessions = createSessionStore();
         seedSendHold(sessions, agent, { submitRequeuedMessage: "typed" });
         mockAgentActivity(agent, afterHold, "waiting");
-        mockHoldAckScan(false);
+        mockHoldAckScan(false, agent === "codex");
         // A fresh daemon: boot recovery leaves a held marker to the settle.
         const { SessionService } = await loadSessionServiceModule();
         const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

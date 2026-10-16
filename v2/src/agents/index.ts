@@ -162,6 +162,7 @@ export interface AgentSubmitAckContext {
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+  qualifiedNoMatch?: true;
 }
 
 export interface SubmitAckPacing {

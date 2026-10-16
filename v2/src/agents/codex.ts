@@ -232,15 +232,21 @@ function sessionResumeId(line: CodexSessionLine): string | null {
   return null;
 }
 
-export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+export async function collectJsonlFiles(
+  dir: string,
+  depth = 0,
+  requireComplete = false,
+): Promise<string[]> {
   if (depth > MAX_SESSION_SCAN_DEPTH) {
+    if (requireComplete) throw new Error("Incomplete rollout directory scan");
     return [];
   }
 
   let entries: string[];
   try {
     entries = await readdir(dir);
-  } catch {
+  } catch (error) {
+    if (requireComplete) throw error;
     return [];
   }
 
@@ -253,9 +259,10 @@ export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[
     }
     try {
       if ((await lstat(filePath)).isDirectory()) {
-        files.push(...(await collectJsonlFiles(filePath, depth + 1)));
+        files.push(...(await collectJsonlFiles(filePath, depth + 1, requireComplete)));
       }
-    } catch {
+    } catch (error) {
+      if (requireComplete) throw error;
       // Ignore inaccessible entries.
     }
   }
@@ -913,7 +920,7 @@ export async function scanCodexRolloutForMessage(
   messageText: string,
   baseline: RolloutBaseline,
   strict?: CodexSubmitAckScope,
-): Promise<{ found: boolean; lastScannedFile: string | null }> {
+): Promise<{ found: boolean; lastScannedFile: string | null; qualifiedNoMatch?: true }> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
@@ -921,6 +928,7 @@ export async function scanCodexRolloutForMessage(
     return { found: false, lastScannedFile: null };
   }
   let lastScannedFile: string | null = null;
+  let qualifiedNoMatch = false;
   const trimmedTarget = messageText.trim();
   for (const filePath of files) {
     lastScannedFile = filePath;
@@ -941,7 +949,7 @@ export async function scanCodexRolloutForMessage(
         ? await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
         : undefined;
       const observed = original ? await original.stat() : undefined;
-      if (observed && (!observed.isFile() || observed.size <= offset)) continue;
+      if (observed && (!observed.isFile() || observed.size < offset)) continue;
       if (strict && original && observed) {
         const boundary = Buffer.alloc(1);
         await original.read(boundary, 0, 1, offset - 1);
@@ -958,30 +966,32 @@ export async function scanCodexRolloutForMessage(
         )
           continue;
       }
-      const input = createReadStream(filePath, {
-        encoding: "utf-8",
-        start: offset,
-        ...(original && observed
-          ? { fd: original.fd, end: observed.size - 1, autoClose: false }
-          : {}),
-      });
-      const reader = createInterface({ input, crlfDelay: Infinity });
       let found = false;
-      try {
-        for await (const rawLine of reader) {
-          const trimmedLine = rawLine.trim();
-          if (!trimmedLine) continue;
-          const extracted = extractUserTextFromLine(trimmedLine, strict);
-          if (
-            extracted !== null &&
-            (strict ? extracted === messageText : extracted.trim() === trimmedTarget)
-          ) {
-            found = true;
-            if (!strict) break;
+      if (!observed || observed.size > offset) {
+        const input = createReadStream(filePath, {
+          encoding: "utf-8",
+          start: offset,
+          ...(original && observed
+            ? { fd: original.fd, end: observed.size - 1, autoClose: false }
+            : {}),
+        });
+        const reader = createInterface({ input, crlfDelay: Infinity });
+        try {
+          for await (const rawLine of reader) {
+            const trimmedLine = rawLine.trim();
+            if (!trimmedLine) continue;
+            const extracted = extractUserTextFromLine(trimmedLine, strict);
+            if (
+              extracted !== null &&
+              (strict ? extracted === messageText : extracted.trim() === trimmedTarget)
+            ) {
+              found = true;
+              if (!strict) break;
+            }
           }
+        } finally {
+          reader.close();
         }
-      } finally {
-        reader.close();
       }
       if (original && observed) {
         const current = await lstat(filePath);
@@ -998,6 +1008,7 @@ export async function scanCodexRolloutForMessage(
         )
           continue;
       }
+      if (strict && baseline.size === 1 && files.length === 1) qualifiedNoMatch = true;
       if (found) return { found: true, lastScannedFile: filePath };
     } catch {
       // Ignore unreadable files.
@@ -1005,7 +1016,20 @@ export async function scanCodexRolloutForMessage(
       await original?.close();
     }
   }
-  return { found: false, lastScannedFile };
+  if (qualifiedNoMatch) {
+    try {
+      const currentFiles = await collectJsonlFiles(sessionsDir, 0, true);
+      qualifiedNoMatch =
+        currentFiles.length === 1 && currentFiles.every((file) => baseline.has(file));
+    } catch {
+      qualifiedNoMatch = false;
+    }
+  }
+  return {
+    found: false,
+    lastScannedFile,
+    ...(qualifiedNoMatch ? { qualifiedNoMatch: true as const } : {}),
+  };
 }
 
 export interface CodexRolloutStateRecord {
