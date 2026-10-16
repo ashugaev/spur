@@ -3068,6 +3068,65 @@ describe("SessionService", () => {
     }
   });
 
+  it("cancels restore during an OpenCode compatibility probe and admits its successor after bounded reap", async () => {
+    mockClaudeJsonlState("waiting");
+    const directory = mkdtempSync(join(tmpdir(), "spur-restore-probe-"));
+    const pidFile = join(directory, "pid");
+    vi.stubEnv(
+      "SPUR_OPENCODE_BIN",
+      fileURLToPath(new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url)),
+    );
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const opencode = await vi.importActual<typeof openCodeModule>("../../src/agents/opencode.js");
+    setupAgentHooksMock.mockImplementationOnce(async () => {
+      await opencode.assertOpenCodeCompatibility();
+      return {};
+    });
+    const record = runningSession({
+      agent: "opencode",
+      agentSessionId: "ses_existing",
+      status: "stopped",
+      stopReason: "manual_pause",
+    });
+    sessions.set(record.id, record);
+    const controller = new AbortController();
+    const first = service.restore(record.id, {}, { signal: controller.signal });
+    const outcome = first.catch((error: unknown) => error);
+    let pid = 0;
+    try {
+      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
+      pid = Number(readFileSync(pidFile, "utf8"));
+      const canceledAt = Date.now();
+      controller.abort();
+      expect(await outcome).toMatchObject({ statusCode: 499 });
+      expect((await service.get(record.id)).lifecycle.operation?.phase).toBe("failed");
+      expect(() => process.kill(pid, 0)).not.toThrow();
+      const successor = service.restore(record.id);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(setupAgentHooksMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect((await successor).lifecycle.operation?.phase).toBe("succeeded");
+      expect(Date.now() - canceledAt).toBeLessThan(15_000);
+      expect(() => process.kill(pid, 0)).toThrow();
+      expect(setupAgentHooksMock).toHaveBeenCalledTimes(2);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      service.dispose();
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* Already reaped. */
+        }
+      }
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("spawns a session through one clear path and returns the enriched view", async () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();

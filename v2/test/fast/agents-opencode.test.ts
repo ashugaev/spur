@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -41,7 +42,9 @@ describe("OpenCode adapter", () => {
     onTestFinished,
   }) => {
     const directory = await mkdtemp(join(tmpdir(), "spur-opencode-version-"));
-    const executable = join(directory, "opencode");
+    const executable = fileURLToPath(
+      new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url),
+    );
     const pidFile = join(directory, "pid");
     onTestFinished(async () => {
       const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
@@ -55,12 +58,8 @@ describe("OpenCode adapter", () => {
       vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });
     });
-    await writeFile(
-      executable,
-      `#!/usr/bin/env node\nprocess.on("SIGTERM", () => {});\nrequire("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
-    );
-    await chmod(executable, 0o755);
     vi.stubEnv("SPUR_OPENCODE_BIN", executable);
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
     const startedAt = Date.now();
     await expect(assertOpenCodeCompatibility()).rejects.toMatchObject({
       cause: { killed: true, signal: "SIGKILL" },
