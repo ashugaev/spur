@@ -1613,13 +1613,11 @@ export async function startServer(
         }
         const view = await service.get(logsSessionId);
         const targets: { kind: "service" | "sidecar"; name: string; pane: string }[] = [];
-        let knownNamedTarget = false;
         if (scope !== "sidecar") {
           for (const serviceView of [...view.services].sort((a, b) =>
             a.serviceId.localeCompare(b.serviceId),
           )) {
             if (name && serviceView.serviceId !== name) continue;
-            knownNamedTarget = true;
             if (serviceView.runtimeAlive) {
               targets.push({
                 kind: "service",
@@ -1632,16 +1630,16 @@ export async function startServer(
         if (scope !== "service") {
           for (const sidecar of [...view.sidecars].sort((a, b) => a.name.localeCompare(b.name))) {
             if (name && sidecar.name !== name) continue;
-            knownNamedTarget = true;
             if (sidecar.alive || sidecar.deadPane) {
               targets.push({ kind: "sidecar", name: sidecar.name, pane: sidecar.tmuxSession });
             }
           }
         }
-        if (name && knownNamedTarget && targets.length === 0 && entries.length === 0) {
+        if (name && targets.length === 0 && entries.length === 0) {
           sendError(response, 404, `No retained pane for runtime ${name}`);
           return;
         }
+        const sources: SpurLogEntry[][] = entries.length ? [entries] : [];
         for (const target of targets) {
           const captured = await captureTmuxPane(target.pane, 200, { fresh: true });
           if (captured === null) {
@@ -1652,9 +1650,10 @@ export async function startServer(
             );
             return;
           }
+          const paneRows: SpurLogEntry[] = [];
           for (const line of captured.split(/\r?\n/)) {
             if (!line) continue;
-            entries.push({
+            paneRows.push({
               timestamp: new Date().toISOString(),
               event: `${target.kind}.output`,
               level: "info",
@@ -1666,8 +1665,30 @@ export async function startServer(
                   : { sidecarName: target.name },
             });
           }
+          if (paneRows.length) sources.push(paneRows);
         }
-        sendJson(response, 200, entries.slice(-limit));
+        const cursors = sources.map((rows) => rows.length - 1);
+        const selected = sources.map(() => [] as SpurLogEntry[]);
+        let count = 0;
+        while (count < limit) {
+          let added = false;
+          for (let index = 0; index < sources.length && count < limit; index++) {
+            const cursor = cursors[index];
+            if (cursor === undefined || cursor < 0) continue;
+            const row = sources[index]?.[cursor];
+            if (!row) continue;
+            selected[index]?.push(row);
+            cursors[index] = cursor - 1;
+            count++;
+            added = true;
+          }
+          if (!added) break;
+        }
+        sendJson(
+          response,
+          200,
+          selected.flatMap((rows) => rows.reverse()),
+        );
         return;
       }
 

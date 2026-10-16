@@ -123,10 +123,24 @@ describe("session runtime logs route", () => {
       expect(capture).toHaveBeenCalledWith("desk-1--web", 200, { fresh: true });
       capture.mockClear();
       expect(await logRows(port, "other-1", "scope=sidecar&name=web")).toEqual({
+        status: 404,
+        body: { error: "No retained pane for runtime web" },
+      });
+      expect(await logRows(port, "other-1", "scope=sidecar&name=web&limit=0")).toEqual({
         status: 200,
         body: [],
       });
       expect(capture).not.toHaveBeenCalled();
+      appendEventLog(dataDir, {
+        event: "sidecar.output",
+        level: "info",
+        sessionId: "other-1",
+        message: "ARCHIVED_ONLY",
+        details: { sidecarName: "web" },
+      });
+      expect((await logRows(port, "other-1", "scope=sidecar&name=web")).body).toMatchObject([
+        { message: "ARCHIVED_ONLY" },
+      ]);
     } finally {
       await stop();
     }
@@ -164,8 +178,8 @@ describe("session runtime logs route", () => {
       ]);
       const limited = await logRows(port, "demo-1", "scope=all&limit=2");
       expect((limited.body as { message: string }[]).map((row) => row.message)).toEqual([
-        "a-sidecar",
-        "z-sidecar",
+        "ARCHIVE",
+        "a-pane",
       ]);
       expect((await logRows(port, "demo-1", "scope=service&name=z")).body).toMatchObject([
         { message: "z-pane", event: "service.output" },
@@ -174,6 +188,29 @@ describe("session runtime logs route", () => {
         { message: "a-sidecar", event: "sidecar.output" },
       ]);
       expect((await logRows(port, "demo-1", "scope=runtime&limit=0")).body).toEqual([]);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("keeps a service failure beside 200 sidecar lines under the default cap", async () => {
+    const { port, stop } = await bootServer();
+    vi.spyOn(SessionService.prototype, "get").mockResolvedValue(runtimeView());
+    const sidecarLines = Array.from({ length: 200 }, (_, index) => `SIDE_${index + 1}`);
+    vi.spyOn(runtimeTmux, "captureTmuxPane").mockImplementation(async (target) =>
+      target === "demo-1--service-api" ? "FRESH_FAILURE" : sidecarLines.join("\n"),
+    );
+    try {
+      const result = await logRows(port, "demo-1", "scope=runtime");
+      expect(result.status).toBe(200);
+      const rows = result.body as { message: string }[];
+      expect(rows).toHaveLength(200);
+      expect(rows.map((row) => row.message)).toEqual(["FRESH_FAILURE", ...sidecarLines.slice(1)]);
+      const sidecarOnly = await logRows(port, "demo-1", "scope=sidecar&limit=2");
+      expect((sidecarOnly.body as { message: string }[]).map((row) => row.message)).toEqual([
+        "SIDE_199",
+        "SIDE_200",
+      ]);
     } finally {
       await stop();
     }
@@ -275,6 +312,10 @@ describe("session runtime logs route", () => {
       expect((await logRows(port, "demo-1", "scope=service&name=api&limit=1")).body).toMatchObject([
         { event: "service.output", message: "OLD" },
       ]);
+      expect(await logRows(port, "demo-1", "scope=sidecar&name=unknown")).toEqual({
+        status: 200,
+        body: [],
+      });
       expect(get).not.toHaveBeenCalled();
     } finally {
       await stop();
