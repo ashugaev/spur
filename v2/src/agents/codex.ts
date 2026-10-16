@@ -993,6 +993,11 @@ export async function scanCodexRolloutForMessage(
           reader.close();
         }
       }
+      if (strict && !found && baseline.size === 1 && files.length === 1) {
+        const currentFiles = await collectJsonlFiles(sessionsDir, 0, true);
+        if (currentFiles.length !== 1 || !currentFiles.every((file) => baseline.has(file)))
+          continue;
+      }
       if (original && observed) {
         const current = await lstat(filePath);
         const held = await original.stat();
@@ -1014,15 +1019,6 @@ export async function scanCodexRolloutForMessage(
       // Ignore unreadable files.
     } finally {
       await original?.close();
-    }
-  }
-  if (qualifiedNoMatch) {
-    try {
-      const currentFiles = await collectJsonlFiles(sessionsDir, 0, true);
-      qualifiedNoMatch =
-        currentFiles.length === 1 && currentFiles.every((file) => baseline.has(file));
-    } catch {
-      qualifiedNoMatch = false;
     }
   }
   return {
