@@ -97,6 +97,19 @@ function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceI
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
 }
 
+function ignoredGitHubFeedbackDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-ignored-feedback", projectId, sourceId);
+}
+
+function ignoredGitHubFeedbackFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(ignoredGitHubFeedbackDir(dataDir, projectId, sourceId), `${sessionId}.json`);
+}
+
 function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-review-pagination", projectId, `${sourceId}.json`);
 }
@@ -1247,48 +1260,6 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
-// A dir removed between the parent readdir and this one is skipped; every
-// other readdir failure still throws.
-function scanProjectDir(projectDir: string, visited: Set<string>, sessions: SessionRecord[]): void {
-  let fileNames: string[];
-  try {
-    fileNames = readdirSync(projectDir);
-  } catch (error) {
-    if (isRecord(error) && error["code"] === "ENOENT") return;
-    throw error;
-  }
-  for (const fileName of fileNames) {
-    if (!fileName.endsWith(".json")) continue;
-    const filePath = join(projectDir, fileName);
-    visited.add(filePath);
-    const session = tryReadSessionFile(filePath);
-    if (session) {
-      sessions.push(session);
-    }
-  }
-}
-
-// Project dirs named by an index value (sessions/<project>/<id>.json), computed
-// once per index object: readSessionIndex returns the same object while the
-// index file fingerprint is unchanged.
-const indexProjectSegments = new WeakMap<object, ReadonlySet<string>>();
-
-function projectSegmentsOf(index: Readonly<Record<string, string>>): ReadonlySet<string> {
-  const cached = indexProjectSegments.get(index);
-  if (cached) return cached;
-  const segments = new Set<string>();
-  for (const path of Object.values(index)) {
-    const project = path.split(sep)[1];
-    if (project) segments.add(project);
-  }
-  indexProjectSegments.set(index, segments);
-  return segments;
-}
-
-function sortNewestFirst(sessions: SessionRecord[]): SessionRecord[] {
-  return sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-}
-
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
@@ -1296,38 +1267,26 @@ export function listSessions(dataDir: string): SessionRecord[] {
     return [];
   }
 
-  // Per-session log shard dirs (sessions/<sessionId>) sit beside project dirs
-  // and hold no records. An indexed session id that no index value uses as a
-  // project segment is a shard dir: skip it.
-  const index = readSessionIndex(dataDir);
-  const projectSegments = projectSegmentsOf(index);
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    if (Object.hasOwn(index, entry.name) && !projectSegments.has(entry.name)) continue;
-    scanProjectDir(join(rootDir, entry.name), visited, sessions);
+    const projectDir = join(rootDir, entry.name);
+    for (const fileName of readdirSync(projectDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      const filePath = join(projectDir, fileName);
+      visited.add(filePath);
+      const session = tryReadSessionFile(filePath);
+      if (session) {
+        sessions.push(session);
+      }
+    }
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
 
-  return sortNewestFirst(sessions);
-}
-
-export function listProjectSessions(dataDir: string, projectId: string): SessionRecord[] {
-  const projectDir = join(dataDir, "sessions", projectId);
-  const sessions: SessionRecord[] = [];
-  const visited = new Set<string>();
-  scanProjectDir(projectDir, visited, sessions);
-  pruneStaleSessionFileCacheEntries(projectDir, visited);
-  return sortNewestFirst(sessions);
-}
-
-// Same cached object listSessions returns for an unchanged file; null when the
-// record is missing.
-export function readListedSession(dataDir: string, sessionId: string): SessionRecord | null {
-  const path = findSessionFilePath(dataDir, sessionId);
-  return path ? tryReadSessionFile(path) : null;
+  sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return sessions;
 }
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
@@ -1624,6 +1583,71 @@ function readIdRegistry(path: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+export function readIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+): Set<string> {
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`, { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.prNumber !== "number" ||
+    !Number.isSafeInteger(parsed.prNumber) ||
+    parsed.prNumber <= 0 ||
+    !Array.isArray(parsed.ids) ||
+    !parsed.ids.every((id: unknown) => typeof id === "string")
+  ) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`);
+  }
+  return parsed.prNumber === prNumber ? new Set<string>(parsed.ids) : new Set();
+}
+
+export function recordIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  ids: readonly string[],
+): void {
+  if (ids.length === 0) return;
+  const known = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, sessionId, prNumber);
+  for (const id of ids) known.add(id);
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  writeJsonFile(path, { prNumber, ids: [...known].sort() });
+}
+
+export function listIgnoredGitHubFeedbackSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string[] {
+  const dir = ignoredGitHubFeedbackDir(dataDir, projectId, sourceId);
+  return existsSync(dir)
+    ? readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => name.slice(0, -5))
+    : [];
+}
+
+export function deleteIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId), { force: true });
 }
 
 export function readAvailableBacklogItems(

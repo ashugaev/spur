@@ -6959,6 +6959,7 @@ describe("startConfiguredTriggers", () => {
       readPendingSendBatchesMock.mockReturnValue(new Map([[queueKey, persisted]]));
       const deliverMock = vi.fn().mockResolvedValue(undefined);
       const { startConfiguredTriggers } = await loadTriggersModule();
+      const bus = new EventBus();
       const controller = startConfiguredTriggers({
         config: {
           dataDir: DATA_DIR,
@@ -6971,11 +6972,11 @@ describe("startConfiguredTriggers", () => {
             },
           },
         } as never,
-        bus: new EventBus(),
+        bus,
         sessionService: { get: getMock, deliver: deliverMock } as never,
         logger: { warn: vi.fn() },
       });
-      return { controller, deliverMock };
+      return { controller, deliverMock, bus };
     }
 
     it("queues at most one tick flush per key while one is in flight, then delivers once", async () => {
@@ -7009,6 +7010,67 @@ describe("startConfiguredTriggers", () => {
       } finally {
         await controller.stop();
       }
+    });
+
+    it("retains new source messages while a tick is held and delivers every message once", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi
+        .fn()
+        .mockImplementationOnce(() => held.promise)
+        .mockResolvedValue(sessionIn("working", new Date().toISOString()));
+      const { controller, deliverMock, bus } = await startRestored(getMock);
+      try {
+        await vi.advanceTimersByTimeAsync(20_000);
+        for (const messageId of [2, 3]) {
+          bus.emit({
+            name: "telegram:message",
+            occurrenceId: `tg-${messageId}`,
+            projectId: "api",
+            sourceId: "tg",
+            data: {
+              sessionId: "api-1",
+              chatId: 123,
+              userId: 7,
+              messageId,
+              text: `new message ${messageId}`,
+            },
+          });
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(getMock).toHaveBeenCalledTimes(1);
+        held.resolve(sessionIn("working", new Date().toISOString()));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deliverMock).not.toHaveBeenCalled();
+        getMock.mockResolvedValue(sessionIn("waiting", staleActivity()));
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+        const delivered = deliverMock.mock.calls[0]?.[1] as string;
+        expect(delivered).toContain("held");
+        expect(delivered).toContain("new message 2");
+        expect(delivered).toContain("new message 3");
+        expect(readPendingSendBatchesMock().has(queueKey)).toBe(false);
+      } finally {
+        await controller.stop();
+      }
+    });
+
+    it("drains the held tick on shutdown and preserves pending data", async () => {
+      const held = deferred<ReturnType<typeof sessionIn>>();
+      const getMock = vi.fn().mockImplementation(() => held.promise);
+      const { controller, deliverMock } = await startRestored(getMock);
+      await vi.advanceTimersByTimeAsync(20_000);
+      let stopped = false;
+      const stopping = controller.stop().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      held.resolve(sessionIn("working", new Date().toISOString()));
+      await stopping;
+      expect(stopped).toBe(true);
+      expect(getMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(readPendingSendBatchesMock().has(queueKey)).toBe(true);
     });
 
     it("still enqueues the interactive flush timer while a tick flush is in flight", async () => {

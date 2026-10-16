@@ -95,10 +95,6 @@ vi.mock("../../src/metadata.js", () => ({
   listActiveServiceProblems: vi.fn().mockReturnValue([]),
   listServiceInstancesForSession: vi.fn().mockReturnValue([]),
   listSessions: listSessionsMock,
-  listProjectSessions: (dataDir: string, projectId: string) =>
-    listSessionsMock(dataDir).filter((session: SessionRecord) => session.project === projectId),
-  readListedSession: (dataDir: string, sessionId: string) =>
-    listSessionsMock(dataDir).find((session: SessionRecord) => session.id === sessionId) ?? null,
   readServiceInstance: vi.fn(),
   readSession: readSessionMock,
   writeServiceInstance: vi.fn(),

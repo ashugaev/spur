@@ -248,9 +248,7 @@ import {
   readAvailableBacklogItems,
   listServiceInstances,
   listServiceInstancesForSession,
-  listProjectSessions,
   listSessions,
-  readListedSession,
   readTelegramBindings,
   readServiceInstance,
   readSession,
@@ -4676,7 +4674,9 @@ export class SessionService {
       const currentOwner = readSession(this.config.dataDir, entry.ownerId);
       if (
         currentOwner &&
-        this.listDeskSessions(currentOwner).some((member) => hasRetainedSessionError(member))
+        this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
+          hasRetainedSessionError(member),
+        )
       ) {
         this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
         continue;
@@ -6020,7 +6020,7 @@ export class SessionService {
 
   private lifecycleSource(record: SessionRecord): SessionRecord {
     if (this.lifecycle.snapshot(record.id).revision === 0) return record;
-    const current = readListedSession(this.config.dataDir, record.id);
+    const current = listSessions(this.config.dataDir).find((session) => session.id === record.id);
     return current && isDeepStrictEqual(current, record) ? current : record;
   }
 
@@ -6062,9 +6062,12 @@ export class SessionService {
     }
     const changed = (row: (typeof rows)[number]) => {
       const receipt = this.lifecycle.snapshot(row.view.id);
-      const current = readListedSession(this.config.dataDir, row.view.id);
-      if (!current) return true;
+      if (!readSession(this.config.dataDir, row.view.id)) return true;
       if (receipt.revision === 0 && row.revision === 0) return false;
+      const current = listSessions(this.config.dataDir).find(
+        (session) => session.id === row.view.id,
+      );
+      if (!current) return true;
       return (
         current !== row.source ||
         receipt.revision !== row.revision ||
@@ -7329,10 +7332,7 @@ export class SessionService {
     }
     this.reaperRunning = true;
     try {
-      // One listing for the whole pass: the sibling precheck below reads it
-      // instead of re-listing per terminal session. The pre-kill check re-reads.
-      const passBatch = listSessions(this.config.dataDir);
-      const sessions = passBatch.filter(
+      const sessions = listSessions(this.config.dataDir).filter(
         (session) =>
           REAPABLE_SESSION_STATUSES.has(session.status) &&
           !hasRetainedSessionError(session) &&
@@ -7399,8 +7399,7 @@ export class SessionService {
         // policy pass (collectSidecarReapCandidates): any non-terminal member
         // holds the shared pane.
         const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 &&
-          this.hasActiveWorkspaceMembers(session, passBatch);
+          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's
@@ -7419,8 +7418,6 @@ export class SessionService {
           const ownerId = this.sidecarOwnerIdForName(session, reapProject, sidecarName);
           const owner = readSession(this.config.dataDir, ownerId);
           const paneAlive = await sidecarTmuxAlive(ownerId, sidecarName);
-          // No live pane and no recorded identity: nothing below acts.
-          if (!paneAlive && !owner?.sidecarProcs?.[sidecarName]) continue;
           // The established-connection veto, applied here too — this loop
           // reaches a desk-shared sidecar by owner id the same as the
           // reaper-tick candidate pass, and is not exempt from the same hard
@@ -7441,18 +7438,11 @@ export class SessionService {
           const currentOwner = readSession(this.config.dataDir, ownerId);
           if (
             currentOwner &&
-            this.listDeskSessions(currentOwner).some((member) => hasRetainedSessionError(member))
+            this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
+              hasRetainedSessionError(member),
+            )
           )
             continue;
-          // passBatch can be minutes old by now: a sibling restored since the
-          // precheck must still hold a desk-shared pane, so re-read before the kill.
-          if (
-            reapSidecar !== undefined &&
-            !reapSidecar.mcp &&
-            this.hasActiveWorkspaceMembers(session)
-          ) {
-            continue;
-          }
           if (paneAlive) {
             await this.reapSidecarByName(ownerId, sidecarName);
             this.clearSidecarProcEntry(ownerId, sidecarName);
@@ -10429,6 +10419,11 @@ export class SessionService {
     return views.filter(included);
   }
 
+  getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
+    const { id, agent } = this.requireSession(sessionId);
+    return { id, agent };
+  }
+
   async get(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -12438,7 +12433,15 @@ export class SessionService {
           // spawn is already failing; a survivor throw here would bury the
           // original error instead of surfacing it.
           await this.killAgentPaneAndConfirmExit(
-            { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+            {
+              id: sessionId,
+              tmuxSession: sessionId,
+              agent,
+              launchCommand: "",
+              ...(launchCandidate?.agentLaunchId
+                ? { agentLaunchId: launchCandidate.agentLaunchId }
+                : {}),
+            },
             { failOnSurvivors: false },
           );
           // Non-mcp project sidecars are desk-shared: a sibling can already be
@@ -12592,6 +12595,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     workspacePath: string,
     finalFailure: boolean,
+    agentLaunchId: string | undefined,
   ): Promise<void> {
     // Called from the background-spawn retry catch, which wraps every stage
     // from tmux.create through record.write — same rationale as the
@@ -12605,6 +12609,7 @@ export class SessionService {
         tmuxSession: prepared.sessionId,
         agent: prepared.agent,
         launchCommand: prepared.placeholder.launchCommand,
+        ...(agentLaunchId ? { agentLaunchId } : {}),
       },
       { failOnSurvivors: false },
     );
@@ -12681,10 +12686,7 @@ export class SessionService {
 
   private listDeskSessions(
     session: SessionRecord,
-    sessionBatch: readonly SessionRecord[] = listProjectSessions(
-      this.config.dataDir,
-      session.project,
-    ),
+    sessionBatch: readonly SessionRecord[] = listSessions(this.config.dataDir),
   ): SessionRecord[] {
     const anchor = workspaceIdOf(session);
     return sessionBatch
@@ -12750,13 +12752,9 @@ export class SessionService {
   private someDeskSibling(
     session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
     match: (sibling: SessionRecord) => boolean,
-    sessionBatch: readonly SessionRecord[] = listProjectSessions(
-      this.config.dataDir,
-      session.project,
-    ),
   ): boolean {
     const anchor = workspaceIdOf(session);
-    return sessionBatch.some(
+    return listSessions(this.config.dataDir).some(
       (s) =>
         s.id !== session.id &&
         s.project === session.project &&
@@ -12770,9 +12768,8 @@ export class SessionService {
   // errored member counts — restore brings it back into the same workspace.
   private hasActiveWorkspaceMembers(
     session: Pick<SessionRecord, "id" | "project" | "workspaceId" | "deskId">,
-    sessionBatch?: readonly SessionRecord[],
   ): boolean {
-    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status), sessionBatch);
+    return this.someDeskSibling(session, (s) => !isTerminalSessionStatus(s.status));
   }
 
   // Running or error-bearing siblings retain shared sidecars and ports.
@@ -12809,7 +12806,7 @@ export class SessionService {
     session: SessionRecord,
     excludeId?: string,
   ): Promise<boolean> {
-    for (const member of this.listDeskSessions(session)) {
+    for (const member of this.listDeskSessions(session, listSessions(this.config.dataDir))) {
       if (member.id === excludeId) continue;
       if (await this.memberRetainsResources(member)) return true;
     }
@@ -13606,7 +13603,12 @@ export class SessionService {
         this.spawnWasKilled(sessionId) ||
         attempt >= SPAWN_RETRY_ATTEMPTS ||
         initialPromptSent;
-      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalAttempt);
+      await this.cleanupBackgroundSpawnAttempt(
+        prepared,
+        workspacePath,
+        finalAttempt,
+        launchCandidate?.agentLaunchId,
+      );
       // Re-read after the cleanup await: a kill can land during it.
       const killed = this.spawnWasKilled(sessionId);
       const finalFailure = finalAttempt || killed;
@@ -17057,10 +17059,13 @@ export class SessionService {
   }
 
   private async killAgentPaneAndConfirmExit(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
+    >,
     options: { failOnSurvivors: boolean },
   ): Promise<void> {
-    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17072,7 +17077,10 @@ export class SessionService {
       });
     }
     const capture = await capturePaneAgentProcesses({
+      sessionId: session.id,
+      agentLaunchId: session.agentLaunchId,
       panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+      paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
       processMatchers: sessionProcessMatchers(session),
     });
     if (capture.status === "unavailable") {
@@ -18170,7 +18178,7 @@ export class SessionService {
             failure,
           },
         });
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+        await this.killAgentPaneAndConfirmExit(failedAttempt, { failOnSurvivors: true });
         usedFreshLaunch = true;
         agentLaunchId = newAgentLaunchId();
         env = buildLaunchEnv(agentLaunchId);
@@ -19021,7 +19029,7 @@ export class SessionService {
         if (launched) {
           await this.retainLaunchedError(launchCandidate, error);
         } else if (cleanupGeneration) {
-          await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+          await this.killAgentPaneAndConfirmExit(launchCandidate, { failOnSurvivors: false });
           await this.cleanupSessionServices(latest);
         }
       });

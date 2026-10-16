@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import type * as GateModule from "../../src/review-gate.js";
 import {
   evaluateSnapshot,
+  changedEvidenceCategories,
   readGateSnapshot,
   GateGitHub,
   type GateSnapshot,
@@ -109,6 +110,135 @@ const strictPolicy = {
   ciJobs: ["Quality", "Playwright E2E", "Runtime Integration", "Real-Agent Smoke"],
 };
 type GateReader = Pick<typeof GateModule, "GateGitHub" | "readGateSnapshot" | "evaluateSnapshot">;
+function sameRepositoryFixture(): GateSnapshot {
+  const snapshot = fixture();
+  for (const branch of ["head", "base"])
+    (snapshot.pr[branch] as Record<string, unknown>).repo = {
+      id: 1175941090,
+      full_name: policy.repository,
+      pushed_at: "2026-10-05T12:00:00Z",
+    };
+  return snapshot;
+}
+test.each(["head", "base", "both"])(
+  "coupled %s repository timestamps preserve approved and blocked evidence without mutation",
+  (branch) => {
+    for (const blocked of [false, true]) {
+      const before = sameRepositoryFixture();
+      if (blocked) before.unresolved = 1;
+      const after = structuredClone(before);
+      for (const name of ["head", "base"]) {
+        const data = after.pr[name] as { repo: Record<string, unknown> };
+        if (branch === name || branch === "both") data.repo.pushed_at = null;
+        Object.freeze(data.repo);
+        Object.freeze(data);
+      }
+      Object.freeze(after.pr);
+      Object.freeze(after);
+      const raw = JSON.stringify(after);
+      expect(evaluateSnapshot(policy, 5, before).status).toBe(blocked ? "BLOCKED" : "APPROVED");
+      expect(evaluateSnapshot(policy, 5, after)).toEqual(evaluateSnapshot(policy, 5, before));
+      expect(changedEvidenceCategories(before, after)).toBe("other evidence");
+      expect(JSON.stringify(after)).toBe(raw);
+    }
+  },
+);
+test.each([
+  ["id", undefined],
+  ["id", null],
+  ["id", "1175941090"],
+  ["id", 0],
+  ["id", -1],
+  ["id", 1.5],
+  ["id", NaN],
+  ["id", Infinity],
+  ["id", Number.MAX_SAFE_INTEGER + 1],
+  ["id", 2],
+  ["full_name", undefined],
+  ["full_name", null],
+  ["full_name", ""],
+  ["full_name", "owner/repo/extra"],
+  ["full_name", " owner/repo"],
+  ["full_name", "other/repo"],
+] as const)("blocked ambiguous repository %s=%s retains coupled head timestamp", (key, value) => {
+  for (const branch of ["head", "base"]) {
+    const before = sameRepositoryFixture();
+    before.unresolved = 1;
+    (before.pr[branch] as { repo: Record<string, unknown> }).repo[key] = value;
+    const after = structuredClone(before);
+    for (const name of ["head", "base"])
+      (after.pr[name] as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+    expect(changedEvidenceCategories(before, after)).toBe("pr");
+  }
+});
+test.each(["__proto__", "constructor", "prototype", "toJSON", "id", "full_name"])(
+  "blocked repository clone retains own %s evidence and raw bytes",
+  (key) => {
+    const before = sameRepositoryFixture();
+    before.unresolved = 1;
+    const after = structuredClone(before);
+    const repo = (after.pr.head as { repo: Record<string, unknown> }).repo;
+    Object.defineProperty(repo, key, { value: "changed", enumerable: true });
+    Object.freeze(repo);
+    const raw = JSON.stringify(after);
+    expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+      evaluateSnapshot(policy, 5, before).fingerprint,
+    );
+    expect(changedEvidenceCategories(before, after)).toBe("pr");
+    expect(JSON.stringify(after)).toBe(raw);
+  },
+);
+test.each([
+  "created_at",
+  "updated_at",
+  "identity",
+  "reviews",
+  "comments",
+  "files",
+  "runs",
+  "jobs",
+  "ciAnchors",
+])("coupled repository timestamps retain blocked %s security evidence", (field) => {
+  const before = sameRepositoryFixture();
+  before.unresolved = 1;
+  const after = structuredClone(before);
+  for (const name of ["head", "base"])
+    (after.pr[name] as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+  if (field === "identity")
+    for (const name of ["head", "base"])
+      (after.pr[name] as { repo: Record<string, unknown> }).repo.id = 2;
+  else if (field === "created_at" || field === "updated_at") after.pr[field] = "changed";
+  else if (field === "ciAnchors") {
+    const anchor = after.ciAnchors[0];
+    if (!anchor) throw new Error("missing fixture anchor");
+    anchor.merge = "e".repeat(40);
+  } else {
+    const key = field as "reviews" | "comments" | "files" | "runs" | "jobs";
+    after[key][0] = { ...after[key][0], secret: "private-value" };
+  }
+  expect(evaluateSnapshot(policy, 5, after).fingerprint).not.toBe(
+    evaluateSnapshot(policy, 5, before).fingerprint,
+  );
+  expect(changedEvidenceCategories(before, after)).not.toContain("private-value");
+});
+test("changed evidence diagnostics contain only fixed categories", () => {
+  const before = sameRepositoryFixture(),
+    after = structuredClone(before);
+  after.pr.secret = "private-value";
+  after.reviews.push({ secret: "private-value" });
+  after.comments.push({ secret: "private-value" });
+  after.files.push({ secret: "private-value" });
+  after.unresolved = 1;
+  after.runs.push({ secret: "private-value" });
+  after.ciAnchors.push({ runId: 2, merge: "secret", parents: [] });
+  after.jobs.push({ secret: "private-value" });
+  expect(changedEvidenceCategories(before, after)).toBe(
+    "pr, reviews, comments, files, threads, ci, anchors, jobs",
+  );
+});
 function unlistedJob() {
   return {
     id: 113418892331,
@@ -886,6 +1016,8 @@ test.each([
   "merge-head",
   "abort-after-precheck",
   "abort-negative-completion",
+  "coupled-blocked",
+  "coupled-retained",
   ...equivalentChanges,
   "new-successful-attempt",
   "new-successful-run",
@@ -899,7 +1031,8 @@ test.each([
 ])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
   async (mode) => {
-    const snapshot = fixture();
+    const snapshot = mode.startsWith("coupled-") ? sameRepositoryFixture() : fixture();
+    if (mode.startsWith("coupled-")) snapshot.unresolved = 1;
     const negative = nativeNegativeModes.some((value) => value === mode);
     if (["missing-code", "negative-outsider", "negative-threads"].includes(mode))
       snapshot.reviews = snapshot.reviews.filter((row) => row.id !== policy.codeActor);
@@ -1027,6 +1160,12 @@ test.each([
         reads++;
         if (reads === 3) {
           changeEquivalent(snapshot, mode);
+          if (mode.startsWith("coupled-")) {
+            for (const name of ["head", "base"])
+              (snapshot.pr[name] as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
+            if (mode === "coupled-retained")
+              snapshot.comments[0] = { ...snapshot.comments[0], updated_at: "private-value" };
+          }
           if (mode === "unlisted-churn") snapshot.jobs.pop();
           if (mode === "corrupt-unlisted") {
             const extra = snapshot.jobs.at(-1);
@@ -1129,6 +1268,16 @@ test.each([
           expect(requestPaths).toHaveLength(mode === "all-native-negative" ? 9 : 5);
         }
         if (mode === "native-page-two") expect(reviewRequests).toBe(6);
+        if (mode === "coupled-blocked")
+          expect(writes.at(-1)?.output?.summary).toBe("unresolved-threads");
+        if (mode === "coupled-retained")
+          expect(writes.at(-1)?.output?.summary).toBe(
+            "Evidence changed during evaluation: comments",
+          );
+        if (mode === "moved")
+          expect(writes.at(-1)?.output?.summary).toBe(
+            "Evidence changed during evaluation: pr, jobs",
+          );
         if (
           [
             "native-revoked",
