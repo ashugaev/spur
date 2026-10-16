@@ -7,7 +7,14 @@ import {
 import { SessionLifecycleError } from "../../src/session-lifecycle.js";
 import { SessionResourceNotFoundError } from "../../src/session-service.js";
 import type { SourceSpawnSessionRequest, SourceWorkbench } from "../../src/event-sources/types.js";
+import type * as TimersPromises from "node:timers/promises";
 import type { ProjectListEntry, SessionView } from "../../src/types.js";
+
+// Route node:timers/promises through the global timer so vi fake timers control it.
+vi.mock("node:timers/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof TimersPromises>()),
+  setTimeout: (ms: number) => new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms)),
+}));
 
 function session(overrides: Partial<SessionView> = {}): SessionView {
   return {
@@ -293,6 +300,29 @@ describe("sourceSessionById", () => {
       .mockResolvedValueOnce(session());
     expect(await sourceSessionById({ get }, "demo-1")).toMatchObject({ id: "demo-1" });
     expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits 250ms then 750ms between snapshot-change retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const get = vi
+        .fn()
+        .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+        .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+        .mockResolvedValueOnce(session());
+      const result = sourceSessionById({ get }, "demo-1");
+      await vi.advanceTimersByTimeAsync(249);
+      expect(get).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(get).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(749);
+      expect(get).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(get).toHaveBeenCalledTimes(3);
+      expect(await result).toMatchObject({ id: "demo-1" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rethrows after three snapshot changes", async () => {

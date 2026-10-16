@@ -4038,6 +4038,85 @@ describe("telegramSourceModule", () => {
     expect(busyReplies).toHaveLength(1);
   });
 
+  it("edits the ack to the gone notice with no extra reply", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, listSessions } = await startSource(dataDir);
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    listSessions.mockResolvedValue([]);
+    const textCtx = telegramContext();
+    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      77,
+      "Spur session api-1 is gone. Unbound. Use /watch or /spawn.",
+    );
+    expect(textCtx.reply).toHaveBeenCalledTimes(1);
+  });
+
+  it("edits the ack to the awaiting-project notice for a bound topic with a gone session", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const { bot, listSessions } = await startSource(dataDir, vi.fn(), vi.fn(), {
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    await bot.emitText(telegramContext({ text: "/spawn codex" }));
+    listSessions.mockResolvedValue([]);
+    const textCtx = telegramContext({ text: "not a project pick" });
+    textCtx.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    await bot.emitText(textCtx);
+
+    expect(textCtx.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      77,
+      "Pick a project for the pending /spawn, or run /spawn again.",
+    );
+    expect(textCtx.reply).toHaveBeenCalledTimes(1);
+  });
+
+  it("edits the ack to the spawn-busy notice with no extra reply", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue([{ id: "api-1", project: "api", agent: "codex", state: "waiting" }]);
+    let resolveSpawn: (value: unknown) => void = () => {};
+    const spawnSession = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        resolveSpawn = resolve;
+      }),
+    );
+    const { bot } = await startSource(dataDir, vi.fn(), spawnSession, {
+      listSessions,
+      config: autoSpawnConfig,
+    });
+    if (!bot) throw new Error("missing bot");
+    await bot.emitText(telegramContext({ text: "/watch api-1" }));
+    listSessions.mockResolvedValue([]);
+    const ctx1 = telegramContext({ text: "first" });
+    const ctx2 = telegramContext({ text: "second" });
+    ctx2.reply.mockResolvedValueOnce({ message_id: 77 });
+
+    const a = bot.emitText(ctx1);
+    const b = bot.emitText(ctx2);
+    resolveSpawn({ id: "shp-6", project: "spur-shepherd", agent: "opencode", state: "working" });
+    await Promise.all([a, b]);
+
+    expect(ctx2.api.editMessageText).toHaveBeenCalledWith(
+      -1001,
+      77,
+      "Spawn already in progress here.",
+    );
+    expect(ctx2.reply).toHaveBeenCalledTimes(1);
+  });
+
   it("auto-spawns after the bound session disappears", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -5253,6 +5332,7 @@ describe("telegramSourceModule inbound delivery under lookup failure", () => {
 
     expect(ctx.api.editMessageText).toHaveBeenCalledWith(-1001, 77, UNDELIVERED);
     expect(ctx.reply).toHaveBeenCalledTimes(1);
+    expect(ctx.reply).not.toHaveBeenCalledWith(UNDELIVERED);
     expect(emit).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("telegram update failed: lookup failed"),
