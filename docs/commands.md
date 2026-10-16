@@ -37,7 +37,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry). CLI daemon requests are deadline-bounded per method and an unresponsive `/info` fails without auto-start; a timed-out mutation may still be applied (values in `v2/src/client.ts`).
 
 ## init
 
