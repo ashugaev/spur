@@ -575,7 +575,7 @@ TOOL_ARGUMENTS = {
 }
 TOOL_DECLARATIONS = [{"name": name, "description": "Return a sandbox submission receipt or observed state; not task completion.",
                       "parameters": {"type": "OBJECT", "properties": properties,
-                                     "required": list(required), "additionalProperties": False}}
+                                     "required": list(required)}}
                      for name, (properties, required) in TOOL_ARGUMENTS.items()]
 
 

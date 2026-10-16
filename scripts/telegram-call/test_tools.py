@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from google import genai
 from google.genai import types
 
 import bridge
@@ -83,8 +84,6 @@ class DirectToolsTests(unittest.IsolatedAsyncioTestCase):
         declared = types.Tool(function_declarations=bridge.TOOL_DECLARATIONS)
         self.assertEqual([item.name for item in declared.function_declarations],
                          ["list_agents", "read_agent", "start_agent", "send_to_agent"])
-        for item in bridge.TOOL_DECLARATIONS:
-            self.assertFalse(item["parameters"]["additionalProperties"])
         invalid = [
             ("ask_shepherd", {"message": "start"}), ("list_agents", {"url": "external"}),
             ("read_agent", {}), ("read_agent", {"session_id": "../other"}),
@@ -105,6 +104,41 @@ class DirectToolsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.invoke(name, args, str(index)), {"status": "invalid_request"})
         self.assertEqual(self.requests, [])
         self.runtime.check.assert_not_awaited()
+
+    async def test_public_live_connection_serializes_supported_four_tool_wire_schema(self):
+        socket = SimpleNamespace(send=AsyncMock(), recv=AsyncMock(return_value='{"setupComplete": {}}'))
+        connection = AsyncMock()
+        connection.__aenter__.return_value = socket
+        client = genai.Client(api_key="offline-key")
+        try:
+            with patch("google.genai.live.ws_connect", return_value=connection):
+                async with client.aio.live.connect(model="configured", config=bridge.live_config()) as session:
+                    self.assertIsNotNone(session.setup_complete)
+        finally:
+            await client.aio.aclose()
+            client.close()
+        wire = json.loads(socket.send.await_args.args[0])
+        self.assertNotIn("additional_properties", json.dumps(wire))
+        self.assertNotIn("additionalProperties", json.dumps(wire))
+        tools = wire["setup"]["tools"][0]["functionDeclarations"]
+        self.assertEqual([tool["name"] for tool in tools], list(bridge.TOOL_ARGUMENTS))
+        for tool in tools:
+            properties, required = bridge.TOOL_ARGUMENTS[tool["name"]]
+            self.assertEqual(set(tool["parameters"]), {"type", "properties", "required"})
+            self.assertEqual(tool["parameters"]["type"], "OBJECT")
+            self.assertEqual(tool["parameters"].get("required", []), list(required))
+            self.assertEqual(set(tool["parameters"].get("properties", {})), set(properties))
+            for name, schema in properties.items():
+                expected = { {"minLength": "min_length", "maxLength": "max_length"}.get(key, key): value
+                            for key, value in schema.items()}
+                self.assertEqual(tool["parameters"]["properties"][name], expected)
+        start = next(tool for tool in tools if tool["name"] == "start_agent")
+        self.assertEqual(start["parameters"]["properties"]["project"]["enum"], list(bridge.PROJECTS))
+        self.assertEqual(start["parameters"]["properties"]["agent"]["enum"], list(bridge.PROVIDERS))
+        for name, (properties, _) in bridge.TOOL_ARGUMENTS.items():
+            args = {key: "unused" for key in properties}
+            with self.assertRaises(bridge.BridgeError):
+                bridge.tool_arguments(name, {**args, "unknown": "blocked"})
 
     async def test_maximum_text_and_identity_bounds_are_accepted(self):
         maximum = "A_-" + "z" * 125
