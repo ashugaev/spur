@@ -1,6 +1,6 @@
 # Commands
 
-> Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
+> Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
 `review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
@@ -37,7 +37,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry). CLI daemon requests are deadline-bounded per method and an unresponsive `/info` fails without auto-start; a timed-out mutation may still be applied (values in `v2/src/client.ts`).
 
 ## init
 
