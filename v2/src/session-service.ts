@@ -9615,16 +9615,21 @@ export class SessionService {
     // "session exists" — that pane's escapee tree can hold a reserved port
     // forever unless treated as not-alive here and reaped before restart.
     const panePresence = alive ? await wait(getTmuxPanePresence(tmuxName, { fresh: true })) : null;
+    const owner = readSession(this.config.dataDir, args.session.id);
+    const incompleteLaunch = owner?.sidecarLaunches?.[args.sidecarName];
+    const ProbeError = incompleteLaunch
+      ? SidecarLaunchIncompleteError
+      : SidecarProbeUnresponsiveError;
     // Unconditional: reapSidecarByName kills by tmux name, destructive with
     // or without a recorded identity.
     if (panePresence?.unresponsive || panePresence?.diagnostic) {
-      throw new SidecarProbeUnresponsiveError(
+      throw new ProbeError(
         `Sidecar ${args.sidecarName} pane state is unreadable (tmux did not answer); retry shortly`,
       );
     }
     const paneDead = panePresence?.dead ?? false;
     if (alive && !paneDead) {
-      if (readSession(this.config.dataDir, args.session.id)?.sidecarLaunches?.[args.sidecarName]) {
+      if (incompleteLaunch) {
         throw new SidecarLaunchIncompleteError(
           `Sidecar "${args.sidecarName}" has an incomplete launch; stop the sidecar before retrying`,
         );
@@ -9643,15 +9648,10 @@ export class SessionService {
       // leak shape reapRecordedIdentity targets — before reserving the
       // port for a new instance, or a still-live escapee tree from the
       // old instance keeps running under the reused port.
-      const owner = readSession(this.config.dataDir, args.session.id);
       const identity = owner?.sidecarProcs?.[args.sidecarName];
-      const incompleteLaunch = owner?.sidecarLaunches?.[args.sidecarName];
       // An unreadable probe cannot reclaim a recorded process or an
       // interrupted launch whose identity was never captured.
       if ((presence.unresponsive || presence.diagnostic) && (identity || incompleteLaunch)) {
-        const ProbeError = incompleteLaunch
-          ? SidecarLaunchIncompleteError
-          : SidecarProbeUnresponsiveError;
         throw new ProbeError(
           `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
         );

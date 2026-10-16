@@ -9,7 +9,11 @@ import {
   type RestoreOperationContext,
 } from "../../src/session-lifecycle.js";
 import { BUILTIN_SIDECARS } from "../../src/sidecars/builtins.js";
-import { createTmuxSidecarSession, getSidecarTmuxPresence } from "../../src/runtime-tmux.js";
+import {
+  createTmuxSidecarSession,
+  getSidecarTmuxPresence,
+  getTmuxPanePresence,
+} from "../../src/runtime-tmux.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import { isHostPortFree } from "../../src/port-probe.js";
 import type * as portProbeModule from "../../src/port-probe.js";
@@ -133,10 +137,48 @@ afterEach(() => {
   vi.mocked(getSidecarTmuxPresence)
     .mockReset()
     .mockResolvedValue({ present: false, unresponsive: false });
+  vi.mocked(getTmuxPanePresence)
+    .mockReset()
+    .mockResolvedValue({ dead: false, unresponsive: false });
   vi.mocked(createTmuxSidecarSession).mockReset().mockResolvedValue(undefined);
 });
 
 describe("restore-owned sidecar cancellation", () => {
+  it.each([{ unresponsive: true }, { unresponsive: false, diagnostic: "pane probe failed" }])(
+    "preserves an interrupted launch when tmux is present but its pane probe is unknown: %j",
+    async (unknown) => {
+      const { service, session, project, dataDir } = fixture();
+      const interrupted = { ...session, sidecarLaunches: { mcp: "interrupted" } };
+      const sidecar: SidecarConfig = {
+        command: "configured-service",
+        autoStart: true,
+        mcp: { server: "test", portId: "http", path: "/mcp" },
+      };
+      project.sidecars = { mcp: sidecar };
+      writeSession(dataDir, interrupted);
+      vi.mocked(getSidecarTmuxPresence).mockResolvedValue({ present: true, unresponsive: false });
+      vi.mocked(getTmuxPanePresence).mockResolvedValue({ dead: false, ...unknown });
+      await expect(
+        service.startSidecarInternalLocked({
+          session: interrupted,
+          project,
+          sidecarName: "mcp",
+          sidecar,
+          sidecarDepth: 0,
+          operation: operation(),
+        }),
+      ).rejects.toThrow("pane state is unreadable");
+      await expect(service.startMcpSidecars(interrupted, project, operation())).rejects.toThrow(
+        "pane state is unreadable",
+      );
+      expect(createTmuxSidecarSession).not.toHaveBeenCalled();
+      expect(readSession(dataDir, session.id)?.sidecarLaunches).toEqual(
+        interrupted.sidecarLaunches,
+      );
+      expect(readSession(dataDir, session.id)?.sidecarProcs).toBeUndefined();
+    },
+  );
+
   it.each([{ unresponsive: true }, { unresponsive: false, diagnostic: "tmux probe failed" }])(
     "preserves an interrupted launch without a process identity when its probe is unknown: %j",
     async (unknown) => {
