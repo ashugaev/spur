@@ -626,6 +626,18 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
       (session.errorSource === undefined && session.launchCommand !== "")
     );
   }
+  return isRuntimeProbeError(session);
+}
+
+// Failed runtime probes: runtime_probe, legacy unsourced tmux/ps, or the
+// two exact historical other-source ps diagnostics; void once a probe answers.
+function isRuntimeProbeError(session: SessionRecord): boolean {
+  if (
+    !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
+    session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+  )
+    return false;
+  if (session.errorSource === "runtime_probe") return true;
   if (session.errorSource === "other") {
     return (
       session.error ===
@@ -634,18 +646,6 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
         "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n"
     );
   }
-  return isRuntimeProbeError(session);
-}
-
-// Retained error that only records a failed runtime probe (runtime_probe
-// source, or a legacy unsourced tmux/ps diagnostic): void once a probe answers.
-function isRuntimeProbeError(session: SessionRecord): boolean {
-  if (
-    !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
-    session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
-  )
-    return false;
-  if (session.errorSource === "runtime_probe") return true;
   if (session.errorSource !== undefined) return false;
   const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
   return (

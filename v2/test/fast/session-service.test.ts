@@ -1,6 +1,7 @@
 import type * as cryptoModule from "node:crypto";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
+import type * as childProcessModule from "node:child_process";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -26680,7 +26681,7 @@ describe("SessionService", () => {
           (guard) => ({ status, guard }),
         ),
       ),
-    )("blocks $status recovery under $guard evidence", async ({ status, guard }) => {
+    )("preserves $status guarded outcome under $guard evidence", async ({ status, guard }) => {
       const sessions = createSessionStore();
       const record = runningSession({
         id: "api-1",
@@ -26717,15 +26718,25 @@ describe("SessionService", () => {
         vi.spyOn(internals, "restoreOwnsRuntimeRecovery").mockReturnValue(true);
       }
 
-      await internals.classifySessionRecord(record);
+      const pending = internals.classifySessionRecord(record);
+      if (guard === "dead" && status === "running") await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
 
       expect(sessions.get(record.id)?.error).toBe(
         guard === "unknown" && status === "running"
           ? "Session status detection failed: runtime probe (tmux or ps) timed out; runtime state unknown"
-          : error,
+          : status === "running" && guard === "dead"
+            ? undefined
+            : status === "running" && guard === "workspace"
+              ? "Agent worktree is missing."
+              : error,
       );
       expect(sessions.get(record.id)?.errorSource).toBe(
-        guard === "unknown" && status === "running" ? "runtime_probe" : "other",
+        guard === "unknown" && status === "running"
+          ? "runtime_probe"
+          : guard === "dead" && status === "running"
+            ? undefined
+            : "other",
       );
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     });
@@ -26878,6 +26889,137 @@ describe("SessionService", () => {
       });
     }
 
+    it.each(
+      historicalErrors.flatMap((error, index) =>
+        ["prewrite", "postwrite", "postwrite dead"].map((stage) => ({ error, index, stage })),
+      ),
+    )(
+      "canonical historical probe: unit producer to retaining send catch ($stage $error)",
+      async ({ error, index, stage }) => {
+        const originalRuntime = await import("../../src/runtime-tmux.js");
+        const { promisify } = await import("node:util");
+        const execFileAsync = vi.fn(async (file: string, args: string[]) => {
+          if (file === "tmux" && args.includes("list-panes")) {
+            return { stdout: "api-1 1 1 0 100 /dev/pts/1", stderr: "" };
+          }
+          if (file === "ps") {
+            if (index === 0) return { stdout: "malformed row", stderr: "" };
+            throw new Error("Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n");
+          }
+          throw new Error(`unexpected unit subprocess: ${file}`);
+        });
+        vi.doMock("node:child_process", async () => ({
+          ...(await vi.importActual<typeof childProcessModule>("node:child_process")),
+          execFile: Object.assign(vi.fn(), { [promisify.custom]: execFileAsync }),
+        }));
+        try {
+          vi.resetModules();
+          const runtime = await vi.importActual<typeof runtimeTmuxModule>(
+            "../../src/runtime-tmux.js",
+          );
+          const generated: unknown = await runtime
+            .isProcessRunningInTmux("api-1", ["claude"], { fresh: true })
+            .catch((failure: unknown) => failure);
+          expect(generated).toBeInstanceOf(runtime.TmuxProbeUnknownError);
+          expect((generated as Error).message).toBe(
+            error.slice("Session status detection failed: ".length),
+          );
+          expect(execFileAsync).toHaveBeenCalledWith(
+            "ps",
+            ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
+            expect.anything(),
+          );
+          vi.doMock("../../src/runtime-tmux.js", () => ({
+            ...originalRuntime,
+            TmuxProbeUnknownError: runtime.TmuxProbeUnknownError,
+          }));
+          const record = runningSession({
+            agentSessionId: "native-original",
+            agentLaunchId: "launch-original",
+          });
+          if (stage !== "prewrite") {
+            record.queuedMessages = { messages: ["current input", "tail"], awaitingPrompt: false };
+          }
+          const sessions = createSessionStore();
+          mockClaudeJsonlState("waiting");
+          const service = await createDisposedSessionService();
+          sessions.set(record.id, record);
+          let written: SessionRecord | undefined;
+          if (stage === "prewrite") {
+            vi.spyOn(
+              service as unknown as { capturePaneGeneration(): Promise<unknown> },
+              "capturePaneGeneration",
+            ).mockRejectedValue(generated);
+          } else {
+            createAgentSubmitAckBindingMock.mockResolvedValue({
+              baseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+              scan: vi.fn(),
+            });
+            vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+              async () => {
+                written = structuredClone(sessions.get(record.id));
+                throw generated;
+              },
+            );
+          }
+          if (stage === "prewrite") {
+            await expect(
+              service.send(record.id, { message: "current input", queue: false }),
+            ).rejects.toBe(generated);
+          } else {
+            const result = await sessionServiceInternals(service).tryDeliverQueuedMessage(
+              record.id,
+            );
+            expect(result).toBe(true);
+          }
+          expect(sessions.get(record.id)).toMatchObject({
+            agentSessionId: record.agentSessionId,
+            agentLaunchId: record.agentLaunchId,
+            error,
+            errorSource: "other",
+          });
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(stage === "prewrite" ? 0 : 1);
+          if (stage !== "prewrite") {
+            expect(written?.queuedMessageTyped).toMatchObject({
+              message: "current input",
+              ackBaseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+            });
+            expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+            expect(sessions.get(record.id)?.queuedMessages).toEqual({
+              messages: ["current input", "tail"],
+              awaitingPrompt: false,
+            });
+          }
+          if (stage === "postwrite dead") {
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("missing actual postcatch fixture");
+            const internals = internalsFor(service);
+            vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue(dead);
+            const pending = internals.reconcileUnexpectedStop(
+              current,
+              dead,
+              "runtime_check",
+              false,
+            );
+            await vi.advanceTimersByTimeAsync(1_000);
+            await pending;
+            expect(sessions.get(record.id)).toMatchObject({
+              status: "stopped",
+              queuedMessages: current.queuedMessages,
+            });
+            expect(sessions.get(record.id)?.error).toBeUndefined();
+            expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+            expect(sendMessageToTmuxMock).toHaveBeenCalledOnce();
+            expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          }
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          vi.doUnmock("node:child_process");
+          vi.doMock("../../src/runtime-tmux.js", () => originalRuntime);
+        }
+      },
+    );
+
     it.each(historicalErrors)("heals healthy historical live evidence %j", async (error) => {
       const sessions = createSessionStore(runningSession({ error, errorSource: "other" }));
       mockClaudeJsonlState("waiting");
@@ -26886,21 +27028,182 @@ describe("SessionService", () => {
       expect(sessions.get("api-1")?.error).toBeUndefined();
     });
 
-    it.each(historicalErrors)(
-      "keeps raw historical dead and boot evidence excluded %j",
-      async (error) => {
+    it.each(
+      historicalErrors.flatMap((error) =>
+        [false, true].map((panePresent) => ({ error, panePresent })),
+      ),
+    )(
+      "canonical historical probe: stops confirmed unavailable terminal ($panePresent $error)",
+      async ({ error, panePresent }) => {
         const record = observationRecord(error, "other");
         const sessions = createSessionStore();
         const service = await createDisposedSessionService();
         sessions.set(record.id, record);
         const internals = internalsFor(service);
-        vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue(dead);
-        expect(
-          (await internals.reconcileUnexpectedStop(record, dead, "runtime_check", false)).session,
-        ).toEqual(record);
-        const result = await service.reconcileStoppedSessions();
-        expect(sessions.get("api-1")).toEqual(record);
-        expect(result.driftedSessions).toEqual([]);
+        const runtime = { ...dead, runtimeAlive: panePresent };
+        const read = vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue({ ...runtime });
+        const ports = vi.spyOn(internals, "sessionWithReleasedSidecarPorts");
+        const teardown = vi.spyOn(internals, "teardownSessionSidecars").mockResolvedValue();
+        const pending = internals.reconcileUnexpectedStop(record, runtime, "runtime_check", false);
+        expect(read).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)).toEqual(record);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+        expect(read).toHaveBeenCalledExactlyOnceWith(record, { fresh: true });
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "stopped",
+          agentSessionId: record.agentSessionId,
+          agentLaunchId: record.agentLaunchId,
+          queuedMessages: record.queuedMessages,
+          queuedMessageTyped: record.queuedMessageTyped,
+        });
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+        expect(ports).toHaveBeenCalledOnce();
+        expect(teardown).toHaveBeenCalledOnce();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it("canonical historical probe: actual boot output excludes both diagnostics and restores plain drift once", async () => {
+      const config = baseConfig();
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: { ...config.projects, api: { ...config.projects.api, restoreAfterReboot: true } },
+      });
+      const sessions = createSessionStore();
+      historicalErrors.forEach((error, index) => {
+        const record = { ...observationRecord(error, "other"), id: `api-${index + 1}` };
+        sessions.set(record.id, record);
+      });
+      sessions.set("api-3", runningSession({ id: "api-3" }));
+      const service = await createDisposedSessionService();
+      vi.spyOn(internalsFor(service), "readRuntimeSnapshot").mockResolvedValue(dead);
+      const pending = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const result = await pending;
+      for (const id of ["api-1", "api-2"]) {
+        expect(sessions.get(id)?.status).toBe("stopped");
+        expect(sessions.get(id)?.error).toBeUndefined();
+        expect(sessions.get(id)?.errorSource).toBeUndefined();
+      }
+      expect(result.driftedSessions.map(({ record }) => record.id)).toEqual(["api-3"]);
+      const restore = vi.spyOn(service, "restore").mockResolvedValue({} as never);
+      await service.restoreRebootedSessions(result.driftedSessions);
+      expect(restore).toHaveBeenCalledExactlyOnceWith("api-3");
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(
+      historicalErrors.flatMap((error) =>
+        ["initial unknown", "fresh unknown", "fresh rejection"].map((mode) => ({ error, mode })),
+      ),
+    )(
+      "canonical historical probe: preserves identical diagnostic under $mode ($error)",
+      async ({ error, mode }) => {
+        const record = {
+          ...observationRecord(error, "other"),
+          submitUnconfirmedAt: "2026-03-18T10:04:00.000Z",
+        };
+        const sessions = createSessionStore(record);
+        const service = await createDisposedSessionService();
+        const internals = internalsFor(service);
+        const diagnostic = error.slice("Session status detection failed: ".length);
+        const runtime = { ...unknown, diagnostic };
+        const read = vi.spyOn(internals, "readRuntimeSnapshot");
+        if (mode === "fresh rejection") read.mockRejectedValue(new Error(diagnostic));
+        else read.mockResolvedValue(runtime);
+        const ports = vi.spyOn(internals, "sessionWithReleasedSidecarPorts");
+        const teardown = vi.spyOn(internals, "teardownSessionSidecars");
+        const pending = internals.reconcileUnexpectedStop(
+          record,
+          mode === "initial unknown" ? runtime : dead,
+          "runtime_check",
+          false,
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+        expect(sessions.get(record.id)).toEqual(record);
+        expect(ports).not.toHaveBeenCalled();
+        expect(teardown).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(
+      historicalErrors.flatMap((error) => [false, true].map((missing) => ({ error, missing }))),
+    )(
+      "canonical historical probe: preserves terminal error distinction (missing=$missing $error)",
+      async ({ error, missing }) => {
+        const record = observationRecord(error, "other");
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        sessions.set(record.id, record);
+        const internals = internalsFor(service);
+        const runtime = { ...dead, runtimeAlive: true, paneUsable: true };
+        vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue(runtime);
+        const pending = internals.reconcileUnexpectedStop(
+          record,
+          runtime,
+          "runtime_check",
+          missing,
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "errored",
+          error: missing ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
+          errorSource: missing ? "other" : "inferred_runtime_exit",
+          queuedMessages: record.queuedMessages,
+          queuedMessageTyped: record.queuedMessageTyped,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(
+      historicalErrors.flatMap((error) =>
+        [
+          { status: "stopped" as const, stopReason: "manual_pause" as const },
+          { status: "stopped" as const, stopReason: "token_budget" as const },
+          { status: "stopped" as const, stopReason: undefined },
+          { status: "errored" as const, stopReason: undefined },
+          { status: "completed" as const, stopReason: undefined },
+          { status: "killed" as const, stopReason: undefined },
+        ].map((state) => ({ error, ...state })),
+      ),
+    )(
+      "canonical historical probe: nonrunning status=$status reason=$stopReason ($error)",
+      async ({ error, status, stopReason }) => {
+        const record = {
+          ...observationRecord(error, "other"),
+          status,
+          ...(stopReason ? { stopReason } : {}),
+        };
+        const sessions = createSessionStore(record);
+        const service = await createDisposedSessionService();
+        vi.spyOn(internalsFor(service), "readRuntimeSnapshot").mockResolvedValue(dead);
+        await internalsFor(service).classifySessionRecord(record);
+        expect(sessions.get(record.id)?.status).toBe(status);
+        expect(sessions.get(record.id)?.stopReason).toBe(stopReason);
+        expect(sessions.get(record.id)?.error).toBe(status === "stopped" ? undefined : error);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(historicalErrors)(
+      "canonical historical probe: skips spawning boot %j",
+      async (error) => {
+        const record = { ...observationRecord(error, "other"), status: "spawning" as const };
+        const sessions = createSessionStore(record);
+        const service = await createDisposedSessionService();
+        await internalsFor(service).reconcileUnexpectedStop(record, dead, "boot", false);
+        expect(sessions.get(record.id)).toEqual(record);
         expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
         expect(createTmuxSessionMock).not.toHaveBeenCalled();
       },
@@ -26966,6 +27269,8 @@ describe("SessionService", () => {
       "project",
       "workspace",
       "pause",
+      "status",
+      "source",
       "provider",
       "server",
       "session-pending",
@@ -26978,97 +27283,127 @@ describe("SessionService", () => {
     ] as const;
     it.each(
       (["fresh", "boot", "boot-fresh"] as const).flatMap((boundary) =>
-        races.map((race) => ({ boundary, race })),
-      ),
-    )("binds $boundary observation under $race", async ({ boundary, race }) => {
-      const record = observationRecord();
-      const sessions = createSessionStore();
-      const service = await createDisposedSessionService();
-      sessions.set(record.id, record);
-      const internals = internalsFor(service);
-      const releasePorts = vi.spyOn(internals, "sessionWithReleasedSidecarPorts");
-      const teardown = vi.spyOn(internals, "teardownSessionSidecars");
-      let replacement = record;
-      let reads = 0;
-      vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
-        if (boundary === "boot-fresh" && reads++ === 0) return dead;
-        const changes: Partial<SessionRecord> =
-          race === "native"
-            ? { agentSessionId: "replacement" }
-            : race === "launch"
-              ? { agentLaunchId: "replacement" }
-              : race === "tmux"
-                ? { tmuxSession: "replacement" }
-                : race === "command"
-                  ? { launchCommand: "replacement" }
-                  : race === "path"
-                    ? { worktreePath: "/replacement" }
-                    : race === "project"
-                      ? { project: "replacement" }
-                      : race === "workspace"
-                        ? { workspaceId: "replacement" }
-                        : race === "pause"
-                          ? { status: "stopped", stopReason: "manual_pause" }
-                          : race === "provider"
-                            ? { error: "Provider request failed", errorSource: "other" }
-                            : race === "server"
-                              ? { serverErrorAt: "2026-03-18T10:04:00.000Z" }
-                              : {};
-        replacement = { ...record, ...changes };
-        sessions.set(record.id, replacement);
-        if (race === "instance") internals.lifecycle = new SessionLifecycleRegister();
-        if (race.includes("pending") || race.includes("settled") || race.includes("reopen")) {
-          const owner = internals.lifecycle.begin(
-            race.includes("reopen") ? "reopen" : "restore",
-            race.includes("workspace") ? [record.workspaceId ?? record.id] : [record.id],
+        races.flatMap((race) => [
+          { boundary, race, error: historicalErrors[0], errorSource: "runtime_probe" as const },
+          ...historicalErrors.map((error) => ({
+            boundary,
             race,
-          );
-          if (race.includes("settled"))
-            internals.lifecycle.settle(
-              owner,
-              true,
-              () => "succeeded",
-              () => true,
+            error,
+            errorSource: "other" as const,
+          })),
+        ]),
+      ),
+    )(
+      "binds $boundary observation under $race ($errorSource $error)",
+      async ({ boundary, race, error, errorSource }) => {
+        const record = observationRecord(error, errorSource);
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        sessions.set(record.id, record);
+        const internals = internalsFor(service);
+        const releasePorts = vi.spyOn(internals, "sessionWithReleasedSidecarPorts");
+        const teardown = vi.spyOn(internals, "teardownSessionSidecars");
+        let replacement = record;
+        let reads = 0;
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
+          if (boundary === "boot-fresh" && reads++ === 0) return dead;
+          const changes: Partial<SessionRecord> =
+            race === "native"
+              ? { agentSessionId: "replacement" }
+              : race === "launch"
+                ? { agentLaunchId: "replacement" }
+                : race === "tmux"
+                  ? { tmuxSession: "replacement" }
+                  : race === "command"
+                    ? { launchCommand: "replacement" }
+                    : race === "path"
+                      ? { worktreePath: "/replacement" }
+                      : race === "project"
+                        ? { project: "replacement" }
+                        : race === "workspace"
+                          ? { workspaceId: "replacement" }
+                          : race === "pause"
+                            ? { status: "stopped", stopReason: "manual_pause" }
+                            : race === "status"
+                              ? { status: "errored" }
+                              : race === "source"
+                                ? {
+                                    errorSource:
+                                      errorSource === "other" ? "runtime_probe" : "other",
+                                  }
+                                : race === "provider"
+                                  ? { error: "Provider request failed", errorSource: "other" }
+                                  : race === "server"
+                                    ? { serverErrorAt: "2026-03-18T10:04:00.000Z" }
+                                    : {};
+          replacement = { ...record, ...changes };
+          sessions.set(record.id, replacement);
+          if (race === "instance") internals.lifecycle = new SessionLifecycleRegister();
+          if (race.includes("pending") || race.includes("settled") || race.includes("reopen")) {
+            const owner = internals.lifecycle.begin(
+              race.includes("reopen") ? "reopen" : "restore",
+              race.includes("workspace") ? [record.workspaceId ?? record.id] : [record.id],
+              race,
             );
-        }
-        return dead;
-      });
-      const pending =
-        boundary !== "fresh"
-          ? service.reconcileStoppedSessions()
-          : internals.reconcileUnexpectedStop(record, dead, "runtime_check", false);
-      await vi.advanceTimersByTimeAsync(1_000);
-      await pending;
-      expect(sessions.get(record.id), `${boundary}/${race}`).toEqual(replacement);
-      expect(releasePorts, `${boundary}/${race}`).not.toHaveBeenCalled();
-      expect(teardown, `${boundary}/${race}`).not.toHaveBeenCalled();
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      expect(createTmuxSessionMock).not.toHaveBeenCalled();
-    });
-
-    it("preserves a concurrent queue append with unchanged owner", async () => {
-      const record = observationRecord();
-      const sessions = createSessionStore();
-      const service = await createDisposedSessionService();
-      sessions.set(record.id, record);
-      const internals = internalsFor(service);
-      vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
-        sessions.set(record.id, {
-          ...record,
-          updatedAt: "2026-03-18T10:05:00.000Z",
-          queuedMessages: { messages: ["A", "B", "C"], awaitingPrompt: true },
+            if (race.includes("settled"))
+              internals.lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+          }
+          return dead;
         });
-        return dead;
-      });
-      const pending = internals.reconcileUnexpectedStop(record, dead, "runtime_check", false);
-      await vi.advanceTimersByTimeAsync(1_000);
-      await pending;
-      expect(sessions.get(record.id)).toMatchObject({
-        status: "stopped",
-        queuedMessages: { messages: ["A", "B", "C"], awaitingPrompt: true },
-        queuedMessageTyped: record.queuedMessageTyped,
-      });
-    });
+        const pending =
+          boundary !== "fresh"
+            ? service.reconcileStoppedSessions()
+            : internals.reconcileUnexpectedStop(record, dead, "runtime_check", false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+        expect(sessions.get(record.id), `${boundary}/${race}`).toEqual(replacement);
+        expect(releasePorts, `${boundary}/${race}`).not.toHaveBeenCalled();
+        expect(teardown, `${boundary}/${race}`).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { error: historicalErrors[0], errorSource: "runtime_probe" as const },
+      ...historicalErrors.map((error) => ({ error, errorSource: "other" as const })),
+    ])(
+      "canonical historical probe: preserves a concurrent queue append ($errorSource $error)",
+      async ({ error, errorSource }) => {
+        const record = {
+          ...observationRecord(error, errorSource),
+          submitUnconfirmedAt: "2026-03-18T10:04:00.000Z",
+        };
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        sessions.set(record.id, record);
+        const internals = internalsFor(service);
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
+          sessions.set(record.id, {
+            ...record,
+            updatedAt: "2026-03-18T10:05:00.000Z",
+            queuedMessages: { messages: ["A", "B", "C"], awaitingPrompt: true },
+          });
+          return dead;
+        });
+        const pending = internals.reconcileUnexpectedStop(record, dead, "runtime_check", false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "stopped",
+          queuedMessages: { messages: ["A", "B", "C"], awaitingPrompt: true },
+          queuedMessageTyped: record.queuedMessageTyped,
+          submitUnconfirmedAt: record.submitUnconfirmedAt,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe("pr1197 review repair:", () => {
