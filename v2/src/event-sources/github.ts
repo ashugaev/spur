@@ -23,10 +23,12 @@ import {
 } from "./types.js";
 import {
   clearGitHubMergeConflictRestoreReplay,
+  deleteIgnoredGitHubFeedback,
   clearGitHubPollDisabledSession,
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  listIgnoredGitHubFeedbackSessions,
   markGitHubPollDisabledChecked,
   readGitHubPollDisabled,
   readLifecycleBaselinedSessions,
@@ -306,6 +308,18 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     deps.projectId,
     deps.sourceId,
   );
+  const pruneIgnoredFeedback = (sessionIds: Set<string>): void => {
+    for (const sessionId of listIgnoredGitHubFeedbackSessions(
+      deps.dataDir,
+      deps.projectId,
+      deps.sourceId,
+    )) {
+      if (!sessionIds.has(sessionId)) {
+        deleteIgnoredGitHubFeedback(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+      }
+    }
+  };
+  pruneIgnoredFeedback(new Set(listSessions(deps.dataDir).map((session) => session.id)));
   const seenWorkItems = deps.config.query
     ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
     : null;
@@ -666,6 +680,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         deps.projectId,
         deps.sourceId,
         deps.config.maxReviewBatchTargets,
+        deps.config.selfMarker,
       );
       for (const session of pollableSessions) {
         try {
@@ -903,6 +918,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           lifecycleBaselined.delete(sessionId);
         }
       }
+      pruneIgnoredFeedback(existingSessionIds);
 
       for (const sessionId of [...attemptedSessionIds]) {
         if (!currentSessionIds.has(sessionId)) attemptedSessionIds.delete(sessionId);

@@ -19,6 +19,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
+  capturePaneAgentProcesses,
   AgentProcessRef,
   AgentTerminationOutcome,
   SessionAgentScan,
@@ -215,7 +216,9 @@ const listTmuxSessionNamesMock = vi.fn<() => Promise<Set<string>>>().mockResolve
 const getTmuxSessionActivityMock = vi.fn();
 const getTmuxPanePidMock = vi.fn(() => Promise.resolve<number | null>(null));
 const lookupTmuxPanePidMock = vi.fn((_sessionName?: string, _options?: { fresh?: boolean }) =>
-  Promise.resolve<{ status: "ok"; panePid: number | null } | { status: "unavailable" }>({
+  Promise.resolve<
+    { status: "ok"; panePid: number | null; paneDead?: boolean } | { status: "unavailable" }
+  >({
     status: "ok",
     panePid: null,
   }),
@@ -260,7 +263,7 @@ const captureAgentProcessesForLaunchMock = vi.fn(() =>
     processes: [],
   }),
 );
-const capturePaneAgentProcessesMock = vi.fn(() =>
+const capturePaneAgentProcessesMock = vi.fn<typeof capturePaneAgentProcesses>(() =>
   Promise.resolve<{ status: "ok"; processes: AgentProcessRef[] } | { status: "unavailable" }>({
     status: "ok",
     processes: [],
@@ -11497,7 +11500,8 @@ describe("SessionService", () => {
       let launches = 0;
       createTmuxSessionMock.mockImplementation(async () => {
         launches += 1;
-        const record = sessions.get("api-1")!;
+        const record = sessions.get("api-1");
+        if (!record) throw new Error("api-1 missing from the session store");
         sessions.set("api-1", { ...record, updatedAt: `2026-03-18T10:0${launches}:30.000Z` });
         restoredTmuxCreated = true;
       });
@@ -34095,6 +34099,40 @@ describe("SessionService", () => {
     );
   });
 
+  it("S1 killAgentPaneAndConfirmExit looks up the pane pid fresh and forwards the dead flag", async () => {
+    createSessionStore({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "main",
+      worktree: false,
+      worktreePath: "/repo/api",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      agentLaunchId: "stored-launch",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: 4242, paneDead: true });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1");
+
+    expect(lookupTmuxPanePidMock).toHaveBeenCalledWith("api-1", { fresh: true });
+    expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "api-1",
+        agentLaunchId: "stored-launch",
+        panePid: 4242,
+        paneDead: true,
+      }),
+    );
+  });
+
   it("kills a renamed-project session using repo-path symlink exclusions from the current config", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -51410,6 +51448,187 @@ describe("SessionService", () => {
     });
   });
 
+  describe("pane launch ownership", () => {
+    function absentLaunchResources(): void {
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+      getTmuxPanePresenceMock.mockResolvedValue({ dead: true, unresponsive: false });
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+      });
+    }
+
+    function attemptedToken(
+      input: Parameters<typeof runtimeTmuxModule.createTmuxSession>[0],
+    ): string {
+      const token = input.env?.SPUR_AGENT_LAUNCH_ID;
+      expect(input.env?.SPUR_SESSION).toBe("api-1");
+      if (!token) throw new Error("expected attempted launch token");
+      return token;
+    }
+
+    it("forwards the foreground create token before it is persisted", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      absentLaunchResources();
+      let token: string | undefined;
+      createTmuxSessionMock.mockImplementationOnce(
+        async (input: Parameters<typeof runtimeTmuxModule.createTmuxSession>[0]) => {
+          token = attemptedToken(input);
+          expect(sessions.get("api-1")?.agentLaunchId).toBeUndefined();
+          throw new Error("foreground create failed");
+        },
+      );
+      const service = await createDisposedSessionService();
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        "foreground create failed",
+      );
+      expect(token).toEqual(expect.any(String));
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ sessionId: "api-1", agentLaunchId: token }),
+      );
+    });
+
+    it("forwards each background retry token including final failure", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      absentLaunchResources();
+      const tokens: string[] = [];
+      createTmuxSessionMock.mockImplementation(
+        async (input: Parameters<typeof runtimeTmuxModule.createTmuxSession>[0]) => {
+          tokens.push(attemptedToken(input));
+          expect(sessions.get("api-1")?.agentLaunchId).toBeUndefined();
+          throw new Error(`background create failed ${tokens.length}`);
+        },
+      );
+      const service = await createDisposedSessionService();
+      await service.spawnInBackground({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("errored"));
+      expect(tokens).toHaveLength(3);
+      expect(new Set(tokens).size).toBe(3);
+      expect(
+        capturePaneAgentProcessesMock.mock.calls.map(([input]) => input.agentLaunchId),
+      ).toEqual(tokens);
+      expect(sessions.get("api-1")?.error).toContain("background create failed 3");
+    });
+
+    it("does not invent a token for a foreground failure before create", async () => {
+      createSessionStore();
+      createWorktreeMock.mockRejectedValueOnce(new Error("worktree failed"));
+      const service = await createDisposedSessionService();
+      await expect(service.spawn({ project: "api", prompt: "hello" })).rejects.toThrow(
+        "worktree failed",
+      );
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ sessionId: "api-1", agentLaunchId: undefined }),
+      );
+    });
+
+    it("cleans the failed recovery token before rotating to a fresh launch", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore(
+        runningSession({
+          agentSessionId: "session-uuid",
+          agentLaunchId: "old-launch",
+          status: "stopped",
+          stopReason: "stale_timeout",
+        }),
+      );
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      const tokens: string[] = [];
+      createTmuxSessionMock.mockImplementation(
+        async (input: Parameters<typeof runtimeTmuxModule.createTmuxSession>[0]) => {
+          tokens.push(attemptedToken(input));
+          if (tokens.length === 1) throw new Error("resume failed before create");
+          relaunched = true;
+        },
+      );
+      const service = await createDisposedSessionService();
+      await service.send("api-1", { message: "resume work", queue: false });
+      expect(tokens).toHaveLength(2);
+      expect(new Set(tokens).size).toBe(2);
+      expect(tokens).not.toContain("old-launch");
+      expect(
+        capturePaneAgentProcessesMock.mock.calls.map(([input]) => input.agentLaunchId),
+      ).toEqual(["old-launch", tokens[0]]);
+    });
+
+    it("cleans a Restore create token while the record still has the old token", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore(
+        runningSession({ agentSessionId: "session-uuid", agentLaunchId: "old-launch" }),
+      );
+      absentLaunchResources();
+      let token: string | undefined;
+      createTmuxSessionMock.mockImplementationOnce(
+        async (input: Parameters<typeof runtimeTmuxModule.createTmuxSession>[0]) => {
+          token = attemptedToken(input);
+          expect(sessions.get("api-1")?.agentLaunchId).toBe("old-launch");
+          throw new Error("restore create failed");
+        },
+      );
+      const service = await createDisposedSessionService();
+      await expect(service.restore("api-1", { force: true })).rejects.toThrow(
+        "restore create failed",
+      );
+      expect(token).toEqual(expect.any(String));
+      expect(token).not.toBe("old-launch");
+      expect(
+        capturePaneAgentProcessesMock.mock.calls.map(([input]) => input.agentLaunchId),
+      ).toEqual(["old-launch", token]);
+    });
+
+    it("does not clean a replacement generation after Restore create fails", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore(
+        runningSession({ agentSessionId: "session-uuid", agentLaunchId: "old-launch" }),
+      );
+      absentLaunchResources();
+      let failed = false;
+      createTmuxSessionMock.mockImplementationOnce(async () => {
+        failed = true;
+        throw new Error("restore create failed");
+      });
+      const service = await createDisposedSessionService();
+      vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches").mockImplementation(
+        async () => !failed,
+      );
+      await expect(service.restore("api-1", { force: true })).rejects.toThrow(
+        "restore create failed",
+      );
+      expect(
+        capturePaneAgentProcessesMock.mock.calls.map(([input]) => input.agentLaunchId),
+      ).toEqual(["old-launch"]);
+      expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not clean a stale foreground receipt after the pane changes during send", async () => {
+      mockClaudeJsonlState("waiting");
+      createSessionStore();
+      let failed = false;
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        failed = true;
+        throw new Error("send failed after replacement");
+      });
+      const service = await createDisposedSessionService();
+      vi.spyOn(sessionServiceInternals(service), "paneGenerationMatches").mockImplementation(
+        async () => !failed,
+      );
+      await expect(
+        service.spawn({ project: "api", prompt: "hello" }, { receiptToken: Symbol("ownership") }),
+      ).rejects.toThrow("successor generation changed before cleanup");
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(capturePaneAgentProcessesMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe("duplicate-agent guard", () => {
     it("captures the pane's agent processes, kills the pane, then hands the captured refs to terminateAgentProcesses — in that order", async () => {
       mockClaudeJsonlState("waiting");
@@ -51479,6 +51698,17 @@ describe("SessionService", () => {
       createSessionStore(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
+      // The first fresh lookup (restore's own) resolves unavailable; every
+      // later lookup, including the kill path's fresh one, resolves an ok pane
+      // without a pid.
+      let freshLookups = 0;
+      lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
+        if (options?.fresh) {
+          freshLookups += 1;
+          if (freshLookups === 1) return { status: "unavailable" };
+        }
+        return { status: "ok", panePid: null, paneDead: false };
+      });
       let freshProbes = 0;
       isProcessRunningInTmuxMock.mockImplementation(
         async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
@@ -51615,7 +51845,7 @@ describe("SessionService", () => {
     it("refuses restore() when a foreign agent process for the session id is already live, and force bypasses it", async () => {
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
-      createSessionStore(runningSession({ id: "api-1" }));
+      createSessionStore(runningSession({ id: "api-1", agentLaunchId: "stored-launch" }));
       mockExitedThenRestoredProcess();
       // A readable pane pid is what makes the scan trustworthy: with a null
       // pane pid on an existing tmux session the guard deliberately skips,
@@ -51639,6 +51869,9 @@ describe("SessionService", () => {
 
       expect(restored.status).toBe("running");
       expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(capturePaneAgentProcessesMock).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "api-1", agentLaunchId: "stored-launch" }),
+      );
     });
 
     it("skips the foreign-agent scan when the pane pid is unreadable, rather than calling the session's own agent foreign", async () => {
