@@ -61,6 +61,8 @@ def guarded_client_class():
     )
 
     class GuardedClient(TelegramClient):
+        # PyTgCalls selects its adapter from the client's module namespace.
+        __module__ = TelegramClient.__module__
         current_call = None
         voice_runtime = None
 

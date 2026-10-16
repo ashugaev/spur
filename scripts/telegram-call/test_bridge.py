@@ -218,6 +218,19 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         return AcceptCallRequest(InputPhoneCall(peer.id, peer.access_hash), b"key",
                                  PhoneCallProtocol(65, 92, ["native"], True, True))
 
+    async def test_public_pytgcalls_constructor_binds_guarded_telethon_without_network(self):
+        from telethon.sessions import StringSession
+        from pytgcalls import PyTgCalls
+        from pytgcalls.mtproto.telethon_client import TelethonClient
+        client = bridge.guarded_client_class()(StringSession(), 1, "test")
+        calls = PyTgCalls(client)
+        self.addCleanup(calls.executor.shutdown, wait=False)
+        self.assertIs(calls.mtproto_client, client)
+        self.assertIsInstance(calls._app._bind_client, TelethonClient)
+        self.assertIs(calls._app._bind_client._app, client)
+        self.assertFalse(client.is_connected())
+        self.network.assert_not_called()
+
     async def test_actual_pytgcalls_adapter_accepts_exact_once(self):
         with bridge.pinned(self.call):
             self.assertEqual(await self.adapter._invoke(self.accept()), "forwarded")
