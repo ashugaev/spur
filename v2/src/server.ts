@@ -2345,7 +2345,7 @@ export async function startServer(
     throw error;
   }
 
-  let driftedSessions: { id: string; project: string }[] = [];
+  let driftedSessions: Parameters<SessionService["restoreRebootedSessions"]>[0] = [];
   try {
     const {
       scanned,

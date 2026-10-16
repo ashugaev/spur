@@ -1809,6 +1809,7 @@ describe("session metadata PR migration", () => {
         nextDueAt: "2026-03-19T09:30:00.000Z",
         message: "Check daily state",
         stopCondition: "Daily checks done",
+        admissionDeferredOccurrence: "2026-03-19T09:30:00.000Z",
       },
     };
 
