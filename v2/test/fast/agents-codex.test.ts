@@ -1163,6 +1163,11 @@ describe("scanCodexRolloutForMessage", () => {
   it.each([
     "exact",
     "response-item",
+    "malformed-text-number",
+    "malformed-text-null",
+    "malformed-text-missing",
+    "malformed-text-object",
+    "image-and-text",
     "whitespace",
     "wrong-uuid",
     "mixed-record-uuid",
@@ -1224,13 +1229,38 @@ describe("scanCodexRolloutForMessage", () => {
       },
     });
     const user = JSON.stringify(
-      guard === "response-item" || guard === "assistant"
+      guard === "response-item" ||
+        guard === "assistant" ||
+        guard.startsWith("malformed-text-") ||
+        guard === "image-and-text"
         ? {
             type: "response_item",
             payload: {
               type: "message",
               role: guard === "assistant" ? "assistant" : "user",
-              content: [{ type: "input_text", text: message }],
+              content: [
+                { type: "input_text", text: message },
+                ...(guard.startsWith("malformed-text-")
+                  ? [
+                      {
+                        type: "input_text",
+                        ...(guard === "malformed-text-missing"
+                          ? {}
+                          : {
+                              text:
+                                guard === "malformed-text-number"
+                                  ? 7
+                                  : guard === "malformed-text-null"
+                                    ? null
+                                    : {},
+                            }),
+                      },
+                    ]
+                  : []),
+                ...(guard === "image-and-text"
+                  ? [{ type: "input_image", image_url: "fixture" }]
+                  : []),
+              ],
             },
           }
         : { type: "event_msg", payload: { type: "user_message", message } },
@@ -1328,7 +1358,10 @@ describe("scanCodexRolloutForMessage", () => {
         { nativeSessionId: "native", worktreePath: "/worktree" },
       );
       expect(result.found).toBe(
-        guard === "exact" || guard === "response-item" || guard === "coherent-duplicate",
+        guard === "exact" ||
+          guard === "response-item" ||
+          guard === "coherent-duplicate" ||
+          guard === "image-and-text",
       );
       if (["replacement", "truncation", "append-during-scan"].includes(guard))
         expect(changed).toBe(true);
@@ -1340,6 +1373,79 @@ describe("scanCodexRolloutForMessage", () => {
       await realPromises.rm(root, { recursive: true, force: true });
     }
   });
+
+  it.each(["before-open", "at-open"])(
+    "rejects a real original-baseline FIFO without a writer: %s",
+    async (replacement) => {
+      const realFs = await vi.importActual<typeof Fs>("node:fs");
+      const realOs = await vi.importActual<typeof Os>("node:os");
+      const realPromises = await vi.importActual<typeof FsPromises>("node:fs/promises");
+      const realReadline = await vi.importActual<typeof Readline>("node:readline");
+      const { execFileSync } = await import("node:child_process");
+      const previousFs = { ...(await import("node:fs")) };
+      const previousPromises = { ...(await import("node:fs/promises")) };
+      const previousReadline = { ...(await import("node:readline")) };
+      const root = await realPromises.mkdtemp(join(realOs.tmpdir(), "spur-codex-fifo-"));
+      const file = join(root, "original.jsonl");
+      const prefix =
+        JSON.stringify({ type: "session_meta", payload: { id: "native", cwd: "/worktree" } }) +
+        "\n";
+      await realPromises.writeFile(file, prefix);
+      const offset = Buffer.byteLength(prefix);
+      const replace = () => {
+        realFs.unlinkSync(file);
+        execFileSync("mkfifo", [file]);
+      };
+      if (replacement === "before-open") replace();
+      let opened = false;
+      vi.doMock("node:fs", () => realFs);
+      vi.doMock("node:fs/promises", () => ({
+        ...realPromises,
+        open: (...args: Parameters<typeof realPromises.open>) => {
+          opened = true;
+          if (replacement === "at-open") replace();
+          return realPromises.open(...args);
+        },
+      }));
+      vi.doMock("node:readline", () => realReadline);
+      vi.resetModules();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const actual = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+        const pending = actual.scanCodexRolloutForMessage(root, "held", new Map([[file, offset]]), {
+          nativeSessionId: "native",
+          worktreePath: "/worktree",
+        });
+        const result = await Promise.race([
+          pending,
+          new Promise<"blocked">((resolve) => {
+            timer = setTimeout(() => resolve("blocked"), 1000);
+          }),
+        ]);
+        if (result === "blocked") {
+          // Release the old blocking open through its own FIFO; no process signal.
+          const writer = await realPromises.open(
+            file,
+            realFs.constants.O_RDWR | realFs.constants.O_NONBLOCK,
+          );
+          try {
+            await pending;
+          } finally {
+            await writer.close();
+          }
+        }
+        expect(opened).toBe(true);
+        expect(result).not.toBe("blocked");
+        expect(result).toMatchObject({ found: false });
+      } finally {
+        clearTimeout(timer);
+        vi.doMock("node:fs", () => previousFs);
+        vi.doMock("node:fs/promises", () => previousPromises);
+        vi.doMock("node:readline", () => previousReadline);
+        await realPromises.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("finds response_item/message user text with exact trimmed match", async () => {
     const line = JSON.stringify({
@@ -1356,6 +1462,25 @@ describe("scanCodexRolloutForMessage", () => {
     const result = await scanCodexRolloutForMessage("/sessions", "  hello world  ", new Map());
     expect(result.found).toBe(true);
     expect(result.lastScannedFile).toBe("/sessions/rollout.jsonl");
+  });
+
+  it("preserves legacy filtering of malformed text blocks and image content", async () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "hello world" },
+          { type: "input_text", text: 7 },
+          { type: "input_image", image_url: "fixture" },
+        ],
+      },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [line]);
+    const result = await scanCodexRolloutForMessage("/sessions", "hello world", new Map());
+    expect(result.found).toBe(true);
   });
 
   it("finds event_msg/user_message with exact trimmed match", async () => {
