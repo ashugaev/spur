@@ -51,8 +51,8 @@ SCENARIOS
 
   1. Agent send: spawn in test project with "notify me in Telegram, buttons X and Y". Forum answer starts with agent body, keyboard renders, topic title precedes session id. Subsequent answers omit session label; successful forum binding confirmations omit identity.
   2. Click: toast, message edited to "Selected: X", keyboard gone, agent answers.
-  3. Topic reply: reply-to the agent message. Placeholder "Received. <label> is thinking..." appears, then is edited into the answer.
-  4. DM spawn: plain task to the bot DM. "Spawned and bound", then the labeled answer in the DM.
+  3. Topic reply: reply-to the agent message. "Received. Delivering to <id>..." appears first, is edited to the placeholder "Received. <label> is thinking...", then into the answer.
+  4. DM spawn: plain task to the bot DM. "Spawned and bound", then the labeled answer in the DM. No "Delivering" line appears.
   5. Second DM agent: `/spawn`, pick agent and project, send a task. Its first reply lands in the DM, never in the forum.
   6. DM routing: plain message reaches the latest bound agent; reply-to reaches the agent that sent the replied message; click reaches the offering agent.
   7. Voice note in the DM: "Heard: ..." then routed like text. Needs a live isolated-ui sidecar. Its process `SPUR_CONFIG` must point at an existing dir; a stale one falls back to the default provider and the route answers 502 `missing_model`. Restart the sidecar, then check the route with a direct `curl -F audio=@<file>` to `/api/runtime/voice/transcribe`.

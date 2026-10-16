@@ -285,11 +285,21 @@ describe("sourceSessionById", () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
-  it("rethrows a second snapshot change", async () => {
+  it("recovers on the third attempt", async () => {
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockRejectedValueOnce(lifecycleError("session_lifecycle_snapshot_changed"))
+      .mockResolvedValueOnce(session());
+    expect(await sourceSessionById({ get }, "demo-1")).toMatchObject({ id: "demo-1" });
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("rethrows after three snapshot changes", async () => {
     const error = lifecycleError("session_lifecycle_snapshot_changed");
     const get = vi.fn().mockRejectedValue(error);
     await expect(sourceSessionById({ get }, "demo-1")).rejects.toBe(error);
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry other lifecycle errors", async () => {
