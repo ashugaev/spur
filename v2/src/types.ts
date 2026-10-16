@@ -1205,6 +1205,8 @@ export interface SessionRecord {
    * desk-shared sidecar, the session itself for an mcp sidecar).
    */
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
+  /** Restore-owned sidecar launches not yet acknowledged as configured commands. */
+  sidecarLaunches?: Record<string, string>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   /**
@@ -1352,6 +1354,7 @@ export interface SessionView extends Omit<
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
@@ -1406,6 +1409,7 @@ export type DashboardOmittedField =
   | "agentLaunchId"
   | "triggerBirthKey"
   | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
   | "preflightTokenUsage"

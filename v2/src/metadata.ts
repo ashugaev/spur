@@ -1078,6 +1078,14 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const sidecarLaunches: Record<string, string> = {};
+  if (isRecord(normalizedSession.sidecarLaunches)) {
+    for (const [name, launchId] of Object.entries(normalizedSession.sidecarLaunches)) {
+      if (name.length > 0 && typeof launchId === "string" && launchId.length > 0) {
+        sidecarLaunches[name] = launchId;
+      }
+    }
+  }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
@@ -1165,6 +1173,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(Object.keys(sidecarLaunches).length > 0 ? { sidecarLaunches } : {}),
     ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }

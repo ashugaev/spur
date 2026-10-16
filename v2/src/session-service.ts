@@ -982,6 +982,10 @@ export class SidecarProbeUnresponsiveError extends Error {
   readonly statusCode = 503;
 }
 
+class SidecarLaunchIncompleteError extends Error {
+  readonly statusCode = 409;
+}
+
 export class OpenPrActionRequiredError extends Error {
   readonly statusCode = 409;
   readonly payload: OpenPrActionRequiredPayload;
@@ -9622,6 +9626,11 @@ export class SessionService {
     }
     const paneDead = panePresence?.dead ?? false;
     if (alive && !paneDead) {
+      if (readSession(this.config.dataDir, args.session.id)?.sidecarLaunches?.[args.sidecarName]) {
+        throw new SidecarLaunchIncompleteError(
+          `Sidecar "${args.sidecarName}" has an incomplete launch; stop the sidecar before retrying`,
+        );
+      }
       this.allowSidecarEndpoint(args.session.id, args.sidecarName);
       return args.session;
     }
@@ -9773,6 +9782,17 @@ export class SessionService {
     // a `let`: control-flow analysis does not follow the callback's write and
     // reads a captured `let` as still-false in the catch.
     const launch = { paneCreated: false };
+    const previousLaunchId = readSession(this.config.dataDir, reservedSession.id)
+      ?.sidecarLaunches?.[args.sidecarName];
+    const launchId = operation || previousLaunchId ? randomUUID() : undefined;
+    if (launchId) {
+      operation?.assertActive();
+      const current = readSession(this.config.dataDir, reservedSession.id) ?? reservedSession;
+      writeSession(this.config.dataDir, {
+        ...current,
+        sidecarLaunches: { ...current.sidecarLaunches, [args.sidecarName]: launchId },
+      });
+    }
     let startedSession: SessionRecord;
     try {
       await createTmuxSidecarSession({
@@ -9793,6 +9813,17 @@ export class SessionService {
         ),
       });
       operation?.assertActive();
+      if (
+        launchId &&
+        readSession(this.config.dataDir, reservedSession.id)?.sidecarLaunches?.[
+          args.sidecarName
+        ] !== launchId
+      ) {
+        throw new SidecarLaunchIncompleteError(
+          `Sidecar "${args.sidecarName}" launch ownership changed; retry after the current launch finishes`,
+        );
+      }
+      if (launchId) this.clearSidecarLaunch(reservedSession.id, args.sidecarName, launchId);
       // Record this instance's identity so a tree that outlives its
       // tmux supervisor is still identifiable and reapable later — see
       // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
@@ -9837,6 +9868,9 @@ export class SessionService {
           ? {}
           : { sidecarNames: [...sidecarNames, args.sidecarName] }),
       };
+      const pendingLaunches = readSession(this.config.dataDir, reservedSession.id)?.sidecarLaunches;
+      if (pendingLaunches) updated.sidecarLaunches = pendingLaunches;
+      else delete updated.sidecarLaunches;
       if (Object.keys(nextSidecarProcs).length > 0) {
         updated.sidecarProcs = nextSidecarProcs;
       } else {
@@ -9855,6 +9889,7 @@ export class SessionService {
       // and identity evidence; a later owner must probe before reclaiming it.
       // The launch adapter has already terminated/reaped its client process.
       operation?.assertActive();
+      if (error instanceof SidecarLaunchIncompleteError) throw error;
       // Keyed on whether `new-session` actually created the session, never on
       // the pre-launch probe. The only thing that ever justified skipping is
       // ownership: a launch that created nothing may have failed on a tmux
@@ -9881,6 +9916,7 @@ export class SessionService {
         await this.reapSidecarByName(reservedSession.id, args.sidecarName, operation);
         operation?.assertActive();
         this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+        if (launchId) this.clearSidecarLaunch(reservedSession.id, args.sidecarName, launchId);
       }
       if (reservedSession !== args.session) {
         const current = readSession(this.config.dataDir, args.session.id);
@@ -9939,6 +9975,7 @@ export class SessionService {
         });
       } catch (error) {
         operation?.assertActive();
+        if (error instanceof SidecarLaunchIncompleteError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.sidecar.autostart.failed", {
           level: "warn",
@@ -11053,6 +11090,7 @@ export class SessionService {
         });
       } catch (sidecarError) {
         operation?.assertActive();
+        if (sidecarError instanceof SidecarLaunchIncompleteError) throw sidecarError;
         const sidecarMessage =
           sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
         this.logEvent("session.sidecar.autostart.failed", {
@@ -11193,6 +11231,7 @@ export class SessionService {
         });
       } catch (sidecarError) {
         operation?.assertActive();
+        if (sidecarError instanceof SidecarLaunchIncompleteError) throw sidecarError;
         const sidecarMessage =
           sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
         this.logEvent("session.sidecar.stale_wake.failed", {
@@ -16843,6 +16882,18 @@ export class SessionService {
     });
   }
 
+  private clearSidecarLaunch(ownerId: string, sidecarName: string, launchId: string): void {
+    const record = readSession(this.config.dataDir, ownerId);
+    if (record?.sidecarLaunches?.[sidecarName] !== launchId) return;
+    const remaining = Object.fromEntries(
+      Object.entries(record.sidecarLaunches).filter(([name]) => name !== sidecarName),
+    );
+    const updated = { ...record };
+    if (Object.keys(remaining).length > 0) updated.sidecarLaunches = remaining;
+    else delete updated.sidecarLaunches;
+    writeSession(this.config.dataDir, updated);
+  }
+
   // Drops sidecarProcs[sidecarName] from the owner record once its pane has
   // been reaped, so a stopped sidecar's stale pgid can never be mistaken for
   // a live claim by the sweep predicate. Mirrors the `delete mirrored.slots`
@@ -17032,6 +17083,13 @@ export class SessionService {
                 survivors,
                 ...(unverifiedPorts.length > 0 ? { unverifiedPorts } : {}),
               };
+      const pendingLaunchId = owner?.sidecarLaunches?.[sidecarName];
+      if (pendingLaunchId && sidecarStop.outcome !== "partial") {
+        const presence = await getSidecarTmuxPresence(ownerId, sidecarName, { fresh: true });
+        if (!presence.present && !presence.unresponsive && !presence.diagnostic) {
+          this.clearSidecarLaunch(ownerId, sidecarName, pendingLaunchId);
+        }
+      }
       if (sidecarStop.outcome !== "nothing-to-stop") {
         this.logEvent("session.sidecar.stopped", {
           level: "info",
@@ -21999,6 +22057,11 @@ export class SessionService {
       this.paneWriteLocks.has(session.tmuxSession) ||
       this.lifecycle.snapshot(session.id).operation?.phase === "pending" ||
       (this.restoreWarmupUntil.get(session.id) ?? 0) > Date.now();
+    const runtimeOwnerMatches = (current: SessionRecord) =>
+      current.status === session.status &&
+      sameSessionRuntimeOwner(current, session) &&
+      current.agentLaunchId === session.agentLaunchId &&
+      current.updatedAt === session.updatedAt;
     if (protectedRuntime()) return { session, runtime };
     if (runtime.probeUnresponsive) {
       return {
@@ -22045,10 +22108,12 @@ export class SessionService {
         session.status === "spawning" &&
         reason !== "boot" &&
         !hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) &&
-        !session.serverErrorAt &&
-        readSession(this.config.dataDir, session.id)?.status === "spawning" &&
-        !this.spawnsInFlight.has(session.id)
+        !session.serverErrorAt
       ) {
+        const current = readSession(this.config.dataDir, session.id);
+        if (!current || protectedRuntime() || !runtimeOwnerMatches(current)) {
+          return { session: current ?? session, runtime: confirmedRuntime };
+        }
         confirmedRuntime = await this.stopOrphanedSpawnPane(session);
       }
       if (live(confirmedRuntime)) {
@@ -22084,13 +22149,7 @@ export class SessionService {
     if (!latest) {
       return { session, runtime };
     }
-    if (
-      protectedRuntime() ||
-      latest.status !== session.status ||
-      !sameSessionRuntimeOwner(latest, session) ||
-      latest.agentLaunchId !== session.agentLaunchId ||
-      latest.updatedAt !== session.updatedAt
-    ) {
+    if (protectedRuntime() || !runtimeOwnerMatches(latest)) {
       return { session: latest, runtime };
     }
 
@@ -23108,6 +23167,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
       errorSource: _errorSource,
@@ -23462,6 +23522,7 @@ export class SessionService {
       agentLaunchId: _agentLaunchId,
       triggerBirthKey: _triggerBirthKey,
       triggerBirthRequest: _triggerBirthRequest,
+      sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,

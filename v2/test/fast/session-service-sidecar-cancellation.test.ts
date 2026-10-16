@@ -9,7 +9,7 @@ import {
   type RestoreOperationContext,
 } from "../../src/session-lifecycle.js";
 import { BUILTIN_SIDECARS } from "../../src/sidecars/builtins.js";
-import { createTmuxSidecarSession } from "../../src/runtime-tmux.js";
+import { createTmuxSidecarSession, getSidecarTmuxPresence } from "../../src/runtime-tmux.js";
 import type * as runtimeTmuxModule from "../../src/runtime-tmux.js";
 import { isHostPortFree } from "../../src/port-probe.js";
 import type * as portProbeModule from "../../src/port-probe.js";
@@ -20,6 +20,8 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => ({
   createTmuxSidecarSession: vi.fn(async () => {}),
   getSidecarTmuxPresence: vi.fn(async () => ({ present: false })),
   getTmuxPanePid: vi.fn(async () => null),
+  getTmuxPanePresence: vi.fn(async () => ({ dead: false })),
+  sidecarTmuxAlive: vi.fn(async () => false),
   tmuxPaneDead: vi.fn(async () => false),
 }));
 
@@ -39,6 +41,8 @@ interface StartArgs {
 }
 
 interface SidecarHarness {
+  clearSidecarLaunch(ownerId: string, sidecarName: string, launchId: string): void;
+  stopSidecarLocked(sessionId: string, sidecarName: string): Promise<unknown>;
   withSidecarPortLock<T>(task: () => Promise<T>, operation?: RestoreOperationContext): Promise<T>;
   startSidecarInternal(args: StartArgs): Promise<SessionRecord>;
   startSidecarInternalLocked(args: StartArgs): Promise<SessionRecord>;
@@ -126,10 +130,130 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.mocked(isHostPortFree).mockReset().mockResolvedValue(true);
+  vi.mocked(getSidecarTmuxPresence)
+    .mockReset()
+    .mockResolvedValue({ present: false, unresponsive: false });
   vi.mocked(createTmuxSidecarSession).mockReset().mockResolvedValue(undefined);
 });
 
 describe("restore-owned sidecar cancellation", () => {
+  it("persists incomplete launches and refuses a live default shell through MCP startup", async () => {
+    const { service, session, project, dataDir } = fixture();
+    const sidecar: SidecarConfig = {
+      command: "configured-service",
+      autoStart: true,
+      mcp: { server: "test", portId: "http", path: "/mcp" },
+      ports: { http: { env: "PORT", start: 43210, end: 43210 } },
+    };
+    project.sidecars = { mcp: sidecar };
+    const controller = new AbortController();
+    vi.mocked(createTmuxSidecarSession).mockImplementationOnce(async (input) => {
+      input.onCreated?.();
+      vi.mocked(getSidecarTmuxPresence).mockResolvedValue({ present: true, unresponsive: false });
+      controller.abort();
+      input.operation?.assertActive();
+    });
+    await expect(
+      service.startMcpSidecars(session, project, operation(controller.signal)),
+    ).rejects.toThrow("cancelled");
+    const interrupted = readSession(dataDir, session.id);
+    expect(interrupted?.sidecarLaunches?.["mcp"]).toEqual(expect.any(String));
+    await expect(service.startMcpSidecars(session, project, operation())).rejects.toThrow(
+      "incomplete launch",
+    );
+    expect(createTmuxSidecarSession).toHaveBeenCalledTimes(1);
+    expect(readSession(dataDir, session.id)?.sidecarLaunches).toEqual(interrupted?.sidecarLaunches);
+    // Confirmed absence permits a real configured launch, including after
+    // the persisted record has been read again by a new caller.
+    vi.mocked(getSidecarTmuxPresence).mockResolvedValue({ present: false, unresponsive: false });
+    const configured = vi.fn();
+    vi.mocked(createTmuxSidecarSession).mockImplementationOnce(async (input) => {
+      configured(input.command);
+    });
+    await service.startMcpSidecars(
+      readSession(dataDir, session.id) ?? session,
+      project,
+      operation(),
+    );
+    expect(configured).toHaveBeenCalledWith("configured-service");
+    expect(readSession(dataDir, session.id)?.sidecarLaunches).toBeUndefined();
+  });
+
+  it("preserves another launch marker and process identity when stale cleanup arrives", async () => {
+    const { service, session, dataDir } = fixture();
+    const newer = {
+      ...session,
+      sidecarLaunches: { mcp: "new-generation", other: "other-generation" },
+      sidecarProcs: { mcp: { pid: 42, pgid: 42, starttime: 123 } },
+    };
+    writeSession(dataDir, newer);
+    service.clearSidecarLaunch(session.id, "mcp", "old-generation");
+    expect(readSession(dataDir, session.id)?.sidecarLaunches).toEqual(newer.sidecarLaunches);
+    expect(readSession(dataDir, session.id)?.sidecarProcs).toEqual(newer.sidecarProcs);
+  });
+
+  it("clears its incomplete marker after explicit stop confirms absence and permits retry", async () => {
+    const { service, session, project, dataDir } = fixture();
+    const sidecar: SidecarConfig = {
+      command: "configured-service",
+      autoStart: true,
+      mcp: { server: "test", portId: "http", path: "/mcp" },
+    };
+    project.sidecars = { mcp: sidecar };
+    Object.assign(service, {
+      resolveProjectForSession: () => project,
+      sidecarOwnerIdForName: () => session.id,
+      suppressedSidecarHeals: new Map(),
+      healTaskSkipNames: new Map(),
+      excludeAmbiguousCrossWorkspacePorts: async () => ({ ports: [], ambiguousPorts: [] }),
+      enrich: async (record: SessionRecord) => record,
+    });
+    writeSession(dataDir, {
+      ...session,
+      sidecarNames: ["mcp"],
+      sidecarLaunches: { mcp: "interrupted" },
+    });
+    await service.stopSidecarLocked(session.id, "mcp");
+    expect(readSession(dataDir, session.id)?.sidecarLaunches).toBeUndefined();
+    const configured = vi.fn();
+    vi.mocked(createTmuxSidecarSession).mockImplementationOnce(async (input) => {
+      configured(input.command);
+    });
+    await service.startMcpSidecars(
+      readSession(dataDir, session.id) ?? session,
+      project,
+      operation(),
+    );
+    expect(configured).toHaveBeenCalledWith("configured-service");
+  });
+
+  it("does not clear or reap a newer launch after its own acknowledged launch completes late", async () => {
+    const { service, session, project, dataDir } = fixture();
+    const newer = {
+      ...session,
+      sidecarLaunches: { mcp: "new-generation" },
+      sidecarProcs: { mcp: { pid: 42, pgid: 42, starttime: 123 } },
+    };
+    vi.mocked(createTmuxSidecarSession).mockImplementationOnce(async () => {
+      writeSession(dataDir, newer);
+    });
+    const reap = vi.fn();
+    Object.assign(service, { reapSidecarByName: reap });
+    await expect(
+      service.startSidecarInternalLocked({
+        session,
+        project,
+        sidecarName: "mcp",
+        sidecar: { command: "configured-service", autoStart: true },
+        sidecarDepth: 0,
+        operation: operation(),
+      }),
+    ).rejects.toThrow("ownership changed");
+    expect(readSession(dataDir, session.id)?.sidecarLaunches).toEqual(newer.sidecarLaunches);
+    expect(readSession(dataDir, session.id)?.sidecarProcs).toEqual(newer.sidecarProcs);
+    expect(reap).not.toHaveBeenCalled();
+  });
+
   it("revokes a global-port-lock waiter without letting its successor overtake the holder", async () => {
     const { service } = fixture();
     let release!: () => void;

@@ -2967,6 +2967,55 @@ describe("SessionService", () => {
     }
   });
 
+  it.each(["lifecycle", "pane", "generation"] as const)(
+    "does not kill a runtime_lost orphan when %s ownership changes during the second probe",
+    async (change) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({ status: "spawning", agentLaunchId: "old-launch" });
+      sessions.set(record.id, record);
+      const ownership = service as unknown as {
+        lifecycle: { begin(action: "restore", ids: string[]): unknown };
+        paneWriteLocks: Map<string, Promise<void>>;
+      };
+      const dead = {
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        probeUnresponsive: false,
+      };
+      const live = {
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        probeUnresponsive: false,
+      };
+      let expected = record;
+      vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+        .mockResolvedValue(live)
+        .mockResolvedValueOnce(dead)
+        .mockImplementationOnce(async () => {
+          if (change === "lifecycle") ownership.lifecycle.begin("restore", [record.id]);
+          else if (change === "pane")
+            ownership.paneWriteLocks.set(record.tmuxSession, Promise.resolve());
+          else {
+            expected = { ...record, agentLaunchId: "new-launch" };
+            sessions.set(record.id, expected);
+          }
+          return live;
+        });
+      try {
+        await service.get(record.id);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(sessions.get(record.id)).toEqual(expected);
+      } finally {
+        ownership.paneWriteLocks.clear();
+        service.dispose();
+      }
+    },
+  );
+
   it("releases restore ownership on abort at readiness and rejects late input", async () => {
     mockClaudeJsonlState("waiting");
     const record = runningSession({
@@ -3126,6 +3175,89 @@ describe("SessionService", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it("fails restore on an interrupted MCP shell and retries only after confirmed absence", async () => {
+    mockClaudeJsonlState("waiting");
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            mcpsvc: {
+              command: "node mcp.js --port $MCP_PORT",
+              autoStart: true,
+              ports: { http: { env: "MCP_PORT", start: 12000, end: 12002 } },
+              mcp: { server: "mcpsvc", portId: "http", path: "/mcp" },
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService({ realPaneGeneration: true });
+    const record = runningSession({ status: "stopped", stopReason: "manual_pause" });
+    sessions.set(record.id, record);
+    sessions.set(
+      "api-2",
+      runningSession({ id: "api-2", status: "stopped", stopReason: "manual_pause" }),
+    );
+    let mainAlive = false;
+    let shellAlive = false;
+    tmuxSessionExistsMock.mockImplementation(
+      async (name: string) => name === record.tmuxSession && mainAlive,
+    );
+    isProcessRunningInTmuxMock.mockImplementation(async () => mainAlive);
+    lookupTmuxPanePidMock.mockImplementation(async (name) => ({
+      status: "ok",
+      panePid: name === record.tmuxSession && mainAlive ? process.pid : null,
+    }));
+    sidecarTmuxAliveMock.mockImplementation(async (id: string) => id === record.id && shellAlive);
+    const controller = new AbortController();
+    createTmuxSidecarSessionMock.mockImplementation(
+      async (args: Parameters<typeof runtimeTmuxModule.createTmuxSidecarSession>[0]) => {
+        if (args.sessionId === record.id) shellAlive = true;
+        args.onCreated?.();
+      },
+    );
+    createTmuxSidecarSessionMock.mockImplementationOnce(
+      async (args: Parameters<typeof runtimeTmuxModule.createTmuxSidecarSession>[0]) => {
+        shellAlive = true;
+        args.onCreated?.();
+        controller.abort();
+        throw args.operation?.signal.reason;
+      },
+    );
+    createTmuxSessionMock.mockImplementation(async () => {
+      mainAlive = true;
+    });
+    try {
+      const canceledAt = Date.now();
+      await expect(
+        service.restore(record.id, {}, { signal: controller.signal }),
+      ).rejects.toMatchObject({ statusCode: 499 });
+      expect((await service.get(record.id)).lifecycle.operation?.phase).toBe("failed");
+      const pendingLaunch = sessions.get(record.id)?.sidecarLaunches?.mcpsvc;
+      expect(pendingLaunch).toEqual(expect.any(String));
+      await expect(service.restore(record.id)).rejects.toThrow("incomplete launch");
+      expect((await service.get(record.id)).lifecycle.operation?.phase).toBe("failed");
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      await service.startSidecar("api-2", "mcpsvc");
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(2);
+      expect(sessions.get(record.id)?.sidecarLaunches?.mcpsvc).toBe(pendingLaunch);
+      shellAlive = false;
+      const restored = await service.restore(record.id);
+      expect(restored.lifecycle.operation?.phase).toBe("succeeded");
+      expect(restored).not.toHaveProperty("sidecarLaunches");
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledTimes(3);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(sessions.get(record.id)?.sidecarLaunches?.mcpsvc).toBeUndefined();
+      expect(Date.now() - canceledAt).toBeLessThan(15_000);
+    } finally {
+      service.dispose();
+    }
+  });
 
   it("spawns a session through one clear path and returns the enriched view", async () => {
     mockClaudeJsonlState("waiting");
