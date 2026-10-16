@@ -3381,6 +3381,11 @@ projects:
     expect(detail.tmuxSession).toBe(`${spawned.id}--svc--web`);
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
+    await pollUntil(async () => captureTmuxPane(detail.tmuxSession), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("SERVICE_BOOT"),
+      label: "service pane SERVICE_BOOT",
+    });
 
     const helperLogs = JSON.parse(
       (
@@ -3497,6 +3502,13 @@ projects:
       (await context.execCli(["--config", configPath, "spawn", "api", "browser logs", "--json"]))
         .stdout,
     ) as SessionView;
+    const browserPane = spawned.sidecars.find((sidecar) => sidecar.name === "browser")?.tmuxSession;
+    if (!browserPane) throw new Error("Missing browser sidecar pane in spawned session view");
+    await pollUntil(async () => captureTmuxPane(browserPane), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("BROWSER_READY"),
+      label: "browser sidecar pane BROWSER_READY",
+    });
 
     const sidecarLogs = JSON.parse(
       (
