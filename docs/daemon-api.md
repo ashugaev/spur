@@ -43,7 +43,7 @@
 - `GET /sessions/:id/conversation`
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
-- `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; 404 for a named request without pane/archive or outputless stopped recorded service (`limit>0`), 502 for failed capture; `v2/src/server.ts`.
+- `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; 404 for a named request without pane/archive or outputless stopped service when the session record exists (`limit>0`), 502 for failed capture; `v2/src/server.ts`.
 - `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
 - `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
