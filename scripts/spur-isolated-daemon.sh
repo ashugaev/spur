@@ -135,7 +135,7 @@ prune_stale_config_dirs() {
   while IFS= read -r -d '' dir; do
     [[ "$dir" == "$CONFIG_DIR" ]] && continue
 
-    if printf '%s' "$ps_output" | grep -qF -- "$dir"; then
+    if grep -qF -- "$dir" <<< "$ps_output"; then
       continue
     fi
 
