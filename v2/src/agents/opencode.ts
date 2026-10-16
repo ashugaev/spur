@@ -171,6 +171,7 @@ export async function assertOpenCodeCompatibility(): Promise<void> {
     ({ stdout } = await execFileAsync(opencodeCommand(), ["--version"], {
       encoding: "utf8",
       timeout: 5_000,
+      killSignal: "SIGKILL",
     }));
   } catch (error) {
     throw new Error(`OpenCode ${MIN_OPENCODE_VERSION}+ is required`, { cause: error });
