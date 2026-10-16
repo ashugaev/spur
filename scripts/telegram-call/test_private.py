@@ -126,12 +126,21 @@ class PrivateSessionTests(unittest.TestCase):
 
 class StartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_stages_close_owned_clients_handlers_and_lock(self):
-        for stage in ("constructor", "connect", "unauthorized", "start", "signal", "disconnect"):
+        for stage in ("constructor", "connect", "unauthorized", "start", "updates", "signal", "disconnect",
+                      "update_error", "transport_closed", "disconnected_startup", "startup_update_error"):
             with self.subTest(stage=stage), contextlib.ExitStack() as stack:
                 lock = Mock()
                 client = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock(),
                                          is_user_authorized=AsyncMock(return_value=stage != "unauthorized"),
+                                         set_receive_updates=AsyncMock(),
+                                         is_connected=Mock(return_value=stage != "disconnected_startup"),
                                          add_event_handler=Mock(), remove_event_handler=Mock())
+                async def monitor():
+                    if stage in ("update_error", "startup_update_error"):
+                        raise RuntimeError("private payload must not reach logs")
+                    if stage != "transport_closed":
+                        await asyncio.Event().wait()
+                client.run_until_disconnected = monitor
                 client_call = AsyncMock(return_value=SimpleNamespace(call_ring_timeout_ms=60000))
                 client_type = type("Client", (), {"__call__": client_call})
                 fake_client = client_type()
@@ -153,6 +162,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                                                           "TELEGRAM_CALL_ENDPOINT_HELPER": "helper"}))
                 loop = asyncio.get_running_loop()
                 signals = stack.enter_context(patch.object(loop, "add_signal_handler"))
+                events = stack.enter_context(patch("bridge.event"))
                 stack.enter_context(patch.object(loop, "remove_signal_handler"))
                 if stage == "constructor":
                     constructor.side_effect = RuntimeError("constructor")
@@ -160,16 +170,25 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                     getattr(fake_client, stage).side_effect = RuntimeError(stage)
                 elif stage == "start":
                     calls.start.side_effect = RuntimeError("start")
+                elif stage == "updates":
+                    fake_client.set_receive_updates.side_effect = RuntimeError("updates")
+                elif stage == "startup_update_error":
+                    async def handshake(*args):
+                        await asyncio.sleep(0)
+                    fake_client.set_receive_updates.side_effect = handshake
                 elif stage == "signal":
                     signals.side_effect = RuntimeError("signal")
                 if stage == "disconnect":
                     signals.side_effect = lambda signum, callback: callback()
                 with self.assertRaises((RuntimeError, bridge.BridgeError)):
                     await asyncio.wait_for(bridge.main(), 2)
+                ready = any(call.args == ("listener_ready",) for call in events.call_args_list)
+                self.assertEqual(ready, stage in ("disconnect", "update_error", "transport_closed"))
                 lock.close.assert_called_once()
                 if stage != "constructor":
                     fake_client.disconnect.assert_awaited_once()
-                if stage in ("start", "signal", "disconnect"):
+                if stage in ("start", "updates", "signal", "disconnect", "update_error",
+                             "transport_closed", "disconnected_startup", "startup_update_error"):
                     gemini.aio.aclose.assert_awaited_once()
                     fake_client.remove_event_handler.assert_called_once()
                     calls.remove_handler.assert_called_once()

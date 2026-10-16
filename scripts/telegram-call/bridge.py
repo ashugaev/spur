@@ -7,6 +7,7 @@ import fcntl
 import importlib.metadata
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,32 @@ class BridgeError(Exception):
 
 def event(stage, **fields):
     print(json.dumps({"stage": stage, "monotonic": time.monotonic(), **fields}), flush=True)
+
+
+class TelegramLogHandler(logging.Handler):
+    def emit(self, record):
+        args = record.args.values() if isinstance(record.args, dict) else record.args
+        error = record.exc_info[1] if record.exc_info else next(
+            (arg for arg in args if isinstance(arg, BaseException)), None)
+        fields = {"level": record.levelname}
+        if error is not None:
+            fields["error"] = type(error).__name__
+            constructor = getattr(error, "invalid_constructor_id", None)
+            if type(constructor) is int and 0 <= constructor <= 0xffffffff:
+                fields["constructor"] = f"0x{constructor:08x}"
+        event("telegram_transport_log", **fields)
+
+
+class TelegramLogger(logging.Logger):
+    def getChild(self, suffix):
+        return self
+
+
+def telegram_logger():
+    logger = TelegramLogger("telegram_call_transport", level=logging.WARNING)
+    logger.propagate = False
+    logger.addHandler(TelegramLogHandler())
+    return logger
 
 
 @dataclasses.dataclass(frozen=True)
@@ -489,7 +516,7 @@ def private_session(values):
 
 
 async def check_dependencies():
-    for package, version in (("py-tgcalls", "3.0.0"), ("ntgcalls", "3.0.3"), ("Telethon", "1.43.2")):
+    for package, version in (("py-tgcalls", "3.0.0"), ("ntgcalls", "3.0.3"), ("Telethon", "1.44.0")):
         if importlib.metadata.version(package) != version:
             raise BridgeError("unsupported_dependency_" + package)
     from telethon import TelegramClient
@@ -767,8 +794,10 @@ async def main():
     calls = None
     gemini = None
     listener = None
+    lifecycle_tasks = []
     try:
-        client = guarded_client_class()(str(session), int(values["TG_API_ID"]), values["TG_API_HASH"])
+        client = guarded_client_class()(str(session), int(values["TG_API_ID"]), values["TG_API_HASH"],
+                                        base_logger=telegram_logger())
         client.voice_runtime = runtime
         await client.connect()
         if not await client.is_user_authorized():
@@ -785,14 +814,32 @@ async def main():
                 client.add_event_handler(listener.raw, events.Raw())
                 calls.on_update()(listener.frames)
                 await calls.start()
+                disconnected = asyncio.create_task(client.run_until_disconnected())
+                lifecycle_tasks.append(disconnected)
+                await client.set_receive_updates(True)
+                if disconnected.done():
+                    await disconnected
+                    raise BridgeError("telegram_disconnected")
+                if not client.is_connected():
+                    raise BridgeError("telegram_disconnected")
                 stop = asyncio.Event()
                 for signum in (signal.SIGTERM, signal.SIGINT):
                     asyncio.get_running_loop().add_signal_handler(signum, stop.set)
+                stopped = asyncio.create_task(stop.wait())
+                lifecycle_tasks.append(stopped)
                 event("listener_ready")
-                await stop.wait()
+                done, _ = await asyncio.wait(lifecycle_tasks, return_when=asyncio.FIRST_COMPLETED)
+                if disconnected in done:
+                    await disconnected
+                    raise BridgeError("telegram_disconnected")
             finally:
-                if listener:
-                    await listener.close()
+                try:
+                    if listener:
+                        await listener.close()
+                finally:
+                    for task in lifecycle_tasks:
+                        task.cancel()
+                    await asyncio.gather(*lifecycle_tasks, return_exceptions=True)
     finally:
         try:
             if listener:

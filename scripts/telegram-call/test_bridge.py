@@ -231,6 +231,50 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.is_connected())
         self.network.assert_not_called()
 
+    async def test_current_message_schema_and_sanitized_telethon_child_logs(self):
+        from telethon import TelegramClient
+        from telethon.errors import TypeNotFoundError
+        from telethon.extensions import BinaryReader
+        from telethon.tl.alltlobjects import tlobjects
+        from telethon.tl.types import Message, PeerUser
+        self.assertIs(tlobjects[0x7600b9d3], Message)
+        message = Message(id=1, peer_id=PeerUser(1), message="offline fixture",
+                          date=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc))
+        encoded = bytes(message)
+        self.assertEqual(int.from_bytes(encoded[:4], "little"), 0x7600b9d3)
+        with BinaryReader(encoded) as reader:
+            self.assertEqual(reader.tgread_object().message, "offline fixture")
+        logger = bridge.telegram_logger()
+        client = TelegramClient(None, 1, "test", base_logger=logger)
+        transport_log = client._log["telethon.client.updates"]
+        self.assertIs(transport_log, logger)
+        error = TypeNotFoundError(0x7600b9d3, b"private-history-bytes")
+        with patch("bridge.event") as output:
+            transport_log.warning("private message %s", error)
+            try:
+                raise error
+            except TypeNotFoundError:
+                transport_log.exception("private traceback message")
+            transport_log.warning("private text with no exception")
+            transport_log.info("private low-level info")
+        self.assertEqual(output.call_count, 3)
+        for call in output.call_args_list[:2]:
+            self.assertEqual(call.args, ("telegram_transport_log",))
+            self.assertEqual(call.kwargs["error"], "TypeNotFoundError")
+            self.assertEqual(call.kwargs["constructor"], "0x7600b9d3")
+        self.assertNotIn("private", str(output.call_args_list))
+
+    async def test_real_disconnect_monitor_propagates_update_failure_without_network(self):
+        from telethon.errors import TypeNotFoundError
+        self.client._updates_error = TypeNotFoundError(0x7600b9d3, b"private-history")
+        with patch.object(type(self.client), "__call__", new=AsyncMock()) as handshake, \
+                patch.object(self.client, "disconnect", new=AsyncMock()) as disconnect:
+            with self.assertRaises(TypeNotFoundError):
+                await self.client.run_until_disconnected()
+        handshake.assert_awaited_once()
+        disconnect.assert_awaited_once()
+        self.network.assert_not_called()
+
     async def test_actual_pytgcalls_adapter_accepts_exact_once(self):
         with bridge.pinned(self.call):
             self.assertEqual(await self.adapter._invoke(self.accept()), "forwarded")

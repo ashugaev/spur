@@ -303,6 +303,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         class Client:
             connect, disconnect = AsyncMock(), AsyncMock()
             is_user_authorized = AsyncMock(return_value=True)
+            set_receive_updates = AsyncMock()
+            is_connected = Mock(return_value=True)
+            async def run_until_disconnected(self):
+                await asyncio.Event().wait()
             add_event_handler, remove_event_handler = Mock(), Mock()
             async def __call__(self, request):
                 return SimpleNamespace(call_ring_timeout_ms=60000)
@@ -331,7 +335,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "GEMINI_API_KEY": "private", "GEMINI_LIVE_MODEL": "configured", "allowed": {33}})),
                 ("bridge.Runtime", Mock(return_value=runtime)),
                 ("bridge.private_session", Mock(return_value=(lock, Path("private.session")))),
-                ("bridge.guarded_client_class", Mock(return_value=lambda *args: client)),
+                ("bridge.guarded_client_class", Mock(return_value=lambda *args, **kwargs: client)),
                 ("bridge.Listener", listener_factory), ("pytgcalls.PyTgCalls", Mock(return_value=calls)),
                 ("google.genai.Client", Mock(return_value=gemini)), ("httpx.AsyncClient", Mock(return_value=http))):
                 stack.enter_context(patch(target, value))
