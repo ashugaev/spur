@@ -9947,7 +9947,10 @@ export class SessionService {
           );
           const previous = args.session.sidecarPorts?.[args.sidecarName];
           if (previous) sidecarPorts[args.sidecarName] = previous;
-          writeSession(this.config.dataDir, { ...current, sidecarPorts, updatedAt: nowIso() });
+          const updated = { ...current, updatedAt: nowIso() };
+          if (Object.keys(sidecarPorts).length > 0) updated.sidecarPorts = sidecarPorts;
+          else delete updated.sidecarPorts;
+          writeSession(this.config.dataDir, updated);
         }
       }
       throw error;
