@@ -106,6 +106,7 @@ interface TelegramTextMessage {
 }
 
 interface TelegramTextContext {
+  me?: { username?: string };
   update?: {
     update_id?: number;
   };
@@ -154,7 +155,6 @@ interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
   lastUpdateId?: number;
-  botUsername?: string;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
   workbench: TelegramWorkbench;
@@ -224,6 +224,7 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
   switch (command) {
     case "complete":
     case "kill":
+      if (mention && !botUsername) return null;
       return { kind: command, invalidArgs: Boolean(args) };
     case "new":
       return args ? { kind: "new", task: args } : { kind: "new" };
@@ -1694,7 +1695,7 @@ async function handleTelegramText(
     ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
     : undefined;
   const deps = runtime.deps;
-  const command = message?.text ? parseTelegramCommand(message.text, runtime.botUsername) : null;
+  const command = message?.text ? parseTelegramCommand(message.text, ctx.me?.username) : null;
   const lifecycle = command?.kind === "complete" || command?.kind === "kill";
   if (lifecycle && (!message || !isAllowed(deps.config, message.chat.id, message.from))) return;
   const lifecycleKey =
@@ -2361,8 +2362,7 @@ async function startTelegramSource(
 
   const bot = new Bot(deps.config.token);
   try {
-    const me = await bot.api.getMe();
-    runtime.botUsername = me.username;
+    await bot.api.getMe();
   } catch (error) {
     logSetupError(deps, error);
     logSpurEvent(deps.dataDir, {

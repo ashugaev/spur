@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type * as Grammy from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   SourceProjectListItem,
@@ -7,7 +8,7 @@ import type {
   SourceWorkbench,
   SourceWorkSessionItem,
 } from "../../src/event-sources/types.js";
-import { readEventLog } from "../../src/event-log.js";
+import { readEventLog, resetEventLogCollapse } from "../../src/event-log.js";
 import * as metadataModule from "../../src/metadata.js";
 import * as consentModule from "../../src/review-interface-consent.js";
 import * as workspaceModule from "../../src/workspace.js";
@@ -75,6 +76,7 @@ vi.mock("@grammyjs/runner", () => ({
 
 const { parseTelegramCommand, telegramSourceModule, wrapTelegramSpawnPrompt } =
   await import("../../src/event-sources/telegram.js");
+const { Api, Context } = await vi.importActual<typeof Grammy>("grammy");
 
 const tempDirs: string[] = [];
 
@@ -86,6 +88,7 @@ function required<T>(value: T | undefined | null): T {
 function telegramContext(overrides: Record<string, unknown> = {}) {
   const { updateId, ...messageOverrides } = overrides;
   return {
+    me: { username: "SpurProjectsBot" },
     ...(typeof updateId === "number" ? { update: { update_id: updateId } } : {}),
     message: {
       message_id: 10,
@@ -248,6 +251,18 @@ describe("parseTelegramCommand", () => {
     });
     expect(parseTelegramCommand(`/${command} force`)).toEqual({ kind: command, invalidArgs: true });
     expect(parseTelegramCommand(`/${command}@otherbot`, "spurbot")).toBeNull();
+    for (const username of [undefined, ""]) {
+      expect(parseTelegramCommand(`/${command}@spurbot`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}@otherbot force`, username)).toBeNull();
+      expect(parseTelegramCommand(`/${command}`, username)).toEqual({
+        kind: command,
+        invalidArgs: false,
+      });
+    }
+    expect(parseTelegramCommand(`/${command}@SPURBOT force`, "spurbot")).toEqual({
+      kind: command,
+      invalidArgs: true,
+    });
   });
   it("parses watch commands with optional bot mention", () => {
     expect(parseTelegramCommand("/watch api-1")).toEqual({ kind: "watch", sessionId: "api-1" });
@@ -372,6 +387,102 @@ describe("telegramSourceModule", () => {
   }
 
   describe("topic lifecycle commands", () => {
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s uses recovered Context identity after startup getMe fails",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        getMeMock.mockRejectedValueOnce(new Error("temporary getMe failure"));
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        expect(
+          readEventLog(dataDir).some((entry) => entry.event === "source.telegram.auth_failed"),
+        ).toBe(true);
+        // Model the initialized Context supplied by runner recovery, not recovery timing.
+        const recoveredContext = (text: string, updateId: number) => {
+          const ctx = new Context(
+            {
+              update_id: updateId,
+              message: {
+                message_id: updateId,
+                date: 0,
+                message_thread_id: 22,
+                is_topic_message: true,
+                chat: { id: -1001, type: "supergroup", title: "Test" },
+                from: { id: 123, is_bot: false, first_name: "User" },
+                text,
+              },
+            },
+            new Api("test-token"),
+            {
+              id: 999,
+              is_bot: true,
+              first_name: "Spur",
+              username: "SpurProjectsBot",
+              can_join_groups: true,
+              can_read_all_group_messages: true,
+              supports_inline_queries: false,
+              can_connect_to_business: false,
+              has_main_web_app: false,
+              has_topics_enabled: false,
+              allows_users_to_create_topics: false,
+              can_manage_bots: false,
+              supports_join_request_queries: false,
+            },
+          );
+          vi.spyOn(ctx, "reply").mockImplementation(telegramContext().reply);
+          return ctx;
+        };
+        const foreign = recoveredContext(`/${action}@otherbot`, 10);
+        await required(bot).emitText(foreign);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(foreign.reply).not.toHaveBeenCalled();
+        const own = recoveredContext(`/${action}@sPuRpRoJeCtSbOt`, 11);
+        await required(bot).emitText(own);
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+        expect(own.reply).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["complete", "kill"] as const)(
+      "lifecycle identity recovery: %s rejects mentions without identity and accepts bare commands",
+      async (action) => {
+        const dataDir = await createTempDir("spur-telegram-lifecycle-");
+        tempDirs.push(dataDir);
+        const { capability } = workbenchFixture();
+        writeTelegramBindings(dataDir, "api", "telegram", [
+          { chatId: -1001, messageThreadId: 22, sessionId: "api-1" },
+        ]);
+        const { bot, emit, spawnSession } = await startSource(dataDir, undefined, undefined, {
+          workbench: capability,
+        });
+        const addressed = {
+          ...telegramContext({ text: `/${action}@SpurProjectsBot` }),
+          me: undefined,
+        };
+        await required(bot).emitText(addressed);
+        expect(capability.completeSession).not.toHaveBeenCalled();
+        expect(capability.killSession).not.toHaveBeenCalled();
+        expect(emit).not.toHaveBeenCalled();
+        expect(spawnSession).not.toHaveBeenCalled();
+        expect(addressed.reply).not.toHaveBeenCalled();
+        await required(bot).emitText({ ...telegramContext({ text: `/${action}` }), me: undefined });
+        const operation =
+          action === "complete" ? capability.completeSession : capability.killSession;
+        expect(operation).toHaveBeenCalledExactlyOnceWith("api-1");
+      },
+    );
+
     it.each(["complete", "kill"] as const)(
       "%s uses durable topic target, clears cache, and sends no extra notice",
       async (action) => {
@@ -647,6 +758,7 @@ describe("telegramSourceModule", () => {
     return ctx;
   }
   beforeEach(() => {
+    resetEventLogCollapse();
     botInstances.splice(0);
     runMock.mockReset();
   });
