@@ -16,10 +16,11 @@ import test_lifecycle as lifecycle
 
 
 class AssetsTests(unittest.TestCase):
-    def test_six_committed_pcm_assets_and_invalid_assets_fail_closed(self):
+    def test_five_committed_pcm_assets_and_invalid_assets_fail_closed(self):
         source = Path(__file__).with_name("audio")
         assets = bridge.load_notices(source)
         self.assertEqual(set(assets), set(bridge.NOTICE_NAMES))
+        self.assertEqual(len(assets), 5)
         self.assertTrue(all(48000 < len(data) <= 8 * 48000 and any(data) for data in assets.values()))
         with tempfile.TemporaryDirectory() as temp:
             copied = Path(temp) / "audio"
@@ -82,8 +83,9 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         session.assert_not_called()
         output.assert_called_once_with("inputs_ready")
 
-    async def test_preparation_waits_at_15_and_30_seconds_without_extending_timeout(self):
+    async def test_preparation_repeats_at_15_second_boundaries_until_180_second_timeout(self):
         f = self.fixture()
+        f.call.received = 0
         clock = 0
         heard = []
         async def pending(*args):
@@ -91,40 +93,64 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         async def wait(tasks, timeout, **kwargs):
             nonlocal clock
             clock += timeout
-            if clock >= 45:
+            if clock >= 180:
                 raise TimeoutError()
             return set(), set(tasks)
         async def notice(name):
             nonlocal clock
             heard.append((name, clock))
             clock += 2
-        f.shepherd.prepare = pending
-        with patch("bridge.time", SimpleNamespace(monotonic=lambda: clock)), \
+        with patch("bridge.event") as diagnostics, \
+                patch("bridge.time", SimpleNamespace(monotonic=lambda: clock)), \
                 patch("bridge.asyncio.wait", side_effect=wait):
             with self.assertRaises(TimeoutError):
-                await f.listener.prepare_services(f.call, SimpleNamespace(notice=notice), pending)
-        self.assertEqual(heard, [("waiting", 15), ("waiting", 30)])
-        self.assertEqual(clock, 45)
-        f.shepherd.prepare = AsyncMock()
+                await f.listener.prepare_voice(f.call, SimpleNamespace(notice=notice), pending)
+        self.assertEqual(heard, [("waiting", second) for second in range(15, 180, 15)])
+        self.assertEqual(clock, 180)
+        snapshots = [call.kwargs for call in diagnostics.call_args_list
+                     if call.kwargs.get("phase") == "voice_setup_wait"]
+        self.assertEqual([item["elapsed_ms"] for item in snapshots], list(range(10000, 180000, 10000)))
+        self.assertTrue(all(set(item) == {"correlation", "phase", "elapsed_ms", "reason"} for item in snapshots))
         writer = SimpleNamespace(notice=AsyncMock())
-        await f.listener.prepare_services(f.call, writer, AsyncMock())
+        await f.listener.prepare_voice(f.call, writer, AsyncMock())
         writer.notice.assert_not_awaited()
+
+    async def test_two_voice_calls_chat_with_zero_agent_requests_and_retain_jobs(self):
+        for _ in range(2):
+            f = self.fixture()
+            f.call.task = asyncio.create_task(f.listener.run_call(f.call))
+            await asyncio.wait_for(f.connected.wait(), 1)
+            self.assertTrue(f.call.active)
+            f.daemon.perform.assert_not_awaited()
+            self.assertEqual(f.requests, [])
+            from pytgcalls.types import StreamFrames, Direction, Device
+            await f.listener.frames(None, StreamFrames(33, Direction.INCOMING, Device.MICROPHONE,
+                                                       [SimpleNamespace(frame=b"I" * 320)]))
+            passed = asyncio.Event()
+            f.live.input.side_effect = lambda **kwargs: passed.set()
+            await asyncio.wait_for(passed.wait(), 1)
+            f.call.task.cancel()
+            await f.call.task
+            self.assertEqual(f.requests, [])
+            self.assertIsNone(f.listener.current)
 
     async def test_media_starting_readiness_record_order_and_no_early_microphone(self):
         f = self.fixture()
         release, preparing = asyncio.Event(), asyncio.Event()
-        original = f.shepherd.prepare
-        async def prepare(call):
-            preparing.set()
-            await release.wait()
-            await original(call)
-        f.shepherd.prepare = prepare
+        class ConnectingLive:
+            async def __aenter__(self):
+                preparing.set()
+                await release.wait()
+                return f.live
+            async def __aexit__(self, *args):
+                await f.live.__aexit__(*args)
+        f.listener.gemini.aio.live.connect = lambda **kwargs: ConnectingLive()
         with patch("bridge.event") as events:
             f.call.task = asyncio.create_task(f.listener.run_call(f.call))
             await asyncio.wait_for(preparing.wait(), 1)
             self.assertTrue(f.call.accepted)
-            self.assertFalse(f.call.ready)
             self.assertFalse(f.call.active)
+            self.assertEqual(f.requests, [])
             self.assertIsNone(f.listener.input)
             self.assertFalse(f.calls.record.called)
             from pytgcalls.types import StreamFrames, Direction, Device
@@ -140,39 +166,35 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(trace.index(("status_finished", "starting")), trace.index(("gemini_ready", None)))
         self.assertLess(trace.index(("status_finished", "ready")), trace.index(("conversation_started", None)))
 
-    async def test_specific_failure_finishes_before_pinned_hangup_and_kills_owned_shepherd(self):
-        for mode in ("shepherd-failed", "voice-failed", "timeout"):
+    async def test_google_failure_or_timeout_finishes_notice_before_hangup_without_agents(self):
+        for mode in ("voice-failed", "timeout"):
             with self.subTest(mode=mode):
                 f = self.fixture()
-                original = f.shepherd.prepare
-                async def prepare(call):
-                    await original(call)
-                    if mode == "shepherd-failed":
-                        raise RuntimeError("setup")
-                    if mode == "timeout":
+                class FailedLive:
+                    async def __aenter__(self):
+                        if mode == "voice-failed":
+                            raise RuntimeError("private provider payload")
                         await asyncio.Event().wait()
-                f.shepherd.prepare = prepare
-                if mode == "voice-failed":
-                    class FailedLive:
-                        async def __aenter__(self):
-                            raise RuntimeError("provider")
-                    f.listener.gemini.aio.live.connect = lambda **kwargs: FailedLive()
+                f.listener.gemini.aio.live.connect = lambda **kwargs: FailedLive()
                 trace = []
+                logged = []
                 async def rpc(sender, request, *args, **kwargs):
                     if isinstance(request, DiscardCallRequest):
                         trace.append("discard")
                 self.network.side_effect = rpc
                 def event(stage, **fields):
+                    logged.append(fields)
                     if stage == "status_finished":
                         trace.append(fields["status"])
                 timeout = asyncio.timeout
                 with patch("bridge.event", side_effect=event), patch("bridge.asyncio.timeout", side_effect=lambda seconds:
-                        timeout(.02 if seconds == 45 else seconds)):
+                        timeout(.02 if seconds == 180 else seconds)):
                     await asyncio.wait_for(f.listener.run_call(f.call), 2)
                 self.assertEqual(trace, ["starting", mode, "discard"])
+                self.assertNotIn("private", repr(logged))
                 self.assertTrue(f.call.accepted)
                 f.calls.record.assert_not_awaited()
-                f.shepherd.request.assert_any_await("POST", "/sessions/owned/kill", {})
+                self.assertEqual(f.requests, [])
                 self.assertIsNone(f.listener.current)
 
     async def test_native_terminal_cancels_starting_and_error_notice_without_sdk_discard(self):
@@ -214,8 +236,7 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(f.listener.current)
                 binding.stop.assert_awaited_once_with(33)
                 self.assertEqual(f.call.task.cancelling(), 1)
-                if failing:
-                    f.shepherd.request.assert_any_await("POST", "/sessions/owned/kill", {})
+                self.assertEqual(f.requests, [])
 
     async def test_native_epoch_rejects_late_same_user_callbacks_and_stop_closed(self):
         f = self.fixture()
@@ -386,4 +407,4 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bounds, [5, 5])
         self.assertIsNone(f.listener.native)
         self.assertIsNone(f.listener.current)
-        f.shepherd.request.assert_any_await("POST", "/sessions/owned/kill", {})
+        self.assertEqual(f.requests, [])

@@ -24,129 +24,6 @@ def assistant(text):
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
-    async def test_each_call_spawns_fresh_background_shepherd_and_only_kills_its_owner(self):
-        shepherd = bridge.Shepherd(None, None)
-        requests, nonce = [], None
-        async def request(method, path, body):
-            nonlocal nonce
-            requests.append((method, path, body))
-            if path == "/sessions/background":
-                nonce = body["prompt"].split("VOICE_READY:")[1]
-                return {"id": "fresh-" + str(len(requests))}
-            return {}
-        async def transcript(session):
-            return view([assistant("VOICE_READY:" + nonce)])
-        shepherd.request = AsyncMock(side_effect=request)
-        shepherd.transcript = transcript
-        sessions = []
-        for peer in (bridge.Peer(11, 22), bridge.Peer(55, 66)):
-            call = bridge.Call(peer, 33, 0)
-            await shepherd.prepare(call)
-            sessions.append(call.session)
-            await shepherd.stop_spawned(call)
-            await shepherd.stop_spawned(call)
-        self.assertNotEqual(*sessions)
-        self.assertEqual([path for _, path, _ in requests],
-                         ["/sessions/background", "/sessions/fresh-1/kill",
-                          "/sessions/background", "/sessions/fresh-3/kill"])
-        for _, path, body in requests:
-            if path == "/sessions/background":
-                self.assertEqual((body["project"], body["agent"]), ("spur-shepherd", "claude"))
-
-    async def test_result_requires_complete_exact_assistant_envelope_and_waiting(self):
-        nonce = "fresh"
-        final = assistant("VOICE_RESULT:fresh\nWorker dispatched.\nVOICE_END:fresh")
-        replies = [view([assistant("VOICE_RESULT:fresh\nWorking")], "working", 2),
-                   view([final], "working", 2),
-                   view([{"kind": "tool", "text": final["text"]}], "waiting", 2),
-                   view([final], "waiting", 2)]
-        shepherd = bridge.Shepherd(None, None)
-        shepherd.transcript = AsyncMock(side_effect=replies)
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0, session="owned")
-        with patch("bridge.asyncio.sleep", new=AsyncMock()):
-            self.assertEqual(await shepherd.answer(call, 2, nonce), "Worker dispatched.")
-        self.assertEqual(shepherd.transcript.await_count, 4)
-        self.assertEqual([args.args[1] for args in shepherd.transcript.await_args_list], [2] * 4)
-
-    async def test_stale_nonce_partial_envelope_empty_and_tool_echo_fail(self):
-        self.assertIsNone(bridge.result_body("VOICE_RESULT:old\nanswer\nVOICE_END:old", "new"))
-        self.assertIsNone(bridge.result_body("VOICE_RESULT:new\nanswer", "new"))
-        self.assertIsNone(bridge.result_body("VOICE_RESULT:new\n\nVOICE_END:new", "new"))
-        self.assertIsNone(bridge.assistant_text({"kind": "reasoning", "text": "VOICE_READY:new"}))
-        self.assertIsNone(bridge.assistant_text({"kind": "message", "role": "user", "text": "VOICE_READY:new"}))
-
-    async def test_transcript_reset_and_terminal_state_fail(self):
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0, session="owned")
-        for reply in (view([], start=0, total=0), view([], "rate_limited", start=2),
-                      view([], "needs_input", start=2)):
-            shepherd = bridge.Shepherd(None, None)
-            shepherd.transcript = AsyncMock(return_value=reply)
-            with self.assertRaises(bridge.BridgeError):
-                await shepherd.answer(call, 2, "nonce")
-
-    async def test_dispatch_prompt_has_exact_end_contract_and_pinned_session(self):
-        shepherd = bridge.Shepherd(None, None)
-        shepherd.transcript = AsyncMock(return_value=view([assistant("old")]))
-        shepherd.request = AsyncMock(return_value={"id": "owned"})
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0, session="owned")
-        cursor = await shepherd.dispatch(call, "launch one worker", "nonce")
-        self.assertEqual(cursor, 1)
-        args = shepherd.request.await_args.args
-        self.assertEqual(args[:2], ("POST", "/sessions/owned/send"))
-        prompt = args[2]["message"]
-        self.assertIn("VOICE_RESULT:nonce", prompt)
-        self.assertIn("VOICE_END:nonce", prompt)
-        self.assertIn("claim completion only after checking worker result", prompt)
-
-    async def test_readiness_ignores_echo_and_cancellation_kills_late_spawn(self):
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0)
-        shepherd = bridge.Shepherd(None, None)
-        started = asyncio.Event()
-        released = asyncio.Event()
-
-        async def request(method, path, body):
-            if path == "/sessions/background":
-                started.set()
-                await released.wait()
-                return {"id": "late"}
-            return {}
-
-        shepherd.request = AsyncMock(side_effect=request)
-        task = asyncio.create_task(shepherd.prepare(call))
-        await started.wait()
-        task.cancel()
-        released.set()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        self.assertEqual(shepherd.request.await_args_list[-1].args[:2], ("POST", "/sessions/late/kill"))
-
-    async def test_readiness_only_fresh_assistant_token(self):
-        shepherd = bridge.Shepherd(None, None)
-        nonce = None
-
-        async def request(method, path, body):
-            nonlocal nonce
-            nonce = body["prompt"].split("VOICE_READY:")[1]
-            return {"id": "owned"}
-
-        reads = 0
-
-        async def transcript(session):
-            nonlocal reads
-            reads += 1
-            return view([assistant("VOICE_READY:stale"),
-                         {"kind": "message", "role": "user", "text": "VOICE_READY:" + nonce}]
-                        + ([assistant("VOICE_READY:" + nonce)] if reads == 2 else []))
-
-        shepherd.request = AsyncMock(side_effect=request)
-        shepherd.transcript = AsyncMock(side_effect=transcript)
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0)
-        with patch("bridge.asyncio.sleep", new=AsyncMock()):
-            await shepherd.prepare(call)
-        self.assertTrue(call.ready)
-        self.assertTrue(call.spawned)
-        self.assertEqual(reads, 2)
-
     async def test_pcm_rechunk_bounds_partial_samples_and_interruption(self):
         queue = bridge.PCM(960, 480)
         queue.put(bytes(477))
@@ -174,51 +51,6 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
 
-    async def test_tool_receipt_is_dispatch_only_busy_and_late_result(self):
-        delivered = asyncio.Event()
-        shepherd = SimpleNamespace(dispatch=AsyncMock(return_value=4))
-
-        async def answer(*args):
-            await delivered.wait()
-            return "One worker dispatched; completion unconfirmed."
-
-        shepherd.answer = AsyncMock(side_effect=answer)
-        live = SimpleNamespace(send_tool_response=AsyncMock(), send_client_content=AsyncMock())
-        types = SimpleNamespace(FunctionResponse=lambda **args: args, Content=lambda **args: args,
-                                Part=lambda **args: args)
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0, session="owned")
-        tools = bridge.Tools(call, shepherd, live, types)
-        fn = SimpleNamespace(id="fn1", name="ask_shepherd", args={"message": "launch"})
-        await tools.handle(fn)
-        receipt = live.send_tool_response.await_args.kwargs["function_responses"][0]
-        self.assertEqual(receipt, {"id": "fn1", "name": "ask_shepherd",
-                                  "response": {"status": "dispatched", "request_id": "fn1"}})
-        self.assertFalse(live.send_client_content.called)
-        await tools.handle(fn)
-        self.assertEqual(live.send_tool_response.await_args.kwargs["function_responses"][0]["response"],
-                         {"status": "busy"})
-        task = tools.pending
-        delivered.set()
-        await task
-        self.assertIn("Shepherd result:", live.send_client_content.await_args.kwargs["turns"]["parts"][0]["text"])
-        self.assertTrue(live.send_client_content.await_args.kwargs["turn_complete"])
-
-    async def test_tool_invalid_or_cancelled_never_speaks_result(self):
-        live = SimpleNamespace(send_tool_response=AsyncMock(), send_client_content=AsyncMock())
-        types = SimpleNamespace(FunctionResponse=lambda **args: args, Content=lambda **args: args,
-                                Part=lambda **args: args)
-        call = bridge.Call(bridge.Peer(1, 2), 3, 0, session="owned")
-        async def blocked(*args):
-            await asyncio.sleep(60)
-        shepherd = SimpleNamespace(dispatch=AsyncMock(return_value=0), answer=AsyncMock(side_effect=blocked))
-        tools = bridge.Tools(call, shepherd, live, types)
-        await tools.handle(SimpleNamespace(id="a", name="shell", args={"message": "x"}))
-        self.assertFalse(shepherd.dispatch.called)
-        await tools.handle(SimpleNamespace(id="a", name="ask_shepherd", args={"message": "x"}))
-        call.alive = False
-        await tools.close()
-        self.assertFalse(live.send_client_content.called)
-
     async def test_invalid_external_json_and_cursor_rejected(self):
         for value in ([], {}, view([], total=-1), view([assistant("x")], total=0)):
             with self.assertRaises(bridge.BridgeError):
@@ -237,7 +69,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.network_patch = patch.object(TelegramClient, "_call", self.network)
         self.network_patch.start()
         self.addCleanup(self.network_patch.stop)
-        self.call = bridge.Call(bridge.Peer(11, 22), 33, 0, ready=True, gemini=True, accept_permission=True)
+        self.call = bridge.Call(bridge.Peer(11, 22), 33, 0, accept_permission=True)
         self.client.current_call = self.call
 
     def accept(self, peer=None):
@@ -343,13 +175,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         connected = asyncio.Event()
         call = self.call
         call.received = bridge.time.monotonic()
-        call.ready = False
-        call.gemini = False
         call.accept_permission = False
-
-        async def prepare(call):
-            await ready.wait()
-            call.ready = True
 
         async def play(user, stream):
             await self.adapter._invoke(self.accept())
@@ -361,6 +187,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             closed = False
 
             async def __aenter__(self):
+                await ready.wait()
                 return SimpleNamespace()
 
             async def __aexit__(self, *args):
@@ -371,16 +198,17 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(calls.executor.shutdown, wait=False)
         calls.play, calls.record = play, record
         self.client.is_connected = lambda: True
-        shepherd = SimpleNamespace(prepare=prepare, stop_spawned=AsyncMock())
+        daemon = SimpleNamespace(perform=AsyncMock())
         gemini = SimpleNamespace(aio=SimpleNamespace(live=SimpleNamespace(connect=lambda **args: context)))
         listener = bridge.Listener({"GEMINI_LIVE_MODEL": "configured"},
-                                  SimpleNamespace(check=AsyncMock()), self.client, calls, shepherd,
+                                  SimpleNamespace(check=AsyncMock()), self.client, calls, daemon,
                                   gemini, SimpleNamespace(), 60000, notices())
         listener.current = call
         call.task = asyncio.create_task(listener.run_call(call))
         await asyncio.sleep(.02)
         self.assertTrue(call.accepted)
-        self.assertFalse(call.ready)
+        self.assertFalse(connected.is_set())
+        daemon.perform.assert_not_awaited()
         ready.set()
         await asyncio.wait_for(connected.wait(), 1)
         self.assertTrue(call.accepted)

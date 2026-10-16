@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import os
 from pathlib import Path
-import re
 import time
 from types import SimpleNamespace
 import unittest
@@ -37,7 +36,6 @@ class Live:
         self.input = AsyncMock()
         self.send_realtime_input = self.input
         self.send_tool_response = AsyncMock()
-        self.send_client_content = AsyncMock()
         self.closed = False
 
     async def __aenter__(self):
@@ -66,7 +64,7 @@ def audio(*chunks, interrupted=False, complete=False, tool=None, mime="audio/pcm
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.client = bridge.guarded_client_class()(None, 1, "private")
-        self.runtime = SimpleNamespace(check=AsyncMock())
+        self.runtime = SimpleNamespace(url="http://127.0.0.1:49001", generation="generation", check=AsyncMock())
         self.client.voice_runtime = self.runtime
         self.client.is_connected = Mock(return_value=True)
         self.adapter = TelethonClient(60, self.client)
@@ -77,17 +75,24 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.forward.start()
         self.addCleanup(self.forward.stop)
 
-    def fixture(self, spawned=True):
+    def fixture(self):
         call = bridge.Call(bridge.Peer(11, 22), 33, time.monotonic())
         self.client.current_call = call
         live = Live()
-        shepherd = bridge.Shepherd(self.runtime, None)
-        shepherd.request = AsyncMock(return_value={})
-
-        async def prepare(target):
-            target.session, target.spawned, target.ready = "owned", spawned, True
-
-        shepherd.prepare = prepare
+        requests = []
+        def transport(request):
+            requests.append((request.method, request.url.path))
+            if request.url.path == "/projects":
+                return httpx.Response(200, json=[{"id": project, "name": project, "configured": True}
+                                                for project in bridge.PROJECTS])
+            if request.url.path == "/sessions" and request.method == "GET":
+                return httpx.Response(200, json=[], headers={"x-spur-lifecycle-instance-id": "generation"})
+            return httpx.Response(200, json={"id": "owned", "project": "voice-sandbox", "agent": "codex",
+                                           "status": "spawning", "state": "working", "runtimeAlive": False})
+        http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        self.addAsyncCleanup(http.aclose)
+        daemon = bridge.AgentDaemon(self.runtime, http)
+        daemon.perform = AsyncMock(wraps=daemon.perform)
         connected = asyncio.Event()
 
         async def play(user, stream):
@@ -101,18 +106,18 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         calls.play, calls.record = play, AsyncMock(side_effect=record)
         gemini = SimpleNamespace(aio=SimpleNamespace(live=SimpleNamespace(connect=lambda **kwargs: live)))
         listener = bridge.Listener({"GEMINI_LIVE_MODEL": "configured"}, self.runtime,
-                                  self.client, calls, shepherd, gemini, types, 60000, notices())
+                                  self.client, calls, daemon, gemini, types, 60000, notices())
         listener.current = call
-        return SimpleNamespace(call=call, live=live, shepherd=shepherd, connected=connected,
-                               calls=calls, listener=listener)
+        return SimpleNamespace(call=call, live=live, daemon=daemon, connected=connected,
+                               calls=calls, listener=listener, requests=requests)
 
     async def test_accept_failures_cleanup_and_actual_sdk_cache_races(self):
-        for mode in ("new_rejected", "reused_rejected", "generation", "expired", "setup", "setup_timeout"):
+        for mode in ("rejected", "generation", "expired", "setup", "setup_timeout"):
             with self.subTest(mode=mode):
-                f = self.fixture(spawned=mode != "reused_rejected")
+                f = self.fixture()
                 self.runtime.check.reset_mock(side_effect=True)
                 self.network.reset_mock(side_effect=True)
-                if mode.endswith("rejected"):
+                if mode == "rejected":
                     async def reject(sender, rpc, *args, **kwargs):
                         if isinstance(rpc, AcceptCallRequest):
                             raise RuntimeError("provider rejected")
@@ -131,12 +136,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     with patch("bridge.event") as events:
                         original_timeout = asyncio.timeout
                         with patch("bridge.asyncio.timeout", side_effect=lambda seconds:
-                                   original_timeout(.03 if seconds == 45 else seconds)):
+                                   original_timeout(.03 if seconds == 180 else seconds)):
                             await asyncio.wait_for(f.listener.run_call(f.call), 1)
                     self.assertEqual(f.call.accepted, mode in ("setup", "setup_timeout"))
                     self.assertFalse(f.calls.record.called)
-                    killed = [a.args[1] for a in f.shepherd.request.await_args_list]
-                    self.assertEqual(killed, ["/sessions/owned/kill"] if mode in ("setup", "setup_timeout") else [])
+                    self.assertEqual(f.requests, [])
                     ended = [a for a in events.call_args_list if a.args == ("call_ended",)]
                     self.assertTrue(ended[0].kwargs["sandbox_jobs_retained"])
                 finally:
@@ -146,7 +150,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.runtime.check.reset_mock(side_effect=True)
         self.network.reset_mock(side_effect=True)
-        call = bridge.Call(bridge.Peer(11, 22), 33, 0, ready=True, gemini=True, accept_permission=True)
+        call = bridge.Call(bridge.Peer(11, 22), 33, 0, accept_permission=True)
         self.client.current_call = call
         # Await the SDK's real peer lookup, replace its same-user cache, then resume.
         lookup = self.adapter._cache.get_input_call
@@ -194,27 +198,22 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             if len(sends) == 2:
                 played.set()
         f.calls.send_frame.side_effect = send
-        nonce = None
-        completed = asyncio.Event()
-        async def request(method, path, body):
-            nonlocal nonce
-            nonce = re.search(r"VOICE_RESULT:([a-f0-9]+)", body["message"])[1]
-            return {"id": "owned"}
-        async def transcript(session, cursor=0):
-            text = "VOICE_RESULT:" + nonce + "\nWorker dispatched.\nVOICE_END:" + nonce if nonce else ""
-            return {"startIndex": 0, "totalEntries": int(bool(nonce)),
-                    "entries": [{"kind": "message", "role": "assistant", "text": text}] if nonce else [],
-                    "state": "waiting" if completed.is_set() else "working"}
-        f.shepherd.request.side_effect = request
-        f.shepherd.transcript = transcript
+        requested, release, receipt_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def perform(*args):
+            requested.set()
+            await release.wait()
+            return {"status": "submitted", "session": {"id": "owned", "state": "working"}}
+        f.daemon.perform.side_effect = perform
+        f.live.send_tool_response.side_effect = lambda **kwargs: receipt_ready.set()
         f.call.task = asyncio.create_task(f.listener.run_call(f.call))
         await asyncio.wait_for(f.connected.wait(), 1)
         f.calls.send_frame.reset_mock()
         sends.clear()
         played.clear()
-        fn = types.FunctionCall(id="operator1", name="ask_shepherd", args={"message": "launch worker"})
+        fn = types.FunctionCall(id="operator1", name="start_agent", args={"project": "voice-sandbox", "prompt": "work"})
         await f.live.events.put(audio(b"A" * 481, b"A" * 961, tool=fn))
         await asyncio.wait_for(blocked.wait(), 1)
+        await asyncio.wait_for(requested.wait(), 1)
         await f.listener.frames(None, StreamFrames(33, Direction.INCOMING, Device.MICROPHONE,
                                                  [SimpleNamespace(frame=b"I" * 320)]))
         await f.live.events.put(audio(interrupted=True))
@@ -225,22 +224,17 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(sends[1][0] - sends[0][0], .007)
         self.assertEqual(f.live.input.await_args.kwargs["audio"].data, b"I" * 320)
         self.assertEqual(f.live.input.await_args.kwargs["audio"].mime_type, "audio/pcm;rate=16000")
+        f.live.send_tool_response.assert_not_awaited()
+        release.set()
+        await asyncio.wait_for(receipt_ready.wait(), 1)
         receipt = f.live.send_tool_response.await_args.kwargs["function_responses"][0]
         self.assertEqual((receipt.id, receipt.name, receipt.response["status"]),
-                         ("operator1", "ask_shepherd", "dispatched"))
-        self.assertFalse(f.live.send_client_content.called)
-        completed.set()
-        for _ in range(60):
-            if f.live.send_client_content.called:
-                break
-            await asyncio.sleep(.01)
-        self.assertEqual(f.live.send_client_content.await_args.kwargs["turns"].parts[0].text,
-                         "Shepherd result: Worker dispatched.")
+                         ("operator1", "start_agent", "submitted"))
         f.call.task.cancel()
         await asyncio.wait_for(f.call.task, 1)
         self.assertTrue(f.live.closed)
         self.assertIsNone(f.listener.current)
-        f.shepherd.request.assert_any_await("POST", "/sessions/owned/kill", {})
+        self.assertFalse(any(path.endswith("/kill") for _, path in f.requests))
         self.assertEqual(len(sends), 2)
         for response in (audio(b"bad", mime="audio/wav"),
                          types.LiveServerMessage(go_away=types.LiveServerGoAway()), None):
@@ -258,14 +252,12 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         for same_event in (False, True):
             with self.subTest(same_event=same_event):
                 f = self.fixture()
-                f.shepherd.dispatch = AsyncMock(return_value=0)
-                f.shepherd.answer = AsyncMock(return_value="Withdrawn work must not speak.")
                 f.call.task = asyncio.create_task(f.listener.run_call(f.call))
                 await asyncio.wait_for(f.connected.wait(), 1)
                 f.calls.send_frame.reset_mock()
                 sent = asyncio.Event()
                 f.calls.send_frame.side_effect = lambda *args: sent.set()
-                fn = types.FunctionCall(id="withdrawn", name="ask_shepherd", args={"message": "launch"})
+                fn = types.FunctionCall(id="withdrawn", name="start_agent", args={"project": "voice-sandbox", "prompt": "work"})
                 cancel = types.LiveServerToolCallCancellation(ids=["withdrawn"])
                 message = types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=[fn]))
                 if same_event:
@@ -277,43 +269,42 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 f.live.events.put_nowait(audio(b"N" * 480, complete=True))
                 await asyncio.wait_for(sent.wait(), 1)
                 f.calls.send_frame.assert_awaited_once()
-                f.shepherd.dispatch.assert_not_awaited()
+                f.daemon.perform.assert_not_awaited()
                 f.live.send_tool_response.assert_not_awaited()
-                f.live.send_client_content.assert_not_awaited()
                 f.call.task.cancel()
                 await asyncio.wait_for(f.call.task, 1)
         f = self.fixture()
-        f.shepherd.dispatch = AsyncMock(return_value=0)
-        async def blocked_answer(*args):
-            await asyncio.Event().wait()
-        f.shepherd.answer = AsyncMock(side_effect=blocked_answer)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def blocked_request(*args):
+            entered.set()
+            await release.wait()
+            return {"status": "observed"}
+        f.daemon.perform.side_effect = blocked_request
         f.call.task = asyncio.create_task(f.listener.run_call(f.call))
         await asyncio.wait_for(f.connected.wait(), 1)
-        functions = [types.FunctionCall(id=name, name="ask_shepherd", args={"message": "launch"})
+        functions = [types.FunctionCall(id=name, name="list_agents", args={})
                      for name in ("first", "second")]
         f.live.events.put_nowait(types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=functions)))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.sleep(0)
+        self.assertEqual(f.daemon.perform.await_count, 1)
+        release.set()
         for _ in range(100):
             if f.live.send_tool_response.await_count == 2:
                 break
             await asyncio.sleep(.001)
-        self.assertEqual(f.shepherd.dispatch.await_count, 1)
         replies = [a.kwargs["function_responses"][0] for a in f.live.send_tool_response.await_args_list]
         self.assertEqual([(r.id, r.response["status"]) for r in replies],
-                         [("first", "dispatched"), ("second", "busy")])
+                         [("second", "busy"), ("first", "observed")])
         f.call.task.cancel()
         await asyncio.wait_for(f.call.task, 1)
 
-    async def test_main_preparing_shutdown_kills_before_http_close(self):
-        order, spawned = [], asyncio.Event()
+    async def test_main_voice_startup_shutdown_closes_http_without_agent_operations(self):
+        order, connecting = [], asyncio.Event()
         runtime = SimpleNamespace(url="http://127.0.0.1:49001", check=AsyncMock())
         async def transport(request):
-            if request.url.path == "/sessions/background":
-                spawned.set()
-                return httpx.Response(201, json={"id": "preparing"})
-            if request.url.path.endswith("/kill"):
-                order.append("kill")
-                return httpx.Response(200, json={})
-            return httpx.Response(200, json={"entries": [], "state": "working", "startIndex": 0, "totalEntries": 0})
+            order.append("unexpected_agent_request")
+            return httpx.Response(200, json={})
         class HTTP(httpx.AsyncClient):
             async def __aexit__(self, *args):
                 order.append("http_close")
@@ -339,13 +330,14 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def start():
             phone = PhoneCallRequested(11, 22, None, 33, 44, b"key", PhoneCallProtocol(65, 92, []))
             await owner.raw(UpdatePhoneCall(phone))
-            await asyncio.wait_for(spawned.wait(), 1)
+            await asyncio.wait_for(connecting.wait(), 1)
         calls = offline_calls(self.client)
         self.addCleanup(calls.executor.shutdown, wait=False)
         calls.start, calls.play, calls.record = start, AsyncMock(), AsyncMock()
         calls.remove_handler = Mock(wraps=calls.remove_handler)
         class PendingLive:
             async def __aenter__(self):
+                connecting.set()
                 await asyncio.Event().wait()
         gemini = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock(),
                     live=SimpleNamespace(connect=lambda **args: PendingLive())))
@@ -366,7 +358,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(asyncio.get_running_loop(), "add_signal_handler",
                                 side_effect=lambda signum, callback: callback()))
             await asyncio.wait_for(bridge.main(), 2)
-        self.assertEqual(order, ["kill", "http_close"])
+        self.assertEqual(order, ["http_close"])
         self.assertIsNone(owner.current)
         client.disconnect.assert_awaited_once()
         client.remove_event_handler.assert_called_once()
