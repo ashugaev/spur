@@ -16486,6 +16486,78 @@ describe("SessionService", () => {
     expect(result.state).toBe("rate_limited");
   });
 
+  it.each(["send", "flush", "future", "unknown", "pending"] as const)(
+    "synthetic expired Codex quota preserves ordinary delivery guards (%s)",
+    async (mode) => {
+      const now = Date.parse("2026-10-16T10:00:00Z");
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          agentSessionId: "quota-root",
+          agentLaunchId: "quota-launch",
+          launchCommand: "codex",
+          rateLimitedAt: "2026-10-09T03:37:00Z",
+          ...(mode === "flush"
+            ? {
+                queuedMessages: {
+                  messages: ["quota follow-up", "remaining"],
+                  awaitingPrompt: true,
+                },
+              }
+            : {}),
+          ...(mode === "pending" ? { submitUnconfirmedAt: "2026-10-16T10:00:00Z" } : {}),
+        }),
+      );
+      const { detectCodexRateLimit } = await import("../../src/rate-limit-detect.js");
+      const detection = detectCodexRateLimit(
+        {
+          secondary: {
+            used_percent: 100,
+            window_minutes: 10080,
+            ...(mode !== "unknown"
+              ? {
+                  resets_at:
+                    Date.parse(
+                      mode === "future" ? "2026-10-17T03:37:00Z" : "2026-10-14T03:37:00Z",
+                    ) / 1000,
+                }
+              : {}),
+          },
+        },
+        mode === "future" ? "2026-10-15T03:37:00Z" : "2026-10-09T03:37:00Z",
+      );
+      readCodexRolloutStateMock.mockResolvedValue({ rollout: null, rateLimit: detection });
+      readAgentHookStateMock.mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-10-16T09:59:59Z",
+      });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService({ realPaneGeneration: true });
+      const view = await service.get("api-1");
+      expect(view.state).toBe(mode === "future" || mode === "unknown" ? "rate_limited" : "waiting");
+      if (mode === "future" || mode === "unknown" || mode === "pending") {
+        await expect(
+          service.send("api-1", { message: "quota follow-up", queue: false }),
+        ).rejects.toThrow();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } else {
+        if (mode === "flush") await service.flushQueuedMessage("api-1", "quota follow-up");
+        else await service.send("api-1", { message: "quota follow-up", queue: false });
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          "api-1",
+          "quota follow-up",
+          expect.any(Object),
+        );
+        if (mode === "flush")
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["remaining"]);
+      }
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+    },
+  );
+
   it("classifies needs_input for codex when the pane shows a live MCP permission dialog despite a soft rate-limit signal (hook-independent)", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

@@ -114,7 +114,10 @@ function usageWindowPresent(window: unknown): boolean {
 
 // Codex rollout `token_count.rate_limits`. Returns null when no usable data is
 // present (caller may then fall back to the tmux pane scan).
-export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | null {
+export function detectCodexRateLimit(
+  rateLimits: unknown,
+  observedAt?: unknown,
+): RateLimitDetection | null {
   if (!isRecord(rateLimits)) {
     return null;
   }
@@ -138,11 +141,49 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   ) {
     return { limited: true, reason: "codex out of credits" };
   }
-  if (usedPercentExhausted(rateLimits["primary"])) {
-    return { limited: true, reason: "codex 5h window exhausted" };
-  }
-  if (usedPercentExhausted(rateLimits["secondary"])) {
-    return { limited: true, reason: "codex weekly window exhausted" };
+  const primary = usedPercentExhausted(rateLimits["primary"]);
+  const secondary = usedPercentExhausted(rateLimits["secondary"]);
+  if (primary || secondary) {
+    const detection: RateLimitDetection = {
+      limited: true,
+      reason: primary ? "codex 5h window exhausted" : "codex weekly window exhausted",
+    };
+    const timestamp =
+      typeof observedAt === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(observedAt)
+        ? Date.parse(observedAt)
+        : NaN;
+    if (
+      !Number.isFinite(timestamp) ||
+      typeof observedAt !== "string" ||
+      new Date(timestamp).toISOString().slice(0, 19) !== observedAt.slice(0, 19)
+    )
+      return detection;
+    let resetAtMs = 0;
+    for (const [key, minutes] of [
+      ["primary", 300],
+      ["secondary", 10080],
+    ] as const) {
+      const window = rateLimits[key];
+      if (!usedPercentExhausted(window)) continue;
+      if (!isRecord(window)) return detection;
+      const reset = window["resets_at"];
+      if (
+        window["window_minutes"] !== minutes ||
+        typeof window["used_percent"] !== "number" ||
+        !Number.isFinite(window["used_percent"]) ||
+        typeof reset !== "number" ||
+        !Number.isSafeInteger(reset) ||
+        reset <= 0 ||
+        !Number.isSafeInteger(reset * 1000) ||
+        reset * 1000 > 8_640_000_000_000_000 ||
+        reset * 1000 - timestamp > minutes * 60_000 ||
+        reset * 1000 <= timestamp
+      )
+        return detection;
+      resetAtMs = Math.max(resetAtMs, reset * 1000);
+    }
+    return { ...detection, resetAtMs };
   }
   return NOT_LIMITED;
 }

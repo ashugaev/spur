@@ -886,6 +886,131 @@ describe("readCodexRolloutState", () => {
     });
   });
 
+  it.each([false, true])(
+    "qualifies synthetic quota expiry per current root on cached reads (state=%s)",
+    async (withState) => {
+      const resetAtMs = Date.parse("2026-10-14T03:37:00Z");
+      const content = [
+        sessionMeta("quota-root"),
+        JSON.stringify({
+          timestamp: "2026-10-09T03:37:00Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              secondary: { used_percent: 100, window_minutes: 10080, resets_at: resetAtMs / 1000 },
+            },
+          },
+        }),
+        ...(withState
+          ? [
+              JSON.stringify({
+                timestamp: "2026-10-09T03:38:00Z",
+                type: "event_msg",
+                payload: { type: "task_complete" },
+              }),
+            ]
+          : []),
+      ].join("\n");
+      const sessionsDir = await makeMultiFileSessionsDir([
+        { filename: "quota.jsonl", content, mtimeMs: 1000 },
+      ]);
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      const unknown = await readCodexRolloutState(sessionsDir, reader);
+      expect(unknown.rateLimit).toEqual({ limited: true, reason: "codex weekly window exhausted" });
+      const cached = JSON.stringify([...reader.files]);
+      const known = await readCodexRolloutState(sessionsDir, reader, "quota-root");
+      expect(known.rateLimit).toMatchObject({ limited: true, resetAtMs });
+      expect((await readCodexRolloutState(sessionsDir, reader)).rateLimit).toEqual(
+        unknown.rateLimit,
+      );
+      expect(
+        (await readCodexRolloutState(sessionsDir, reader, "different-root")).rateLimit,
+      ).toBeNull();
+      expect((await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit).toEqual(
+        known.rateLimit,
+      );
+      expect(JSON.stringify([...reader.files])).toBe(cached);
+      expect((await readCodexRolloutState(sessionsDir, undefined, "quota-root")).rateLimit).toEqual(
+        known.rateLimit,
+      );
+      await writeFile(
+        join(sessionsDir, "2026", "04", "19", "quota.jsonl"),
+        `${content}\n${JSON.stringify({
+          timestamp: "2026-10-16T03:37:00Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              secondary: {
+                used_percent: 100,
+                window_minutes: 10080,
+                resets_at: resetAtMs / 1000 + 7 * 86400,
+              },
+            },
+          },
+        })}`,
+      );
+      expect(
+        (await readCodexRolloutState(sessionsDir, reader, "quota-root")).rateLimit?.resetAtMs,
+      ).toBe(resetAtMs + 7 * 86400_000);
+    },
+  );
+  it.each([
+    ["root", "other"],
+    ["other", "root"],
+    ["root", "root"],
+  ])(
+    "keeps first-meta selection but rejects conflicting quota identities %s/%s",
+    async (first, second) => {
+      const resetAtMs = Date.parse("2026-10-14T03:37:00Z");
+      const content = [
+        JSON.stringify({ type: "session_meta", payload: { id: first } }),
+        JSON.stringify({ type: "session_meta", payload: { id: second } }),
+        JSON.stringify({
+          timestamp: "2026-10-09T03:37:00Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              secondary: { used_percent: 100, window_minutes: 10080, resets_at: resetAtMs / 1000 },
+            },
+          },
+        }),
+      ].join("\n");
+      const dir = await makeMultiFileSessionsDir([
+        { filename: "ambiguous.jsonl", content, mtimeMs: 1000 },
+      ]);
+      const result = await readCodexRolloutState(dir, undefined, first);
+      expect(result.rateLimit?.limited).toBe(true);
+      expect(result.rateLimit?.reason).toBe("codex weekly window exhausted");
+      expect(result.rateLimit?.resetAtMs).toBe(first === second ? resetAtMs : undefined);
+    },
+  );
+  it("does not qualify synthetic expiry without session metadata", async () => {
+    const content = JSON.stringify({
+      timestamp: "2026-10-09T03:37:00Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          secondary: {
+            used_percent: 100,
+            window_minutes: 10080,
+            resets_at: Date.parse("2026-10-14T03:37:00Z") / 1000,
+          },
+        },
+      },
+    });
+    const dir = await makeMultiFileSessionsDir([
+      { filename: "unknown.jsonl", content, mtimeMs: 1000 },
+    ]);
+    expect((await readCodexRolloutState(dir)).rateLimit).toEqual({
+      limited: true,
+      reason: "codex weekly window exhausted",
+    });
+  });
+
   it("aligns rate-limit detection to the selected content-newest file", async () => {
     const currentContent = [
       JSON.stringify({

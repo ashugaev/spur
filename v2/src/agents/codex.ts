@@ -898,6 +898,7 @@ export interface CodexRolloutReadResult {
 
 interface CodexRolloutCandidate {
   result: CodexRolloutReadResult;
+  expiryThreadId?: string;
   mtimeMs: number;
 }
 
@@ -1277,7 +1278,10 @@ function extractCodexLifetimeTokenUsage(
     : undefined;
 }
 
-function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRolloutReadResult {
+function readCodexRolloutFromLines(
+  filePath: string,
+  lines: string[],
+): Omit<CodexRolloutCandidate, "mtimeMs"> {
   let generationId: string | undefined;
   let threadId: string | undefined;
   let isSubagent = false;
@@ -1306,6 +1310,18 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     }
     break;
   }
+  let expiryThreadId = threadId;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed["type"] !== "session_meta") continue;
+    const payload = parsed["payload"];
+    if (!isRecord(payload) || payload["id"] !== threadId) expiryThreadId = undefined;
+  }
   const matchedCallIds = readMatchedToolCallIds(lines);
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
@@ -1323,7 +1339,10 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
       continue;
     }
     if (rateLimit === null) {
-      const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
+      const detection = detectCodexRateLimit(
+        extractCodexRateLimitsLine(parsed),
+        parsed["timestamp"],
+      );
       if (detection) {
         rateLimit = detection;
       }
@@ -1346,12 +1365,15 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     }
   }
   return {
-    rollout,
-    rateLimit,
-    ...(threadId ? { threadId } : {}),
-    ...(isSubagent ? { isSubagent: true } : {}),
-    ...(model ? { model } : {}),
-    ...(tokenUsage ? { tokenUsage } : {}),
+    result: {
+      rollout,
+      rateLimit,
+      ...(threadId ? { threadId } : {}),
+      ...(isSubagent ? { isSubagent: true } : {}),
+      ...(model ? { model } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
+    },
+    ...(expiryThreadId ? { expiryThreadId } : {}),
   };
 }
 
@@ -1400,14 +1422,15 @@ export async function readCodexRolloutState(
         return null;
       }
       const lines = content.trim().split("\n").filter(Boolean);
-      const result = readCodexRolloutFromLines(filePath, lines);
+      const parsed = readCodexRolloutFromLines(filePath, lines);
+      const result = parsed.result;
       if (!result.rollout && !result.rateLimit && !result.model && !result.tokenUsage) {
         if (fingerprint) {
           nextFiles.set(filePath, { ...fingerprint, candidate: null });
         }
         return null;
       }
-      const candidate = { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
+      const candidate = { ...parsed, mtimeMs: fingerprint?.mtimeMs ?? 0 };
       if (fingerprint) {
         nextFiles.set(filePath, { ...fingerprint, candidate });
       }
@@ -1451,6 +1474,13 @@ export async function readCodexRolloutState(
   const stateful = rootCandidates.filter(
     (candidate) => candidate.result.rollout !== null || candidate.result.rateLimit !== null,
   );
+  const rateLimitFor = (candidate: CodexRolloutCandidate | null): RateLimitDetection | null => {
+    const detection = candidate?.result.rateLimit ?? null;
+    if (!detection || (rootThreadId && candidate?.expiryThreadId === rootThreadId))
+      return detection;
+    const { resetAtMs: _reset, ...unbound } = detection;
+    return unbound;
+  };
   const withRollout = stateful.filter((candidate) => candidate.result.rollout !== null);
   if (withRollout.length > 0) {
     const best = withRollout.reduce((left, right) => {
@@ -1464,6 +1494,7 @@ export async function readCodexRolloutState(
     const tokenUsage = best.result.tokenUsage ?? newestTokenUsage;
     return {
       ...best.result,
+      rateLimit: rateLimitFor(best),
       ...(model ? { model } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(tokenUsages.length > 0 ? { tokenUsages } : {}),
@@ -1475,7 +1506,7 @@ export async function readCodexRolloutState(
   );
   return {
     rollout: null,
-    rateLimit: newestByMtime?.result.rateLimit ?? null,
+    rateLimit: rateLimitFor(newestByMtime),
     ...(model ? { model } : {}),
     ...(newestTokenUsage ? { tokenUsage: newestTokenUsage } : {}),
     ...(tokenUsages.length > 0 ? { tokenUsages } : {}),

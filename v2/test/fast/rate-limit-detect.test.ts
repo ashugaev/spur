@@ -157,6 +157,92 @@ describe("detectCodexRateLimit", () => {
   });
 });
 
+describe("Codex quota reset freshness (synthetic structured events)", () => {
+  const observed = "2026-10-09T03:37:00.000Z";
+  const primaryReset = Date.parse("2026-10-09T08:37:00.000Z");
+  const weeklyReset = Date.parse("2026-10-14T03:37:00.000Z");
+  const primary = { used_percent: 100, window_minutes: 300, resets_at: primaryReset / 1000 };
+  const secondary = { used_percent: 100, window_minutes: 10080, resets_at: weeklyReset / 1000 };
+
+  it.each(["primary", "secondary", "both"])(
+    "expires only after every %s barrier resets",
+    (kind) => {
+      const detection = detectCodexRateLimit(
+        {
+          ...(kind !== "secondary" ? { primary } : {}),
+          ...(kind !== "primary" ? { secondary } : {}),
+        },
+        observed,
+      );
+      const reset = kind === "primary" ? primaryReset : weeklyReset;
+      expect(detection).toMatchObject({ limited: true, resetAtMs: reset });
+      if (!detection) throw new Error("missing detection");
+      expect(rateLimitExpired(detection, reset - 1)).toBe(false);
+      expect(rateLimitExpired(detection, reset)).toBe(true);
+      expect(rateLimitExpired(detection, reset + 1)).toBe(true);
+      expect(rateLimitExpired(detection, Date.parse(observed) - 1)).toBe(false);
+    },
+  );
+  it.each(["primary", "secondary"])(
+    "does not hide unknown %s reset behind an expired peer",
+    (key) => {
+      const limits = { primary, secondary, [key]: { used_percent: 100 } };
+      expect(detectCodexRateLimit(limits, observed)).toMatchObject({ limited: true });
+      expect(detectCodexRateLimit(limits, observed)?.resetAtMs).toBeUndefined();
+    },
+  );
+  it.each([undefined, null, "bad", "2026-10-09 03:37:00", "2026-02-30T03:37:00Z", 0])(
+    "keeps ambiguous original time %s non-expiring",
+    (time) => {
+      expect(detectCodexRateLimit({ secondary }, time)).toEqual({
+        limited: true,
+        reason: "codex weekly window exhausted",
+      });
+    },
+  );
+  it.each([
+    undefined,
+    null,
+    "1791949020",
+    0,
+    -1,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER,
+    weeklyReset,
+    Date.parse(observed) / 1000,
+  ])("keeps invalid reset %s non-expiring", (reset) => {
+    const detection = detectCodexRateLimit(
+      { secondary: { ...secondary, resets_at: reset } },
+      observed,
+    );
+    expect(detection).toEqual({ limited: true, reason: "codex weekly window exhausted" });
+  });
+  it("retains a future event barrier and refuses resets before its own event", () => {
+    const time = "2026-10-20T03:37:00.000Z";
+    const resetAtMs = Date.parse("2026-10-21T03:37:00.000Z");
+    const future = detectCodexRateLimit(
+      { secondary: { ...secondary, resets_at: resetAtMs / 1000 } },
+      time,
+    );
+    if (!future) throw new Error("missing detection");
+    expect(rateLimitExpired(future, Date.parse("2026-10-16T00:00:00Z"))).toBe(false);
+    expect(detectCodexRateLimit({ secondary }, time)?.resetAtMs).toBeUndefined();
+  });
+  it("does not expire hard account limits or unfamiliar monthly windows", () => {
+    for (const limits of [
+      { secondary, rate_limit_reached_type: "monthly" },
+      { credits: { has_credits: false } },
+      { secondary: { ...secondary, window_minutes: 43200 } },
+      { secondary: { ...secondary, used_percent: Infinity } },
+    ]) {
+      const detection = detectCodexRateLimit(limits, observed);
+      expect(detection?.limited).toBe(true);
+      expect(detection?.resetAtMs).toBeUndefined();
+    }
+  });
+});
+
 describe("detectClaudeRateLimit", () => {
   it("flags a trailing synthetic rate_limit record", () => {
     const record = parseJsonlRecord(CLAUDE_RATE_LIMIT_LINE, 0);
