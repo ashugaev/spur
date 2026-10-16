@@ -13789,6 +13789,9 @@ export class SessionService {
       },
       updatedAt: nowIso(),
     };
+    if (request.target === "interval" && updated.intervalWake) {
+      delete updated.intervalWake.dispatchClaimId;
+    }
     writeSession(this.config.dataDir, updated);
     return this.enrich(updated);
   }
@@ -13886,7 +13889,7 @@ export class SessionService {
       }
       const claimedSession = {
         ...current,
-        intervalWake: { ...intervalWake, nextDueAt },
+        intervalWake: { ...intervalWake, nextDueAt, dispatchClaimId: randomUUID() },
         updatedAt: nowIso(),
       };
       writeSession(this.config.dataDir, claimedSession);
@@ -13925,6 +13928,8 @@ export class SessionService {
           if (
             afterDenial &&
             afterDenial.intervalWake &&
+            afterDenial.intervalWake.dispatchClaimId ===
+              claim.session.intervalWake.dispatchClaimId &&
             isDeepStrictEqual(afterDenial.intervalWake, claim.session.intervalWake) &&
             sameSessionRuntimeOwner(afterDenial, claim.session) &&
             afterDenial.agentLaunchId === claim.session.agentLaunchId &&
