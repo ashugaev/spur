@@ -51778,7 +51778,7 @@ describe("SessionService", () => {
       },
     );
 
-    it.each([false, true, "resend"] as const)(
+    it.each([false, true, "resend", "binding"] as const)(
       "fences an already-typed server-error reminder after a restore claims its ACK (found=%s)",
       async (found) => {
         const sessions = createSessionStore();
@@ -51799,19 +51799,27 @@ describe("SessionService", () => {
         const ackGate = new Promise<void>((resolve) => {
           releaseAck = resolve;
         });
-        createAgentSubmitAckBindingMock.mockImplementationOnce(async () => ({
-          scan: async () => {
+        createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
+          if (found === "binding") {
             enterAck();
             await ackGate;
-            return { found: found === true, lastScannedFile: null };
-          },
-        }));
+            return null;
+          }
+          return {
+            scan: async () => {
+              enterAck();
+              await ackGate;
+              return { found: found === true, lastScannedFile: null };
+            },
+          };
+        });
         agentSubmitAckPacingMock.mockReturnValue({ windowMs: 1, maxResends: 1 });
         const internals = service as unknown as { processScheduledWakes(): Promise<void> };
         const waking = internals.processScheduledWakes();
         await ackEntered;
-        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-        let mainAlive = false;
+        const oldInputCount = found === "binding" ? 0 : 1;
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(oldInputCount);
+        let mainAlive = found === "binding";
         tmuxSessionExistsMock.mockImplementation(async () => mainAlive);
         isProcessRunningInTmuxMock.mockImplementation(async () => mainAlive);
         createTmuxSessionMock.mockImplementation(async () => {
@@ -51826,6 +51834,7 @@ describe("SessionService", () => {
           releaseProbe = resolve;
         });
         lookupTmuxPanePidMock.mockImplementationOnce(async () => {
+          mainAlive = false;
           enterProbe();
           await probeGate;
           return { status: "ok", panePid: null };
@@ -51846,12 +51855,12 @@ describe("SessionService", () => {
           await waking;
           await probeEntered;
           expect(sessions.get(record.id)).toEqual(snapshot);
-          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(oldInputCount);
           expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
           expect(reactivatedEventCount()).toBe(0);
           releaseProbe();
           expect((await restoring)?.lifecycle.operation?.phase).toBe("succeeded");
-          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(oldInputCount + 1);
           await vi.advanceTimersByTimeAsync(1_800_001);
           await service.get(record.id);
           await internals.processScheduledWakes();
@@ -51859,7 +51868,7 @@ describe("SessionService", () => {
             sendMessageToTmuxMock.mock.calls.filter(
               ([, message]) => message === SERVER_ERROR_REACTIVATION_PROMPT,
             ),
-          ).toHaveLength(2);
+          ).toHaveLength(oldInputCount + 1);
           expect(reactivatedEventCount()).toBe(1);
         } finally {
           releaseAck();
