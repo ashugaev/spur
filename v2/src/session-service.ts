@@ -12151,13 +12151,16 @@ export class SessionService {
   ): Promise<SessionRecord> {
     const holdAt = session.submitUnconfirmedAt;
     const ackOnly = mode === "ack-only";
+    const typed = session.queuedMessageTyped;
+    const strictCodex = session.agent === "codex" && typed?.ackBaseline?.agent === "codex";
+    const qualifiedObservation = ackOnly || strictCodex;
     if (
       !holdAt ||
-      (!ackOnly && (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
+      (!qualifiedObservation &&
+        (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
     ) {
       return session;
     }
-    const typed = session.queuedMessageTyped;
     if (!typed?.ackBaseline) {
       if (ackOnly) return session;
       const latest = readSession(this.config.dataDir, session.id);
@@ -12166,10 +12169,10 @@ export class SessionService {
       }
       return this.confirmSubmitHold(latest, "activity");
     }
-    const observed = ackOnly ? { ...session } : session;
+    const observed = qualifiedObservation ? { ...session } : session;
     const originalTyped = {
       ...typed,
-      ackBaseline: ackOnly ? structuredClone(typed.ackBaseline) : typed.ackBaseline,
+      ackBaseline: qualifiedObservation ? structuredClone(typed.ackBaseline) : typed.ackBaseline,
     };
     const lifecycle = this.lifecycle.snapshot(session.id);
     const matchesObservation = (latest: SessionRecord | null): boolean => {
@@ -12194,7 +12197,7 @@ export class SessionService {
       );
     };
     if (
-      ackOnly &&
+      qualifiedObservation &&
       (session.agent !== "codex" ||
         !session.agentSessionId?.trim() ||
         !session.agentLaunchId?.trim() ||
@@ -12208,20 +12211,23 @@ export class SessionService {
     }
     this.submitHoldScans.add(session.id);
     let acked: boolean;
+    let qualifiedNoMatch: boolean;
     try {
       const binding = await resumeAgentSubmitAckBinding(
         session.agent,
         {
           ...this.submitAckContext(session),
-          ...(ackOnly ? { codexAckScope: "current-native-baseline" as const } : {}),
+          ...(qualifiedObservation ? { codexAckScope: "current-native-baseline" as const } : {}),
         },
         originalTyped.ackBaseline,
       );
-      if (ackOnly && !matchesObservation(readSession(this.config.dataDir, session.id)))
+      if (qualifiedObservation && !matchesObservation(readSession(this.config.dataDir, session.id)))
         return readSession(this.config.dataDir, session.id) ?? session;
-      acked = binding ? (await binding.scan(originalTyped.message)).found : false;
+      const scan = binding ? await binding.scan(originalTyped.message) : undefined;
+      acked = scan?.found ?? false;
+      qualifiedNoMatch = scan?.qualifiedNoMatch === true;
     } catch (error) {
-      if (!ackOnly) throw error;
+      if (!qualifiedObservation) throw error;
       return readSession(this.config.dataDir, session.id) ?? session;
     } finally {
       this.submitHoldScans.delete(session.id);
@@ -12232,14 +12238,20 @@ export class SessionService {
       !latest ||
       latest.submitUnconfirmedAt !== holdAt ||
       latest.queuedMessageTyped?.typedAt !== typed.typedAt ||
-      (ackOnly && !matchesObservation(latest))
+      (qualifiedObservation && !matchesObservation(latest))
     ) {
       return latest ?? session;
     }
     if (acked) {
       return this.confirmSubmitHold(latest, "ack");
     }
-    if (ackOnly || !agentActivityAt) return latest;
+    if (
+      ackOnly ||
+      (strictCodex && !qualifiedNoMatch) ||
+      !agentActivityAt ||
+      agentActivityAt.getTime() < Date.parse(holdAt)
+    )
+      return latest;
     const turnEnded =
       state === "waiting" &&
       Date.now() - agentActivityAt.getTime() >= agentQueuedSendPromptGraceMs(session.agent);
