@@ -19477,6 +19477,180 @@ describe("SessionService", () => {
     );
   });
 
+  // Shifts Date.now (restore warmup clock) only; real timers keep the
+  // reconcile's 1s confirmation sleep and the waitFor polls working.
+  function skewDateNow(): { advance(ms: number): void } {
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    return {
+      advance(ms: number) {
+        skewMs += ms;
+      },
+    };
+  }
+  // RESTORE_WARMUP_MS (30s) plus margin.
+  const PAST_RESTORE_WARMUP_MS = 31_000;
+
+  function holdAgentReady(): {
+    agent: { started: boolean };
+    release(): void;
+    fail(error: Error): void;
+    held(): boolean;
+  } {
+    const agent = { started: false };
+    isProcessRunningInTmuxMock.mockImplementation(async () => agent.started);
+    let releaseReady: (() => void) | undefined;
+    let failReady: ((error: Error) => void) | undefined;
+    waitForTmuxReadyMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolveReady, rejectReady) => {
+          releaseReady = resolveReady;
+          failReady = rejectReady;
+        }),
+    );
+    return {
+      agent,
+      release() {
+        agent.started = true;
+        releaseReady?.();
+      },
+      fail(error: Error) {
+        failReady?.(error);
+      },
+      held: () => releaseReady !== undefined,
+    };
+  }
+
+  async function expectNotErroredMidLaunch(
+    service: { get(id: string): Promise<SessionView> },
+    sessions: ReturnType<typeof createSessionStore>,
+  ): Promise<void> {
+    const midLaunch = await service.get("api-1");
+    expect(midLaunch.status).toBe("running");
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")?.error).toBeUndefined();
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ id: "api-1", status: "errored" }),
+    );
+  }
+
+  async function expectReconciledAfterExit(
+    service: { get(id: string): Promise<SessionView> },
+    sessions: ReturnType<typeof createSessionStore>,
+    agent: { started: boolean },
+  ): Promise<void> {
+    // Settled launch releases the guard: a later agent exit reconciles.
+    agent.started = false;
+    const afterExit = service.get("api-1");
+    await vi.waitFor(() => expect(sessions.get("api-1")?.status).toBe("errored"), {
+      timeout: 5_000,
+    });
+    await afterExit;
+  }
+
+  it("leaves a relaunching session running while its agent has not reached the prompt yet", async () => {
+    // Recovery writes `running` right after creating the pane, then waits for
+    // the agent prompt. An rc-file prompt (oh-my-zsh "update? [Y/n]") holds
+    // the agent off past the 30s warmup; the live pane with no agent process
+    // must not be reconciled to errored while the relaunch still owns it.
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+
+    const service = await createDisposedSessionService();
+    try {
+      const sending = service.send("api-1", { message: "resume work" });
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+
+      await expectNotErroredMidLaunch(service, sessions);
+
+      ready.release();
+      const result = await sending;
+      expect(result.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("leaves a restoring session running while its agent has not reached the prompt yet", async () => {
+    // restore() writes a provisional `running` record, then waits for the
+    // agent prompt longer than the 30s warmup. A reconcile to errored there
+    // breaks restore's lifecycle stamp and fails a launch that is still live.
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped", stopReason: "manual_pause" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+
+    const service = await createDisposedSessionService();
+    try {
+      const restoring = service.restore("api-1");
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+
+      await expectNotErroredMidLaunch(service, sessions);
+
+      ready.release();
+      const restored = await restoring;
+      expect(restored.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+
+      // restore() re-arms the post-launch warmup on success; let it lapse.
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("releases the launch guard when a restore fails its ready wait", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped", stopReason: "manual_pause" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+    const { PromptReadyTimeoutError } = await import("../../src/runtime-tmux.js");
+
+    const service = await createDisposedSessionService();
+    try {
+      const restoring = service.restore("api-1");
+      const rejected = expect(restoring).rejects.toThrow("Failed to restore api-1");
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      ready.fail(
+        new PromptReadyTimeoutError({ sessionName: "api-1", elapsedMs: 120_000, detail: "" }),
+      );
+      await rejected;
+      expect(sessions.get("api-1")?.status).toBe("errored");
+
+      // A later running record with a dead agent must reconcile again.
+      const failed = sessions.get("api-1");
+      if (!failed) throw new Error("missing api-1 record");
+      const { error: _launchError, ...runningBase } = failed;
+      sessions.set("api-1", { ...runningBase, status: "running" });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("retains running status and the error when tmux is confirmed missing", async () => {
     let session: SessionRecord = {
       ...runningSession(),
