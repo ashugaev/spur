@@ -23,6 +23,7 @@ import {
   TELEGRAM_MESSAGE_EVENT,
   type TelegramAutoSpawnConfig,
   type TelegramBinding,
+  type TelegramBotIdentity,
   type TelegramMessageEventData,
   type TelegramSourceConfig,
 } from "../types.js";
@@ -152,7 +153,7 @@ interface TelegramRuntime {
   deps: SourceStartDeps<TelegramSourceConfig>;
   bindings: Map<string, TelegramBinding>;
   lastUpdateId?: number;
-  botUsername?: string;
+  botIdentity?: TelegramBotIdentity;
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
   workbench: TelegramWorkbench;
@@ -1691,7 +1692,7 @@ async function handleTelegramText(
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
-  const command = parseTelegramCommand(message.text, runtime.botUsername);
+  const command = parseTelegramCommand(message.text, runtime.botIdentity?.username);
   const owner: WorkbenchOwner = {
     userId: from.id,
     chatId: message.chat.id,
@@ -2295,7 +2296,7 @@ async function startTelegramSource(
   const bot = new Bot(deps.config.token);
   try {
     const me = await bot.api.getMe();
-    runtime.botUsername = me.username;
+    runtime.botIdentity = { id: me.id, ...(me.username ? { username: me.username } : {}) };
   } catch (error) {
     logSetupError(deps, error);
     logSpurEvent(deps.dataDir, {
@@ -2373,6 +2374,7 @@ async function startTelegramSource(
 
   return {
     stop,
+    ...(runtime.botIdentity ? { telegramBotIdentity: runtime.botIdentity } : {}),
   };
 }
 
