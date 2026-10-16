@@ -1953,7 +1953,7 @@ test.describe("S2a: Logs modal", () => {
     page,
   }, testInfo) => {
     const session = makeWorkingSession({ id: "detail-s2a-error-404" });
-    const message = `No retained pane for runtime ${"long-runtime-name".repeat(20)}`;
+    const message = `No retained pane for runtime ${"x".repeat(400)}`;
     await page.setViewportSize({ width: 360, height: 780 });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "waiting");
