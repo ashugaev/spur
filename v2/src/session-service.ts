@@ -626,6 +626,14 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
       (session.errorSource === undefined && session.launchCommand !== "")
     );
   }
+  if (session.errorSource === "other") {
+    return (
+      session.error ===
+        "Session status detection failed: ps failed: malformed process table output" ||
+      session.error ===
+        "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n"
+    );
+  }
   return isRuntimeProbeError(session);
 }
 
@@ -11264,9 +11272,43 @@ export class SessionService {
       // reboot-restored. Read from the listed snapshot: a concurrent heal
       // between list and read must not turn it into a plain drifted record.
       const healedProbeError = this.probeErrorHealable(session);
+      const observed = { ...session };
+      const stamp = this.lifecycleStamp(observed);
+      const lifecycle = this.lifecycleIdsFor(session).map((id) => ({
+        id,
+        snapshot: this.lifecycle.snapshot(id),
+      }));
+      const sameObservationOwner = (record: SessionRecord) =>
+        sameSessionRuntimeOwner(record, observed) &&
+        record.agentLaunchId === observed.agentLaunchId &&
+        lifecycle.every(({ id, snapshot }) => {
+          const latest = this.lifecycle.snapshot(id);
+          return (
+            snapshot.operation?.phase !== "pending" &&
+            latest.operation?.phase !== "pending" &&
+            latest.instanceId === snapshot.instanceId &&
+            latest.revision === snapshot.revision
+          );
+        });
       const runtime = await this.readRuntimeSnapshot(session);
       const current = readSession(this.config.dataDir, session.id);
       if (!current) continue;
+      const concurrentlyHealed =
+        healedProbeError &&
+        current.status === "stopped" &&
+        !hasRetainedSessionError(current) &&
+        !current.serverErrorAt &&
+        current.stopReason !== "manual_pause" &&
+        current.stopReason !== "token_budget";
+      if (
+        !sameObservationOwner(current) ||
+        (!this.lifecycleStateMatches(current, stamp) && !concurrentlyHealed) ||
+        (!concurrentlyHealed &&
+          (current.error !== observed.error ||
+            current.errorSource !== observed.errorSource ||
+            current.serverErrorAt !== observed.serverErrorAt))
+      )
+        continue;
       const workspace = probeWorkspace(current.worktreePath);
       const reconciled = await this.reconcileUnexpectedStop(
         current,
@@ -11283,7 +11325,16 @@ export class SessionService {
         throw error;
       });
       if (!reconciled) continue;
-      if (!readSession(this.config.dataDir, session.id)) continue;
+      const latest = readSession(this.config.dataDir, session.id);
+      if (
+        !latest ||
+        !sameObservationOwner(latest) ||
+        !sameObservationOwner(reconciled.session) ||
+        !this.lifecycleStateMatches(latest, this.lifecycleStamp(reconciled.session)) ||
+        latest.stopReason === "manual_pause" ||
+        latest.stopReason === "token_budget"
+      )
+        continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         if (
           !hasRetainedSessionError(reconciled.session) &&
@@ -21808,6 +21859,37 @@ export class SessionService {
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
+    const observed = { ...session };
+    const stamp = this.lifecycleStamp(observed);
+    const lifecycle = this.lifecycleIdsFor(observed).map((id) => ({
+      id,
+      snapshot: this.lifecycle.snapshot(id),
+    }));
+    const readObservation = () => {
+      const latest = readSession(this.config.dataDir, observed.id);
+      return {
+        latest,
+        valid:
+          latest !== null &&
+          sameSessionRuntimeOwner(latest, observed) &&
+          latest.agentLaunchId === observed.agentLaunchId &&
+          this.lifecycleStateMatches(latest, stamp) &&
+          latest.error === observed.error &&
+          latest.errorSource === observed.errorSource &&
+          latest.serverErrorAt === observed.serverErrorAt &&
+          lifecycle.every(({ id, snapshot }) => {
+            const current = this.lifecycle.snapshot(id);
+            return (
+              snapshot.operation?.phase !== "pending" &&
+              current.operation?.phase !== "pending" &&
+              current.instanceId === snapshot.instanceId &&
+              current.revision === snapshot.revision
+            );
+          }),
+      };
+    };
+    const initial = readObservation();
+    if (!initial.valid) return { session: initial.latest ?? session, runtime };
     if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -21855,6 +21937,9 @@ export class SessionService {
         try {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
         } catch (error) {
+          const observation = readObservation();
+          if (!observation.valid)
+            return { session: observation.latest ?? session, runtime: confirmedRuntime };
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(session, diagnostic, "runtime_probe");
           return {
@@ -21871,6 +21956,9 @@ export class SessionService {
         }
         if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
+      const observation = readObservation();
+      if (!observation.valid)
+        return { session: observation.latest ?? session, runtime: confirmedRuntime };
       if (
         live(confirmedRuntime) &&
         session.status === "spawning" &&
@@ -21908,13 +21996,10 @@ export class SessionService {
       }
     }
 
-    const latest = readSession(this.config.dataDir, session.id);
-    if (!latest) {
-      return { session, runtime };
-    }
-    if (latest.status !== session.status) {
-      return { session: latest, runtime };
-    }
+    const observation = readObservation();
+    const latest = observation.latest;
+    if (!observation.valid || !latest)
+      return { session: latest ?? session, runtime: confirmedRuntime };
     if (hasRetainedSessionError(latest) && !this.probeErrorHealable(latest))
       return { session: latest, runtime: confirmedRuntime };
 
