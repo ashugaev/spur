@@ -6297,7 +6297,7 @@ export class SessionService {
   // as triggers.ts enqueue).
   private async withPaneWriteLock<T>(
     paneKey: string,
-    task: () => Promise<T>,
+    task: (owner: Promise<void>) => Promise<T>,
     operation?: RestoreOperationContext,
   ): Promise<T> {
     const previous = this.paneWriteLocks.get(paneKey) ?? Promise.resolve();
@@ -6321,7 +6321,7 @@ export class SessionService {
       }
     } else await previous;
     try {
-      return await task();
+      return await task(current);
     } finally {
       release();
       if (this.paneWriteLocks.get(paneKey) === current) {
@@ -17353,13 +17353,21 @@ export class SessionService {
       SessionRecord,
       "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
     >,
-    options: { failOnSurvivors: boolean; operation?: RestoreOperationContext },
+    options: {
+      failOnSurvivors: boolean;
+      operation?: RestoreOperationContext;
+      assertCurrent?: () => void;
+    },
   ): Promise<void> {
     const operation = options.operation;
-    operation?.assertActive();
+    const assertActive = () => {
+      operation?.assertActive();
+      options.assertCurrent?.();
+    };
+    assertActive();
     const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
     const paneLookup = await wait(this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }));
-    operation?.assertActive();
+    assertActive();
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17379,7 +17387,7 @@ export class SessionService {
         processMatchers: sessionProcessMatchers(session),
       }),
     );
-    operation?.assertActive();
+    assertActive();
     if (capture.status === "unavailable") {
       // The process table could not be read, so "no survivors" would be a
       // guess. Refusing a relaunch is recoverable; launching a duplicate is
@@ -17431,12 +17439,12 @@ export class SessionService {
         throw new Error(message);
       }
     }
-    operation?.assertActive();
+    assertActive();
     if (operation) await killTmuxSession(session.tmuxSession, operation);
     else await killTmuxSession(session.tmuxSession);
-    operation?.assertActive();
+    assertActive();
     const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
-    operation?.assertActive();
+    assertActive();
     if (outcome.status === "clear") {
       return;
     }
@@ -22026,7 +22034,12 @@ export class SessionService {
   // reached it, so its pane is stopped; the caller then reconciles the record
   // to "stopped" like a dead orphan, queue kept, and restore or the next send
   // relaunches it with the task prompt.
-  private async stopOrphanedSpawnPane(session: SessionRecord): Promise<SessionRuntimeSnapshot> {
+  private async stopOrphanedSpawnPane(
+    session: SessionRecord,
+    assertCurrent: () => void,
+  ): Promise<SessionRuntimeSnapshot> {
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false, assertCurrent });
+    assertCurrent();
     this.logEvent("session.spawn.orphan_stopped", {
       level: "warn",
       sessionId: session.id,
@@ -22037,7 +22050,6 @@ export class SessionService {
         queuedCount: queuedMessages(session).length,
       },
     });
-    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
     return this.readRuntimeSnapshot(session, { fresh: true });
   }
 
@@ -22051,9 +22063,10 @@ export class SessionService {
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
-    const protectedRuntime = () =>
+    const protectedRuntime = (ownedPane?: Promise<void>) =>
       this.spawnsInFlight.has(session.id) ||
-      this.paneWriteLocks.has(session.tmuxSession) ||
+      (this.paneWriteLocks.has(session.tmuxSession) &&
+        this.paneWriteLocks.get(session.tmuxSession) !== ownedPane) ||
       this.lifecycle.snapshot(session.id).operation?.phase === "pending" ||
       (this.restoreWarmupUntil.get(session.id) ?? 0) > Date.now();
     const runtimeOwnerMatches = (current: SessionRecord) =>
@@ -22113,7 +22126,28 @@ export class SessionService {
         if (!current || protectedRuntime() || !runtimeOwnerMatches(current)) {
           return { session: current ?? session, runtime: confirmedRuntime };
         }
-        confirmedRuntime = await this.stopOrphanedSpawnPane(session);
+        const superseded = new Error("Orphan runtime ownership changed");
+        try {
+          confirmedRuntime = await this.withPaneWriteLock(
+            session.tmuxSession,
+            async (ownedPane) => {
+              const assertCurrent = () => {
+                const latest = readSession(this.config.dataDir, session.id);
+                if (!latest || protectedRuntime(ownedPane) || !runtimeOwnerMatches(latest)) {
+                  throw superseded;
+                }
+              };
+              assertCurrent();
+              return this.stopOrphanedSpawnPane(session, assertCurrent);
+            },
+          );
+        } catch (error) {
+          if (error !== superseded) throw error;
+          return {
+            session: readSession(this.config.dataDir, session.id) ?? session,
+            runtime: confirmedRuntime,
+          };
+        }
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };

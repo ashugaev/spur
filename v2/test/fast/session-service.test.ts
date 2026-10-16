@@ -3016,6 +3016,137 @@ describe("SessionService", () => {
     },
   );
 
+  it.each(["lookup", "capture", "pane"] as const)(
+    "preserves an orphan successor installed during the actual %s await",
+    async (seam) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({ status: "spawning", agentLaunchId: "old-launch" });
+      const successor = { ...record, agentLaunchId: "new-launch" };
+      let recovery: Promise<void> | undefined;
+      sessions.set(record.id, record);
+      const ownership = service as unknown as {
+        lifecycle: { begin(action: "restore", ids: string[]): unknown };
+      };
+      const live = {
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        probeUnresponsive: false,
+      };
+      vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+        .mockResolvedValue(live)
+        .mockResolvedValueOnce({
+          ...live,
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+        });
+      const installSuccessor = async () => {
+        await Promise.resolve();
+        if (seam === "pane") {
+          const internals = sessionServiceInternals(service);
+          internals.restoreWarmupUntil.set(record.id, Date.now() - 1);
+          recovery = internals.withPaneWriteLock(record.tmuxSession, async () => {});
+        } else {
+          ownership.lifecycle.begin("restore", [record.id]);
+          sessions.set(record.id, successor);
+        }
+      };
+      if (seam === "lookup") {
+        lookupTmuxPanePidMock.mockImplementationOnce(async () => {
+          await installSuccessor();
+          return { status: "ok", panePid: 4242 };
+        });
+      } else {
+        capturePaneAgentProcessesMock.mockImplementationOnce(async () => {
+          await installSuccessor();
+          return { status: "ok", processes: [] };
+        });
+      }
+      try {
+        await service.get(record.id);
+        await recovery;
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ event: "session.spawn.orphan_stopped" }),
+        );
+        expect(sessions.get(record.id)).toEqual(seam === "pane" ? record : successor);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(["capture", "kill"] as const)(
+    "serializes a successor restore behind orphan %s and fences old termination",
+    async (seam) => {
+      mockClaudeJsonlState("waiting");
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null });
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({ status: "spawning", agentLaunchId: "old-launch" });
+      sessions.set(record.id, record);
+      const live = {
+        runtimeAlive: true,
+        paneUsable: true,
+        processAlive: true,
+        probeUnresponsive: false,
+      };
+      const dead = { ...live, runtimeAlive: false, paneUsable: false, processAlive: false };
+      vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+        .mockResolvedValue(dead)
+        .mockResolvedValueOnce(dead)
+        .mockResolvedValueOnce(live);
+      let entered!: () => void;
+      let release!: () => void;
+      const enteredGate = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (seam === "capture") {
+        capturePaneAgentProcessesMock.mockImplementationOnce(async () => {
+          entered();
+          await gate;
+          return { status: "ok", processes: [] };
+        });
+      } else {
+        killTmuxSessionMock.mockImplementationOnce(async () => {
+          entered();
+          await gate;
+        });
+      }
+      const inspecting = service.get(record.id);
+      try {
+        await enteredGate;
+        const restoring = service.restore(record.id);
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(terminateAgentProcessesMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).toHaveBeenCalledTimes(seam === "capture" ? 0 : 1);
+        release();
+        await inspecting;
+        expect((await restoring).lifecycle.operation?.phase).toBe("succeeded");
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).toHaveBeenCalledTimes(seam === "capture" ? 1 : 2);
+        expect(terminateAgentProcessesMock).toHaveBeenCalledTimes(1);
+        expect(logSpurEventMock).not.toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ event: "session.spawn.orphan_stopped" }),
+        );
+        expect(sessions.get(record.id)?.status).toBe("running");
+      } finally {
+        release();
+        service.dispose();
+      }
+    },
+  );
+
   it("releases restore ownership on abort at readiness and rejects late input", async () => {
     mockClaudeJsonlState("waiting");
     const record = runningSession({
