@@ -22038,7 +22038,17 @@ export class SessionService {
         readSession(this.config.dataDir, session.id)?.status === "spawning" &&
         !this.spawnsInFlight.has(session.id)
       ) {
-        confirmedRuntime = await this.stopOrphanedSpawnPane(session, () => readObservation().valid);
+        try {
+          confirmedRuntime = await this.stopOrphanedSpawnPane(
+            session,
+            () => readObservation().valid,
+          );
+        } catch (error) {
+          const afterOrphan = readObservation();
+          if (!afterOrphan.valid)
+            return { session: afterOrphan.latest ?? session, runtime: confirmedRuntime };
+          throw error;
+        }
         const afterOrphan = readObservation();
         if (!afterOrphan.valid)
           return { session: afterOrphan.latest ?? session, runtime: confirmedRuntime };

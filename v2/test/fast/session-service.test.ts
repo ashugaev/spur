@@ -27166,6 +27166,48 @@ describe("SessionService", () => {
       expect(sessions.get(original.id)).toEqual(replacement);
     });
 
+    it.each(["replacement", "current"])(
+      "handles rejected orphan snapshots through classifier for %s owner",
+      async (owner) => {
+        const sessions = createSessionStore();
+        const service = await createDisposedSessionService();
+        const original = runningSession({
+          status: "spawning",
+          agentSessionId: "original",
+          agentLaunchId: "original",
+          queuedMessages: { messages: ["A", "B"], awaitingPrompt: true },
+        });
+        const replacement = {
+          ...original,
+          status: "running" as const,
+          agentLaunchId: "replacement",
+        };
+        sessions.set(original.id, original);
+        const internals = repairInternals(service);
+        vi.spyOn(internals, "lookupPanePidQuietly").mockResolvedValue({
+          status: "ok",
+          panePid: 101,
+          paneDead: false,
+        });
+        let reads = 0;
+        vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
+          if (reads++ === 0) return live;
+          if (owner === "replacement") sessions.set(original.id, replacement);
+          throw new Error("old orphan post-kill probe rejected");
+        });
+        await internals.classifySessionRecord(original);
+        expect(killTmuxSessionMock).toHaveBeenCalledOnce();
+        if (owner === "replacement") expect(sessions.get(original.id)).toEqual(replacement);
+        else
+          expect(sessions.get(original.id)).toMatchObject({
+            agentLaunchId: "original",
+            error: "Session status detection failed: old orphan post-kill probe rejected",
+            errorSource: "other",
+            queuedMessages: original.queuedMessages,
+          });
+      },
+    );
+
     it.each(["reject", "unknown"])(
       "retains original C1 protection during fresh %s",
       async (mode) => {
@@ -53432,38 +53474,22 @@ describe("SessionService", () => {
     });
 
     it("refuses to launch a replacement when the pane still reads alive but nothing was captured", async () => {
-      // capturePaneAgentProcessesMock stays at its ok+empty default: the
-      // matchers found nothing owned. isProcessRunningInTmuxMock disagrees
-      // with itself on purpose: classification (no `fresh`) and
-      // reconcileUnexpectedStop's own confirmation re-probe (its own
-      // `{fresh:true}` call, unrelated to this guard) must both still read
-      // dead so restore() proceeds past the "not restorable" gate at all —
-      // only the SECOND `fresh` probe, the one inside
-      // killAgentPaneAndConfirmExit's new ownership-blind check, reads alive,
-      // simulating a process the ownership matchers cannot see.
+      // Only the liveness check after an empty ownership capture sees the
+      // foreign process; earlier classification remains dead.
       mockClaudeJsonlState("waiting");
       findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
       createSessionStore(runningSession({ id: "api-1" }));
       mockExitedThenRestoredProcess();
       agentLaunchUsesForeignBinaryMock.mockReturnValue(true);
-      // The first fresh lookup (restore's own) resolves unavailable; every
-      // later lookup, including the kill path's fresh one, resolves an ok pane
-      // without a pid.
-      let freshLookups = 0;
-      lookupTmuxPanePidMock.mockImplementation(async (_name, options) => {
-        if (options?.fresh) {
-          freshLookups += 1;
-          if (freshLookups === 1) return { status: "unavailable" };
-        }
-        return { status: "ok", panePid: null, paneDead: false };
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: null, paneDead: false });
+      let emptyOwnershipCaptured = false;
+      capturePaneAgentProcessesMock.mockImplementation(async () => {
+        emptyOwnershipCaptured = true;
+        return { status: "ok", processes: [] };
       });
-      let freshProbes = 0;
       isProcessRunningInTmuxMock.mockImplementation(
-        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
-          if (opts?.fresh !== true) return false;
-          freshProbes += 1;
-          return freshProbes >= 2;
-        },
+        async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) =>
+          opts?.fresh === true && emptyOwnershipCaptured,
       );
 
       const service = await createDisposedSessionService();
