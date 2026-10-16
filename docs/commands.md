@@ -1,6 +1,6 @@
 # Commands
 
-> Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md).
+> Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
 `review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
@@ -9,7 +9,7 @@ Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|
 ## Session tools and environment
 
 `$SPUR_SESSION_TOOL_DIR` on `PATH`: `spur`, `spur-slots`, `spur-sidecar`, `spur-self-destruct`, `spur-todo` (+ `spur-branch`, `spur-agent-state`, `spur-isolated` when applicable). Identity env: `$SPUR_SESSION`, `$SPUR_PROJECT`, `$SPUR_AGENT`, `$SPUR_SESSION_TOOL_DIR`, `$SPUR_SESSION_ARTIFACTS_DIR`, `$SPUR_REAL_HOME`. Commands: `$SPUR_SLOT_COMMAND`, `$SPUR_TODO_COMMAND` (+ `$SPUR_AGENT_STATE_COMMAND`, `$SPUR_AGENT_STATE_FILE` for hook-state agents). `$SPUR_CLOSEOUT_OWNER=1` marks the closeout owner; `0` skips git/PR closeout in the Stop hook. Launcher exports `$SPUR_ISOLATED_CONFIG`, `$SPUR_ISOLATED_UI_ENDPOINT_FILE`; private runtime-file fields `SPUR_ISOLATED_DAEMON_PID`, `SPUR_ISOLATED_DAEMON_STARTTIME` consumed by UI: current-generation readiness/receipt contract, UI wait budget 30s, `/info` timeout 1s, timeout exits nonzero; `v2/src/isolated-web-endpoint.ts`, `scripts/spur-isolated-ui.sh`.
-`$SPUR_AGENT_LAUNCH_ID`: opaque, fresh per agent process generation; agent configuration cannot override it. Do not persist or reuse it.
+`$SPUR_AGENT_LAUNCH_ID`: opaque, fresh per agent process generation; agent config cannot override; never persist/reuse; additional live-pane orphan cleanup requires readable exact `$SPUR_SESSION` and attempted-launch markers; missing/mismatched/unreadable markers skipped, baseline matched descendants unchanged — `v2/src/agent-processes.ts`, `v2/src/session-service.ts`.
 
 ## doctor
 

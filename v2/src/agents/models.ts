@@ -299,11 +299,39 @@ export function parseOpenCodeVerboseModelsOutput(stdout: string): AgentModel[] {
 // loaded host and blocks the spawn. Match the other OpenCode CLI reads.
 const OPENCODE_MODELS_TIMEOUT_MS = 20_000;
 
-async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+// Same TTL, keying and failure semantics as cursorCache: only successful
+// discovery is cached; a rejected call is evicted from in-flight, never cached.
+const openCodeCache = new Map<string, CursorCacheEntry>();
+const openCodeInFlight = new Map<string, Promise<AgentModel[]>>();
+
+async function execOpenCodeModels(cacheKey: string): Promise<AgentModel[]> {
   const stdout = await readOpenCodeJson(["models", "--verbose"], {
     timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
   });
-  return parseOpenCodeVerboseModelsOutput(stdout);
+  const models = parseOpenCodeVerboseModelsOutput(stdout);
+  // An empty catalog is not cached: a provider configured later must show up
+  // without waiting out the TTL.
+  if (models.length > 0) {
+    openCodeCache.set(cacheKey, { models, expiresAt: Date.now() + CURSOR_CACHE_TTL_MS });
+  }
+  return models;
+}
+
+async function discoverOpenCodeModels(): Promise<AgentModel[]> {
+  const cacheKey = opencodeCommand();
+  const cached = openCodeCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.models;
+  }
+  const inFlight = openCodeInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = execOpenCodeModels(cacheKey).finally(() => {
+    openCodeInFlight.delete(cacheKey);
+  });
+  openCodeInFlight.set(cacheKey, request);
+  return request;
 }
 
 function missingOpenCodeExecutableError(error: unknown): Error | null {
