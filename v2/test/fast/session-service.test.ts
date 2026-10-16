@@ -2642,6 +2642,7 @@ describe("SessionService", () => {
     rmSync(TEST_DATA_DIR, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe("config registry lifecycle", () => {
