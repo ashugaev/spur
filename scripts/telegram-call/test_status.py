@@ -8,7 +8,7 @@ import wave
 from unittest.mock import AsyncMock, patch
 
 from ntgcalls import ConnectionInfo, ConnectionKind, ConnectionState
-from telethon.tl.functions.phone import DiscardCallRequest
+from telethon.tl.functions.phone import DiscardCallRequest, SendSignalingDataRequest
 from telethon.tl.types import InputPhoneCall, PhoneCallDiscarded, UpdatePhoneCall
 
 import bridge
@@ -267,6 +267,46 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await asyncio.wait_for(new_waiter, 1))
         current.retire()
         await current.close()
+
+    async def test_registered_native_signaling_checks_exact_peer_after_real_adapter_lookup(self):
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced):
+                f = self.fixture()
+                self.network.reset_mock()
+                adapter = f.calls._app._bind_client
+                peer = InputPhoneCall(55, 66) if replaced else InputPhoneCall(11, 22)
+                adapter._cache.set_cache(33, peer)
+                binding = Binding()
+                with patch("ntgcalls.NTgCalls", return_value=binding):
+                    native = bridge.NativeCall(f.listener, f.call, bridge.Playback(f.listener, f.call))
+                f.call.task = asyncio.create_task(asyncio.Event().wait())
+                binding.callbacks["signaling"](33, b"offline signaling")
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                await asyncio.gather(*native.tasks, return_exceptions=True)
+                await asyncio.sleep(0)
+                if replaced:
+                    self.network.assert_not_awaited()
+                    self.assertFalse(f.call.alive)
+                else:
+                    self.network.assert_awaited_once()
+                    request = self.network.await_args.args[1]
+                    self.assertIsInstance(request, SendSignalingDataRequest)
+                    self.assertEqual((request.peer.id, request.peer.access_hash), (11, 22))
+                    self.assertTrue(f.call.alive)
+                native.retire()
+                f.call.task.cancel()
+                await asyncio.gather(f.call.task, return_exceptions=True)
+                await native.close()
+
+        f = self.fixture()
+        self.network.reset_mock()
+        valid = SendSignalingDataRequest(InputPhoneCall(11, 22), b"current")
+        stale = SendSignalingDataRequest(InputPhoneCall(55, 66), b"replaced")
+        with bridge.pinned(f.call):
+            with self.assertRaisesRegex(bridge.BridgeError, "call_peer_changed"):
+                await f.calls._app._bind_client._invoke([valid, stale])
+        self.network.assert_not_awaited()
 
     async def test_status_completion_waits_for_last_frame_drain_and_one_sender(self):
         f = self.fixture()

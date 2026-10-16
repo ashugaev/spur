@@ -94,6 +94,7 @@ def guarded_client_class():
     from telethon import TelegramClient
     from telethon.tl.functions.phone import (
         AcceptCallRequest, DiscardCallRequest, ReceivedCallRequest, RequestCallRequest,
+        SendSignalingDataRequest,
     )
 
     class GuardedClient(TelegramClient):
@@ -113,7 +114,8 @@ def guarded_client_class():
             for rpc in requests:
                 if isinstance(rpc, RequestCallRequest):
                     raise BridgeError("outgoing_call_forbidden")
-                if isinstance(rpc, (AcceptCallRequest, DiscardCallRequest, ReceivedCallRequest)):
+                if isinstance(rpc, (AcceptCallRequest, DiscardCallRequest, ReceivedCallRequest,
+                                    SendSignalingDataRequest)):
                     if captured is None or Peer(rpc.peer.id, rpc.peer.access_hash) != captured.peer:
                         raise BridgeError("call_peer_changed")
                     if isinstance(rpc, AcceptCallRequest):
