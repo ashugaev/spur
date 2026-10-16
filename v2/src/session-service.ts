@@ -982,9 +982,7 @@ export class SidecarProbeUnresponsiveError extends Error {
   readonly statusCode = 503;
 }
 
-class SidecarLaunchIncompleteError extends Error {
-  readonly statusCode = 409;
-}
+class SidecarLaunchIncompleteError extends Error {}
 
 export class OpenPrActionRequiredError extends Error {
   readonly statusCode = 409;
@@ -9647,13 +9645,14 @@ export class SessionService {
       // old instance keeps running under the reused port.
       const owner = readSession(this.config.dataDir, args.session.id);
       const identity = owner?.sidecarProcs?.[args.sidecarName];
-      // Narrowed to an identity-present start: "absent" from an unreadable
-      // probe must not reap a recorded identity. A first start has no
-      // identity, so reapRecordedIdentity and clearSidecarProcEntry below are
-      // both no-ops there — refusing it would turn a harmless launch into a
-      // hard failure. Thrown before any write.
-      if ((presence.unresponsive || presence.diagnostic) && owner && identity) {
-        throw new SidecarProbeUnresponsiveError(
+      const incompleteLaunch = owner?.sidecarLaunches?.[args.sidecarName];
+      // An unreadable probe cannot reclaim a recorded process or an
+      // interrupted launch whose identity was never captured.
+      if ((presence.unresponsive || presence.diagnostic) && (identity || incompleteLaunch)) {
+        const ProbeError = incompleteLaunch
+          ? SidecarLaunchIncompleteError
+          : SidecarProbeUnresponsiveError;
+        throw new ProbeError(
           `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
         );
       }

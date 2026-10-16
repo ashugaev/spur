@@ -137,6 +137,41 @@ afterEach(() => {
 });
 
 describe("restore-owned sidecar cancellation", () => {
+  it.each([{ unresponsive: true }, { unresponsive: false, diagnostic: "tmux probe failed" }])(
+    "preserves an interrupted launch without a process identity when its probe is unknown: %j",
+    async (unknown) => {
+      const { service, session, project, dataDir } = fixture();
+      const interrupted = { ...session, sidecarLaunches: { mcp: "interrupted" } };
+      project.sidecars = {
+        mcp: {
+          command: "configured-service",
+          autoStart: true,
+          mcp: { server: "test", portId: "http", path: "/mcp" },
+        },
+      };
+      writeSession(dataDir, interrupted);
+      vi.mocked(getSidecarTmuxPresence).mockResolvedValue({ present: false, ...unknown });
+      await expect(
+        service.startSidecarInternalLocked({
+          session: interrupted,
+          project,
+          sidecarName: "mcp",
+          sidecar: { command: "configured-service", autoStart: true },
+          sidecarDepth: 0,
+          operation: operation(),
+        }),
+      ).rejects.toThrow("tmux state is unreadable");
+      await expect(service.startMcpSidecars(interrupted, project, operation())).rejects.toThrow(
+        "tmux state is unreadable",
+      );
+      expect(createTmuxSidecarSession).not.toHaveBeenCalled();
+      expect(readSession(dataDir, session.id)?.sidecarLaunches).toEqual(
+        interrupted.sidecarLaunches,
+      );
+      expect(readSession(dataDir, session.id)?.sidecarProcs).toBeUndefined();
+    },
+  );
+
   it("persists incomplete launches and refuses a live default shell through MCP startup", async () => {
     const { service, session, project, dataDir } = fixture();
     const sidecar: SidecarConfig = {
