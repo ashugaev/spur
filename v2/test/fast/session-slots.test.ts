@@ -558,6 +558,61 @@ exec "$REAL_GIT" "$@"
       }
     });
 
+    it("preserves cwd lookup, PATH and argv when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      writeFileSync(
+        join(cwd, "git"),
+        `#!/usr/bin/env bash
+printf 'cwd-git\\nPATH=<%s>\\n' "$PATH"
+printf 'arg=<%s>\\n' "$@"
+`,
+        { encoding: "utf8", mode: 0o755 },
+      );
+      const result = spawnSync(join(inner, "git"), ["--version", "", "two words"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe("cwd-git\nPATH=<>\narg=<--version>\narg=<>\narg=<two words>\n");
+      expect(result.stderr).toBe("");
+    });
+
+    it("retains Bash default lookup when PATH is unset", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(true);
+      const env = { ...process.env };
+      delete env.PATH;
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^git version \d/);
+      expect(result.stderr).toBe("");
+    });
+
+    it("skips cwd wrappers when PATH is empty", async () => {
+      const inner = await makeWrapper("inner");
+      const cwd = await makeToolStub(false);
+      writeFileSync(join(cwd, "git"), readFileSync(join(inner, "git")), { mode: 0o755 });
+      const result = spawnSync(join(inner, "git"), ["--version"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, PATH: "" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(127);
+      expect(result.stderr).toBe("Spur git wrapper could not find git outside Spur git wrappers\n");
+    });
+
     it("blocks a bad-branch push through nested wrappers", async () => {
       const inner = await makeWrapper("inner");
       const outer = await makeWrapper("outer");

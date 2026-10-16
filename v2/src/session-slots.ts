@@ -392,6 +392,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
 REAL_GIT=""
 IFS=: read -r -a path_parts <<< "\${PATH:-}"
+if [[ -z "\${PATH:-}" ]]; then
+  path_parts=("")
+fi
 for path_part in "\${path_parts[@]}"; do
   candidate="\${path_part:-.}/git"
   if [[ ! -f "$candidate" || ! -x "$candidate" ]]; then
