@@ -1795,7 +1795,11 @@ export async function startServer(
 
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
-        sendJson(response, 201, await service.spawn(mergeSpawnStateSubscriptions(body)));
+        sendJson(
+          response,
+          201,
+          await service.spawn(mergeSpawnStateSubscriptions(body), { acceptQueued: true }),
+        );
         return;
       }
 
