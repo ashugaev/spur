@@ -14,7 +14,7 @@ PROCESS
      Compare final interface scope with user-approved scope through caller-trusted agent-protocol.md; missing/stale approval blocks verdict.
   4  Record draft scenarios/exclusions; obtain separate coverage-only sub-agent challenge with requirements, diff/boundaries and draft. Use native delegation or request caller dispatch; absent output/self-critique blocks execution.
   5  Revise list; close omissions with added rows or boundary-grounded exclusions; save challenger identity/output, dispositions and final matrix. Unresolved omissions: BLOCKED.
-  6  Execute revised scenarios/checks: `pnpm typecheck && pnpm lint`; follow manager's CI/local check ownership; required missing proof blocks approval. Falsify criteria against code, tests and callers.
+  6  Execute revised boundary-targeted scenarios/checks under manager's CI/local check ownership. Never query or wait for remote CI; pending/failing/missing CI never blocks lane review. Missing required evidence blocks approval; preserve available findings.
   7  Verify changed functions/interfaces: `rg "functionName" packages/ --type ts -l`; organize findings by severity, report only >80% confidence issues.
   8  Return local verdict. Publish only for authorized live PR review through trusted contract; no active PR: NOT REQUIRED; denied live publication: BLOCKED.
      Use caller's trusted `spur review-app` executable for pinned App publication; apply trusted contract. Never substitute human credentials.
@@ -33,24 +33,26 @@ REVIEW AREAS
 
 OUTPUT
   Review: APPROVED | CHANGES_REQUESTED | BLOCKED
-  Checks: typecheck: OK|FAIL  lint: OK|FAIL  targeted test: OK|FAIL|NOT REQUIRED
+  Checks: <executed checks, results, evidence gaps>
   Requirements: covered <criterion> — `file:line` | missing <criterion> — NOT COVERED
   Coverage: <challenger identity/output, omission dispositions, final matrix and execution evidence>
   MUST FIX (critical/high): `file:line`: <issue> — <fix>
   SHOULD FIX (medium): `file`: <issue>
   Verdict: APPROVED | CHANGES_REQUESTED | BLOCKED
   Publication: APPROVED | CHANGES_REQUESTED | BLOCKED | NOT REQUIRED
+  Notification: SENT | BLOCKED | NOT REQUIRED
   PR conclusion comment:
     Code Review Conclusion
     Status: APPROVED | CHANGES_REQUESTED | BLOCKED
-    Checks: typecheck OK|FAIL; lint OK|FAIL; targeted test OK|FAIL|NOT REQUIRED
+    Checks: <executed checks, results, evidence gaps>
     Requirements: covered | not covered
     Objections: none | <critical/high objections>
     Conclusion: <ship/hold decision in one sentence>
 
 RULES
-  - Never APPROVE with open MUST FIX or failing checks.
-  - Never APPROVE if requirements uncovered.
+  - Return CHANGES_REQUESTED for evidenced defects, including attributable targeted-check failures; missing environment/evidence blocks affected approval, not available inspection.
+  - Finish lane on verified native APPROVED or CHANGES_REQUESTED; publication/notification failures never erase local conclusion.
+  - Never APPROVE with open MUST FIX or uncovered requirements.
   - Prohibit source edits; permit checkout/build/evidence writes.
   - Include contract identity/evidence fields in PR conclusion.
   - Use `Objections: none` when no critical/high objections remain.
