@@ -13,6 +13,7 @@ import { EventBus } from "../../src/event-bus.js";
 import type {
   AutoPingRouteDescriptor,
   PersistedPendingBatch,
+  PersistedSpawnWork,
   ReviewSignal,
   ReviewSnapshot,
   WorkItemLifecycleRecord,
@@ -40,6 +41,7 @@ const logSpurEventMock = vi.fn();
 const refreshSignalsMock =
   vi.fn<(input: RefreshReviewSignalsInput) => Promise<ReviewSignalRefreshResult[]>>();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
+const pendingSpawnWork = new Map<string, PersistedSpawnWork>();
 
 function inputLogEntries(sessionId: string): unknown[] {
   return logSpurEventMock.mock.calls
@@ -60,6 +62,19 @@ vi.mock("../../src/event-log.js", async (importOriginal) => {
 });
 
 vi.mock("../../src/metadata.js", () => ({
+  readPendingSpawnWork: () =>
+    new Map([...pendingSpawnWork].map(([id, work]) => [id, structuredClone(work)])),
+  writePendingSpawnWork: (_dataDir: string, work: PersistedSpawnWork, revision?: number) => {
+    const current = pendingSpawnWork.get(work.workId);
+    if (revision === undefined ? current !== undefined : current?.revision !== revision)
+      return false;
+    pendingSpawnWork.set(work.workId, structuredClone(work));
+    return true;
+  },
+  deletePendingSpawnWork: (_dataDir: string, id: string, revision: number) => {
+    if (pendingSpawnWork.get(id)?.revision !== revision) return false;
+    return pendingSpawnWork.delete(id);
+  },
   deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
   readReviewSourceSnapshot: readReviewSourceSnapshotMock,
@@ -750,6 +765,10 @@ async function loadTriggersModule() {
   return {
     ...module,
     startConfiguredTriggers(deps: Omit<TriggerDeps, "autoPing"> & { autoPing?: AutoPingService }) {
+      deps = {
+        ...deps,
+        sessionService: Object.assign({ getTriggerBirth: () => undefined }, deps.sessionService),
+      };
       if (deps.autoPing) return module.startConfiguredTriggers(deps as TriggerDeps);
       const policyDir = mkdtempSync(join(tmpdir(), "spur-trigger-policy-"));
       const autoPing = new AutoPingService(policyDir);
@@ -780,6 +799,7 @@ async function advanceSendWindow(): Promise<void> {
 
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
+    pendingSpawnWork.clear();
     vi.useFakeTimers();
     refreshSignalsMock
       .mockReset()
@@ -3689,7 +3709,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           steps: ["review", "continue"],
@@ -3723,7 +3743,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(webhookEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: 'Body={"kind":"deploy"} At=2026-09-08T12:00:00.000Z',
         });
@@ -3752,7 +3772,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           agent: "codex",
@@ -3783,7 +3803,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "ship the task",
           mode: "council",
@@ -3817,7 +3837,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -3826,7 +3846,7 @@ describe("startConfiguredTriggers", () => {
           worktree: false,
         },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -3855,6 +3875,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: vi.fn(),
@@ -3866,7 +3887,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "ship ship the task",
         steps: ["review", "continue"],
@@ -3875,7 +3896,7 @@ describe("startConfiguredTriggers", () => {
           worktree: false,
         },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "risks for ship the task",
         steps: ["verify"],
@@ -3904,6 +3925,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: warnMock,
@@ -3944,6 +3966,7 @@ describe("startConfiguredTriggers", () => {
       bus,
       sessionService: {
         spawn: spawnMock,
+        get: vi.fn().mockResolvedValue({ status: "running", workspaceExists: true }),
       } as never,
       logger: {
         warn: warnMock,
@@ -4671,7 +4694,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "review only",
           restrictWrites: true,
@@ -4724,12 +4747,12 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "review only",
         restrictWrites: true,
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         prompt: "write access",
       });
@@ -4775,7 +4798,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(cronEvent());
       await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledWith({
+        expect(spawnMock.mock.calls[0]?.[0]).toEqual({
           project: "api",
           prompt: "review only",
           allowedTriggers: [],
@@ -4880,7 +4903,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
@@ -4925,13 +4948,13 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         agent: "claude",
         prompt: "Claude review https://github.com/acme/api/pull/42.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         agent: "codex",
         prompt: "Codex review https://github.com/acme/api/pull/42.",
@@ -4962,7 +4985,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(2);
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(1, {
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         agent: "claude",
         model: "sonnet",
@@ -4971,7 +4994,7 @@ describe("startConfiguredTriggers", () => {
         allowedTriggers: [],
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
-      expect(spawnMock).toHaveBeenNthCalledWith(2, {
+      expect(spawnMock.mock.calls[1]?.[0]).toEqual({
         project: "api",
         agent: "cursor",
         model: "composer-2.5",
@@ -5012,7 +5035,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
+      expect(spawnMock.mock.calls[0]?.[0]).toEqual({
         project: "api",
         prompt: "Triage https://sentry.io/issues/7/ from acme/web.",
         slots: { links: [{ label: "pr", url: "https://sentry.io/issues/7/" }] },
@@ -5079,7 +5102,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: expect.any(String) });
       const path = join(policyDir, "auto-ping.json");
       const grants = existsSync(path)
         ? (JSON.parse(readFileSync(path, "utf8")) as { grants: unknown[] }).grants
@@ -5145,7 +5168,7 @@ describe("startConfiguredTriggers", () => {
     try {
       bus.emit(workItemEvent());
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledOnce());
-      expect(spawnMock.mock.calls[0]).toHaveLength(1);
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual({ triggerBirthKey: expect.any(String) });
     } finally {
       await controller.stop();
       autoPing.dispose();
@@ -5455,6 +5478,7 @@ describe("startConfiguredTriggers", () => {
           project: "api",
           prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
+        { triggerBirthKey: expect.any(String) },
       );
     } finally {
       await controller.stop();
