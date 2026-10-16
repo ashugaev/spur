@@ -613,7 +613,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
         worktreePath,
         options?.cursorConfigDir ? { configDir: options.cursorConfigDir } : undefined,
       ),
-    readConversation: (ctx) => readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId),
+    readConversation: async (ctx) =>
+      ctx.agentSessionId ? readCursorTranscriptEntries(ctx.worktreePath, ctx.agentSessionId) : null,
     setup: async ({ worktreePath, restrictWrites, cursorConfigDir }) => {
       await ensureCursorWorkspaceTrust(worktreePath);
       if (cursorConfigDir) {

@@ -421,6 +421,7 @@ function resetAccountStoreMocks(): void {
   swapSessionCredentialsMock.mockReset();
 }
 const readCursorJsonlStateMock = vi.fn();
+const captureCursorRestoreBoundaryMock = vi.fn();
 const readCursorTokenUsageMock = vi.fn();
 const configureCursorTurnEndedStoreMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
@@ -528,7 +529,7 @@ vi.mock("../../src/claude-accounts.js", () => ({
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", () => ({
-  captureCursorRestoreBoundary: vi.fn().mockResolvedValue(null),
+  captureCursorRestoreBoundary: captureCursorRestoreBoundaryMock,
   readCursorJsonlState: readCursorJsonlStateMock,
   configureCursorTurnEndedStore: configureCursorTurnEndedStoreMock,
   resolveCursorBuild: () => "test-build",
@@ -1419,7 +1420,7 @@ type SessionServiceInternals = {
   classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean },
-  ): Promise<{ state: SessionState; session: SessionRecord }>;
+  ): Promise<{ state: SessionState; source: string; session: SessionRecord }>;
   classifySessionState(session: SessionRecord): Promise<SessionState>;
   codexMcpDialogOverrides: Map<string, number>;
   claudeCompactingOverrides: Map<string, number>;
@@ -2292,6 +2293,7 @@ describe("SessionService", () => {
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationTailMock.mockReset().mockResolvedValue(null);
     readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
+    captureCursorRestoreBoundaryMock.mockReset().mockResolvedValue(null);
     readCursorTokenUsageMock.mockReset().mockResolvedValue(undefined);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     writeTelegramOfferMock.mockReset();
@@ -5991,6 +5993,46 @@ describe("SessionService", () => {
 
     expect(buildAgentRestorePlanMock.mock.calls[0]?.[2]).not.toContain("Mode:");
   });
+
+  it.each([
+    ["private-chat", ["/tmp/spur-worktrees/api/api-1", "private-chat"]],
+    [null, null],
+  ] as const)(
+    "cursor id-less restore boundary uses private-dir chat (%s)",
+    async (chatId, expectedCall) => {
+      // First lookup is the boundary's; later ones are restore's own id discovery.
+      findAgentSessionIdMock.mockResolvedValueOnce(chatId).mockResolvedValue("session-uuid");
+      createSessionStore({
+        id: "api-1",
+        project: "api",
+        agent: "cursor",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "cursor-agent --force",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+      mockExitedThenRestoredProcess();
+
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
+      if (expectedCall) {
+        expect(captureCursorRestoreBoundaryMock).toHaveBeenCalledWith(...expectedCall);
+      } else {
+        expect(captureCursorRestoreBoundaryMock).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("carries a configured mode through restore's resume-plan prompt", async () => {
     mockClaudeJsonlState("waiting");
@@ -18502,11 +18544,40 @@ describe("SessionService", () => {
       expect(internals.cursorPaneReadyOverrides.get("cursor-1")).toBe(expiresAt);
     });
 
-    it("applies a 60-second grace window to minMtimeMs for unpinned cursor sessions", async () => {
+    it("cursor id-less tick without private chat stays working", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const createdAt = "2026-03-18T10:00:00.000Z";
-      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor", createdAt });
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      findAgentSessionIdMock.mockResolvedValue(null);
+      readCursorJsonlStateMock.mockResolvedValue({
+        state: "error",
+        reader: {
+          filePath: "/tmp/foreign.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: 0,
+          tailRecords: [],
+        },
+        rateLimit: { limited: true, reason: "cursor out of usage" },
+      });
+
+      const classified = await internals.classifySessionRecord(cursorSession, { scanPane: false });
+
+      expect(classified.state).toBe("working");
+      expect(classified.state).not.toBe("rate_limited");
+      // The result carries no rateLimit field; a non-jsonl source proves no
+      // transcript (and so no transcript rate limit) was consulted.
+      expect(classified.source).not.toBe("jsonl");
+      expect(readCursorJsonlStateMock).not.toHaveBeenCalled();
+      expect(findAgentSessionIdMock).toHaveBeenCalledWith("cursor", cursorSession.worktreePath, {
+        cursorConfigDir: join(TEST_DATA_DIR, "cursor", cursorSession.id),
+      });
+    });
+
+    it("cursor id-less tick reads private-dir chat transcript", async () => {
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      const cursorSession = runningSession({ id: "cursor-1", agent: "cursor" });
+      findAgentSessionIdMock.mockResolvedValue("private-chat");
       mockCursorJsonlState("working");
 
       await internals.classifySessionRecord(cursorSession);
@@ -18514,22 +18585,25 @@ describe("SessionService", () => {
       expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
         cursorSession.worktreePath,
         undefined,
-        undefined,
-        { minMtimeMs: new Date(createdAt).getTime() - 60_000 },
+        "private-chat",
+        {},
       );
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
     });
 
-    it("skips minMtimeMs when agentSessionId is pinned for cursor sessions", async () => {
+    it("cursor pinned agentSessionId skips private lookup", async () => {
       const service = await createDisposedSessionService();
       const internals = sessionServiceInternals(service);
-      const createdAt = "2026-03-18T10:00:00.000Z";
-      const agentSessionId = "pinned-cursor-session-123";
       const cursorSession = runningSession({
         id: "cursor-1",
         agent: "cursor",
-        createdAt,
-        agentSessionId,
+        agentSessionId: "pinned-id",
       });
+      findAgentSessionIdMock.mockResolvedValue("other");
       mockCursorJsonlState("working");
 
       await internals.classifySessionRecord(cursorSession);
@@ -18537,9 +18611,10 @@ describe("SessionService", () => {
       expect(readCursorJsonlStateMock).toHaveBeenCalledWith(
         cursorSession.worktreePath,
         undefined,
-        agentSessionId,
-        { minMtimeMs: undefined },
+        "pinned-id",
+        {},
       );
+      expect(findAgentSessionIdMock).not.toHaveBeenCalled();
     });
 
     it("passes the persisted Cursor restore boundary to structured classification", async () => {
@@ -18561,7 +18636,7 @@ describe("SessionService", () => {
         cursorSession.worktreePath,
         undefined,
         cursorSession.agentSessionId,
-        { minMtimeMs: undefined, after: cursorRestoreBoundary },
+        { after: cursorRestoreBoundary },
       );
     });
 
@@ -45451,6 +45526,31 @@ describe("SessionService", () => {
       );
       expect(result.messages).toEqual([{ role: "user", text: "fix the bug", timestampMs: 0 }]);
       expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "question"]);
+    });
+
+    it("cursor id-less getConversation uses private-dir chat", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "cursor", status: "running" }));
+      findAgentSessionIdMock.mockResolvedValue("private-chat");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "cursor",
+        expect.objectContaining({ agentSessionId: "private-chat" }),
+      );
+      expect(
+        writeSessionMock.mock.calls.some(
+          (call) => (call[1] as SessionRecord).agentSessionId === "private-chat",
+        ),
+      ).toBe(false);
+
+      readAgentConversationMock.mockClear();
+      findAgentSessionIdMock.mockResolvedValue(null);
+      await service.getConversation("api-1");
+
+      expect(readAgentConversationMock.mock.calls[0]?.[1]).not.toHaveProperty("agentSessionId");
     });
   });
 
