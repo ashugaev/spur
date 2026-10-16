@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
+import { AutoPingService } from "../../src/auto-ping.js";
 import {
   readPendingSpawnWork,
   writePendingSpawnWork,
   recordWorkItemLifecycle,
   readWorkItemLifecycles,
+  readPendingSendBatches,
 } from "../../src/metadata.js";
 import { SessionAdmissionDeniedError } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
@@ -54,6 +56,152 @@ function fixture(blocks = [{ prompt: "review" }]) {
 }
 
 describe("durable spawn admission", () => {
+  it("keeps equal-payload occurrences and routes distinct across disk reload", async () => {
+    const f = fixture();
+    Object.assign(f.config.projects.test.triggers, {
+      second: structuredClone(f.config.projects.test.triggers.review),
+    });
+    f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+    let controller = startConfiguredTriggers(f.deps);
+    const emit = (occurrenceId: string) =>
+      f.deps.bus.emit({
+        projectId: "test",
+        sourceId: "tick",
+        name: "cron:tick",
+        occurrenceId,
+        data: { title: "same payload" },
+      });
+    emit("first");
+    emit("second");
+    emit("first");
+    await vi.advanceTimersByTimeAsync(0);
+    const pending = [...readPendingSpawnWork(f.dataDir).values()];
+    expect(pending).toHaveLength(4);
+    expect(
+      new Set(pending.flatMap((work) => work.blocks.map((block) => block.birthKey))).size,
+    ).toBe(4);
+    expect(f.spawn).toHaveBeenCalledTimes(4);
+    await controller.stop();
+    const births = new Map<string, string>();
+    f.spawn.mockImplementation(async (_request, options) => {
+      const sessionId = `test-${births.size + 1}`;
+      births.set(options.triggerBirthKey, sessionId);
+      return { id: sessionId, status: "running" };
+    });
+    controller = startConfiguredTriggers(f.deps);
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(births.size).toBe(4);
+      expect(new Set(births.values()).size).toBe(4);
+      expect(f.spawn).toHaveBeenCalledTimes(8);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("suppresses distinct occurrences for a work item owned by one pending spawn claim", async () => {
+    const f = fixture();
+    f.config.projects.test.triggers.review.event = "github:work_item.new";
+    const data = {
+      externalId: "repo#1",
+      url: "https://example.com/pr/1",
+      number: 1,
+      title: "task",
+      repo: "repo",
+    };
+    f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+    const controller = startConfiguredTriggers(f.deps);
+    const emit = (occurrenceId: string) =>
+      f.deps.bus.emit({
+        projectId: "test",
+        sourceId: "tick",
+        name: "github:work_item.new",
+        occurrenceId,
+        data,
+      });
+    try {
+      emit("first");
+      emit("second");
+      await vi.advanceTimersByTimeAsync(0);
+      const pending = [...readPendingSpawnWork(f.dataDir).values()];
+      expect(pending).toHaveLength(1);
+      expect(f.spawn).toHaveBeenCalledTimes(1);
+      expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
+        state: "pending",
+        spawnWorkId: pending[0]?.workId,
+      });
+      f.spawn.mockResolvedValue({ id: "test-owner", status: "running" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(f.spawn).toHaveBeenCalledTimes(2);
+      expect(readWorkItemLifecycles(f.dataDir, "test", "tick").get(data.externalId)).toMatchObject({
+        state: "running",
+        sessionId: "test-owner",
+      });
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("drains eligible SEND beside denied SPAWN and fences the replaced scheduler", async () => {
+    const f = fixture();
+    Object.assign(f.config.projects.test.sources, { monitor: { type: "service" } });
+    Object.assign(f.config.projects.test.triggers, {
+      notify: { source: "monitor", event: "service:problem", send: { interrupt: false } },
+    });
+    f.get.mockResolvedValue({
+      id: "test-existing",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: "2000-01-01T00:00:00.000Z",
+      workspaceExists: true,
+    });
+    f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const autoPing = new AutoPingService(f.dataDir);
+    const deps = {
+      ...f.deps,
+      autoPing,
+      sessionService: { spawn: f.spawn, get: f.get, getTriggerBirth: f.birth, deliver } as never,
+    };
+    const timers = vi.spyOn(globalThis, "setInterval");
+    let controller = startConfiguredTriggers(deps);
+    f.emit();
+    f.deps.bus.emit({
+      projectId: "test",
+      sourceId: "monitor",
+      name: "service:problem",
+      occurrenceId: "send",
+      data: { sessionId: "test-existing", serviceId: "monitor", ruleId: "health" },
+    });
+    await vi.advanceTimersByTimeAsync(35_000);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(readPendingSendBatches(f.dataDir).size).toBe(0);
+    expect(readPendingSpawnWork(f.dataDir).size).toBe(1);
+    const oldTick = timers.mock.calls.find(([, delay]) => delay === 5_000)?.[0];
+    if (typeof oldTick !== "function") throw new Error("Missing shared scheduler");
+    await controller.stop();
+    controller = startConfiguredTriggers(deps);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const pending = [...readPendingSpawnWork(f.dataDir).values()];
+      const attempts = f.spawn.mock.calls.length;
+      oldTick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect([...readPendingSpawnWork(f.dataDir).values()]).toEqual(pending);
+      expect(f.spawn).toHaveBeenCalledTimes(attempts);
+      f.spawn.mockResolvedValue({ id: "test-new", status: "running" });
+      await vi.advanceTimersByTimeAsync(80_000);
+      expect(f.spawn).toHaveBeenCalledTimes(attempts + 1);
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(readPendingSpawnWork(f.dataDir).size).toBe(0);
+    } finally {
+      await controller.stop();
+      autoPing.dispose();
+      timers.mockRestore();
+    }
+  });
   it("preserves original event data while a spawn waits for admission", async () => {
     const f = fixture([{ prompt: "{{title}}" }]);
     f.spawn.mockRejectedValue(new SessionAdmissionDeniedError("cap", "cap"));
