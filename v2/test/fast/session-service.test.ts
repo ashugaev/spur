@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import type * as fsPromisesModule from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
@@ -3004,6 +3005,66 @@ describe("SessionService", () => {
       expect(successor.lifecycle.operation?.phase).toBe("succeeded");
     } finally {
       service.dispose();
+    }
+  });
+
+  it("cancels restore during filesystem setup while serializing its drain before the successor", async () => {
+    mockClaudeJsonlState("waiting");
+    const setupDir = mkdtempSync(join(tmpdir(), "spur-restore-setup-"));
+    const settingsPath = join(setupDir, "claude", "settings.json");
+    let releaseWrite!: () => void;
+    let enteredWrite!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredWrite = resolve;
+    });
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof fsPromisesModule>();
+      return {
+        ...actual,
+        writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+          if (args[0] === settingsPath) {
+            enteredWrite();
+            await writeGate;
+          }
+          return actual.writeFile(...args);
+        },
+      };
+    });
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const claude = await vi.importActual<typeof claudeModule>("../../src/agents/claude.js");
+    setupAgentHooksMock.mockImplementationOnce(async () => ({
+      claudeSettingsPath: await claude.ensureClaudeRestrictWritesSettings(setupDir),
+    }));
+    const record = runningSession({ status: "stopped", stopReason: "manual_pause" });
+    sessions.set(record.id, record);
+    const controller = new AbortController();
+    const first = service.restore(record.id, {}, { signal: controller.signal });
+    const firstOutcome = first.catch((error: unknown) => error);
+    try {
+      await entered;
+      controller.abort();
+      expect(await firstOutcome).toMatchObject({ statusCode: 499 });
+      expect((await service.get(record.id)).lifecycle.operation?.phase).toBe("failed");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      const successor = service.restore(record.id);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(setupAgentHooksMock).toHaveBeenCalledTimes(1);
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      releaseWrite();
+      expect((await successor).lifecycle.operation?.phase).toBe("succeeded");
+      expect(readFileSync(settingsPath, "utf8")).toContain("PreToolUse");
+      expect(setupAgentHooksMock).toHaveBeenCalledTimes(2);
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseWrite();
+      service.dispose();
+      vi.doUnmock("node:fs/promises");
+      rmSync(setupDir, { recursive: true, force: true });
     }
   });
 
