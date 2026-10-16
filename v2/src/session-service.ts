@@ -13789,6 +13789,9 @@ export class SessionService {
       },
       updatedAt: nowIso(),
     };
+    if (request.target === "interval" && updated.intervalWake) {
+      delete updated.intervalWake.dispatchClaimId;
+    }
     writeSession(this.config.dataDir, updated);
     return this.enrich(updated);
   }
@@ -13871,7 +13874,7 @@ export class SessionService {
       );
     }
     const nextDueAt = new Date(Date.now() + intervalWake.intervalMs).toISOString();
-    await this.withWorkspaceLifecycleLocks(session.id, async () => {
+    const claim = await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const current = readSession(this.config.dataDir, session.id);
       if (current === null || !isRestorableStatus(current.status)) {
         throw new WakeDispatchConflictError(`Wake target "interval" unavailable for ${session.id}`);
@@ -13884,11 +13887,20 @@ export class SessionService {
       if (!claimed) {
         throw new WakeDispatchConflictError(`Wake target "interval" changed for ${session.id}`);
       }
-      writeSession(this.config.dataDir, {
+      const claimedSession = {
         ...current,
-        intervalWake: { ...intervalWake, nextDueAt },
+        intervalWake: { ...intervalWake, nextDueAt, dispatchClaimId: randomUUID() },
         updatedAt: nowIso(),
-      });
+      };
+      writeSession(this.config.dataDir, claimedSession);
+      return {
+        session: claimedSession,
+        stamp: this.lifecycleStamp(claimedSession),
+        lifecycle: this.lifecycleIdsFor(claimedSession).map((id) => ({
+          id,
+          snapshot: this.lifecycle.snapshot(id),
+        })),
+      };
     });
     try {
       await this.send(session.id, {
@@ -13907,10 +13919,30 @@ export class SessionService {
         details: { nextDueAt, intervalMs: intervalWake.intervalMs, manual: true },
       });
     } catch (error) {
-      if (error instanceof SessionAdmissionDeniedError) {
+      if (
+        error instanceof SessionAdmissionDeniedError ||
+        error instanceof LaunchPromptPendingError
+      ) {
         await this.withWorkspaceLifecycleLocks(session.id, async () => {
           const afterDenial = readSession(this.config.dataDir, session.id);
-          if (afterDenial?.intervalWake?.nextDueAt === nextDueAt) {
+          if (
+            afterDenial &&
+            afterDenial.intervalWake &&
+            afterDenial.intervalWake.dispatchClaimId ===
+              claim.session.intervalWake.dispatchClaimId &&
+            isDeepStrictEqual(afterDenial.intervalWake, claim.session.intervalWake) &&
+            sameSessionRuntimeOwner(afterDenial, claim.session) &&
+            afterDenial.agentLaunchId === claim.session.agentLaunchId &&
+            this.lifecycleStateMatches(afterDenial, claim.stamp) &&
+            claim.lifecycle.every(({ id, snapshot }) => {
+              const latest = this.lifecycle.snapshot(id);
+              return (
+                latest.instanceId === snapshot.instanceId &&
+                latest.revision === snapshot.revision &&
+                latest.operation?.phase !== "pending"
+              );
+            })
+          ) {
             writeSession(this.config.dataDir, {
               ...afterDenial,
               intervalWake: {
