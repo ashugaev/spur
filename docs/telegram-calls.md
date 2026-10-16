@@ -10,8 +10,9 @@ Use Python 3.11+ with virtualenv support and Linux native call libraries.
 `run-call.sh` installs pinned dependencies in private cache; `TELEGRAM_CALL_PYTHON` selects an existing interpreter.
 Set `TELEGRAM_CALL_STATE_DIR` to private storage outside session artifacts; default `$XDG_CACHE_HOME/spur/telegram-call`, or `~/.cache/spur/telegram-call` when unset.
 
-Create mode-0600 dotenv file outside checkout and session artifacts.
-Set `TELEGRAM_CALL_ENV_FILE` to its path before starting sidecar.
+Create mode-0600 `call.env` in the private state directory, outside checkout and session artifacts.
+Launcher reads this file when present; `TELEGRAM_CALL_ENV_FILE` overrides its path.
+Pass overrides through sidecar child `env` configuration; caller-shell exports do not reach sidecars.
 Required fields:
 
 - `TG_API_ID`, `TG_API_HASH`: Telegram application credentials.

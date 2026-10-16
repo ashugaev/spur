@@ -18,6 +18,9 @@ if [[ -n "${SPUR_SESSION_ARTIFACTS_DIR:-}" && \
 fi
 mkdir -p "$TELEGRAM_CALL_STATE_DIR"
 chmod 700 "$TELEGRAM_CALL_STATE_DIR"
+if [[ -z "${TELEGRAM_CALL_ENV_FILE:-}" && -f "$TELEGRAM_CALL_STATE_DIR/call.env" ]]; then
+  export TELEGRAM_CALL_ENV_FILE="$TELEGRAM_CALL_STATE_DIR/call.env"
+fi
 
 if [[ -n "${TELEGRAM_CALL_PYTHON:-}" ]]; then
   PYTHON_BIN="$TELEGRAM_CALL_PYTHON"

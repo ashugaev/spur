@@ -4,6 +4,8 @@ import datetime
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -337,6 +339,64 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("dotenv"), "install prototype requirements for input tests")
 class InputTests(unittest.TestCase):
+    def test_launcher_discovers_private_inputs_and_preserves_overrides_and_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "cache/spur/telegram-call"
+            state.mkdir(parents=True)
+            credentials = state / "call.env"
+            content = ("TG_API_ID=1\nTG_API_HASH=test\nTG_SESSION=test.session\n"
+                       "GEMINI_API_KEY=test\nGEMINI_LIVE_MODEL=test\n"
+                       "TELEGRAM_ALLOWED_USERS=1\nTELEGRAM_CALL_EXCLUSIVE_SESSION=1\n")
+            credentials.write_text(content)
+            credentials.chmod(0o600)
+            probe = root / "python-probe"
+            probe.write_text(f"#!{sys.executable}\n"
+                             "import sys\nfrom pathlib import Path\n"
+                             "sys.path.insert(0, str(Path(sys.argv[1]).parent))\n"
+                             "import bridge\nprint(bridge.read_inputs()['TG_API_ID'])\n")
+            probe.chmod(0o700)
+            env = {"HOME": os.environ["HOME"], "XDG_CACHE_HOME": str(root / "cache"),
+                   "PATH": os.environ["PATH"], "TELEGRAM_CALL_PYTHON": str(probe),
+                   "TELEGRAM_CALL_ALLOWLIST_FILE": str(root / "missing-allowlist.env"),
+                   "PYTHONDONTWRITEBYTECODE": "1"}
+            launcher = Path(__file__).with_name("run-call.sh")
+
+            def launch(**overrides):
+                return subprocess.run(["/bin/bash", str(launcher), "--check-deps"],
+                                      env={**env, **overrides}, capture_output=True, text=True)
+
+            result = launch()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "1")
+            self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+            override = root / "override.env"
+            override.write_text(content.replace("TG_API_ID=1", "TG_API_ID=2"))
+            override.chmod(0o600)
+            result = launch(TELEGRAM_CALL_ENV_FILE=str(override))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "2")
+            result = launch(TELEGRAM_CALL_ENV_FILE=str(root / "missing.env"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FileNotFoundError", result.stderr)
+            credentials.chmod(0o644)
+            result = launch()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("credential_file_permissions", result.stderr)
+            credentials.chmod(0o600)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            private = artifacts / "call.env"
+            credentials.rename(private)
+            credentials.symlink_to(private)
+            result = launch(SPUR_SESSION_ARTIFACTS_DIR=str(artifacts))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("credentials_in_artifacts", result.stderr)
+            credentials.unlink()
+            result = launch()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing_TG_API_ID", result.stderr)
+
     def test_required_inputs_fail_before_account_connection(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(bridge.BridgeError, "missing_TG_API_ID"):
