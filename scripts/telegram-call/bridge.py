@@ -17,10 +17,17 @@ import sys
 import time
 from urllib.parse import quote, urlsplit
 import uuid
+import wave
 
 
 class BridgeError(Exception):
     pass
+
+
+class StartupFailure(BridgeError):
+    def __init__(self, notice):
+        self.notice = notice
+        super().__init__(notice)
 
 
 def event(stage, **fields):
@@ -72,6 +79,8 @@ class Call:
     accept_request: object | None = None
     accept_inflight: bool = False
     accepted: bool = False
+    media_connected: bool = False
+    active: bool = False
     session: str | None = None
     spawned: bool = False
     spawn_cleanup_done: bool = False
@@ -110,7 +119,6 @@ def guarded_client_class():
                     if isinstance(rpc, AcceptCallRequest):
                         accepts += 1
                         if (captured is not self.current_call or not captured.alive
-                                or not captured.ready or not captured.gemini
                                 or captured.accepted or captured.accept_inflight
                                 or (not captured.accept_permission and captured.accept_request is not rpc)):
                             raise BridgeError("call_not_ready")
@@ -246,8 +254,8 @@ class Shepherd:
     async def prepare(self, call):
         nonce = uuid.uuid4().hex
         event("spawn_request", correlation=call.correlation)
-        spawning = asyncio.create_task(self.request("POST", "/shepherd/spawn", {
-            "reportDisposition": True,
+        spawning = asyncio.create_task(self.request("POST", "/sessions/background", {
+            "project": "spur-shepherd", "agent": "claude",
             "prompt": "Operate only voice-sandbox on this isolated daemon. Inspect initial session state. "
                       "Reply in one assistant message with exactly VOICE_READY:" + nonce,
         }))
@@ -257,20 +265,16 @@ class Shepherd:
             # HTTP may already have created the agent. Retrieve its receipt before cleanup.
             try:
                 value = await spawning
-                session = value.get("session", {}) if isinstance(value, dict) else {}
-                if value.get("disposition") == "spawned" and isinstance(session.get("id"), str):
-                    call.session, call.spawned = session["id"], True
+                if isinstance(value, dict) and isinstance(value.get("id"), str) and value["id"]:
+                    call.session, call.spawned = value["id"], True
                     await self.stop_spawned(call)
             except Exception:
                 event("spawn_receipt_unavailable", correlation=call.correlation)
             raise
-        if (not isinstance(value, dict) or value.get("disposition") not in ("spawned", "reused")
-                or not isinstance(value.get("session"), dict)
-                or not isinstance(value["session"].get("id"), str)):
+        if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not value["id"]:
             raise BridgeError("invalid_spawn_receipt")
-        call.session = value["session"]["id"]
-        call.spawned = value["disposition"] == "spawned"
-        event("spawn_receipt", correlation=call.correlation, disposition=value["disposition"])
+        call.session, call.spawned = value["id"], True
+        event("spawn_receipt", correlation=call.correlation)
         try:
             while call.alive:
                 view = await self.transcript(call.session)
@@ -365,6 +369,201 @@ class PCM:
         return self.generation, frame
 
 
+NOTICE_NAMES = ("starting", "waiting", "ready", "shepherd-failed", "voice-failed", "timeout")
+
+
+def load_notices(directory):
+    notices = {}
+    for name in NOTICE_NAMES:
+        try:
+            with wave.open(str(Path(directory) / (name + ".wav")), "rb") as audio:
+                if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (1, 2, 24000, "NONE"):
+                    raise ValueError("format")
+                count = audio.getnframes()
+                if not 0 < count <= 8 * 24000:
+                    raise ValueError("duration")
+                data = audio.readframes(count)
+                if len(data) != count * 2 or not any(data):
+                    raise ValueError("content")
+                notices[name] = data
+        except (OSError, EOFError, wave.Error, ValueError) as error:
+            raise BridgeError("invalid_notice_" + name) from error
+    return notices
+
+
+class Playback:
+    def __init__(self, listener, call):
+        self.listener, self.call = listener, call
+        self.output = PCM(240000, 480)
+        self.native = None
+        self.lock = asyncio.Lock()
+        self.inflight = None
+        self.due = time.monotonic()
+
+    def invalidate(self):
+        self.output.clear()
+        if self.inflight:
+            self.inflight.cancel()
+
+    def check(self):
+        if (not self.call.alive or not self.call.media_connected
+                or self.native is None or not self.native.owns()):
+            raise BridgeError("media_unavailable")
+
+    async def frame(self, frame, generation):
+        from pytgcalls.types import Device
+        async with self.lock:
+            if generation != self.output.generation:
+                return
+            await asyncio.sleep(max(0, self.due - time.monotonic()))
+            self.check()
+            if generation != self.output.generation:
+                return
+            self.inflight = asyncio.create_task(self.listener.calls.send_frame(
+                self.call.user, Device.MICROPHONE, frame))
+            try:
+                await self.inflight
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                self.call.media_connected = False
+                raise
+            finally:
+                self.inflight = None
+            self.due = time.monotonic() + .01
+
+    async def notice(self, name):
+        try:
+            await self._notice(name)
+        except Exception:
+            self.call.media_connected = False
+            raise
+
+    async def _notice(self, name):
+        data = self.listener.notices[name]
+        async with asyncio.timeout(len(data) / 48000 + 2):
+            self.check()
+            generation = self.output.generation
+            event("status_started", correlation=self.call.correlation, status=name)
+            for offset in range(0, len(data), 480):
+                await self.frame(data[offset:offset + 480].ljust(480, b"\0"), generation)
+            await asyncio.sleep(max(0, self.due - time.monotonic()) + .05)
+            self.check()
+            if generation != self.output.generation:
+                raise BridgeError("status_interrupted")
+            event("status_finished", correlation=self.call.correlation, status=name)
+
+    async def live(self):
+        while True:
+            generation, frame = await self.output.take()
+            await self.frame(frame, generation)
+
+
+class NativeCall:
+    def __init__(self, listener, call, writer):
+        from ntgcalls import NTgCalls
+        self.listener, self.call, self.writer = listener, call, writer
+        self.binding = NTgCalls()
+        self.retired = False
+        self.tasks = set()
+        self.loop = asyncio.get_running_loop()
+        self.register()
+        listener.native = self
+        listener.calls._binding = self.binding
+        writer.native = self
+
+    def owns(self):
+        return (not self.retired and self.listener.current is self.call
+                and self.listener.native is self and self.listener.calls._binding is self.binding)
+
+    def register(self):
+        calls = self.listener.calls
+        routes = (("on_stream_end", calls._handle_stream_ended, 3),
+                  ("on_upgrade", calls._update_status, 2),
+                  ("on_connection_change", None, 2),
+                  ("on_update_emojis", calls._handle_emojis_update, 2),
+                  ("on_signaling_data", calls._app.send_signaling, 2),
+                  ("on_frames", calls._handle_stream_frame, 4))
+        for setter, handler, count in routes:
+            try:
+                inspect.signature(handler or calls._handle_connection_changed).bind(*([None] * count))
+            except (ValueError, TypeError) as error:
+                raise BridgeError("unsupported_native_callback_" + setter) from error
+            def callback(*args, handler=handler):
+                if not self.retired:
+                    self.loop.call_soon_threadsafe(self.deliver, handler, args)
+            getattr(self.binding, setter)(callback)
+
+    def deliver(self, handler, args):
+        from ntgcalls import ConnectionState
+        if not self.owns() or args[0] != self.call.user:
+            return
+        if handler is None:
+            state = args[1].state
+            if state == ConnectionState.CONNECTING:
+                return
+            if state != ConnectionState.CONNECTED:
+                self.call.media_connected = False
+                self.call.alive = False
+                self.writer.invalidate()
+                waiter = self.listener.calls._wait_connect.get(self.call.user)
+                if waiter is not None and not waiter.done():
+                    waiter.set_exception(BridgeError("native_connection_lost"))
+                    waiter.exception()
+                if self.call.task:
+                    self.call.task.cancel()
+                return
+            handler = self.listener.calls._handle_connection_changed
+
+        async def forward():
+            if self.owns() and self.call.alive:
+                with pinned(self.call):
+                    await handler(*args)
+        task = asyncio.create_task(forward())
+        self.tasks.add(task)
+        def completed(finished):
+            self.tasks.discard(finished)
+            if not finished.cancelled() and finished.exception() and self.owns():
+                self.call.media_connected = False
+                self.call.alive = False
+                self.writer.invalidate()
+                if self.call.task:
+                    self.call.task.cancel()
+                event("native_callback_failed", correlation=self.call.correlation)
+        task.add_done_callback(completed)
+
+    def retire(self):
+        self.retired = True
+        self.call.media_connected = False
+        self.writer.invalidate()
+
+    async def close(self):
+        from ntgcalls import ConnectionNotFound
+        tasks = [task for task in self.tasks if task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            try:
+                await asyncio.wait_for(self.binding.stop(self.call.user), 5)
+            except ConnectionNotFound:
+                pass
+            except Exception:
+                event("native_cleanup_failed", correlation=self.call.correlation)
+        finally:
+            try:
+                await asyncio.wait_for(self.listener.discard(self.call), 5)
+            except Exception:
+                event("media_cleanup_failed", correlation=self.call.correlation)
+            finally:
+                try:
+                    self.listener.calls._clear_cache(self.call.user)
+                finally:
+                    if self.listener.native is self:
+                        self.listener.native = None
+
+
 class Tools:
     def __init__(self, call, shepherd, live, types):
         self.call, self.shepherd, self.live, self.types = call, shepherd, live, types
@@ -449,7 +648,10 @@ class Tools:
 
 
 def read_inputs():
-    from dotenv import dotenv_values
+    try:
+        from dotenv import dotenv_values
+    except ModuleNotFoundError as error:
+        raise BridgeError("input_dependencies_missing_run_check_deps") from error
     required = ("TG_API_ID", "TG_API_HASH", "TG_SESSION", "GEMINI_API_KEY",
                 "GEMINI_LIVE_MODEL", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_CALL_EXCLUSIVE_SESSION")
     values = {}
@@ -516,42 +718,59 @@ def private_session(values):
 
 
 async def check_dependencies():
+    notices = load_notices(Path(__file__).with_name("audio"))
     for package, version in (("py-tgcalls", "3.0.0"), ("ntgcalls", "3.0.3"), ("Telethon", "1.44.0")):
         if importlib.metadata.version(package) != version:
             raise BridgeError("unsupported_dependency_" + package)
     from telethon import TelegramClient
     from pytgcalls.mtproto.telethon_client import TelethonClient
+    from pytgcalls import PyTgCalls
     from pytgcalls.types import ExternalMedia, MediaStream, RecordStream
     from pytgcalls.types.raw.audio_parameters import AudioParameters
-    from ntgcalls import NTgCalls, StreamMode, StreamDevice, FrameData
+    from ntgcalls import StreamMode, StreamDevice, FrameData, ConnectionInfo, ConnectionKind, ConnectionState
     from pytgcalls.methods.utilities.stream_params import StreamParams
     import google.genai
     if "flood_sleep_threshold" not in inspect.signature(TelegramClient._call).parameters:
         raise BridgeError("unsupported_telegram_rpc_hook")
     if "self._app._call(" not in inspect.getsource(TelethonClient._invoke):
         raise BridgeError("unsupported_pytgcalls_rpc_route")
+    if ConnectionInfo(ConnectionState.CONNECTED, ConnectionKind.NORMAL).state != ConnectionState.CONNECTED:
+        raise BridgeError("unsupported_native_connection_state")
     outgoing = MediaStream(ExternalMedia.AUDIO, audio_parameters=AudioParameters(24000, 1))
     incoming = RecordStream(audio=True, audio_parameters=AudioParameters(16000, 1))
-    engine = NTgCalls()
-    await engine.create_p2p_call(1)
+    client = guarded_client_class()(None, 1, "offline-probe")
+    calls = PyTgCalls(client)
+    listener = Listener({}, None, client, calls, None, None, None, 60000, notices)
+    call = Call(Peer(1, 1), 1, 0)
+    listener.current = call
+    native = NativeCall(listener, call, Playback(listener, call))
+    engine = native.binding
     try:
+        await engine.create_p2p_call(1)
         await engine.set_stream_sources(1, StreamMode.CAPTURE, await StreamParams.get_stream_params(outgoing))
         await engine.set_stream_sources(1, StreamMode.PLAYBACK, await StreamParams.get_record_params(incoming))
         await engine.send_external_frame(1, StreamDevice.MICROPHONE, bytes(480), FrameData())
     finally:
-        await engine.stop(1)
+        native.retire()
+        try:
+            await engine.stop(1)
+        finally:
+            calls.executor.shutdown(wait=False)
     event("dependencies_ready", input_rate=16000, output_rate=24000, channels=1,
           frame_ms=10, frame_bytes=480, network=False)
+    return notices
 
 
 class Listener:
-    def __init__(self, values, runtime, client, calls, shepherd, gemini, types, ring_ms):
+    def __init__(self, values, runtime, client, calls, shepherd, gemini, types, ring_ms, notices):
         self.values, self.runtime, self.client, self.calls = values, runtime, client, calls
         self.shepherd, self.gemini, self.types, self.ring_ms = shepherd, gemini, types, ring_ms
         self.current = None
         self.seen = set()
         self.tasks = set()
         self.input = None
+        self.native = None
+        self.notices = notices
 
     def schedule(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -579,6 +798,7 @@ class Listener:
         phone = update.phone_call
         if isinstance(phone, PhoneCallDiscarded):
             if self.current and self.current.peer.id == phone.id:
+                self.current.media_connected = False
                 self.current.alive = False
                 if self.current.task:
                     self.current.task.cancel()
@@ -592,6 +812,7 @@ class Listener:
         call = Call(Peer(phone.id, phone.access_hash), phone.admin_id, time.monotonic())
         if self.current is not None or call.user not in self.values["allowed"]:
             if self.current and self.current.user == call.user:
+                self.current.media_connected = False
                 self.current.alive = False
                 self.current.task.cancel()
             self.schedule(self.reject(call))
@@ -610,7 +831,7 @@ class Listener:
 
     async def frames(self, _, update):
         from pytgcalls.types import StreamFrames, Direction, Device
-        if (isinstance(update, StreamFrames) and self.current and self.current.accepted
+        if (isinstance(update, StreamFrames) and self.current and self.current.active
                 and update.chat_id == self.current.user and update.direction == Direction.INCOMING
                 and update.device == Device.MICROPHONE and self.input):
             try:
@@ -623,21 +844,39 @@ class Listener:
     async def run_call(self, call):
         from telethon.tl.functions.phone import ReceivedCallRequest
         from telethon.tl.types import InputPhoneCall
-        from pytgcalls.types import ExternalMedia, MediaStream, RecordStream, Device
+        from pytgcalls.types import ExternalMedia, MediaStream, RecordStream
         from pytgcalls.types.raw.audio_parameters import AudioParameters
         deadline = call.received + min(45, self.ring_ms / 1000 - 5)
         live_context = None
         live = None
         tasks = []
         tools = None
-        output = PCM(240000, 480)
-        self.input = PCM(64000, 320)
+        writer = Playback(self, call)
+        native = None
+        output = writer.output
+        failure_notice = None
         try:
             if deadline <= time.monotonic():
                 raise BridgeError("ring_budget_expired")
-            await self.runtime.check()
-            with pinned(call):
-                await self.client(ReceivedCallRequest(InputPhoneCall(call.peer.id, call.peer.access_hash)))
+            async with asyncio.timeout_at(deadline):
+                await self.runtime.check()
+                with pinned(call):
+                    await self.client(ReceivedCallRequest(InputPhoneCall(call.peer.id, call.peer.access_hash)))
+                await self.runtime.check()
+                if not call.alive or self.current is not call:
+                    raise BridgeError("call_discarded")
+                native = NativeCall(self, call, writer)
+                call.accept_permission = True
+                with pinned(call):
+                    await self.calls.play(call.user, MediaStream(
+                        ExternalMedia.AUDIO, audio_parameters=AudioParameters(24000, 1)))
+            if not call.alive:
+                raise BridgeError("call_discarded")
+            call.media_connected = True
+            duration_deadline = time.monotonic() + 480
+            event("media_connected", correlation=call.correlation)
+            await writer.notice("starting")
+            failure_notice = "voice-failed"
             live_context = self.gemini.aio.live.connect(model=self.values["GEMINI_LIVE_MODEL"], config={
                 "response_modalities": ["AUDIO"],
                 "system_instruction": "Speak with the operator. Use ask_shepherd for every orchestration "
@@ -655,41 +894,16 @@ class Listener:
                 call.gemini = True
                 event("gemini_ready", correlation=call.correlation)
 
-            async with asyncio.timeout_at(deadline):
-                async with asyncio.TaskGroup() as group:
-                    group.create_task(self.shepherd.prepare(call))
-                    group.create_task(setup())
-                await self.runtime.check()
-                if not call.alive or self.current is not call:
-                    raise BridgeError("call_discarded")
-                call.accept_permission = True
-                with pinned(call):
-                    await self.calls.play(call.user, MediaStream(
-                        ExternalMedia.AUDIO, audio_parameters=AudioParameters(24000, 1)))
-                    await self.calls.record(call.user, RecordStream(
-                        audio=True, audio_parameters=AudioParameters(16000, 1)))
-            event("media_connected", correlation=call.correlation)
+            await self.prepare_services(call, writer, setup)
+            await self.runtime.check()
+            await writer.notice("ready")
+            self.input = PCM(64000, 320)
+            with pinned(call):
+                await self.calls.record(call.user, RecordStream(
+                    audio=True, audio_parameters=AudioParameters(16000, 1)))
+            call.active = True
+            event("conversation_started", correlation=call.correlation)
             tools = Tools(call, self.shepherd, live, self.types)
-            inflight = None
-
-            async def playback():
-                nonlocal inflight
-                due = time.monotonic()
-                while True:
-                    generation, frame = await output.take()
-                    await asyncio.sleep(max(0, due - time.monotonic()))
-                    if generation != output.generation:
-                        due = time.monotonic()
-                        continue
-                    inflight = asyncio.create_task(self.calls.send_frame(call.user, Device.MICROPHONE, frame))
-                    try:
-                        await inflight
-                    except asyncio.CancelledError:
-                        if asyncio.current_task().cancelling():
-                            raise
-                    finally:
-                        inflight = None
-                    due = max(due + .01, time.monotonic())
 
             async def input_pump():
                 while True:
@@ -706,9 +920,7 @@ class Listener:
                         content = response.server_content
                         if content:
                             if content.interrupted:
-                                output.clear()
-                                if inflight:
-                                    inflight.cancel()
+                                writer.invalidate()
                             if content.model_turn:
                                 for part in content.model_turn.parts or []:
                                     if part.inline_data and part.inline_data.data:
@@ -725,8 +937,8 @@ class Listener:
                     if not received:
                         raise BridgeError("gemini_closed")
 
-            tasks = [asyncio.create_task(fn()) for fn in (playback, input_pump, receive)]
-            async with asyncio.timeout(480):
+            tasks = [asyncio.create_task(fn()) for fn in (writer.live, input_pump, receive)]
+            async with asyncio.timeout_at(duration_deadline):
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     task.result()
@@ -735,38 +947,90 @@ class Listener:
         except Exception as error:
             reason = str(error) if isinstance(error, BridgeError) else type(error).__name__
             event("call_failed", correlation=call.correlation, reason=reason)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            tasks.clear()
+            if tools:
+                await tools.close()
+                tools = None
+            writer.invalidate()
+            notice = error.notice if isinstance(error, StartupFailure) else failure_notice
+            if isinstance(error, TimeoutError):
+                notice = None if call.active else "timeout"
+            if notice and call.alive and call.media_connected and self.client.is_connected():
+                try:
+                    await writer.notice(notice)
+                except Exception:
+                    event("status_failed", correlation=call.correlation, status=notice)
+            else:
+                event("status_skipped", correlation=call.correlation, reason="media_unavailable")
         finally:
             call.alive = False
+            call.active = False
+            if native:
+                native.retire()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             if tools:
                 await tools.close()
-            output.clear()
-            self.input.clear()
+            writer.invalidate()
+            if self.input:
+                self.input.clear()
             if live_context and live:
                 try:
                     await asyncio.wait_for(live_context.__aexit__(None, None, None), 5)
                 except Exception:
                     event("live_cleanup_failed", correlation=call.correlation)
             try:
-                with pinned(call):
-                    if call.accepted:
-                        await asyncio.wait_for(self.calls.leave_call(call.user), 5)
-                    else:
+                if native:
+                    await native.close()
+                else:
+                    try:
                         await asyncio.wait_for(self.discard(call), 5)
-            except Exception:
-                event("media_cleanup_failed", correlation=call.correlation)
-            if not call.accepted:
-                await self.shepherd.stop_spawned(call)
-            if self.current is call:
-                self.current = None
-                self.client.current_call = None
-                self.input = None
-            event("call_ended", correlation=call.correlation, sandbox_jobs_retained=call.accepted)
+                    except Exception:
+                        event("media_cleanup_failed", correlation=call.correlation)
+            finally:
+                try:
+                    await self.shepherd.stop_spawned(call)
+                finally:
+                    if self.current is call:
+                        self.current = None
+                        self.client.current_call = None
+                        self.input = None
+                    event("call_ended", correlation=call.correlation, sandbox_jobs_retained=True)
+
+    async def prepare_services(self, call, writer, setup):
+        owners = {asyncio.create_task(self.shepherd.prepare(call)): "shepherd-failed",
+                  asyncio.create_task(setup()): "voice-failed"}
+        pending = set(owners)
+        started = time.monotonic()
+        notice_index = 0
+        try:
+            async with asyncio.timeout(45):
+                while pending:
+                    due = started + (15, 30, 45)[notice_index]
+                    done, pending = await asyncio.wait(pending, timeout=max(0, due - time.monotonic()),
+                                                       return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        try:
+                            task.result()
+                        except Exception as error:
+                            raise StartupFailure(owners[task]) from error
+                    if pending and not done and notice_index < 2:
+                        if all(task.done() for task in pending):
+                            continue
+                        await writer.notice("waiting")
+                        notice_index += 1
+        finally:
+            for task in owners:
+                task.cancel()
+            await asyncio.gather(*owners, return_exceptions=True)
 
     async def close(self):
         if self.current:
+            self.current.media_connected = False
             self.current.alive = False
         tasks = list(self.tasks)
         for task in tasks:
@@ -775,7 +1039,11 @@ class Listener:
 
 
 async def main():
-    await check_dependencies()
+    if sys.argv[1:] == ["--check-inputs"]:
+        read_inputs()
+        event("inputs_ready")
+        return
+    notices = await check_dependencies()
     if sys.argv[1:] == ["--check-deps"]:
         return
     if sys.argv[1:]:
@@ -810,7 +1078,7 @@ async def main():
             try:
                 gemini = genai.Client(api_key=values["GEMINI_API_KEY"])
                 listener = Listener(values, runtime, client, calls, Shepherd(runtime, http), gemini, types,
-                                    config.call_ring_timeout_ms)
+                                    config.call_ring_timeout_ms, notices)
                 client.add_event_handler(listener.raw, events.Raw())
                 calls.on_update()(listener.frames)
                 await calls.start()

@@ -24,6 +24,35 @@ def assistant(text):
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_each_call_spawns_fresh_background_shepherd_and_only_kills_its_owner(self):
+        shepherd = bridge.Shepherd(None, None)
+        requests, nonce = [], None
+        async def request(method, path, body):
+            nonlocal nonce
+            requests.append((method, path, body))
+            if path == "/sessions/background":
+                nonce = body["prompt"].split("VOICE_READY:")[1]
+                return {"id": "fresh-" + str(len(requests))}
+            return {}
+        async def transcript(session):
+            return view([assistant("VOICE_READY:" + nonce)])
+        shepherd.request = AsyncMock(side_effect=request)
+        shepherd.transcript = transcript
+        sessions = []
+        for peer in (bridge.Peer(11, 22), bridge.Peer(55, 66)):
+            call = bridge.Call(peer, 33, 0)
+            await shepherd.prepare(call)
+            sessions.append(call.session)
+            await shepherd.stop_spawned(call)
+            await shepherd.stop_spawned(call)
+        self.assertNotEqual(*sessions)
+        self.assertEqual([path for _, path, _ in requests],
+                         ["/sessions/background", "/sessions/fresh-1/kill",
+                          "/sessions/background", "/sessions/fresh-3/kill"])
+        for _, path, body in requests:
+            if path == "/sessions/background":
+                self.assertEqual((body["project"], body["agent"]), ("spur-shepherd", "claude"))
+
     async def test_result_requires_complete_exact_assistant_envelope_and_waiting(self):
         nonce = "fresh"
         final = assistant("VOICE_RESULT:fresh\nWorker dispatched.\nVOICE_END:fresh")
@@ -76,10 +105,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         released = asyncio.Event()
 
         async def request(method, path, body):
-            if path == "/shepherd/spawn":
+            if path == "/sessions/background":
                 started.set()
                 await released.wait()
-                return {"disposition": "spawned", "session": {"id": "late"}}
+                return {"id": "late"}
             return {}
 
         shepherd.request = AsyncMock(side_effect=request)
@@ -98,7 +127,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         async def request(method, path, body):
             nonlocal nonce
             nonce = body["prompt"].split("VOICE_READY:")[1]
-            return {"disposition": "reused", "session": {"id": "owned"}}
+            return {"id": "owned"}
 
         reads = 0
 
@@ -115,7 +144,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         with patch("bridge.asyncio.sleep", new=AsyncMock()):
             await shepherd.prepare(call)
         self.assertTrue(call.ready)
-        self.assertFalse(call.spawned)
+        self.assertTrue(call.spawned)
         self.assertEqual(reads, 2)
 
     async def test_pcm_rechunk_bounds_partial_samples_and_interruption(self):
@@ -307,12 +336,11 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.network.called)
         self.assertFalse(self.call.accepted)
 
-    async def test_lifecycle_waits_for_ready_then_accepts_and_cleans_media(self):
+    async def test_lifecycle_accepts_media_before_ready_and_cleans_exact_peer(self):
+        from test_lifecycle import offline_calls, notices
         from telethon.tl.functions.phone import DiscardCallRequest
-        from telethon.tl.types import InputPhoneCall, PhoneCallDiscardReasonHangup
         ready = asyncio.Event()
         connected = asyncio.Event()
-        wait = asyncio.Event()
         call = self.call
         call.received = bridge.time.monotonic()
         call.ready = False
@@ -329,10 +357,6 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         async def record(user, stream):
             connected.set()
 
-        async def leave(user):
-            await self.adapter._invoke(DiscardCallRequest(InputPhoneCall(11, 22), 0,
-                                      PhoneCallDiscardReasonHangup(), 0))
-
         class Context:
             closed = False
 
@@ -343,29 +367,32 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
                 self.closed = True
 
         context = Context()
-        calls = SimpleNamespace(play=play, record=record, leave_call=AsyncMock(side_effect=leave),
-                                send_frame=AsyncMock())
+        calls = offline_calls(self.client)
+        self.addCleanup(calls.executor.shutdown, wait=False)
+        calls.play, calls.record = play, record
+        self.client.is_connected = lambda: True
         shepherd = SimpleNamespace(prepare=prepare, stop_spawned=AsyncMock())
         gemini = SimpleNamespace(aio=SimpleNamespace(live=SimpleNamespace(connect=lambda **args: context)))
         listener = bridge.Listener({"GEMINI_LIVE_MODEL": "configured"},
                                   SimpleNamespace(check=AsyncMock()), self.client, calls, shepherd,
-                                  gemini, SimpleNamespace(), 60000)
+                                  gemini, SimpleNamespace(), 60000, notices())
         listener.current = call
         call.task = asyncio.create_task(listener.run_call(call))
         await asyncio.sleep(.02)
-        self.assertFalse(call.accepted)
+        self.assertTrue(call.accepted)
+        self.assertFalse(call.ready)
         ready.set()
         await asyncio.wait_for(connected.wait(), 1)
         self.assertTrue(call.accepted)
         call.task.cancel()
         await call.task
-        calls.leave_call.assert_awaited_once_with(33)
+        self.assertTrue(any(isinstance(args.args[1], DiscardCallRequest) for args in self.network.await_args_list))
         self.assertTrue(context.closed)
         self.assertIsNone(listener.current)
 
     async def test_incoming_unauthorized_busy_duplicate_and_discard(self):
         from telethon.tl.types import PhoneCallRequested, PhoneCallProtocol, UpdatePhoneCall, PhoneCallDiscarded
-        listener = bridge.Listener({"allowed": {33}}, None, self.client, None, None, None, None, 60000)
+        listener = bridge.Listener({"allowed": {33}}, None, self.client, None, None, None, None, 60000, {})
         wait = asyncio.Event()
         async def run_call(call):
             await wait.wait()
@@ -396,6 +423,33 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("dotenv"), "install prototype requirements for input tests")
 class InputTests(unittest.TestCase):
+    def test_real_launchers_reject_missing_or_partial_inputs_before_runtime_state(self):
+        values = {"TG_API_ID": "1", "TG_API_HASH": "hidden", "TG_SESSION": "dummy.session",
+                  "GEMINI_API_KEY": "hidden", "GEMINI_LIVE_MODEL": "configured",
+                  "TELEGRAM_ALLOWED_USERS": "1", "TELEGRAM_CALL_EXCLUSIVE_SESSION": "1"}
+        for script in ("run-call.sh", "run-daemon.sh"):
+            for missing in (None, "TG_SESSION", "GEMINI_API_KEY"):
+                with self.subTest(script=script, missing=missing), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    inputs = root / "private.env"
+                    inputs.write_text("\n".join(key + "=" + value for key, value in values.items()
+                                               if missing is not None and key != missing))
+                    inputs.chmod(0o600)
+                    env = {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"],
+                           "TELEGRAM_CALL_STATE_DIR": str(root / "state"),
+                           "TELEGRAM_CALL_ENV_FILE": str(inputs), "TELEGRAM_CALL_PYTHON": sys.executable,
+                           "SPUR_SESSION_TOOL_DIR": str(root / "tools"), "TMPDIR": str(root / "tmp"),
+                           "TELEGRAM_CALL_ALLOWLIST_FILE": str(root / "absent.env"),
+                           "PYTHONDONTWRITEBYTECODE": "1"}
+                    result = subprocess.run(["/bin/bash", str(Path(__file__).with_name(script))],
+                                            env=env, capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("missing_" + (missing or "TG_API_ID"), result.stdout)
+                    self.assertNotIn("hidden", result.stdout + result.stderr)
+                    self.assertFalse((root / "state").exists())
+                    self.assertFalse((root / "tools").exists())
+                    self.assertFalse((root / "tmp").exists())
+
     def test_launcher_discovers_private_inputs_and_preserves_overrides_and_guards(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

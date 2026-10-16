@@ -20,6 +20,17 @@ from telethon.tl.types import InputPhoneCall, PhoneCallProtocol, PhoneCallReques
 import bridge
 
 
+def notices():
+    return {name: bytes([index + 1]) * 480 for index, name in enumerate(bridge.NOTICE_NAMES)}
+
+
+def offline_calls(client):
+    from pytgcalls import PyTgCalls
+    calls = PyTgCalls(client)
+    calls.send_frame = AsyncMock()
+    return calls
+
+
 class Live:
     def __init__(self):
         self.events = asyncio.Queue()
@@ -57,6 +68,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.client = bridge.guarded_client_class()(None, 1, "private")
         self.runtime = SimpleNamespace(check=AsyncMock())
         self.client.voice_runtime = self.runtime
+        self.client.is_connected = Mock(return_value=True)
         self.adapter = TelethonClient(60, self.client)
         self.adapter._cache.set_cache(33, InputPhoneCall(11, 22))
         self.protocol = Protocol(65, 92, True, True, ["native"])
@@ -84,11 +96,12 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def record(user, stream):
             connected.set()
 
-        calls = SimpleNamespace(play=play, record=AsyncMock(side_effect=record),
-                                leave_call=AsyncMock(), send_frame=AsyncMock())
+        calls = offline_calls(self.client)
+        self.addCleanup(calls.executor.shutdown, wait=False)
+        calls.play, calls.record = play, AsyncMock(side_effect=record)
         gemini = SimpleNamespace(aio=SimpleNamespace(live=SimpleNamespace(connect=lambda **kwargs: live)))
         listener = bridge.Listener({"GEMINI_LIVE_MODEL": "configured"}, self.runtime,
-                                  self.client, calls, shepherd, gemini, types, 60000)
+                                  self.client, calls, shepherd, gemini, types, 60000, notices())
         listener.current = call
         return SimpleNamespace(call=call, live=live, shepherd=shepherd, connected=connected,
                                calls=calls, listener=listener)
@@ -116,14 +129,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                         f.live.__class__.__aenter__ = AsyncMock(side_effect=RuntimeError("setup failed"))
                 try:
                     with patch("bridge.event") as events:
-                        await asyncio.wait_for(f.listener.run_call(f.call), 1)
-                    self.assertFalse(f.call.accepted)
+                        original_timeout = asyncio.timeout
+                        with patch("bridge.asyncio.timeout", side_effect=lambda seconds:
+                                   original_timeout(.03 if seconds == 45 else seconds)):
+                            await asyncio.wait_for(f.listener.run_call(f.call), 1)
+                    self.assertEqual(f.call.accepted, mode in ("setup", "setup_timeout"))
                     self.assertFalse(f.calls.record.called)
-                    self.assertFalse(f.calls.leave_call.called)
                     killed = [a.args[1] for a in f.shepherd.request.await_args_list]
-                    self.assertEqual(killed, [] if mode in ("reused_rejected", "expired") else ["/sessions/owned/kill"])
+                    self.assertEqual(killed, ["/sessions/owned/kill"] if mode in ("setup", "setup_timeout") else [])
                     ended = [a for a in events.call_args_list if a.args == ("call_ended",)]
-                    self.assertFalse(ended[0].kwargs["sandbox_jobs_retained"])
+                    self.assertTrue(ended[0].kwargs["sandbox_jobs_retained"])
                 finally:
                     if mode in ("setup", "setup_timeout"):
                         del f.live.__class__.__aenter__
@@ -194,6 +209,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         f.shepherd.transcript = transcript
         f.call.task = asyncio.create_task(f.listener.run_call(f.call))
         await asyncio.wait_for(f.connected.wait(), 1)
+        f.calls.send_frame.reset_mock()
+        sends.clear()
+        played.clear()
         fn = types.FunctionCall(id="operator1", name="ask_shepherd", args={"message": "launch worker"})
         await f.live.events.put(audio(b"A" * 481, b"A" * 961, tool=fn))
         await asyncio.wait_for(blocked.wait(), 1)
@@ -222,7 +240,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(f.call.task, 1)
         self.assertTrue(f.live.closed)
         self.assertIsNone(f.listener.current)
-        f.calls.leave_call.assert_awaited_once()
+        f.shepherd.request.assert_any_await("POST", "/sessions/owned/kill", {})
         self.assertEqual(len(sends), 2)
         for response in (audio(b"bad", mime="audio/wav"),
                          types.LiveServerMessage(go_away=types.LiveServerGoAway()), None):
@@ -230,6 +248,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 f = self.fixture()
                 f.call.task = asyncio.create_task(f.listener.run_call(f.call))
                 await asyncio.wait_for(f.connected.wait(), 1)
+                f.calls.send_frame.reset_mock()
                 await f.live.events.put(response)
                 await asyncio.wait_for(f.call.task, 1)
                 self.assertTrue(f.live.closed)
@@ -243,6 +262,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 f.shepherd.answer = AsyncMock(return_value="Withdrawn work must not speak.")
                 f.call.task = asyncio.create_task(f.listener.run_call(f.call))
                 await asyncio.wait_for(f.connected.wait(), 1)
+                f.calls.send_frame.reset_mock()
+                sent = asyncio.Event()
+                f.calls.send_frame.side_effect = lambda *args: sent.set()
                 fn = types.FunctionCall(id="withdrawn", name="ask_shepherd", args={"message": "launch"})
                 cancel = types.LiveServerToolCallCancellation(ids=["withdrawn"])
                 message = types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=[fn]))
@@ -253,10 +275,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     f.live.events.put_nowait(types.LiveServerMessage(tool_call_cancellation=cancel))
                 # Observe later input to prove receive consumed both buffered events.
                 f.live.events.put_nowait(audio(b"N" * 480, complete=True))
-                for _ in range(100):
-                    if f.calls.send_frame.called:
-                        break
-                    await asyncio.sleep(.001)
+                await asyncio.wait_for(sent.wait(), 1)
                 f.calls.send_frame.assert_awaited_once()
                 f.shepherd.dispatch.assert_not_awaited()
                 f.live.send_tool_response.assert_not_awaited()
@@ -288,9 +307,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         order, spawned = [], asyncio.Event()
         runtime = SimpleNamespace(url="http://127.0.0.1:49001", check=AsyncMock())
         async def transport(request):
-            if request.url.path == "/shepherd/spawn":
+            if request.url.path == "/sessions/background":
                 spawned.set()
-                return httpx.Response(201, json={"disposition": "spawned", "session": {"id": "preparing"}})
+                return httpx.Response(201, json={"id": "preparing"})
             if request.url.path.endswith("/kill"):
                 order.append("kill")
                 return httpx.Response(200, json={})
@@ -321,8 +340,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             phone = PhoneCallRequested(11, 22, None, 33, 44, b"key", PhoneCallProtocol(65, 92, []))
             await owner.raw(UpdatePhoneCall(phone))
             await asyncio.wait_for(spawned.wait(), 1)
-        calls = SimpleNamespace(start=start, on_update=Mock(return_value=Mock()), remove_handler=Mock(),
-                                play=AsyncMock(), record=AsyncMock())
+        calls = offline_calls(self.client)
+        self.addCleanup(calls.executor.shutdown, wait=False)
+        calls.start, calls.play, calls.record = start, AsyncMock(), AsyncMock()
+        calls.remove_handler = Mock(wraps=calls.remove_handler)
         class PendingLive:
             async def __aenter__(self):
                 await asyncio.Event().wait()
@@ -330,7 +351,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     live=SimpleNamespace(connect=lambda **args: PendingLive())))
         with contextlib.ExitStack() as stack:
             for target, value in (
-                ("bridge.check_dependencies", AsyncMock()),
+                ("bridge.check_dependencies", AsyncMock(return_value=notices())),
                 ("bridge.read_inputs", Mock(return_value={"TG_API_ID": "1", "TG_API_HASH": "private",
                     "GEMINI_API_KEY": "private", "GEMINI_LIVE_MODEL": "configured", "allowed": {33}})),
                 ("bridge.Runtime", Mock(return_value=runtime)),
@@ -352,7 +373,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         calls.remove_handler.assert_called_once()
         gemini.aio.aclose.assert_awaited_once()
         lock.close.assert_called_once()
-        calls.play.assert_not_awaited()
+        calls.play.assert_awaited_once()
 
 
 live_enter = Live.__aenter__
