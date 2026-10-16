@@ -3393,7 +3393,15 @@ projects:
         })
       ).stdout,
     ) as SpurLogEntry[];
-    expect(helperLogs).toEqual([]);
+    expect(helperLogs).toEqual([
+      expect.objectContaining({
+        event: "service.output",
+        level: "info",
+        message: "SERVICE_BOOT",
+        sessionId: spawned.id,
+        details: { serviceId: "web" },
+      }),
+    ]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -3438,7 +3446,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
+  it("reads sidecar pane output when background runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -3504,7 +3512,15 @@ projects:
         ])
       ).stdout,
     ) as SpurLogEntry[];
-    expect(sidecarLogs).toEqual([]);
+    expect(sidecarLogs).toEqual([
+      expect.objectContaining({
+        event: "sidecar.output",
+        level: "info",
+        message: "BROWSER_READY",
+        sessionId: spawned.id,
+        details: { sidecarName: "browser" },
+      }),
+    ]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {
