@@ -4072,15 +4072,18 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
-      expect(spawnMock).toHaveBeenCalledWith({
-        project: "api",
-        prompt: "risks for ship the task",
-        steps: ["verify"],
-        agent: "codex",
-        overrides: {
-          worktree: false,
+      expect(spawnMock).toHaveBeenCalledWith(
+        {
+          project: "api",
+          prompt: "risks for ship the task",
+          steps: ["verify"],
+          agent: "codex",
+          overrides: { worktree: false },
         },
-      });
+        {
+          triggerBirthKey: `${JSON.stringify(["api", "morning", "kickoff", "fanout-cron-occurrence-1"])}:1`,
+        },
+      );
       expect(warnMock).toHaveBeenCalledWith(
         "[trigger:api/kickoff] failed to spawn claude: Cannot render prompt placeholder {{missing}}: event data.missing is unavailable",
       );
