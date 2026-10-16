@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -26,6 +26,34 @@ function fixture(): string {
   paths.push(path);
   return path;
 }
+
+function inputChecker(path: string, status = 0): string {
+  const python = join(path, "input-checker");
+  writeFileSync(python, `#!/bin/bash\n[[ "$2" == --check-inputs ]] || exit 91\nexit ${status}\n`);
+  chmodSync(python, 0o700);
+  return python;
+}
+
+it.each(["run-daemon.sh", "run-call.sh"])(
+  "%s rejects unconfigured inputs before creating runtime or private state",
+  (launcher) => {
+    const path = fixture();
+    const state = join(path, "state");
+    const tools = join(path, "tools");
+    const result = spawnSync("/bin/bash", [resolve(`../scripts/telegram-call/${launcher}`)], {
+      env: {
+        ...process.env,
+        TELEGRAM_CALL_PYTHON: inputChecker(path, 1),
+        TELEGRAM_CALL_STATE_DIR: state,
+        TELEGRAM_CALL_ENV_FILE: join(path, "missing.env"),
+        SPUR_SESSION_TOOL_DIR: tools,
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(existsSync(state)).toBe(false);
+    expect(existsSync(tools)).toBe(false);
+  },
+);
 
 it("composes two manual private sidecars without a public endpoint", () => {
   const path = fixture();
@@ -62,6 +90,8 @@ it("launches an unknown-selection fixture containing only a disposable project",
       ...process.env,
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
+      TELEGRAM_CALL_PYTHON: inputChecker(path),
+      TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_CAPTURE: capture,
       VOICE_NODE: process.execPath,
       VOICE_WRITER: resolve("bin/write-isolated-project-config.mjs"),
@@ -100,6 +130,31 @@ it("forwards dependency probes to private Python without requiring a runtime", (
   );
   expect(output).toContain("bridge.py\n--check-deps");
   expect(statSync(state).mode & 0o777).toBe(0o700);
+});
+
+it.each([false, true])("checks inputs before listener launch (override=%s)", (override) => {
+  const path = fixture();
+  const state = join(path, "state");
+  mkdirSync(state);
+  writeFileSync(join(state, "call.env"), "");
+  const selected = override ? join(path, "override.env") : join(state, "call.env");
+  const python = join(path, "python");
+  writeFileSync(
+    python,
+    '#!/bin/bash\nif [[ "$#" == 1 ]]; then set -- "$1" listener; fi\nprintf "%s|%s\\n" "$2" "$TELEGRAM_CALL_ENV_FILE"\n',
+  );
+  chmodSync(python, 0o700);
+  const output = execFileSync("/bin/bash", [resolve("../scripts/telegram-call/run-call.sh")], {
+    env: {
+      ...process.env,
+      TELEGRAM_CALL_PYTHON: python,
+      TELEGRAM_CALL_STATE_DIR: state,
+      TELEGRAM_CALL_ENV_FILE: override ? selected : "",
+      SPUR_SESSION_TOOL_DIR: join(path, "tools"),
+    },
+    encoding: "utf8",
+  });
+  expect(output.trim().split("\n")).toEqual([`--check-inputs|${selected}`, `listener|${selected}`]);
 });
 
 it("finishes owned tmux teardown when pane HUP follows TERM", async () => {
@@ -143,6 +198,8 @@ exec "$VOICE_TMUX" "$@"
       ...process.env,
       PATH: `${bin}:/usr/bin:/bin`,
       SPUR_SESSION_TOOL_DIR: tools,
+      TELEGRAM_CALL_PYTHON: inputChecker(path),
+      TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_CAPTURE: capture,
       VOICE_MARKER: marker,
       VOICE_NODE: process.execPath,

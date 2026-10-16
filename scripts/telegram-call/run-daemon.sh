@@ -4,6 +4,8 @@ umask 077
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(realpath "$SCRIPT_DIR/../..")
+source "$SCRIPT_DIR/inputs.sh"
+check_voice_inputs
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}/voice-daemon"
 mkdir -p "$TOOL_DIR"
 chmod 700 "$TOOL_DIR"
