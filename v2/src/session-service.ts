@@ -617,6 +617,14 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
   )
     return false;
   if (session.errorSource === "runtime_probe") return true;
+  if (session.errorSource === "other") {
+    return (
+      session.error ===
+        "Session status detection failed: ps failed: malformed process table output" ||
+      session.error ===
+        "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n"
+    );
+  }
   if (session.errorSource !== undefined) return false;
   const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
   return (

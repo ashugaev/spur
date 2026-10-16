@@ -1449,6 +1449,7 @@ type SessionServiceInternals = {
     sessionBatch?: SessionRecord[],
   ): Promise<{ view: SessionView; classified: unknown }>;
   restoreWarmupUntil: Map<string, number>;
+  restoreOwnsRuntimeRecovery(sessionId: string): boolean;
   withWorkspaceLifecycleLocks<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
   confirmAgentExited(
     session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
@@ -18996,50 +18997,62 @@ describe("SessionService", () => {
     }
   });
 
-  it("keeps codex working while a long exec_command tool call is still pending", async () => {
-    const now = new Date("2026-04-14T19:30:00.000Z");
-    vi.setSystemTime(now);
-    const tenMinAgoMs = now.getTime() - 10 * 60_000;
-    readSessionMock.mockReturnValue({
-      id: "spur-exec",
-      project: "sp",
-      agent: "codex",
-      prompt: "long exec",
-      branch: "feature/exec",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/sp/spur-exec",
-      tmuxSession: "spur-exec",
-      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-      status: "running",
-      createdAt: "2026-04-14T13:34:40.615Z",
-      updatedAt: "2026-04-14T19:20:00.000Z",
-    });
-    readAgentHookStateMock.mockReturnValue({
-      state: "working",
-      updatedAt: new Date(tenMinAgoMs).toISOString(),
-      hookEvent: "PreToolUse",
-      turnId: "019efdf7",
-    });
-    readCodexRolloutStateMock.mockResolvedValue({
-      rollout: {
+  it.each([
+    undefined,
+    "Session status detection failed: ps failed: malformed process table output",
+    "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+  ])(
+    "historical transport recovery: keeps codex working while a long exec_command tool call is still pending (%j)",
+    async (error) => {
+      const now = new Date("2026-04-14T19:30:00.000Z");
+      vi.setSystemTime(now);
+      const tenMinAgoMs = now.getTime() - 10 * 60_000;
+      const sessions = createSessionStore();
+      sessions.set("spur-exec", {
+        id: "spur-exec",
+        project: "sp",
+        agent: "codex",
+        prompt: "long exec",
+        branch: "feature/exec",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/sp/spur-exec",
+        tmuxSession: "spur-exec",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        status: "running",
+        createdAt: "2026-04-14T13:34:40.615Z",
+        updatedAt: "2026-04-14T19:20:00.000Z",
+        ...(error ? { error, errorSource: "other" } : {}),
+      });
+      readAgentHookStateMock.mockReturnValue({
         state: "working",
-        timestamp: new Date(tenMinAgoMs).toISOString(),
-        timestampMs: tenMinAgoMs,
-        filePath: "/tmp/spur-exec/rollout.jsonl",
-        reason: "function_call",
-        callId: "call_1",
+        updatedAt: new Date(tenMinAgoMs).toISOString(),
+        hookEvent: "PreToolUse",
         turnId: "019efdf7",
-      },
-      rateLimit: null,
-    });
+      });
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: {
+          state: "working",
+          timestamp: new Date(tenMinAgoMs).toISOString(),
+          timestampMs: tenMinAgoMs,
+          filePath: "/tmp/spur-exec/rollout.jsonl",
+          reason: "function_call",
+          callId: "call_1",
+          turnId: "019efdf7",
+        },
+        rateLimit: null,
+      });
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
 
-    const result = await service.get("spur-exec");
+      const result = await service.get("spur-exec");
 
-    expect(result.state).toBe("working");
-  });
+      expect(result.state).toBe("working");
+      expect(sessions.get("spur-exec")?.error).toBeUndefined();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("flips codex working to waiting for a stale UserPromptSubmit hook (spur-7ce0)", async () => {
     const now = new Date("2026-06-25T15:00:00.000Z");
@@ -26531,6 +26544,116 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.error).toBeUndefined();
     },
   );
+
+  describe.each([
+    "Session status detection failed: ps failed: malformed process table output",
+    "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+  ])("historical transport recovery: %j", (error) => {
+    it.each(["running", "errored"] as const)("heals a healthy %s record", async (status) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        id: "api-1",
+        status,
+        agentSessionId: "native-original",
+        agentLaunchId: "launch-original",
+        error,
+        errorSource: "other",
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+
+      const result = await service.get(record.id);
+
+      expect(result.state).toBe("waiting");
+      expect(sessions.get(record.id)).toMatchObject({
+        id: record.id,
+        status: "running",
+        agentSessionId: "native-original",
+        agentLaunchId: "launch-original",
+      });
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it.each(
+      (["running", "errored"] as const).flatMap((status) =>
+        ["unknown", "dead", "workspace", "server", "restore", "owner", "generation"].map(
+          (guard) => ({ status, guard }),
+        ),
+      ),
+    )("blocks $status recovery under $guard evidence", async ({ status, guard }) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        id: "api-1",
+        status,
+        agentSessionId: "native-original",
+        agentLaunchId: "launch-original",
+        error,
+        errorSource: "other",
+        ...(guard === "server" ? { serverErrorAt: "2026-03-18T10:01:00.000Z" } : {}),
+      });
+      sessions.set(record.id, record);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "readRuntimeSnapshot").mockImplementation(async () => {
+        if (guard === "owner" || guard === "generation") {
+          sessions.set(record.id, {
+            ...record,
+            ...(guard === "owner"
+              ? { agentSessionId: "native-replacement" }
+              : { agentLaunchId: "launch-replacement" }),
+          });
+        }
+        return {
+          runtimeAlive: guard !== "dead",
+          paneUsable: guard !== "dead",
+          processAlive: guard !== "dead",
+          probeUnresponsive: guard === "unknown",
+        };
+      });
+      if (guard === "workspace") {
+        probeWorkspaceMock.mockReturnValue({ exists: false, missing: true });
+      }
+      if (guard === "restore") {
+        vi.spyOn(internals, "restoreOwnsRuntimeRecovery").mockReturnValue(true);
+      }
+
+      await internals.classifySessionRecord(record);
+
+      expect(sessions.get(record.id)?.error).toBe(
+        guard === "unknown"
+          ? "Session status detection failed: runtime probe (tmux or ps) timed out; runtime state unknown"
+          : error,
+      );
+      expect(sessions.get(record.id)?.errorSource).toBe(
+        guard === "unknown" ? "runtime_probe" : "other",
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    "Session status detection failed: ps failed: malformed process table output\n",
+    "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args",
+    "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n\n",
+    "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\npermission denied\n",
+    "Session status detection failed: ps failed: classifier",
+    "Session status detection failed: workspace failed",
+    "Session reporting detection failed: ps failed: malformed process table output",
+    "Provider request failed",
+  ])("historical transport recovery: retains unrelated complete error %j", async (error) => {
+    const sessions = createSessionStore();
+    const record = runningSession({ id: "api-1", error, errorSource: "other" });
+    sessions.set(record.id, record);
+    mockClaudeJsonlState("waiting");
+    const service = await createDisposedSessionService();
+
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(error);
+    expect(sessions.get(record.id)?.errorSource).toBe("other");
+  });
 
   it("keeps a workspace diagnostic after an unresponsive runtime probe recovers", async () => {
     const sessions = createSessionStore();
@@ -59390,6 +59513,102 @@ describe("SessionService", () => {
 
     const holdAgents = ["claude", "codex", "cursor", "opencode"] as const;
     const afterHold = Date.parse(PENDING_LAUNCH_AT) + 30_000;
+
+    it.each(["needs_input", "rate_limited", "unconfirmed"] as const)(
+      "historical transport recovery: blocks queued input under current %s",
+      async (guard) => {
+        timerPromisesSleepMock.mockImplementation(
+          (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        );
+        const sessions = createSessionStore();
+        seedSendHold(sessions, "codex", {
+          error: "Session status detection failed: ps failed: malformed process table output",
+          errorSource: "other",
+          queuedMessages: { messages: ["A", "B"], awaitingPrompt: true },
+        });
+        mockAgentActivity("codex", Date.now(), "working");
+        mockHoldAckScan(guard !== "unconfirmed");
+        if (guard === "needs_input") {
+          readAgentHookStateMock.mockReturnValue({
+            state: "needs_input",
+            updatedAt: new Date().toISOString(),
+          });
+        } else if (guard === "rate_limited") {
+          readCodexRolloutStateMock.mockResolvedValue({
+            rollout: null,
+            rateLimit: { limited: true, reason: "codex out of credits" },
+          });
+        }
+        const service = await deferredService();
+        try {
+          const result = await service.get("api-1");
+          expect(sessions.get("api-1")?.error).toBeUndefined();
+          expect(result.state).toBe(guard === "unconfirmed" ? "working" : guard);
+          await vi.advanceTimersByTimeAsync(30_000);
+          expect(tmuxTexts()).toEqual([]);
+          expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["A", "B"]);
+          if (guard === "unconfirmed") {
+            expect(sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+          }
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each([
+      "Session status detection failed: ps failed: malformed process table output",
+      "Session status detection failed: ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+    ])("historical transport recovery: own Codex ACK resumes FIFO once for %j", async (error) => {
+      timerPromisesSleepMock.mockImplementation(
+        (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      );
+      const sessions = createSessionStore();
+      seedSendHold(sessions, "codex", {
+        error,
+        errorSource: "other",
+        queuedMessages: { messages: ["A", "B"], awaitingPrompt: true },
+      });
+      mockAgentActivity("codex", afterHold, "working");
+      const scan = mockHoldAckScan(true);
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        mockAgentActivity("codex", Date.now(), "working");
+      });
+      const service = await deferredService();
+      try {
+        await service.get("api-1");
+        expect(scan).toHaveBeenCalledWith("typed");
+        expect(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
+        expect(sessions.get("api-1")?.error).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(tmuxTexts()).toEqual([]);
+
+        mockAgentActivity("codex", Date.now(), "waiting");
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(tmuxTexts()).toEqual(["A"]);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(tmuxTexts()).toEqual(["A"]);
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["B"]);
+
+        mockAgentActivity("codex", Date.now(), "waiting");
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(tmuxTexts()).toEqual(["A", "B"]);
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(tmuxTexts()).toEqual(["A", "B"]);
+        expect(sessions.get("api-1")?.agentSessionId).toBe("ses_1");
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(eventsNamed("session.message.sent")).toEqual([
+          expect.objectContaining({ details: expect.objectContaining({ interrupt: false }) }),
+          expect.objectContaining({ details: expect.objectContaining({ interrupt: false }) }),
+        ]);
+      } finally {
+        service.dispose();
+      }
+    });
 
     it.each(holdAgents)(
       "%s: a running turn's own records never clear a send's hold",
