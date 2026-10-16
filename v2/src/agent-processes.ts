@@ -183,14 +183,18 @@ export type PaneAgentCapture =
 
 const CAPTURE_RETRY_DELAY_MS = 100;
 
-// P1, pane-rooted and exact: descendants of `panePid` whose args match this
-// session's own agent matchers, plus members of the pane's kernel session
-// (sid === panePid) carrying this exact launch's markers. The session pass
-// catches processes re-parented to init after the agent wrapper died, and MCP
-// children that never match an agent matcher. It starts only while the pane
-// is alive and `panePid` is a live session leader. Each added member must keep
-// its identity and SID across both marker reads. `panePid: null` (pane already
-// gone, or the caller never resolved one) reads as an empty capture — never throws.
+// P1, pane-rooted and exact: descendants of the selected pane roots
+// whose args match this session's own agent matchers, plus members of each
+// pane's kernel session (sid === pane pid) carrying this exact launch's
+// markers. The session pass catches processes re-parented to init after the
+// agent wrapper died, and MCP children that never match an agent matcher. It
+// runs only for a pane pid that is still a live session leader. Legacy
+// {panePid, paneDead} keeps dead active descendants but skips their SID pass.
+// The all-live `panePids` form
+// must hold live panes only (lookupTmuxSessionPanePids): a dead pane's pid can
+// be recycled. Each added member must keep its identity and SID across both
+// marker reads. Empty `panePids` (panes already gone, or the caller never
+// resolved any) reads as an empty capture — never throws.
 //
 // "unavailable" when the process table could not be read. That must NOT
 // collapse into an empty capture: an empty capture makes
@@ -199,14 +203,17 @@ const CAPTURE_RETRY_DELAY_MS = 100;
 // duplicate this module exists to prevent. Same fail-safe policy as
 // snapshotProcessLiveness. One retry first, since a `ps` failure here is
 // usually transient fork pressure.
-export async function capturePaneAgentProcesses(input: {
-  sessionId: string;
-  agentLaunchId?: string | undefined;
-  panePid: number | null;
-  paneDead: boolean;
-  processMatchers: readonly string[];
-}): Promise<PaneAgentCapture> {
-  if (input.panePid === null) {
+export async function capturePaneAgentProcesses(
+  input: {
+    sessionId: string;
+    agentLaunchId?: string | undefined;
+    processMatchers: readonly string[];
+  } & ({ panePids: readonly number[] } | { panePid: number | null; paneDead: boolean }),
+): Promise<PaneAgentCapture> {
+  const panePids =
+    "panePids" in input ? input.panePids : input.panePid === null ? [] : [input.panePid];
+  const sidPanePids = "panePids" in input || !input.paneDead ? panePids : [];
+  if (panePids.length === 0) {
     return { status: "ok", processes: [] };
   }
   const matchers = compileMatchers(input.processMatchers);
@@ -223,7 +230,7 @@ export async function capturePaneAgentProcesses(input: {
   }
   const processes = snapshot.processes;
   const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
-  const orderedPids = collectDescendants(input.panePid, processes);
+  const orderedPids = panePids.flatMap((panePid) => collectDescendants(panePid, processes));
   const refs: AgentProcessRef[] = [];
   for (const pid of orderedPids) {
     const proc = byPid.get(pid);
@@ -231,14 +238,15 @@ export async function capturePaneAgentProcesses(input: {
       refs.push({ pid: proc.pid, identity: await readProcessIdentity(proc.pid) });
     }
   }
-  const { panePid, sessionId, agentLaunchId } = input;
-  if (
-    agentLaunchId &&
-    !input.paneDead &&
-    panePid > 1 &&
-    (await readProcessStat(panePid))?.sid === panePid
-  ) {
-    const captured = new Set(refs.map((ref) => ref.pid));
+  const { sessionId, agentLaunchId } = input;
+  if (!agentLaunchId) {
+    return { status: "ok", processes: refs };
+  }
+  const captured = new Set(refs.map((ref) => ref.pid));
+  for (const panePid of sidPanePids) {
+    if (panePid <= 1 || (await readProcessStat(panePid))?.sid !== panePid) {
+      continue;
+    }
     for (const pid of await listSessionMemberPids(panePid)) {
       if (pid === panePid || pid === process.pid || captured.has(pid)) {
         continue;
@@ -362,14 +370,15 @@ export async function terminateAgentProcesses(
 export type SessionAgentScan = { status: "unavailable" } | { status: "ok"; pids: number[] };
 
 // P2, env-rooted and heuristic launch guard: processes carrying
-// SPUR_SESSION === sessionId that are not this pane's own children
-// (excludePanePid's descendants), collapsed to their shallowest ancestor.
+// SPUR_SESSION === sessionId that are not this session's own pane children
+// (descendants of every excludePanePids entry, live panes only), collapsed to
+// their shallowest ancestor.
 // "unavailable" when this platform cannot read process environments — the
 // caller MUST treat that as "no finding", never as "duplicate".
 export async function findForeignAgentProcessesForSession(input: {
   sessionId: string;
   processMatchers: readonly string[];
-  excludePanePid: number | null;
+  excludePanePids: readonly number[];
 }): Promise<SessionAgentScan> {
   if (!(await canReadProcessEnv())) {
     return { status: "unavailable" };
@@ -380,7 +389,7 @@ export async function findForeignAgentProcessesForSession(input: {
   }
   const processes = await listProcesses();
   const excluded = new Set(
-    input.excludePanePid !== null ? collectDescendants(input.excludePanePid, processes) : [],
+    input.excludePanePids.flatMap((panePid) => collectDescendants(panePid, processes)),
   );
   const candidates = processes.filter(
     (proc) => !excluded.has(proc.pid) && matchers.some((matcher) => matcher.test(proc.args)),
