@@ -37,6 +37,56 @@ import {
 import { findFreePort, startOnFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
+  it("GET source-info returns association, absence, and unknown-session 404", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-source-info-server-"));
+    const port = await findFreePort();
+    const configPath = join(root, "config.yaml");
+    await writeFile(
+      configPath,
+      `server: {host: 127.0.0.1, port: ${port}}\ndataDir: ${join(root, "data")}\nworktreeDir: ${join(root, "worktrees")}\n`,
+    );
+    const sourceInfo = vi
+      .spyOn(SessionService.prototype, "sourceInfo")
+      .mockReturnValueOnce({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      })
+      .mockReturnValueOnce({ sessionId: "api-2", source: null })
+      .mockImplementationOnce(() => {
+        throw new SessionResourceNotFoundError("Session not found: missing");
+      });
+    const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+    try {
+      const associated = await fetch(`http://127.0.0.1:${port}/sessions/api-1/source-info`);
+      expect(associated.status).toBe(200);
+      expect(await associated.json()).toEqual({
+        sessionId: "api-1",
+        source: "telegram",
+        projectId: "api",
+        sourceId: "chat",
+        chatId: -1001,
+        messageThreadId: 22,
+        bot: { id: 44 },
+      });
+      const absent = await fetch(`http://127.0.0.1:${port}/sessions/api-2/source-info`);
+      expect(absent.status).toBe(200);
+      expect(await absent.json()).toEqual({ sessionId: "api-2", source: null });
+      expect((await fetch(`http://127.0.0.1:${port}/sessions/missing/source-info`)).status).toBe(
+        404,
+      );
+      expect(sourceInfo.mock.calls).toEqual([["api-1"], ["api-2"], ["missing"]]);
+    } finally {
+      await server.stop();
+      sourceInfo.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["spawn", "respawn", "handoff"] as const)(
     "returns a client error for rejected %s reasoning effort",
     async (operation) => {

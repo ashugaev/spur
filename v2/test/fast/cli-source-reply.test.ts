@@ -4,12 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const postJsonMock = vi.fn();
+const getExistingJsonMock = vi.fn();
+const ensureInstanceConfigMock = vi.fn(() => ({
+  configPath: "/tmp/spur.yaml",
+  initialized: false,
+}));
 const writeStdoutMock = vi.fn();
 
 vi.mock("../../src/client.js", () => ({
   connectProjectConfig: vi.fn(),
   disconnectProjectConfig: vi.fn(),
   getJson: vi.fn(),
+  getExistingJson: getExistingJsonMock,
   listProjects: vi.fn(),
   postJson: postJsonMock,
   postPreflight: vi.fn(),
@@ -20,10 +26,7 @@ vi.mock("../../src/client.js", () => ({
 vi.mock("../../src/config.js", () => ({
   defaultVoiceModelPath: vi.fn(),
   createProjectConfigScaffold: vi.fn(),
-  ensureInstanceConfig: vi.fn(() => ({
-    configPath: "/tmp/spur.yaml",
-    initialized: false,
-  })),
+  ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
   loadConfig: vi.fn(() => ({
     tmux: { socketName: "spur-test" },
@@ -71,12 +74,70 @@ describe("source reply CLI", () => {
     vi.resetModules();
     postJsonMock.mockReset().mockResolvedValue(replyResponse());
     writeStdoutMock.mockReset();
+    getExistingJsonMock.mockReset();
+    ensureInstanceConfigMock.mockClear();
     process.env["SPUR_SESSION"] = "api-1";
   });
 
   afterEach(() => {
     delete process.env["SPUR_SESSION"];
     vi.restoreAllMocks();
+  });
+
+  it.each([false, true])("source info reads current or explicit session: %s", async (explicit) => {
+    const result = {
+      sessionId: "api-1",
+      source: "telegram",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: -1001,
+      messageThreadId: 22,
+      bot: { id: 44, username: "testbot" },
+    };
+    getExistingJsonMock.mockResolvedValue(result);
+    await parseSourceReply([
+      "--config",
+      "/tmp/existing.yaml",
+      "source",
+      "info",
+      ...(explicit ? ["--session", "api-2", "--json"] : []),
+    ]);
+    expect(getExistingJsonMock).toHaveBeenCalledWith(
+      `/sessions/${explicit ? "api-2" : "api-1"}/source-info`,
+      "/tmp/existing.yaml",
+    );
+    expect(ensureInstanceConfigMock).not.toHaveBeenCalled();
+    expect(postJsonMock).not.toHaveBeenCalled();
+    expect(writeStdoutMock).toHaveBeenCalledWith(
+      explicit
+        ? JSON.stringify(result, null, 2)
+        : "Telegram api/chat: chat -1001, topic 22; bot @testbot (44).",
+    );
+  });
+
+  it.each([null, { id: 44 }])("source info renders unavailable or unnamed bot: %s", async (bot) => {
+    getExistingJsonMock.mockResolvedValue({
+      sessionId: "api-1",
+      source: "telegram",
+      projectId: "api",
+      sourceId: "chat",
+      chatId: 42,
+      bot,
+    });
+    await parseSourceReply(["source", "info"]);
+    expect(writeStdoutMock).toHaveBeenCalledWith(
+      `Telegram api/chat: chat 42; bot ${bot ? "(44)" : "identity unavailable"}.`,
+    );
+  });
+
+  it("source info renders absent association and requires a session", async () => {
+    getExistingJsonMock.mockResolvedValue({ sessionId: "api-1", source: null });
+    await parseSourceReply(["source", "info"]);
+    expect(writeStdoutMock).toHaveBeenCalledWith("No source association for api-1.");
+    delete process.env["SPUR_SESSION"];
+    await expect(parseSourceReply(["source", "info"])).rejects.toThrow(
+      "source info requires --session or SPUR_SESSION",
+    );
   });
 
   it("posts the message with no buttons field when none are passed", async () => {

@@ -90,7 +90,7 @@ Empty `[prompt...]` skips default `spawn.steps`. Preflight usage counts toward `
 ## source
 
 `spur source poll-enable --session <id>` re-enables GitHub signal polling after a not-found PR permanently disabled a session (see [source.poll.disabled](configuration.md#events)). `--session` defaults to `SPUR_SESSION`. `--json` prints raw JSON. Clears the disable in every `github`-type source of the session's project, and in registry entries of removed or renamed sources; `cleared: []` when nothing was disabled. Route: [daemon-api.md#session-routes](daemon-api.md#session-routes).
-
+`spur source info [--session <id>] [--json]`: read associated chat/topic and cached bot identity from existing daemon; session defaults to `SPUR_SESSION`; advertised in standard startup prompts; `v2/src/cli.ts`.
 ## source reply
 
 `spur source reply <message...> [--button <label[=value]>]... [--session <id>] [--json]`: bound-chat send; up to 8 buttons; `--request-interface-approval <manifest-file>` requests designated-human semantic consent. Outside forum topics: bold session label (`<id> — <title>`, or `<id>`), one empty line before body; `v2/src/session-service.ts`. Wire: [daemon-api.md#session-routes](daemon-api.md#session-routes); routing/formatting: [configuration.md#telegram-binding](configuration.md#telegram-binding).

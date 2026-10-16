@@ -34,6 +34,7 @@ import {
   deleteJson,
   disconnectProjectConfig,
   getJson,
+  getExistingJson,
   listProjects,
   postJson,
   postPreflight,
@@ -167,6 +168,7 @@ import {
   type SharedMemoryRemoveResponse,
   type SharedMemoryScope,
   type SourcePollEnableResponse,
+  type SourceInfoResponse,
   type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
@@ -451,6 +453,15 @@ function parseSharedMemoryScope(value: unknown): SharedMemoryScope {
     throw new Error("--scope must be task, project, or global");
   }
   return scope;
+}
+
+function renderSourceInfo(response: SourceInfoResponse): string {
+  if (response.source === null) return `No source association for ${response.sessionId}.`;
+  const topic = response.messageThreadId !== undefined ? `, topic ${response.messageThreadId}` : "";
+  const bot = response.bot
+    ? `${response.bot.username ? `@${response.bot.username} ` : ""}(${response.bot.id})`
+    : "identity unavailable";
+  return `Telegram ${response.projectId}/${response.sourceId}: chat ${response.chatId}${topic}; bot ${bot}.`;
 }
 
 function renderSourceReplyResponse(response: SourceReplyResponse): string {
@@ -4658,6 +4669,26 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   const source = program.command("source").description("Work with source-bound session messages.");
+
+  source
+    .command("info")
+    .description("Read the associated chat and cached bot identity without sending.")
+    .option("--session <id>", "Session id; defaults to SPUR_SESSION")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { session?: string; json?: boolean }, command: Command) => {
+      const sessionId = options.session?.trim() || process.env["SPUR_SESSION"]?.trim();
+      if (!sessionId) throw new Error("source info requires --session or SPUR_SESSION");
+      await outputResult({
+        json: Boolean(options.json),
+        label: "reading source association",
+        action: () =>
+          getExistingJson<SourceInfoResponse>(
+            `/sessions/${encodeURIComponent(sessionId)}/source-info`,
+            getConfigPath(command.parent?.parent as Command),
+          ),
+        render: renderSourceInfo,
+      });
+    });
 
   source
     .command("reply")
