@@ -51,13 +51,13 @@ SCENARIOS
 
   1. Agent send: spawn in test project with "notify me in Telegram, buttons X and Y". Forum answer starts with agent body, keyboard renders, topic title precedes session id. Subsequent answers omit session label; successful forum binding confirmations omit identity.
   2. Click: toast, message edited to "Selected: X", keyboard gone, agent answers.
-  3. Topic reply: reply-to the agent message. "Received. Delivering to <id>..." appears first, is edited to the placeholder "Received. <label> is thinking...", then into the answer.
+  3. Topic reply: reply-to the agent message. Ack "Received. Delivering to <id>..." is edited to the placeholder "Received. <label> is thinking...", then into the answer. Ack may arrive already edited: Telegram delivers the edited state, `edit_date` on the first bot message is the evidence. A live edit watcher shows the literal "Delivering" line.
   4. DM spawn: plain task to the bot DM. "Spawned and bound", then the labeled answer in the DM. No "Delivering" line appears.
   5. Second DM agent: `/spawn`, pick agent and project, send a task. Its first reply lands in the DM, never in the forum.
   6. DM routing: plain message reaches the latest bound agent; reply-to reaches the agent that sent the replied message; click reaches the offering agent.
   7. Voice note in the DM: "Heard: ..." then routed like text. Needs a live isolated-ui sidecar. Its process `SPUR_CONFIG` must point at an existing dir; a stale one falls back to the default provider and the route answers 502 `missing_model`. Restart the sidecar, then check the route with a direct `curl -F audio=@<file>` to `/api/runtime/voice/transcribe`.
   8. Inactive: `pause` an agent, reply-to its message: "<label> is not active. Message not delivered." Nothing delivered.
-  9. Gone: `kill --pr-action leave_open`, reply-to its message: "Spur session <id> is gone. Message not delivered." Binding unchanged.
+  9. Gone: `kill --pr-action leave_open`, then message in the topic. Kill unbinds the topic ("This chat is unbound."); next message autospawns when autoSpawn is on. "Spur session <id> is gone. Unbound. Use /watch or /spawn." only when the binding outlives the session (autoSpawn off). Reply-to outside topics: "Spur session <id> is gone. Message not delivered.", binding unchanged.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
 
 
