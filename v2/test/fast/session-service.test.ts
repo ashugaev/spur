@@ -12444,6 +12444,7 @@ describe("SessionService", () => {
       // Reconcile-shaped drift: status flips to "stopped" with no stopReason,
       // the pipeline is left running untouched (matches the terminalUnavailable
       // branch at session-service.ts's reconcile, :14520-14530).
+      await waitForRealTime(() => expect(timerPromisesSleepMock).toHaveBeenCalledWith(1_000));
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
       sessions.set("api-1", {
@@ -12655,6 +12656,7 @@ describe("SessionService", () => {
 
       // Reconcile's errored branch (session-service.ts:14531-14538): same
       // unintended wedge, no stopReason, different status.
+      await waitForRealTime(() => expect(timerPromisesSleepMock).toHaveBeenCalledWith(1_000));
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
       sessions.set("api-1", {
@@ -12708,6 +12710,7 @@ describe("SessionService", () => {
       const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
       expect(run).toBeDefined();
 
+      await waitForRealTime(() => expect(timerPromisesSleepMock).toHaveBeenCalledWith(1_000));
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
       sessions.set("api-1", {
@@ -12834,6 +12837,7 @@ describe("SessionService", () => {
       const run = sessionServiceInternals(service).deliveryRuns.get("api-1");
       expect(run).toBeDefined();
 
+      await waitForRealTime(() => expect(timerPromisesSleepMock).toHaveBeenCalledWith(1_000));
       const parked = sessions.get("api-1");
       if (!parked) throw new Error("expected api-1 to exist");
       sessions.set("api-1", {
@@ -27440,7 +27444,7 @@ describe("SessionService", () => {
           claim: DailyClaim,
           denial: { kind: "denied"; error: Error },
           now: number,
-        ): Promise<void>;
+        ): void;
       };
     }
 
@@ -27754,8 +27758,8 @@ describe("SessionService", () => {
       });
       sessions.set(original.id, original);
       const claim = rebootCandidates(service, [original.id])[0] as DailyClaim;
-      let replacement = original;
-      vi.spyOn(internals, "withWorkspaceLifecycleLocks").mockImplementation(async (_id, action) => {
+      let replacement: SessionRecord;
+      {
         replacement = {
           ...original,
           dailyWake: {
@@ -27785,8 +27789,7 @@ describe("SessionService", () => {
               () => true,
             );
         }
-        return action();
-      });
+      }
       const exhausted = change === "exhausted" || change === "stale-exhausted";
       await internals.deferDailyWakeForAdmission(
         original,
@@ -51054,6 +51057,49 @@ describe("SessionService", () => {
           return { sessions, panes, freeSlot, takeSlot };
         }
 
+        it.each(["daily-api-1", "new-message"])(
+          "serializes a denied claim before supported rearm with %s",
+          async (message) => {
+            const { sessions } = seedDaily();
+            vi.setSystemTime(at(9, 0, 1));
+            const service = await createDisposedSessionService();
+            const internals = service as unknown as {
+              assertAdmissible(...args: unknown[]): unknown;
+            };
+            const original = internals.assertAdmissible.bind(service);
+            let rearm: Promise<unknown> | undefined;
+            vi.spyOn(internals, "assertAdmissible").mockImplementationOnce((...args) => {
+              vi.setSystemTime(at(9, 0, 2));
+              rearm = service.scheduleWake("api-1", {
+                dailyAt: ["09:00", "09:40"],
+                message,
+                stopCondition: "Stop condition",
+              });
+              return original(...args);
+            });
+            await tick(service);
+            expect(rearm).toBeDefined();
+            await rearm;
+            expect(sessions.get("api-1")?.dailyWake).toEqual({
+              dailyAt: ["09:00", "09:40"],
+              nextDueAt: iso(at(9, 40)),
+              message,
+              stopCondition: "Stop condition",
+            });
+            expect(wakeSends(message)).toBe(0);
+            const writes = writeSessionMock.mock.calls
+              .map(([, record]) => record)
+              .filter((record) => record.id === "api-1");
+            expect(writes.map((record) => record.dailyWake?.nextDueAt)).toEqual([
+              iso(at(9, 40)),
+              iso(at(9, 15, 1)),
+              iso(at(9, 40)),
+            ]);
+            expect(events("session.wake.daily_deferred")).toHaveLength(1);
+            service.dispose();
+          },
+        );
+
         it("retries a denied occurrence until admitted, then sends it once", async () => {
           const { sessions, freeSlot } = seedDaily();
           vi.setSystemTime(at(9, 0, 1));
@@ -53884,20 +53930,17 @@ describe("SessionService", () => {
       createTmuxSessionMock.mockImplementation(async () => {
         restoredTmuxCreated = true;
       });
-      // Same disagreement shape as the sibling above: classification's own
-      // reads (including reconcileUnexpectedStop's `{fresh:true}` confirm)
-      // must stay dead so restore() proceeds; only a SECOND `fresh` probe —
-      // reachable only if the paneLookup.status gate were ever dropped —
-      // would read alive. With the gate intact, killAgentPaneAndConfirmExit
-      // never issues that second probe at all.
-      let freshProbes = 0;
+      // Bind liveness to capture and creation, not classification probe count.
+      // A forbidden fresh capture probe reads alive; readiness after creation
+      // also reads alive, while every pre-capture classification reads dead.
+      let captured = false;
+      capturePaneAgentProcessesMock.mockImplementation(async () => {
+        captured = true;
+        return { status: "ok", processes: [] };
+      });
       isProcessRunningInTmuxMock.mockImplementation(
         async (_tmuxSession: string, _matchers: string[], opts?: { fresh?: boolean }) => {
-          if (opts?.fresh === true) {
-            freshProbes += 1;
-            return freshProbes >= 2;
-          }
-          return restoredTmuxCreated;
+          return restoredTmuxCreated || (opts?.fresh === true && captured);
         },
       );
 

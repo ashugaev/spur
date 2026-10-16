@@ -5537,30 +5537,25 @@ export class SessionService {
                 updatedAt: nowIso(),
               };
               writeSession(this.config.dataDir, updated);
-              return {
+              const claim: DailyWakeClaim = {
                 record: updated,
                 lifecycle: this.lifecycleIdsFor(updated).map((id) => ({
                   id,
                   snapshot: this.lifecycle.snapshot(id),
                 })),
               };
+              const admissionDenial = this.wakeAdmissionDenial(session.id);
+              if (admissionDenial) {
+                this.deferDailyWakeForAdmission(session, dailyWake, claim, admissionDenial, now);
+                return null;
+              }
+              return claim;
             }
             return null;
           },
         );
         if (claimedDailyWake !== null) {
           const claimedDailyNextDueAt = claimedDailyWake.record.dailyWake.nextDueAt;
-          const admissionDenial = this.wakeAdmissionDenial(session.id);
-          if (admissionDenial) {
-            await this.deferDailyWakeForAdmission(
-              session,
-              dailyWake,
-              claimedDailyWake,
-              admissionDenial,
-              now,
-            );
-            continue;
-          }
           try {
             await this.send(session.id, {
               message: this.formatDailyWakeMessage(
@@ -5670,62 +5665,60 @@ export class SessionService {
   // Denied daily occurrence retries every DAILY_WAKE_ADMISSION_RETRY_MS until
   // its next scheduled slot, where the claim already points; past that it is
   // skipped. The occurrence is persisted so a restart keeps the window.
-  private async deferDailyWakeForAdmission(
+  // Called synchronously under the claim's workspace lifecycle locks.
+  private deferDailyWakeForAdmission(
     session: SessionRecord,
     dailyWake: SessionDailyWakeState,
     claimed: DailyWakeClaim,
     denial: WakeAdmissionDenial,
     now: number,
-  ): Promise<void> {
+  ): void {
     const occurrence = dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt;
     const windowEndMs = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(occurrence)).getTime();
     const retryAtMs = now + DAILY_WAKE_ADMISSION_RETRY_MS;
     const retryAt = new Date(retryAtMs).toISOString();
-    const deferred = await this.withWorkspaceLifecycleLocks(session.id, async () => {
-      const afterDenial = readSession(this.config.dataDir, session.id);
-      if (
-        !afterDenial ||
-        !sameSessionRuntimeOwner(afterDenial, claimed.record) ||
-        afterDenial.agentLaunchId !== claimed.record.agentLaunchId ||
-        !this.lifecycleStateMatches(afterDenial, this.lifecycleStamp(claimed.record)) ||
-        !isDeepStrictEqual(afterDenial.dailyWake, claimed.record.dailyWake) ||
-        claimed.lifecycle.some(({ id, snapshot }) => {
-          const current = this.lifecycle.snapshot(id);
-          return (
-            snapshot.operation?.phase === "pending" ||
-            current.operation?.phase === "pending" ||
-            current.instanceId !== snapshot.instanceId ||
-            current.revision !== snapshot.revision
-          );
-        })
-      )
-        return false;
-      if (retryAtMs >= windowEndMs) {
-        this.logEvent("session.wake.daily_exhausted", {
-          level: "warn",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.error.message}`,
-          details: {
-            occurrence,
-            nextDueAt: claimed.record.dailyWake.nextDueAt,
-            dailyAt: dailyWake.dailyAt,
-          },
-        });
-        return false;
-      }
-      writeSession(this.config.dataDir, {
-        ...afterDenial,
-        dailyWake: {
-          ...claimed.record.dailyWake,
-          nextDueAt: retryAt,
-          admissionDeferredOccurrence: occurrence,
+    const afterDenial = readSession(this.config.dataDir, session.id);
+    if (
+      !afterDenial ||
+      !sameSessionRuntimeOwner(afterDenial, claimed.record) ||
+      afterDenial.agentLaunchId !== claimed.record.agentLaunchId ||
+      !this.lifecycleStateMatches(afterDenial, this.lifecycleStamp(claimed.record)) ||
+      !isDeepStrictEqual(afterDenial.dailyWake, claimed.record.dailyWake) ||
+      claimed.lifecycle.some(({ id, snapshot }) => {
+        const current = this.lifecycle.snapshot(id);
+        return (
+          snapshot.operation?.phase === "pending" ||
+          current.operation?.phase === "pending" ||
+          current.instanceId !== snapshot.instanceId ||
+          current.revision !== snapshot.revision
+        );
+      })
+    )
+      return;
+    if (retryAtMs >= windowEndMs) {
+      this.logEvent("session.wake.daily_exhausted", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.error.message}`,
+        details: {
+          occurrence,
+          nextDueAt: claimed.record.dailyWake.nextDueAt,
+          dailyAt: dailyWake.dailyAt,
         },
-        updatedAt: nowIso(),
       });
-      return true;
+      return;
+    }
+    writeSession(this.config.dataDir, {
+      ...afterDenial,
+      dailyWake: {
+        ...claimed.record.dailyWake,
+        nextDueAt: retryAt,
+        admissionDeferredOccurrence: occurrence,
+      },
+      updatedAt: nowIso(),
     });
-    if (!deferred || dailyWake.admissionDeferredOccurrence !== undefined) return;
+    if (dailyWake.admissionDeferredOccurrence !== undefined) return;
     this.logEvent("session.wake.daily_deferred", {
       level: wakeAdmissionLogLevel(denial),
       sessionId: session.id,
@@ -21940,10 +21933,11 @@ export class SessionService {
     }));
     const readObservation = () => {
       const latest = readSession(this.config.dataDir, observed.id);
+      if (latest === null)
+        throw new SessionResourceNotFoundError(`Session not found: ${observed.id}`);
       return {
         latest,
         valid:
-          latest !== null &&
           sameSessionRuntimeOwner(latest, observed) &&
           latest.agentLaunchId === observed.agentLaunchId &&
           this.lifecycleStateMatches(latest, stamp) &&
@@ -21962,7 +21956,7 @@ export class SessionService {
       };
     };
     const initial = readObservation();
-    if (!initial.valid) return { session: initial.latest ?? session, runtime };
+    if (!initial.valid) return { session: initial.latest, runtime };
     if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
@@ -22011,8 +22005,7 @@ export class SessionService {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
         } catch (error) {
           const observation = readObservation();
-          if (!observation.valid)
-            return { session: observation.latest ?? session, runtime: confirmedRuntime };
+          if (!observation.valid) return { session: observation.latest, runtime: confirmedRuntime };
           const diagnostic = error instanceof Error ? error.message : String(error);
           const retained = this.retainDetectionError(session, diagnostic, "runtime_probe");
           return {
@@ -22030,8 +22023,7 @@ export class SessionService {
         if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
       const observation = readObservation();
-      if (!observation.valid)
-        return { session: observation.latest ?? session, runtime: confirmedRuntime };
+      if (!observation.valid) return { session: observation.latest, runtime: confirmedRuntime };
       if (
         live(confirmedRuntime) &&
         session.status === "spawning" &&
@@ -22045,13 +22037,11 @@ export class SessionService {
           );
         } catch (error) {
           const afterOrphan = readObservation();
-          if (!afterOrphan.valid)
-            return { session: afterOrphan.latest ?? session, runtime: confirmedRuntime };
+          if (!afterOrphan.valid) return { session: afterOrphan.latest, runtime: confirmedRuntime };
           throw error;
         }
         const afterOrphan = readObservation();
-        if (!afterOrphan.valid)
-          return { session: afterOrphan.latest ?? session, runtime: confirmedRuntime };
+        if (!afterOrphan.valid) return { session: afterOrphan.latest, runtime: confirmedRuntime };
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
@@ -22084,8 +22074,7 @@ export class SessionService {
 
     const observation = readObservation();
     const latest = observation.latest;
-    if (!observation.valid || !latest)
-      return { session: latest ?? session, runtime: confirmedRuntime };
+    if (!observation.valid) return { session: latest, runtime: confirmedRuntime };
     if (hasRetainedSessionError(latest) && !this.probeErrorHealable(latest))
       return { session: latest, runtime: confirmedRuntime };
 
