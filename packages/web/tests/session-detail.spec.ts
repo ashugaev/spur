@@ -1957,8 +1957,13 @@ test.describe("S2a: Logs modal", () => {
     await page.setViewportSize({ width: 360, height: 780 });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "waiting");
-    await page.route(`**/api/sessions/${session.id}/logs`, (route) => {
-      void route.fulfill({
+    let releaseLoading!: () => void;
+    const loadingPending = new Promise<void>((resolve) => {
+      releaseLoading = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/logs`, async (route) => {
+      await loadingPending;
+      await route.fulfill({
         status: 404,
         contentType: "application/json",
         body: JSON.stringify({ error: message }),
@@ -1968,6 +1973,9 @@ test.describe("S2a: Logs modal", () => {
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^logs$/i }).click();
     const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
+    await expect(dialog.getByText("No Spur log entries yet.")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("logs-loading.png") });
+    releaseLoading();
     const alert = dialog.getByRole("alert");
     await expect(alert).toContainText("Logs unavailable · HTTP 404");
     await expect(alert).toContainText(message);
@@ -1975,6 +1983,12 @@ test.describe("S2a: Logs modal", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       360,
     );
+    const widths = await alert.evaluate((element) => ({
+      alert: [element.scrollWidth, element.clientWidth],
+      body: [element.parentElement?.scrollWidth ?? 0, element.parentElement?.clientWidth ?? 0],
+    }));
+    expect(widths.alert[0]).toBeLessThanOrEqual(widths.alert[1]);
+    expect(widths.body[0]).toBeLessThanOrEqual(widths.body[1]);
     const retry = dialog.getByRole("button", { name: "Retry" });
     await retry.focus();
     await page.keyboard.press("Shift+Tab");

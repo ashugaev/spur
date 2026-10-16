@@ -4157,6 +4157,40 @@ describe("SessionDetail logs", () => {
     expect(within(dialog).queryByText("LATE_ROW")).not.toBeInTheDocument();
   });
 
+  it("ignores a late 404 after a newer successful open", async () => {
+    let finishFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    mockLogResponses([
+      firstResponse,
+      new Response(
+        JSON.stringify([
+          {
+            timestamp: "2026-10-16T00:00:00.000Z",
+            event: "service.output",
+            level: "info",
+            message: "NEW_ROW",
+          },
+        ]),
+        { status: 200 },
+      ),
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    const open = await screen.findByRole("button", { name: /^logs$/i });
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
+    fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    expect(await within(dialog).findByText("NEW_ROW")).toBeInTheDocument();
+    await act(async () =>
+      finishFirst(new Response(JSON.stringify({ error: "STALE_ERROR" }), { status: 404 })),
+    );
+    expect(within(dialog).getByText("NEW_ROW")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("STALE_ERROR")).not.toBeInTheDocument();
+  });
+
   it("hides automatic history snapshot links in the default agent view", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
