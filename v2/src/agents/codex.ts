@@ -855,6 +855,11 @@ function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): st
   if (type === "response_item") {
     const p = payload as unknown as RolloutResponseItemPayload;
     if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
+      if (
+        strict &&
+        p.content.some((c) => isRecord(c) && c.type === "input_text" && typeof c.text !== "string")
+      )
+        throw new Error("Malformed original rollout user text");
       const texts = p.content
         .filter(
           (c): c is { type: string; text: string } =>
@@ -937,7 +942,7 @@ export async function scanCodexRolloutForMessage(
       )
         continue;
       original = strict
-        ? await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+        ? await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
         : undefined;
       const observed = original ? await original.stat() : undefined;
       if (observed && (!observed.isFile() || observed.size <= offset)) continue;
