@@ -57,7 +57,7 @@ SCENARIOS
   6. DM routing: plain message reaches the latest bound agent; reply-to reaches the agent that sent the replied message; click reaches the offering agent.
   7. Voice note in the DM: "Heard: ..." then routed like text. Needs a live isolated-ui sidecar. Its process `SPUR_CONFIG` must point at an existing dir; a stale one falls back to the default provider and the route answers 502 `missing_model`. Restart the sidecar, then check the route with a direct `curl -F audio=@<file>` to `/api/runtime/voice/transcribe`.
   8. Inactive: `pause` an agent, reply-to its message: "<label> is not active. Message not delivered." Nothing delivered.
-  9. Gone: `kill --pr-action leave_open`, reply-to its message: "Spur session <id> is gone. Message not delivered." Binding unchanged.
+  9. Gone (DM/group-main): `kill --pr-action leave_open`, reply-to message: "Spur session <id> is gone. Message not delivered." Binding unchanged.
   10. Command menu: after final-build source start/restart, compare dedicated TEST `getMyCommands` with TELEGRAM_COMMANDS; verify `getChatMenuButton` commands type. Record build/start identity; report overrides without deleting scopes.
 
 
