@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { isCursorDeliveryId } from "./agents/cursor-submit-ack.js";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
@@ -833,20 +834,37 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const { agent } = record;
+  if (agent === "cursor") {
+    const deliveryId = record["deliveryId"];
+    if (deliveryId !== undefined && !isCursorDeliveryId(deliveryId)) return undefined;
+    const file = record["file"];
+    const size = record["size"];
+    if (typeof size !== "number") return undefined;
+    const rotated = record["rotated"];
+    const rotation =
+      rotated !== null && typeof rotated === "object"
+        ? (rotated as Record<string, unknown>)
+        : undefined;
+    const extra =
+      rotation && typeof rotation["file"] === "string" && typeof rotation["size"] === "number"
+        ? { rotated: { file: rotation["file"], size: rotation["size"] } }
+        : {};
+    if (file === null) {
+      return size === 0 && isCursorDeliveryId(deliveryId)
+        ? { agent, file: null, size: 0, deliveryId, ...extra }
+        : undefined;
+    }
+    return typeof file === "string"
+      ? { agent, file, size, ...(deliveryId ? { deliveryId } : {}), ...extra }
+      : undefined;
+  }
   if (
-    (agent === "claude" || agent === "cursor") &&
+    agent === "claude" &&
     typeof record["file"] === "string" &&
     typeof record["size"] === "number"
   ) {
     const base = { file: record["file"], size: record["size"] };
-    const rotated = record["rotated"];
-    if (agent === "claude" || rotated === null || typeof rotated !== "object") {
-      return { agent, ...base };
-    }
-    const { file, size } = rotated as Record<string, unknown>;
-    return typeof file === "string" && typeof size === "number"
-      ? { agent, ...base, rotated: { file, size } }
-      : { agent, ...base };
+    return { agent, ...base };
   }
   const offsets = record["offsets"];
   if (agent === "codex" && offsets !== null && typeof offsets === "object") {

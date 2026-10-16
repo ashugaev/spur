@@ -1587,6 +1587,65 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    it("Q4b: sensitive stdin paste carries delivery identity before Enter-only retry", async () => {
+      const deliveryId = "a1111111-1111-4111-8111-111111111111";
+      const baseline: {
+        agent: "cursor";
+        file: string;
+        size: number;
+        deliveryId: string;
+        rotated?: { file: string; size: number };
+      } = { agent: "cursor", file: "/t/c.jsonl", size: 7, deliveryId };
+      const markWriteStart = vi.fn(async () => {
+        await Promise.resolve();
+        baseline.size = 70;
+        baseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
+      });
+      const scan = vi.fn().mockResolvedValue({ found: false, lastScannedFile: null });
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        baseline,
+        inputText: "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nsensitive controls",
+        scan,
+        markWriteStart,
+      });
+      sendSensitiveMessageToTmuxMock.mockImplementationOnce(async () => {
+        expect(baseline).toMatchObject({
+          size: 70,
+          rotated: { file: "/t/rotated.jsonl", size: 90 },
+        });
+      });
+      isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
+      mockTimerPromisesSleepWithFakeTimers();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await deferredInternals(service).sendDeferredSensitiveInitialMessage(
+        runningSession(),
+        controlsMessage(),
+      );
+
+      expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(markWriteStart).toHaveBeenCalledWith();
+      expect(sendSensitiveMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendSensitiveMessageToTmuxMock.mock.calls[0]?.[1]).toBe(
+        "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nsensitive controls",
+      );
+      expect(createAgentSubmitAckBindingMock.mock.calls[0]?.[1]).toMatchObject({
+        message: controlsMessage(),
+      });
+      const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
+      // After the binding is built (this path has no alive probe), before the paste.
+      expect(createAgentSubmitAckBindingMock.mock.invocationCallOrder[0]).toBeLessThan(hookOrder);
+      expect(hookOrder).toBeLessThan(
+        sendSensitiveMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(sendSubmitKeyToTmuxMock.mock.calls.length).toBeGreaterThan(0);
+      expect(baseline.deliveryId).toBe(deliveryId);
+      expect(scan).toHaveBeenCalledWith(controlsMessage());
+      expect(scan.mock.calls.every((call) => call[0] === controlsMessage())).toBe(true);
+      service.dispose();
+    });
+
     it("AC2: a real deliver() whose controls leg times out on a live agent does not fail and does not re-send the body", async () => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession());

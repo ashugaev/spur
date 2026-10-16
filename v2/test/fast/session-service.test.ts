@@ -15116,6 +15116,84 @@ describe("SessionService", () => {
       });
     });
 
+    it("Q4: normal authorized paste carries delivery identity and refreshes once", async () => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      const service = await liveService();
+      const deliveryId = "a1111111-1111-4111-8111-111111111111";
+      const ackBaseline = { agent: "cursor", file: "/t/c.jsonl", size: 7, deliveryId } as {
+        agent: "cursor";
+        file: string;
+        size: number;
+        deliveryId: string;
+        rotated?: { file: string; size: number };
+      };
+      const markWriteStart = vi.fn(async () => {
+        await Promise.resolve();
+        ackBaseline.size = 70;
+        ackBaseline.rotated = { file: "/t/rotated.jsonl", size: 90 };
+      });
+      createAgentSubmitAckBindingMock.mockResolvedValue({
+        baseline: ackBaseline,
+        inputText: "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nfirst",
+        scan: vi.fn(),
+        markWriteStart,
+      });
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        expect(ackBaseline).toMatchObject({
+          size: 70,
+          rotated: { file: "/t/rotated.jsonl", size: 90 },
+        });
+      });
+      let releaseAck: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      const waitForAck = vi
+        .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+        .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+        .mockImplementation(async () => {
+          await gate;
+          return { found: true, lastScannedFile: "/x.jsonl" };
+        });
+
+      isProcessRunningInTmuxMock.mockClear();
+      const sent = service.send("api-1", { message: "first" });
+      await waitForRealTime(() => {
+        expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+      });
+
+      expect(markWriteStart).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toBe(
+        "[Spur delivery: a1111111-1111-4111-8111-111111111111]\n\nfirst",
+      );
+      expect(createAgentSubmitAckBindingMock.mock.calls[0]?.[1]).toMatchObject({
+        message: "first",
+      });
+      const hookOrder = markWriteStart.mock.invocationCallOrder[0] ?? 0;
+      // After the last alive probe before the paste, then the paste.
+      const pasteOrder = sendMessageToTmuxMock.mock.invocationCallOrder[0] ?? 0;
+      const lastProbeBeforePaste = Math.max(
+        ...isProcessRunningInTmuxMock.mock.invocationCallOrder.filter((n) => n < pasteOrder),
+      );
+      expect(lastProbeBeforePaste).toBeGreaterThan(0);
+      expect(lastProbeBeforePaste).toBeLessThan(hookOrder);
+      expect(hookOrder).toBeLessThan(pasteOrder);
+      expect(markWriteStart).toHaveBeenCalledWith();
+      expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toEqual({
+        ...ackBaseline,
+        size: 70,
+        rotated: { file: "/t/rotated.jsonl", size: 90 },
+      });
+      expect(sessions.get("api-1")?.queuedMessageTyped?.ackBaseline).toMatchObject({ deliveryId });
+      releaseAck();
+      await sent;
+      expect(waitForAck.mock.calls.length).toBeGreaterThan(0);
+      expect(waitForAck.mock.calls.every((call) => call[1] === "first")).toBe(true);
+    });
+
     const restartBaseline = { agent: "claude", file: "/t/claude.jsonl", size: 42 } as const;
 
     function seedTypedBeforeRestart(
@@ -15167,12 +15245,13 @@ describe("SessionService", () => {
       expect(scan).toHaveBeenCalledWith("typed");
     });
 
-    it("rebinds a cursor restart scan with the session's cursor config dir, so a rotated chat acks", async () => {
+    it("Q3: rebinds a cursor restart scan with retained delivery identity without another paste", async () => {
       mockCursorJsonlState("waiting");
       const cursorBaseline = {
         agent: "cursor",
         file: "/t/pinned.jsonl",
         size: 9,
+        deliveryId: "a1111111-1111-4111-8111-111111111111",
         rotated: { file: "/t/rotated.jsonl", size: 40 },
       } as const;
       const scan = vi.fn().mockResolvedValue({ found: true, lastScannedFile: "/t/rotated.jsonl" });
