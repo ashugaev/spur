@@ -1667,22 +1667,18 @@ export async function startServer(
           }
           if (paneRows.length) sources.push(paneRows);
         }
-        const cursors = sources.map((rows) => rows.length - 1);
         const selected = sources.map(() => [] as SpurLogEntry[]);
         let count = 0;
-        while (count < limit) {
-          let added = false;
+        for (let depth = 1; count < limit; depth++) {
+          let found = false;
           for (let index = 0; index < sources.length && count < limit; index++) {
-            const cursor = cursors[index];
-            if (cursor === undefined || cursor < 0) continue;
-            const row = sources[index]?.[cursor];
+            const row = sources[index]?.at(-depth);
             if (!row) continue;
             selected[index]?.push(row);
-            cursors[index] = cursor - 1;
             count++;
-            added = true;
+            found = true;
           }
-          if (!added) break;
+          if (!found) break;
         }
         sendJson(
           response,
