@@ -108,11 +108,11 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
-
 `spur subscribe <targetSessionId> --state <state>... [--message <text>] [--session <id>] | --list | --remove <subscriptionId>`. States: `working|waiting|needs_input|rate_limited|stale|stopped|error|killed`.
 
 ## Sidecars
 
+`SPUR_PROJECT_CONFIG_PATH`: managed launch defaults to session project's owning connected config or empty (isolated script repository fallback); explicit `sidecars.<name>.env` wins; `v2/src/session-service.ts`, `scripts/spur-isolated-daemon.sh`.
 Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 Open: configured reserved TCP listener + live recorded launcher; `v2/src/session-service.ts`. Dev stand: start `isolated-ui` (daemon dependency); `isolated-daemon` alone is backend-only. Seed dedicated TEST JSON once through stdin: `node v2/bin/write-isolated-project-config.mjs --input spur.yaml --output <private-project.yaml> --worktree <checkout> --project <id> --telegram-env-stdin`; unknown project rejects seed; `scripts/spur-isolated-daemon.sh` reuses it, source-free outcomes: `Telegram NOT_CONNECTED/missing-fixture`, `Telegram NOT_CONNECTED/unknown-project`, `Telegram NOT_CONNECTED/owner-busy`.
 Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
