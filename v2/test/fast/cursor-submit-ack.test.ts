@@ -1,13 +1,15 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
+import type * as CursorModule from "../../src/agents/cursor.js";
 
 const {
   findCursorAckTranscriptFileMock,
   resolveCursorPinnedTranscriptPathMock,
   findCursorSessionIdMock,
+  stableReadFault,
 } = vi.hoisted(() => ({
   findCursorAckTranscriptFileMock:
     vi.fn<(worktreePath: string, agentSessionId?: string) => Promise<string | null>>(),
@@ -15,23 +17,40 @@ const {
     vi.fn<(worktreePath: string, agentSessionId: string) => Promise<string>>(),
   findCursorSessionIdMock:
     vi.fn<(worktreePath: string, options?: { configDir?: string }) => Promise<string | null>>(),
+  stableReadFault: { file: "", armed: false, calls: [] as string[] },
 }));
 
 vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => {
   const actual = await importOriginal<typeof CursorJsonlStateModule>();
   return {
+    ...actual,
     findCursorAckTranscriptFile: findCursorAckTranscriptFileMock,
     resolveCursorPinnedTranscriptPath: resolveCursorPinnedTranscriptPathMock,
-    readCursorStableOffset: actual.readCursorStableOffset,
+    readCursorStableOffset: async (file: string) => {
+      if (stableReadFault.armed && file === stableReadFault.file) {
+        stableReadFault.armed = false;
+        stableReadFault.calls.push(file);
+        throw new Error("owned fixture one-shot stable read failure");
+      }
+      return actual.readCursorStableOffset(file);
+    },
   };
 });
 
-vi.mock("../../src/agents/cursor.js", () => ({
+vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorModule>()),
   findCursorSessionId: findCursorSessionIdMock,
 }));
 
 import { readSession, writeSession } from "../../src/metadata.js";
 import { createTempDir } from "../helpers/common.js";
+import * as cursorAck from "../../src/agents/cursor-submit-ack.js";
+import {
+  createAgentSubmitAckBinding,
+  resumeAgentSubmitAckBinding,
+  type AgentSubmitAckContext,
+  type SubmitAckBinding,
+} from "../../src/agents/index.js";
 import {
   captureCursorSubmitBaseline,
   cursorDeliveryInput,
@@ -47,9 +66,13 @@ beforeEach(() => {
   findCursorAckTranscriptFileMock.mockReset();
   resolveCursorPinnedTranscriptPathMock.mockReset();
   findCursorSessionIdMock.mockReset();
+  stableReadFault.armed = false;
+  stableReadFault.file = "";
+  stableReadFault.calls = [];
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
@@ -75,6 +98,210 @@ async function appendJsonl(filePath: string, lines: Array<Record<string, unknown
 function userTurn(text: string): Record<string, unknown> {
   return { role: "user", message: { content: [{ type: "text", text }] } };
 }
+
+async function resumeStoredBinding(binding: SubmitAckBinding, ctx: AgentSubmitAckContext) {
+  const dataDir = await createTempDir("spur-binding-store-");
+  tempDirs.push(dataDir);
+  writeSession(dataDir, {
+    id: "fixture",
+    project: "fixture",
+    agent: "cursor",
+    prompt: "continue",
+    branch: "feature/test",
+    worktree: true,
+    worktreePath: ctx.worktreePath,
+    tmuxSession: "fixture",
+    launchCommand: "cursor",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:00:00.000Z",
+    queuedMessageTyped: {
+      message: "continue",
+      typedAt: "2026-03-18T10:00:00.000Z",
+      ackBaseline: binding.baseline,
+    },
+  });
+  const stored = readSession(dataDir, "fixture")?.queuedMessageTyped?.ackBaseline;
+  if (!stored || stored.agent !== "cursor") throw new Error("missing stored Cursor binding");
+  const resumed = await resumeAgentSubmitAckBinding("cursor", ctx, stored);
+  if (!resumed) throw new Error("missing resumed Cursor binding");
+  return { stored, resumed };
+}
+
+describe("correlated source boundary evidence", () => {
+  it("C2 binding persistence / C2 proof gap: measures F0 and scan-only F1 separately", async () => {
+    const pinned = await makeJsonl("pinned.jsonl", [userTurn("continue old")]);
+    const known = await makeJsonl("known.jsonl", [userTurn("continue old")]);
+    const selected = await makeJsonl("selected.jsonl", [userTurn("continue old")]);
+    const files = new Map([
+      ["pinned", pinned],
+      ["known", known],
+      ["selected", selected],
+    ]);
+    findCursorAckTranscriptFileMock.mockImplementation(
+      async (_worktree, id) => files.get(id ?? "") ?? null,
+    );
+    findCursorSessionIdMock.mockResolvedValue("pinned");
+    const ctx = {
+      worktreePath: dirname(pinned),
+      codexSessionsDir: dirname(pinned),
+      agentSessionId: "pinned",
+      cursorConfigDir: dirname(pinned),
+      message: "continue",
+    };
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!binding || binding.baseline.agent !== "cursor" || !binding.inputText)
+      throw new Error("missing real correlated binding");
+    const captureFloor = binding.baseline.size;
+    const captureDeliveryId = binding.baseline.deliveryId;
+    expect(captureDeliveryId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(binding.inputText).toBe(cursorDeliveryInput(captureDeliveryId ?? "", "continue"));
+    expect(captureFloor).toBeGreaterThan(0);
+    await appendJsonl(pinned, [userTurn("continue old before hook")]);
+    findCursorSessionIdMock.mockResolvedValue("known");
+    await binding.markWriteStart?.();
+    const f0 = structuredClone(binding.baseline);
+    expect(f0.size).toBe((await stat(pinned)).size);
+    expect(f0.size).toBeGreaterThan(captureFloor);
+    expect(f0.rotated).toEqual({ file: known, size: (await stat(known)).size });
+    expect(f0.rotated?.size).toBeGreaterThan(0);
+    expect(f0.deliveryId).toBe(captureDeliveryId);
+    const scanSpy = vi.spyOn(cursorAck, "scanCursorJsonlForMessage");
+    findCursorSessionIdMock.mockResolvedValue("selected");
+    let syntheticCurrentRecordWrites = 0;
+    expect(await binding.scan("continue")).toEqual({ found: false, lastScannedFile: selected });
+    const live = scanSpy.mock.calls[0]?.[0];
+    if (!live) throw new Error("real scanner did not run");
+    const f1 = live.rotationOffsets?.get(selected);
+    expect(f1).toBe((await stat(selected)).size);
+    const { stored, resumed } = await resumeStoredBinding(binding, ctx);
+    for (const value of [binding.baseline, stored, resumed.baseline]) expect(value).toEqual(f0);
+    expect((await resumed.scan("continue")).found).toBe(false);
+    expect(scanSpy.mock.calls.at(-1)?.[0].rotationOffsets?.get(selected)).toBe(f1);
+    expect(syntheticCurrentRecordWrites).toBe(0);
+    await appendJsonl(selected, [userTurn(binding.inputText)]);
+    syntheticCurrentRecordWrites++;
+    expect((await binding.scan("continue")).found).toBe(true);
+    expect((await resumed.scan("continue")).found).toBe(true);
+    const after = await resumeStoredBinding(binding, ctx);
+    expect(after.stored).toEqual(f0);
+    expect(after.resumed.baseline).toEqual(f0);
+    expect((await after.resumed.scan("continue")).found).toBe(true);
+    expect(syntheticCurrentRecordWrites).toBe(1);
+    expect(live.rotationOffsets?.get(selected)).toBe(f1);
+  });
+
+  async function oldThenCurrent(
+    binding: SubmitAckBinding,
+    ctx: AgentSubmitAckContext,
+    file: string,
+  ) {
+    if (!binding.inputText) throw new Error("missing actual binding input");
+    const { stored, resumed } = await resumeStoredBinding(binding, ctx);
+    expect(stored).toEqual(binding.baseline);
+    expect(resumed.baseline).toEqual(binding.baseline);
+    let syntheticCurrentRecordWrites = 0;
+    for (const current of [binding, resumed]) {
+      expect(await current.scan("continue")).toEqual({ found: false, lastScannedFile: file });
+    }
+    expect(syntheticCurrentRecordWrites).toBe(0);
+    await appendJsonl(file, [userTurn(binding.inputText)]);
+    syntheticCurrentRecordWrites++;
+    for (const current of [binding, resumed])
+      expect((await current.scan("continue")).found).toBe(true);
+    expect(syntheticCurrentRecordWrites).toBe(1);
+    expect(resumed.baseline).toEqual(binding.baseline);
+  }
+
+  it.each([false, true])("C1 proof gap: alternate pinned (%s)", async (privateConfig) => {
+    const alternate = await makeJsonl("alternate.jsonl", [userTurn("continue old")]);
+    const missing = alternate + ".unresolved";
+    findCursorAckTranscriptFileMock.mockResolvedValueOnce(null).mockResolvedValue(alternate);
+    resolveCursorPinnedTranscriptPathMock.mockResolvedValue(missing);
+    findCursorSessionIdMock.mockResolvedValue("pinned");
+    const ctx = {
+      worktreePath: dirname(alternate),
+      codexSessionsDir: dirname(alternate),
+      agentSessionId: "pinned",
+      message: "continue",
+      ...(privateConfig ? { cursorConfigDir: dirname(alternate) } : {}),
+    };
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!binding || binding.baseline.agent !== "cursor") throw new Error("missing binding");
+    expect(binding.baseline.file).toBe(missing);
+    await binding.markWriteStart?.();
+    await oldThenCurrent(binding, ctx, alternate);
+  });
+
+  it.each(["pinned", "rotated"])("C3 proof gap: failed %s refresh", async (mode) => {
+    const pinned = await makeJsonl("pinned-read.jsonl", [userTurn("unrelated")]);
+    const rotated = await makeJsonl("rotated-read.jsonl", [userTurn("unrelated")]);
+    findCursorAckTranscriptFileMock.mockImplementation(async (_path, id) =>
+      id === "rotated" ? rotated : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue(mode === "rotated" ? "rotated" : "pinned");
+    const ctx = {
+      worktreePath: dirname(pinned),
+      codexSessionsDir: dirname(pinned),
+      agentSessionId: "pinned",
+      cursorConfigDir: dirname(pinned),
+      message: "continue",
+    };
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!binding || binding.baseline.agent !== "cursor") throw new Error("missing binding");
+    const captured = structuredClone(binding.baseline);
+    const file = mode === "rotated" ? rotated : pinned;
+    const floor = mode === "rotated" ? captured.rotated?.size : captured.size;
+    expect(floor).toBeGreaterThan(0);
+    const old = JSON.stringify(userTurn("continue old complete")) + "\n";
+    await writeFile(file, old, { flag: "a" });
+    expect(await readFile(file, "utf8")).toContain(old);
+    expect((await stat(file)).size).toBeGreaterThan(floor ?? 0);
+    stableReadFault.file = file;
+    stableReadFault.armed = true;
+    try {
+      await binding.markWriteStart?.();
+      expect(stableReadFault.calls).toEqual([file]);
+      expect(stableReadFault.armed).toBe(false);
+      expect(binding.baseline).toEqual(captured);
+      expect(await readFile(file, "utf8")).toContain(old);
+      await oldThenCurrent(binding, ctx, file);
+    } finally {
+      stableReadFault.armed = false;
+      stableReadFault.file = "";
+    }
+  });
+
+  it.each(["pinned", "rotated"])("C4 proof gap: old partial %s", async (mode) => {
+    const pinned = await makeJsonl("pinned-partial.jsonl", [userTurn("unrelated")]);
+    const rotated = await makeJsonl("rotated-partial.jsonl", [userTurn("unrelated")]);
+    const file = mode === "rotated" ? rotated : pinned;
+    const floor = (await stat(file)).size;
+    const old = JSON.stringify(userTurn("continue old partial"));
+    await writeFile(file, old.slice(0, -5), { flag: "a" });
+    findCursorAckTranscriptFileMock.mockImplementation(async (_path, id) =>
+      id === "rotated" ? rotated : pinned,
+    );
+    findCursorSessionIdMock.mockResolvedValue(mode === "rotated" ? "rotated" : "pinned");
+    const ctx = {
+      worktreePath: dirname(pinned),
+      codexSessionsDir: dirname(pinned),
+      agentSessionId: "pinned",
+      cursorConfigDir: dirname(pinned),
+      message: "continue",
+    };
+    const binding = await createAgentSubmitAckBinding("cursor", ctx);
+    if (!binding || binding.baseline.agent !== "cursor") throw new Error("missing binding");
+    await binding.markWriteStart?.();
+    const beforeCompletion = structuredClone(binding.baseline);
+    expect(mode === "rotated" ? beforeCompletion.rotated?.size : beforeCompletion.size).toBe(floor);
+    expect(floor).toBeGreaterThan(0);
+    await writeFile(file, old.slice(-5) + "\n", { flag: "a" });
+    expect(await readFile(file, "utf8")).toContain(old + "\n");
+    await oldThenCurrent(binding, ctx, file);
+    expect(binding.baseline).toEqual(beforeCompletion);
+  });
+});
 
 describe("captureCursorSubmitBaseline", () => {
   it.each([false, true])("Q1/Q1b: live and restored first query, no-ID=%s", async (noId) => {
