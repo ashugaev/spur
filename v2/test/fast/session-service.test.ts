@@ -2,6 +2,7 @@ import type * as cryptoModule from "node:crypto";
 import type * as fsPromisesModule from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
+import type * as fsPromisesModule from "node:fs/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -62667,6 +62668,129 @@ describe("SessionService", () => {
           expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
         } finally {
           fixture.close();
+        }
+      },
+    );
+
+    it.each(
+      (["append", "replace"] as const).flatMap((mutation) =>
+        [false, true].map((requeued) => ({ mutation, requeued })),
+      ),
+    )(
+      "holds Codex uncertainty after final enumeration mutation=$mutation requeued=$requeued",
+      async ({ mutation, requeued }) => {
+        const realPromises = await vi.importActual<typeof fsPromisesModule>("node:fs/promises");
+        const previousPromises = { ...(await import("node:fs/promises")) };
+        let root = "";
+        let armed = false;
+        let enumerations = 0;
+        let entered: () => void = () => {};
+        const enumerating = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        vi.doMock("node:fs/promises", () => ({
+          ...realPromises,
+          readdir: async (path: string) => {
+            const entries = await realPromises.readdir(path);
+            if (armed && path === root && ++enumerations === 2) {
+              entered();
+              await gate;
+            }
+            return entries;
+          },
+        }));
+        vi.resetModules();
+        let fixture: Awaited<ReturnType<typeof historicalAckFixture>> | undefined;
+        let projection: Promise<unknown> | undefined;
+        try {
+          fixture = await historicalAckFixture(`enumeration-${mutation}-${requeued}`);
+          root = fixture.root;
+          const prefix = readFileSync(fixture.file).subarray(
+            0,
+            fixture.baseline.offsets[fixture.file],
+          );
+          writeFileSync(fixture.file, prefix);
+          if (requeued) {
+            const record = fixture.sessions.get("api-1");
+            if (!record) throw new Error("missing held session");
+            fixture.sessions.set(record.id, { ...record, submitRequeuedMessage: "typed" });
+          }
+          const before = structuredClone(fixture.sessions.get("api-1"));
+          const schedule = vi.spyOn(
+            fixture.service as unknown as { scheduleDeliveryRunner(id: string): void },
+            "scheduleDeliveryRunner",
+          );
+          const scans: Array<{ found: boolean; qualifiedNoMatch?: boolean }> = [];
+          const realAgents = fixture.realAgents;
+          resumeAgentSubmitAckBindingMock.mockImplementation(
+            async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+              const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+              if (!binding) return binding;
+              return {
+                ...binding,
+                async scan(message: string) {
+                  const result = await binding.scan(message);
+                  scans.push(result);
+                  return result;
+                },
+              };
+            },
+          );
+          mockAgentActivity("codex", afterHold, "waiting");
+          armed = true;
+          projection = fixture.service.get("api-1");
+          await enumerating;
+          expect(enumerations).toBe(2);
+          expect(scans).toEqual([]);
+          const accepted =
+            JSON.stringify({
+              type: "event_msg",
+              payload: { type: "user_message", message: "typed" },
+            }) + "\n";
+          if (mutation === "append") await realPromises.appendFile(fixture.file, accepted);
+          else {
+            const replacement = join(root, "replacement.tmp");
+            await realPromises.writeFile(
+              replacement,
+              Buffer.concat([prefix, Buffer.from(accepted)]),
+            );
+            await realPromises.rename(replacement, fixture.file);
+          }
+          release();
+          await projection;
+          expect.soft(scans).toHaveLength(1);
+          expect.soft(scans[0]?.found).toBe(false);
+          expect.soft(scans[0]?.qualifiedNoMatch).not.toBe(true);
+          expect.soft(fixture.sessions.get("api-1")?.submitUnconfirmedAt).toBe(PENDING_LAUNCH_AT);
+          expect
+            .soft(fixture.sessions.get("api-1")?.queuedMessageTyped)
+            .toEqual(before?.queuedMessageTyped);
+          expect
+            .soft(fixture.sessions.get("api-1")?.submitRequeuedMessage)
+            .toBe(before?.submitRequeuedMessage);
+          expect.soft(fixture.sessions.get("api-1")?.submitFailedMessage).toBeUndefined();
+          expect
+            .soft(fixture.sessions.get("api-1")?.queuedMessages)
+            .toEqual(before?.queuedMessages);
+          expect.soft(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+          expect.soft(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect.soft(eventsNamed("session.submit.released")).toHaveLength(0);
+          expect.soft(schedule).not.toHaveBeenCalled();
+          expect.soft(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect.soft(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect.soft(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          release();
+          try {
+            await projection;
+          } finally {
+            fixture?.close();
+            vi.doMock("node:fs/promises", () => previousPromises);
+          }
         }
       },
     );
