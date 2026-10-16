@@ -216,6 +216,45 @@ describe("session runtime logs route", () => {
     }
   });
 
+  it("takes a second fair round before rendering multiline sources", async () => {
+    const { port, dataDir, stop } = await bootServer();
+    for (const message of ["A1", "A2", "A3"]) {
+      appendEventLog(dataDir, {
+        event: "session.note",
+        level: "info",
+        sessionId: "demo-1",
+        message,
+        details: { serviceId: "shared" },
+      });
+    }
+    vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
+      runtimeView({
+        services: [
+          { serviceId: "shared", tmuxSession: "service-pane", runtimeAlive: true },
+        ] as SessionView["services"],
+        sidecars: [
+          { name: "shared", tmuxSession: "sidecar-pane", alive: true },
+        ] as SessionView["sidecars"],
+      }),
+    );
+    vi.spyOn(runtimeTmux, "captureTmuxPane").mockImplementation(async (target) =>
+      target === "service-pane" ? "S1\nS2\nS3" : "C1\nC2\nC3",
+    );
+    try {
+      const result = await logRows(port, "demo-1", "scope=all&name=shared&limit=5");
+      expect(result.status).toBe(200);
+      expect((result.body as { message: string }[]).map((row) => row.message)).toEqual([
+        "A2",
+        "A3",
+        "S2",
+        "S3",
+        "C3",
+      ]);
+    } finally {
+      await stop();
+    }
+  });
+
   it("distinguishes a blank pane, a failed capture, and a named absent pane", async () => {
     const { port, dataDir, stop } = await bootServer();
     const get = vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
