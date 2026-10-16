@@ -104,7 +104,7 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
-`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows; default runtime scope and 200-row limit; explicit name without pane or archived rows in an existing session exits nonzero, as does failed capture; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
+`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.

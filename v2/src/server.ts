@@ -1613,6 +1613,7 @@ export async function startServer(
         }
         const view = await service.get(logsSessionId);
         const targets: { kind: "service" | "sidecar"; name: string; pane: string }[] = [];
+        let stoppedServiceId: string | undefined;
         if (scope !== "sidecar") {
           for (const serviceView of [...view.services].sort((a, b) =>
             a.serviceId.localeCompare(b.serviceId),
@@ -1624,6 +1625,8 @@ export async function startServer(
                 name: serviceView.serviceId,
                 pane: serviceView.tmuxSession,
               });
+            } else {
+              stoppedServiceId ??= serviceView.serviceId;
             }
           }
         }
@@ -1666,6 +1669,10 @@ export async function startServer(
             });
           }
           if (paneRows.length) sources.push(paneRows);
+        }
+        if (stoppedServiceId && sources.length === 0) {
+          sendError(response, 404, `No retained pane for runtime ${stoppedServiceId}`);
+          return;
         }
         const selected = sources.map(() => [] as SpurLogEntry[]);
         let count = 0;

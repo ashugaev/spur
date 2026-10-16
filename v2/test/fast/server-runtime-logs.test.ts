@@ -255,6 +255,101 @@ describe("session runtime logs route", () => {
     }
   });
 
+  it("reports an unfiltered recorded service whose pane is gone", async () => {
+    const { port, stop } = await bootServer();
+    vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
+      runtimeView({
+        services: [
+          { serviceId: "dead", tmuxSession: "dead-pane", runtimeAlive: false },
+        ] as SessionView["services"],
+        sidecars: [],
+      }),
+    );
+    const capture = vi.spyOn(runtimeTmux, "captureTmuxPane");
+    try {
+      expect(await logRows(port, "demo-1", "scope=runtime")).toEqual({
+        status: 404,
+        body: { error: "No retained pane for runtime dead" },
+      });
+      expect(capture).not.toHaveBeenCalled();
+    } finally {
+      await stop();
+    }
+  });
+
+  it("checks captured rows before reporting a stopped service", async () => {
+    const { port, dataDir, stop } = await bootServer();
+    vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
+      runtimeView({
+        services: [
+          { serviceId: "dead", tmuxSession: "dead-pane", runtimeAlive: false },
+        ] as SessionView["services"],
+        sidecars: [
+          { name: "web", tmuxSession: "web-pane", alive: true },
+        ] as SessionView["sidecars"],
+      }),
+    );
+    const capture = vi.spyOn(runtimeTmux, "captureTmuxPane").mockResolvedValue("");
+    try {
+      expect(await logRows(port, "demo-1", "scope=runtime")).toEqual({
+        status: 404,
+        body: { error: "No retained pane for runtime dead" },
+      });
+      expect(await logRows(port, "demo-1", "scope=sidecar")).toEqual({ status: 200, body: [] });
+      expect(await logRows(port, "demo-1", "scope=runtime&limit=0")).toEqual({
+        status: 200,
+        body: [],
+      });
+      capture.mockResolvedValue("SIDECAR_OUTPUT");
+      expect((await logRows(port, "demo-1", "scope=runtime")).body).toMatchObject([
+        { event: "sidecar.output", message: "SIDECAR_OUTPUT" },
+      ]);
+      capture.mockResolvedValue(null);
+      expect((await logRows(port, "demo-1", "scope=runtime")).status).toBe(502);
+      capture.mockResolvedValue("");
+      appendEventLog(dataDir, {
+        event: "service.run.failed",
+        level: "error",
+        sessionId: "demo-1",
+        message: "FAILED_ARCHIVE",
+      });
+      expect((await logRows(port, "demo-1", "scope=runtime")).status).toBe(404);
+      expect((await logRows(port, "demo-1", "scope=all")).body).toEqual(
+        expect.arrayContaining([expect.objectContaining({ message: "FAILED_ARCHIVE" })]),
+      );
+      appendEventLog(dataDir, {
+        event: "service.output",
+        level: "info",
+        sessionId: "demo-1",
+        message: "OLD_OUTPUT",
+        details: { serviceId: "dead" },
+      });
+      expect((await logRows(port, "demo-1", "scope=runtime")).body).toMatchObject([
+        { event: "service.output", message: "OLD_OUTPUT" },
+      ]);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("allows a successfully blank retained service pane", async () => {
+    const { port, stop } = await bootServer();
+    vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
+      runtimeView({
+        services: [
+          { serviceId: "quiet", tmuxSession: "quiet-pane", runtimeAlive: true },
+        ] as SessionView["services"],
+        sidecars: [],
+      }),
+    );
+    vi.spyOn(runtimeTmux, "captureTmuxPane").mockResolvedValue("");
+    try {
+      expect(await logRows(port, "demo-1", "scope=runtime")).toEqual({ status: 200, body: [] });
+    } finally {
+      await stop();
+    }
+  });
+
   it("distinguishes a blank pane, a failed capture, and a named absent pane", async () => {
     const { port, dataDir, stop } = await bootServer();
     const get = vi.spyOn(SessionService.prototype, "get").mockResolvedValue(
