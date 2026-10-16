@@ -1356,6 +1356,13 @@ interface SessionRuntimeSnapshot {
   probeUnresponsive: boolean;
   diagnostic?: string;
 }
+interface SessionObservation {
+  record: SessionRecord;
+  lifecycle: { id: string; snapshot: SessionLifecycleSnapshot }[];
+}
+interface DailyWakeClaim extends SessionObservation {
+  record: SessionRecord & { dailyWake: SessionDailyWakeState };
+}
 interface SessionStateResult {
   session: SessionRecord;
   runtime: SessionRuntimeSnapshot;
@@ -5455,9 +5462,9 @@ export class SessionService {
           continue;
         }
         const dailySchedule = withoutAdmissionDeferral(dailyWake);
-        const claimedDailyNextDueAt = await this.withWorkspaceLifecycleLocks(
+        const claimedDailyWake = await this.withWorkspaceLifecycleLocks(
           session.id,
-          async (): Promise<string | null> => {
+          async (): Promise<DailyWakeClaim | null> => {
             // Claim the due occurrence BEFORE sending: advance nextDueAt to the
             // next future scheduled time and persist it first. A slow or failing
             // send must not leave the wake due, or the `<= now` guard stays true
@@ -5521,7 +5528,7 @@ export class SessionService {
                 });
                 return null;
               }
-              const updated: SessionRecord = {
+              const updated = {
                 ...currentDailyWakeSession,
                 dailyWake: {
                   ...dailySchedule,
@@ -5530,18 +5537,25 @@ export class SessionService {
                 updatedAt: nowIso(),
               };
               writeSession(this.config.dataDir, updated);
-              return nextDueAt.toISOString();
+              return {
+                record: updated,
+                lifecycle: this.lifecycleIdsFor(updated).map((id) => ({
+                  id,
+                  snapshot: this.lifecycle.snapshot(id),
+                })),
+              };
             }
             return null;
           },
         );
-        if (claimedDailyNextDueAt !== null) {
+        if (claimedDailyWake !== null) {
+          const claimedDailyNextDueAt = claimedDailyWake.record.dailyWake.nextDueAt;
           const admissionDenial = this.wakeAdmissionDenial(session.id);
           if (admissionDenial) {
             await this.deferDailyWakeForAdmission(
               session,
               dailyWake,
-              claimedDailyNextDueAt,
+              claimedDailyWake,
               admissionDenial,
               now,
             );
@@ -5659,31 +5673,51 @@ export class SessionService {
   private async deferDailyWakeForAdmission(
     session: SessionRecord,
     dailyWake: SessionDailyWakeState,
-    claimedNextDueAt: string,
+    claimed: DailyWakeClaim,
     denial: WakeAdmissionDenial,
     now: number,
   ): Promise<void> {
     const occurrence = dailyWake.admissionDeferredOccurrence ?? dailyWake.nextDueAt;
     const windowEndMs = resolveNextDailyWakeAt(dailyWake.dailyAt, new Date(occurrence)).getTime();
     const retryAtMs = now + DAILY_WAKE_ADMISSION_RETRY_MS;
-    if (retryAtMs >= windowEndMs) {
-      this.logEvent("session.wake.daily_exhausted", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.error.message}`,
-        details: { occurrence, nextDueAt: claimedNextDueAt, dailyAt: dailyWake.dailyAt },
-      });
-      return;
-    }
     const retryAt = new Date(retryAtMs).toISOString();
     const deferred = await this.withWorkspaceLifecycleLocks(session.id, async () => {
       const afterDenial = readSession(this.config.dataDir, session.id);
-      if (afterDenial?.dailyWake?.nextDueAt !== claimedNextDueAt) return false;
+      if (
+        !afterDenial ||
+        !sameSessionRuntimeOwner(afterDenial, claimed.record) ||
+        afterDenial.agentLaunchId !== claimed.record.agentLaunchId ||
+        !this.lifecycleStateMatches(afterDenial, this.lifecycleStamp(claimed.record)) ||
+        !isDeepStrictEqual(afterDenial.dailyWake, claimed.record.dailyWake) ||
+        claimed.lifecycle.some(({ id, snapshot }) => {
+          const current = this.lifecycle.snapshot(id);
+          return (
+            snapshot.operation?.phase === "pending" ||
+            current.operation?.phase === "pending" ||
+            current.instanceId !== snapshot.instanceId ||
+            current.revision !== snapshot.revision
+          );
+        })
+      )
+        return false;
+      if (retryAtMs >= windowEndMs) {
+        this.logEvent("session.wake.daily_exhausted", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Skipped daily wake occurrence ${occurrence} for ${session.id}: ${denial.error.message}`,
+          details: {
+            occurrence,
+            nextDueAt: claimed.record.dailyWake.nextDueAt,
+            dailyAt: dailyWake.dailyAt,
+          },
+        });
+        return false;
+      }
       writeSession(this.config.dataDir, {
         ...afterDenial,
         dailyWake: {
-          ...afterDenial.dailyWake,
+          ...claimed.record.dailyWake,
           nextDueAt: retryAt,
           admissionDeferredOccurrence: occurrence,
         },
@@ -11214,8 +11248,9 @@ export class SessionService {
     return updated;
   }
 
-  async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
-    for (const [index, { id, project }] of drifted.entries()) {
+  async restoreRebootedSessions(drifted: SessionObservation[]): Promise<void> {
+    for (const [index, { record, lifecycle }] of drifted.entries()) {
+      const { id, project } = record;
       const projectConfig = this.config.projects[project];
       if (projectConfig?.restoreAfterReboot !== true) continue;
       const memory = readHostMemory();
@@ -11237,6 +11272,26 @@ export class SessionService {
         });
         break;
       }
+      const current = readSession(this.config.dataDir, id);
+      if (
+        !current ||
+        !sameSessionRuntimeOwner(current, record) ||
+        current.agentLaunchId !== record.agentLaunchId ||
+        !this.lifecycleStateMatches(current, this.lifecycleStamp(record)) ||
+        current.error !== record.error ||
+        current.errorSource !== record.errorSource ||
+        current.serverErrorAt !== record.serverErrorAt ||
+        lifecycle.some(({ id: ownerId, snapshot }) => {
+          const latest = this.lifecycle.snapshot(ownerId);
+          return (
+            snapshot.operation?.phase === "pending" ||
+            latest.operation?.phase === "pending" ||
+            latest.instanceId !== snapshot.instanceId ||
+            latest.revision !== snapshot.revision
+          );
+        })
+      )
+        continue;
       try {
         await this.restore(id);
         if (memory !== null) {
@@ -11258,14 +11313,14 @@ export class SessionService {
     scanned: number;
     alive: number;
     drifted: number;
-    driftedSessions: { id: string; project: string }[];
+    driftedSessions: SessionObservation[];
   }> {
     const candidates = listSessions(this.config.dataDir).filter(
       (session) => session.status === "running" || session.status === "spawning",
     );
     let alive = 0;
     let drifted = 0;
-    const driftedSessions: { id: string; project: string }[] = [];
+    const driftedSessions: SessionObservation[] = [];
 
     for (const session of candidates) {
       // A record that carried a probe error is stopped at boot but never
@@ -11325,31 +11380,38 @@ export class SessionService {
         throw error;
       });
       if (!reconciled) continue;
+      const usage =
+        (reconciled.session.status === "stopped" || reconciled.session.status === "errored") &&
+        !hasRetainedSessionError(reconciled.session) &&
+        !reconciled.runtime.probeUnresponsive &&
+        !reconciled.runtime.diagnostic &&
+        !workspace.diagnostic &&
+        (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
+          ? await this.readFinalTokenUsage(session, reconciled.runtime)
+          : undefined;
       const latest = readSession(this.config.dataDir, session.id);
       if (
         !latest ||
         !sameObservationOwner(latest) ||
         !sameObservationOwner(reconciled.session) ||
         !this.lifecycleStateMatches(latest, this.lifecycleStamp(reconciled.session)) ||
+        latest.error !== reconciled.session.error ||
+        latest.errorSource !== reconciled.session.errorSource ||
+        latest.serverErrorAt !== reconciled.session.serverErrorAt ||
         latest.stopReason === "manual_pause" ||
         latest.stopReason === "token_budget"
       )
         continue;
+      let accepted = latest;
+      if (usage) {
+        const persisted = this.persistClassifiedTokenUsage(latest, usage);
+        if (persisted.status === "missing") continue;
+        accepted = persisted.session;
+      }
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
-        if (
-          !hasRetainedSessionError(reconciled.session) &&
-          !reconciled.runtime.probeUnresponsive &&
-          !reconciled.runtime.diagnostic &&
-          !workspace.diagnostic &&
-          (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
-        ) {
-          const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
-          const persisted = this.persistClassifiedTokenUsage(session, usage);
-          if (persisted.status === "missing") continue;
-        }
         drifted += 1;
         if (reconciled.session.status === "stopped" && !healedProbeError) {
-          driftedSessions.push({ id: session.id, project: session.project });
+          driftedSessions.push({ record: accepted, lifecycle });
         }
       } else {
         alive += 1;
@@ -17268,9 +17330,11 @@ export class SessionService {
       SessionRecord,
       "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
     >,
-    options: { failOnSurvivors: boolean },
+    options: { failOnSurvivors: boolean; isObservationCurrent?: () => boolean },
   ): Promise<void> {
+    if (options.isObservationCurrent?.() === false) return;
     const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+    if (options.isObservationCurrent?.() === false) return;
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17288,6 +17352,7 @@ export class SessionService {
       paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
       processMatchers: sessionProcessMatchers(session),
     });
+    if (options.isObservationCurrent?.() === false) return;
     if (capture.status === "unavailable") {
       // The process table could not be read, so "no survivors" would be a
       // guess. Refusing a relaunch is recoverable; launching a duplicate is
@@ -17328,6 +17393,7 @@ export class SessionService {
         },
         { fresh: true },
       );
+      if (options.isObservationCurrent?.() === false) return;
       if (stillAlive) {
         const message = `Session ${session.id}: the agent process still reads alive but no owned process was captured; refusing to launch a replacement`;
         this.logEvent("session.agent_process.capture_blind", {
@@ -17339,6 +17405,7 @@ export class SessionService {
         throw new Error(message);
       }
     }
+    if (options.isObservationCurrent?.() === false) return;
     await killTmuxSession(session.tmuxSession);
     const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
     if (outcome.status === "clear") {
@@ -21838,7 +21905,10 @@ export class SessionService {
   // reached it, so its pane is stopped; the caller then reconciles the record
   // to "stopped" like a dead orphan, queue kept, and restore or the next send
   // relaunches it with the task prompt.
-  private async stopOrphanedSpawnPane(session: SessionRecord): Promise<SessionRuntimeSnapshot> {
+  private async stopOrphanedSpawnPane(
+    session: SessionRecord,
+    isObservationCurrent: () => boolean,
+  ): Promise<SessionRuntimeSnapshot> {
     this.logEvent("session.spawn.orphan_stopped", {
       level: "warn",
       sessionId: session.id,
@@ -21849,7 +21919,10 @@ export class SessionService {
         queuedCount: queuedMessages(session).length,
       },
     });
-    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
+    await this.killAgentPaneAndConfirmExit(session, {
+      failOnSurvivors: false,
+      isObservationCurrent,
+    });
     return this.readRuntimeSnapshot(session, { fresh: true });
   }
 
@@ -21965,7 +22038,10 @@ export class SessionService {
         readSession(this.config.dataDir, session.id)?.status === "spawning" &&
         !this.spawnsInFlight.has(session.id)
       ) {
-        confirmedRuntime = await this.stopOrphanedSpawnPane(session);
+        confirmedRuntime = await this.stopOrphanedSpawnPane(session, () => readObservation().valid);
+        const afterOrphan = readObservation();
+        if (!afterOrphan.valid)
+          return { session: afterOrphan.latest ?? session, runtime: confirmedRuntime };
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
