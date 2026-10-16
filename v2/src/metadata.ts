@@ -1076,6 +1076,16 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  // The request is an equality fingerprint, never replayed as executable input.
+  const birthRequest = normalizedSession.triggerBirthRequest;
+  const triggerBirth =
+    typeof normalizedSession.triggerBirthKey === "string" &&
+    normalizedSession.triggerBirthKey.trim().length > 0 &&
+    isRecord(birthRequest) &&
+    birthRequest.project === normalizedSession.project &&
+    (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
+      ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
   const sidecarLaunches: Record<string, string> = {};
@@ -1105,6 +1115,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    ...triggerBirth,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
