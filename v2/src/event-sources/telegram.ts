@@ -77,6 +77,8 @@ const TELEGRAM_COMMANDS = [
   { command: "new", description: "Launch a task with project defaults" },
   { command: "work", description: "Inspect tasks needing attention" },
   { command: "unwatch", description: "Unbind this chat" },
+  { command: "complete", description: "Complete this topic's Spur session" },
+  { command: "kill", description: "Kill this topic's Spur session" },
 ] as const;
 
 interface TelegramTextMessage {
@@ -156,7 +158,7 @@ interface TelegramRuntime {
   pendingSpawns: Map<string, TelegramPendingSpawn>;
   autoSpawnInFlight: Set<string>;
   workbench: TelegramWorkbench;
-  persistBindings(options?: { removeKeys?: string[] }): Promise<void>;
+  persistBindings(options?: { removeKeys?: string[]; reconcileKey?: string }): Promise<void>;
   drainWrites(): Promise<void>;
 }
 
@@ -178,6 +180,7 @@ interface TelegramPendingSpawn {
 }
 
 type TelegramCommand =
+  | { kind: "complete" | "kill"; invalidArgs: boolean }
   | { kind: "new"; task?: string }
   | { kind: "work" }
   | {
@@ -219,6 +222,9 @@ export function parseTelegramCommand(text: string, botUsername?: string): Telegr
   }
   const args = rest?.trim();
   switch (command) {
+    case "complete":
+    case "kill":
+      return { kind: command, invalidArgs: Boolean(args) };
     case "new":
       return args ? { kind: "new", task: args } : { kind: "new" };
     case "work":
@@ -271,13 +277,15 @@ function mergePersistedBindings(
 async function rememberUpdate(
   runtime: TelegramRuntime,
   update?: { update_id?: number },
+  reconcileKey?: string,
 ): Promise<boolean> {
   const updateId = update?.update_id;
-  if (typeof updateId !== "number" || !Number.isInteger(updateId)) return true;
-  if (runtime.lastUpdateId !== undefined && updateId <= runtime.lastUpdateId) return false;
-  runtime.lastUpdateId = updateId;
+  if (typeof updateId === "number" && Number.isInteger(updateId)) {
+    if (runtime.lastUpdateId !== undefined && updateId <= runtime.lastUpdateId) return false;
+    runtime.lastUpdateId = updateId;
+  } else if (reconcileKey === undefined) return true;
   try {
-    await runtime.persistBindings();
+    await runtime.persistBindings({ ...(reconcileKey !== undefined ? { reconcileKey } : {}) });
   } catch (error) {
     logPersistError(runtime.deps, error);
   }
@@ -525,6 +533,8 @@ async function sendHelp(ctx: TelegramTextContext): Promise<void> {
       "/new <task> - launch with displayed project defaults",
       "/work - inspect Attention, Working, and Recent tasks",
       "/unwatch - unbind this chat",
+      "/complete - complete this topic's session; keep PR open",
+      "/kill - kill this topic's session; requires saved and pushed work",
       "",
       "Plain text goes to the bound agent. Commands stay in Telegram.",
     ].join("\n"),
@@ -1684,14 +1694,58 @@ async function handleTelegramText(
     ? { ...ctx.message, message_thread_id: telegramMessageThreadId(ctx.message) }
     : undefined;
   const deps = runtime.deps;
-  if (!(await rememberUpdate(runtime, ctx.update))) return;
+  const command = message?.text ? parseTelegramCommand(message.text, runtime.botUsername) : null;
+  const lifecycle = command?.kind === "complete" || command?.kind === "kill";
+  if (lifecycle && (!message || !isAllowed(deps.config, message.chat.id, message.from))) return;
+  const lifecycleKey =
+    lifecycle && message && message.chat.id < 0 && message.message_thread_id !== undefined
+      ? telegramBindingKey(message.chat.id, message.message_thread_id)
+      : undefined;
+  if (!(await rememberUpdate(runtime, ctx.update, lifecycleKey))) return;
   runtime.workbench.prune();
   if (!message?.text || !message.text.trim()) return;
   const from = message.from;
   if (!isAllowed(deps.config, message.chat.id, from)) return;
   if (!from) return;
 
-  const command = parseTelegramCommand(message.text, runtime.botUsername);
+  if (command?.kind === "complete" || command?.kind === "kill") {
+    if (command.invalidArgs) {
+      await ctx.reply(`Usage: /${command.kind}`);
+      return;
+    }
+    if (lifecycleKey === undefined) {
+      await ctx.reply(`Use /${command.kind} inside a bound forum topic.`);
+      return;
+    }
+    const selected = runtime.bindings.get(lifecycleKey);
+    const current = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+      lifecycleKey,
+    );
+    if (current) runtime.bindings.set(lifecycleKey, current);
+    else runtime.bindings.delete(lifecycleKey);
+    if (!current) {
+      await ctx.reply("No Spur session bound here.");
+      return;
+    }
+    if (selected?.sessionId !== current.sessionId) {
+      await ctx.reply("Topic binding changed. Send the command again.");
+      return;
+    }
+    if (!deps.workbench) {
+      await ctx.reply("Session operation unavailable.");
+      return;
+    }
+    try {
+      if (command.kind === "complete") await deps.workbench.completeSession(current.sessionId);
+      else await deps.workbench.killSession(current.sessionId);
+      for (const [key, binding] of runtime.bindings) {
+        if (binding.sessionId === current.sessionId) runtime.bindings.delete(key);
+      }
+    } catch (error) {
+      await ctx.reply(`Failed to ${command.kind} session: ${redactedErrorText(deps, error)}`);
+    }
+    return;
+  }
   const owner: WorkbenchOwner = {
     userId: from.id,
     chatId: message.chat.id,
@@ -2273,15 +2327,28 @@ async function startTelegramSource(
     pendingSpawns: new Map(),
     autoSpawnInFlight: new Set(),
     workbench: new TelegramWorkbench(),
-    persistBindings(options: { removeKeys?: string[] } = {}): Promise<void> {
+    persistBindings(options: { removeKeys?: string[]; reconcileKey?: string } = {}): Promise<void> {
       const removedKeys = new Set(options.removeKeys ?? []);
-      const next = writeQueue.then(() =>
-        writeTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId, bindings.values(), {
-          ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
-          preserveExisting: true,
-          ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
-        }),
-      );
+      const next = writeQueue.then(() => {
+        if (options.reconcileKey !== undefined) {
+          const current = readTelegramBindings(deps.dataDir, deps.projectId, deps.sourceId).get(
+            options.reconcileKey,
+          );
+          if (current) bindings.set(options.reconcileKey, current);
+          else bindings.delete(options.reconcileKey);
+        }
+        return writeTelegramBindings(
+          deps.dataDir,
+          deps.projectId,
+          deps.sourceId,
+          bindings.values(),
+          {
+            ...(runtime.lastUpdateId !== undefined ? { lastUpdateId: runtime.lastUpdateId } : {}),
+            preserveExisting: true,
+            ...(removedKeys.size > 0 ? { removeKeys: removedKeys } : {}),
+          },
+        );
+      });
       writeQueue = next.catch((error: unknown) => {
         logPersistError(deps, error);
       });
