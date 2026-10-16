@@ -48565,6 +48565,320 @@ describe("SessionService", () => {
       service.dispose();
     });
 
+    describe("manual interval zero-input claim:", () => {
+      const pastDue = "2026-03-18T09:00:00.000Z";
+
+      async function wakeFixture() {
+        const sessions = seedShepherdSession({
+          agentSessionId: "native-original",
+          agentLaunchId: "launch-original",
+          workspaceId: "wake-workspace",
+          submitUnconfirmedAt: "2026-03-18T10:04:00.000Z",
+          queuedMessageTyped: {
+            message: "earlier typed input",
+            typedAt: "2026-03-18T10:04:00.000Z",
+            ackBaseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+          },
+          queuedMessages: { messages: ["A", "B"], awaitingPrompt: true },
+          intervalWake: {
+            nextDueAt: pastDue,
+            intervalMs: 300_000,
+            message: "Manual interval",
+            stopCondition: "Done",
+          },
+        });
+        mockClaudeJsonlState("waiting");
+        const module = await loadSessionServiceModule();
+        const service = new module.SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+        return { sessions, service, lifecycle, ...module };
+      }
+
+      it("restores the occurrence after actual pending typed input refuses the current wake", async () => {
+        const pastDue = "2026-03-18T09:00:00.000Z";
+        const heldAt = "2026-03-18T10:04:00.000Z";
+        const sessions = seedShepherdSession({
+          agentSessionId: "native-original",
+          agentLaunchId: "launch-original",
+          submitUnconfirmedAt: heldAt,
+          queuedMessageTyped: {
+            message: "prior typed input",
+            typedAt: heldAt,
+            ackBaseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+          },
+          queuedMessages: { messages: ["A", "B"], awaitingPrompt: true },
+          intervalWake: {
+            nextDueAt: pastDue,
+            intervalMs: 300_000,
+            message: "Manual interval",
+            stopCondition: "Done",
+          },
+        });
+        mockClaudeJsonlState("waiting");
+        const { SessionService, LaunchPromptPendingError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+          deferBackgroundLoops: true,
+        });
+        const before = sessions.get("shp-1");
+        const send = vi.spyOn(service, "send");
+        const failure = await service
+          .dispatchWake("shp-1", { target: "interval", dispatch: true })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(LaunchPromptPendingError);
+        await expect(send.mock.results[0]?.value).rejects.toBe(failure);
+        expect(send).toHaveBeenCalledOnce();
+        expect(sessions.get("shp-1")).toMatchObject({
+          agentSessionId: before?.agentSessionId,
+          agentLaunchId: before?.agentLaunchId,
+          submitUnconfirmedAt: heldAt,
+          queuedMessageTyped: before?.queuedMessageTyped,
+          queuedMessages: before?.queuedMessages,
+          intervalWake: before?.intervalWake,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it.each(["pending", "admission"] as const)(
+        "restores its unchanged claim after %s refusal without replay",
+        async (kind) => {
+          const { sessions, service, LaunchPromptPendingError, SessionAdmissionDeniedError } =
+            await wakeFixture();
+          const failure =
+            kind === "pending"
+              ? new LaunchPromptPendingError("prior acknowledgement pending", pastDue)
+              : new SessionAdmissionDeniedError("admission denied", "memory_guard");
+          const send = vi.spyOn(service, "send").mockRejectedValue(failure);
+          await expect(
+            service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+          ).rejects.toBe(failure);
+          expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe(pastDue);
+          expect(send).toHaveBeenCalledOnce();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        "due",
+        "interval",
+        "message",
+        "condition",
+        "cancel",
+        "rearm",
+        "native",
+        "launch",
+        "workspace",
+        "tmux",
+        "agent",
+        "command",
+        "worktree",
+        "project",
+        "pause",
+        "status",
+        "session pending",
+        "session settled",
+        "workspace pending",
+        "workspace settled",
+        "lifecycle instance",
+      ])("preserves replacement after %s changes", async (change) => {
+        const { sessions, service, lifecycle, LaunchPromptPendingError } = await wakeFixture();
+        const failure = new LaunchPromptPendingError("prior acknowledgement pending", pastDue);
+        let replacement: SessionRecord | undefined;
+        const send = vi.spyOn(service, "send").mockImplementation(async () => {
+          const current = sessions.get("shp-1");
+          if (!current?.intervalWake) throw new Error("missing claimed wake fixture");
+          replacement = structuredClone(current);
+          if (change === "due")
+            replacement.intervalWake = { ...current.intervalWake, nextDueAt: pastDue };
+          if (change === "interval")
+            replacement.intervalWake = { ...current.intervalWake, intervalMs: 600_000 };
+          if (change === "message")
+            replacement.intervalWake = { ...current.intervalWake, message: "rearmed message" };
+          if (change === "condition")
+            replacement.intervalWake = {
+              ...current.intervalWake,
+              stopCondition: "rearmed condition",
+            };
+          if (change === "cancel") delete replacement.intervalWake;
+          if (change === "rearm")
+            replacement.intervalWake = {
+              ...current.intervalWake,
+              message: "new occurrence at same due",
+            };
+          if (change === "native") replacement.agentSessionId = "native-replacement";
+          if (change === "launch") replacement.agentLaunchId = "launch-replacement";
+          if (change === "workspace") replacement.workspaceId = "workspace-replacement";
+          if (change === "tmux") replacement.tmuxSession = "replacement-pane";
+          if (change === "agent") replacement.agent = "codex";
+          if (change === "command") replacement.launchCommand = "replacement-command";
+          if (change === "worktree") replacement.worktreePath = "/tmp/replacement-worktree";
+          if (change === "project") replacement.project = "replacement-project";
+          if (change === "pause") replacement.stopReason = "manual_pause";
+          if (change === "status") replacement.status = "stopped";
+          if (change.includes("pending") || change.includes("settled")) {
+            const id = change.startsWith("workspace") ? "wake-workspace" : "shp-1";
+            const owner = lifecycle.begin("restore", [id]);
+            if (change.includes("settled"))
+              lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+          }
+          if (change === "lifecycle instance") {
+            const { SessionLifecycleRegister } = await import("../../src/session-lifecycle.js");
+            (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle =
+              new SessionLifecycleRegister();
+          }
+          sessions.set("shp-1", replacement);
+          throw failure;
+        });
+        await expect(
+          service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+        ).rejects.toBe(failure);
+        expect(sessions.get("shp-1")).toEqual(replacement);
+        expect(send).toHaveBeenCalledOnce();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it("preserves a concurrent rearm while rollback waits for the workspace lock", async () => {
+        const { sessions, service, LaunchPromptPendingError } = await wakeFixture();
+        const failure = new LaunchPromptPendingError("prior acknowledgement pending", pastDue);
+        const internals = sessionServiceInternals(service);
+        let release: () => void = () => {};
+        let locked: () => void = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const entered = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        let blocker: Promise<void> | undefined;
+        vi.spyOn(service, "send").mockImplementation(async () => {
+          blocker = internals.withWorkspaceLifecycleLocks("shp-1", async () => {
+            locked();
+            await gate;
+          });
+          throw failure;
+        });
+        const dispatch = service.dispatchWake("shp-1", { target: "interval", dispatch: true });
+        const rejected = expect(dispatch).rejects.toBe(failure);
+        await entered;
+        const current = sessions.get("shp-1");
+        if (!current?.intervalWake) throw new Error("missing claimed wake fixture");
+        const replacement = {
+          ...current,
+          intervalWake: { ...current.intervalWake, message: "rearmed while locked" },
+        };
+        sessions.set("shp-1", replacement);
+        release();
+        await blocker;
+        await rejected;
+        expect(sessions.get("shp-1")).toEqual(replacement);
+      });
+
+      it("restores only due while preserving appended FIFO and prior typed evidence", async () => {
+        const { sessions, service, LaunchPromptPendingError } = await wakeFixture();
+        const failure = new LaunchPromptPendingError("prior acknowledgement pending", pastDue);
+        let latest: SessionRecord | undefined;
+        vi.spyOn(service, "send").mockImplementation(async () => {
+          const current = sessions.get("shp-1");
+          if (!current) throw new Error("missing claimed wake fixture");
+          latest = {
+            ...current,
+            updatedAt: "2026-03-18T10:05:01.000Z",
+            queuedMessages: { messages: ["A", "B", "C"], awaitingPrompt: true },
+            submitUnconfirmedAt: pastDue,
+            queuedMessageTyped: {
+              message: "earlier typed input",
+              typedAt: pastDue,
+              ackBaseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+            },
+          };
+          sessions.set("shp-1", latest);
+          throw failure;
+        });
+        await expect(
+          service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+        ).rejects.toBe(failure);
+        expect(sessions.get("shp-1")).toEqual({
+          ...latest,
+          intervalWake: { ...latest?.intervalWake, nextDueAt: pastDue },
+          updatedAt: "2026-03-18T10:05:00.000Z",
+        });
+      });
+
+      it.each(["ZERO_INPUT_RETAINED_ERROR", "timeout"])(
+        "keeps consumed claim on generic %s without retry",
+        async (message) => {
+          const { sessions, service } = await wakeFixture();
+          const before = sessions.get("shp-1");
+          const failure = new Error(message);
+          const send = vi.spyOn(service, "send").mockRejectedValue(failure);
+          await expect(
+            service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+          ).rejects.toBe(failure);
+          expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:10:00.000Z");
+          expect(send).toHaveBeenCalledOnce();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get("shp-1")).toMatchObject({
+            submitUnconfirmedAt: before?.submitUnconfirmedAt,
+            queuedMessageTyped: before?.queuedMessageTyped,
+            queuedMessages: before?.queuedMessages,
+          });
+        },
+      );
+
+      it.each(["reject", "postwrite", "unconfirmed"] as const)(
+        "keeps advanced occurrence after actual send transport %s",
+        async (outcome) => {
+          const { sessions, service } = await wakeFixture();
+          const current = sessions.get("shp-1");
+          if (!current) throw new Error("missing wake fixture");
+          const { submitUnconfirmedAt: _hold, queuedMessageTyped: _typed, ...ready } = current;
+          sessions.set("shp-1", {
+            ...ready,
+            queuedMessages: { messages: [], awaitingPrompt: false },
+          });
+          const failure = new Error("postwrite transport uncertain");
+          if (outcome === "reject") sendMessageToTmuxMock.mockRejectedValueOnce(failure);
+          if (outcome === "unconfirmed") {
+            createAgentSubmitAckBindingMock.mockResolvedValue({
+              baseline: { agent: "claude", file: "prior.jsonl", size: 123 },
+              scan: vi.fn(),
+            });
+            vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+              found: false,
+              lastScannedFile: "prior.jsonl",
+            });
+          }
+          if (outcome === "postwrite") {
+            const internals = service as unknown as {
+              enrich(session: SessionRecord): Promise<SessionView>;
+            };
+            vi.spyOn(internals, "enrich").mockRejectedValueOnce(failure);
+          }
+          const send = vi.spyOn(service, "send");
+          const dispatch = service.dispatchWake("shp-1", { target: "interval", dispatch: true });
+          if (outcome !== "unconfirmed") await expect(dispatch).rejects.toBe(failure);
+          else await expect(dispatch).resolves.toMatchObject({ id: "shp-1" });
+          expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:10:00.000Z");
+          expect(send).toHaveBeenCalledOnce();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledOnce();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          if (outcome === "unconfirmed") {
+            expect(sessions.get("shp-1")?.submitUnconfirmedAt).toBeDefined();
+            expect(sessions.get("shp-1")?.queuedMessageTyped?.message).toContain("Manual interval");
+          }
+        },
+      );
+    });
+
     describe("issue #907 claimed manual wake transaction (R13/R17)", () => {
       for (const target of ["scheduled", "interval", "daily"] as const) {
         it(`releases lifecycle ownership during ${target} acknowledgement`, async () => {
