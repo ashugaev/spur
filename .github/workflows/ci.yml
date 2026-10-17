@@ -55,7 +55,6 @@ jobs:
     timeout-minutes: 20
     env:
       SPUR_BUILD_RESTART: "0"
-      SPUR_TEST_DEPLOY_EXPORT_DIR: ${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -68,13 +67,18 @@ jobs:
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
-      - run: bash scripts/test-deploy.sh
+      - id: candidate
+        env:
+          SPUR_TEST_DEPLOY_EXPORT_DIR: ${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          bash scripts/test-deploy.sh
+          printf 'directory=%s\n' "$SPUR_TEST_DEPLOY_EXPORT_DIR" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: spur-install-candidate-${{ github.event.pull_request.head.sha }}
           path: |
-            ${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/manifest.json
-            ${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/*.tgz
+            ${{ steps.candidate.outputs.directory }}/manifest.json
+            ${{ steps.candidate.outputs.directory }}/*.tgz
           if-no-files-found: error
           compression-level: 0
           retention-days: 3

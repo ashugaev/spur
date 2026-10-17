@@ -792,8 +792,10 @@ type Workflow = {
       env?: { SPUR_BUILD_RESTART?: string; SPUR_TEST_DEPLOY_EXPORT_DIR?: string };
       with?: { stage?: Stage };
       steps?: {
+        id?: string;
         uses?: string;
         run?: string;
+        env?: { SPUR_TEST_DEPLOY_EXPORT_DIR?: string };
         with?: {
           script?: string;
           ref?: string;
@@ -889,11 +891,7 @@ test("PR install artifact follows Quality admission and binds the canonical expo
   expect(present(definition.jobs.quality).needs).toBe("quality-admission");
   expect(job["runs-on"]).toBe("self-hosted");
   expect(job["timeout-minutes"]).toBe(20);
-  expect(job.env).toEqual({
-    SPUR_BUILD_RESTART: "0",
-    SPUR_TEST_DEPLOY_EXPORT_DIR:
-      "${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}",
-  });
+  expect(job.env).toEqual({ SPUR_BUILD_RESTART: "0" });
   const steps = present(job.steps);
   expect(steps[0]).toEqual({
     uses: "actions/checkout@v5",
@@ -901,18 +899,32 @@ test("PR install artifact follows Quality admission and binds the canonical expo
   });
   expect(steps.filter((step) => step.run).map((step) => step.run)).toEqual([
     "pnpm install --frozen-lockfile",
-    "bash scripts/test-deploy.sh",
+    "bash scripts/test-deploy.sh\nprintf 'directory=%s\\n' \"$SPUR_TEST_DEPLOY_EXPORT_DIR\" >> \"$GITHUB_OUTPUT\"\n",
   ]);
+  expect(steps.find((step) => step.id === "candidate")?.env).toEqual({
+    SPUR_TEST_DEPLOY_EXPORT_DIR:
+      "${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}",
+  });
   expect(steps.at(-1)).toEqual({
     uses: "actions/upload-artifact@v4",
     with: {
       name: "spur-install-candidate-${{ github.event.pull_request.head.sha }}",
-      path: "${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/manifest.json\n${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/*.tgz\n",
+      path: "${{ steps.candidate.outputs.directory }}/manifest.json\n${{ steps.candidate.outputs.directory }}/*.tgz\n",
       "if-no-files-found": "error",
       "compression-level": 0,
       "retention-days": 3,
     },
   });
+});
+
+test("install candidate job env rejects runner-only expression contexts", async () => {
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+  const allowed = ["github", "needs", "strategy", "matrix", "vars", "secrets", "inputs"];
+  const job = present((await workflow("ci.yml")).jobs["install-candidate"]);
+  for (const value of Object.values(job.env ?? {})) {
+    for (const [, context] of value?.matchAll(/\$\{\{\s*(\w+)\./g) ?? [])
+      expect(allowed).toContain(context);
+  }
 });
 
 async function wrapper(
