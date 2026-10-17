@@ -147,6 +147,32 @@ describe("session gc against a real git worktree", () => {
     expect(stdout).toContain(fixture.worktreePath);
   });
 
+  it("rechecks for a spawn that joined the workspace after waiting for the workspace lock", async () => {
+    const fixture = await createFixture();
+    const group = planFor(fixture.config).groups[0];
+    if (!group) throw new Error("fixture has no GC group");
+    const lockPath = join(fixture.repoPath, ".git", "spur-workspace.lock");
+    writeFileSync(lockPath, `${process.pid}:test`);
+    const ownerProbe = vi.spyOn(process, "kill");
+    const removal = createGcDeps(fixture.config).removeWorktree(group, [fixture.session]);
+    const rejection = expect(removal).rejects.toThrow("Session GC blocked: changed_during_run");
+    try {
+      await vi.waitFor(() => expect(ownerProbe).toHaveBeenCalledWith(process.pid, 0));
+    } finally {
+      ownerProbe.mockRestore();
+    }
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      status: "spawning",
+      tmuxSession: "api-2",
+    });
+    await rm(lockPath);
+    await rejection;
+
+    expect(existsSync(fixture.worktreePath)).toBe(true);
+  });
+
   it("removes the worktree through git, prunes the repo, archives the record, and reports freed bytes", async () => {
     const fixture = await createFixture();
     const plan = planFor(fixture.config);

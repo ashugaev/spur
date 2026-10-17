@@ -922,6 +922,7 @@ export function createGcDeps(
   const openPrIndexCache = new Map<string, Promise<GcOpenPrIndex>>();
   const readGroupMembers: SessionGcExecutorDeps["readGroupMembers"] = (sessionIds) =>
     sessionIds.map((id) => readSession(config.dataDir, id));
+  const listSessionRecords = (): readonly SessionRecord[] => listSessions(config.dataDir);
   const checkGroupLiveness: SessionGcExecutorDeps["checkGroupLiveness"] = (sessionIds) => {
     try {
       for (const session of readGroupMembers(sessionIds)) {
@@ -947,7 +948,7 @@ export function createGcDeps(
     cwd: process.cwd(),
     readGroupMembers,
     checkGroupLiveness,
-    listSessionRecords: () => listSessions(config.dataDir),
+    listSessionRecords,
     probeGuards: async (group, freshMembers) => {
       if (!group.worktreePath || !existsSync(group.worktreePath)) {
         return [];
@@ -1010,7 +1011,8 @@ export function createGcDeps(
       await removeWorktree(repoPath, group.worktreePath, () => {
         const blockReason =
           currentLivenessBlockReason({ checkGroupLiveness }, group.sessionIds) ??
-          currentRecordsBlockReason(readGroupMembers, group.sessionIds, group.members);
+          currentRecordsBlockReason(readGroupMembers, group.sessionIds, group.members) ??
+          newMemberBlockReason({ listSessionRecords }, group);
         if (blockReason) throw new Error(`Session GC blocked: ${blockReason}`);
       });
     },
