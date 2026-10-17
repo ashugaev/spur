@@ -20160,11 +20160,73 @@ describe("SessionService", () => {
     const result = await service.reconcileStoppedSessions();
 
     expect(sessions.get("api-1")).toMatchObject({
-      status: "stopped",
-      stopReason: "runtime_lost",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
     });
     expect(result.drifted).toBe(1);
     expect(result.driftedSessions).toEqual([{ id: "api-1", project: "api" }]);
+  });
+
+  it.each([
+    { label: "clean exit", restoreAfterReboot: true, evidence: {}, eligible: true },
+    { label: "disabled restore", restoreAfterReboot: false, evidence: {}, eligible: true },
+    {
+      label: "provider failure",
+      restoreAfterReboot: true,
+      evidence: { error: "Provider request failed", errorSource: "other" as const },
+      eligible: false,
+    },
+    {
+      label: "probe failure",
+      restoreAfterReboot: true,
+      evidence: {
+        error: "Session status detection failed: ps failed: controlled",
+        errorSource: "runtime_probe" as const,
+      },
+      eligible: false,
+    },
+    {
+      label: "server failure",
+      restoreAfterReboot: true,
+      evidence: { serverErrorAt: "2026-03-18T10:00:00.000Z" },
+      eligible: false,
+    },
+    {
+      label: "inferred exit with server failure",
+      restoreAfterReboot: true,
+      evidence: {
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "inferred_runtime_exit" as const,
+        serverErrorAt: "2026-03-18T10:00:00.000Z",
+      },
+      eligible: false,
+    },
+  ])("boot restore after live-pane agent loss respects $label", async (scenario) => {
+    const config = baseConfig();
+    loadConfigMock.mockReturnValue({
+      ...config,
+      projects: {
+        api: { ...config.projects.api, restoreAfterReboot: scenario.restoreAfterReboot },
+      },
+    });
+    const sessions = createSessionStore(runningSession(scenario.evidence));
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    const service = await createDisposedSessionService();
+    const restoreSpy = vi.spyOn(service, "restore").mockResolvedValue({} as never);
+
+    const result = await service.reconcileStoppedSessions();
+    await service.restoreRebootedSessions(result.driftedSessions);
+
+    expect(sessions.get("api-1")).toMatchObject({ status: "errored", ...scenario.evidence });
+    expect(result.driftedSessions).toEqual(
+      scenario.eligible ? [{ id: "api-1", project: "api" }] : [],
+    );
+    if (scenario.eligible && scenario.restoreAfterReboot) {
+      expect(restoreSpy).toHaveBeenCalledExactlyOnceWith("api-1");
+    } else {
+      expect(restoreSpy).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["claude", "codex", "opencode", "cursor"] as const)(
