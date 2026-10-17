@@ -513,14 +513,14 @@ describe("executeSessionGc", () => {
   });
 });
 
-function planMany(sessions: SessionRecord[]) {
+function planMany(sessions: SessionRecord[], limit = 100) {
   return planSessionGc({
     sessions,
     worktreeDir: WORKTREE_DIR,
     now: NOW,
     olderThanDays: 30,
     statuses: ["completed", "killed", "stopped"],
-    limit: 100,
+    limit,
     pathExists: () => true,
   });
 }
@@ -736,6 +736,43 @@ describe("executeSessionGc partial groups", () => {
       action: "blocked",
       blockReasons: ["changed_during_run"],
     });
+  });
+});
+
+describe("executeSessionGc limit", () => {
+  it("counts only acting groups, so groups blocked at execution never starve eligible ones", async () => {
+    const blocked = Array.from({ length: 21 }, (_, index) =>
+      makeSession({
+        id: `blocked-${index}`,
+        branch: `feature/open-${index}`,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const eligible = [
+      makeSession({ id: "ok-1", updatedAt: "2026-02-01T00:00:00.000Z" }),
+      makeSession({ id: "ok-2", updatedAt: "2026-02-02T00:00:00.000Z" }),
+    ];
+    const records = [...blocked, ...eligible];
+    const deps = makeDeps({
+      readGroupMembers: (ids) =>
+        ids.map((id) => records.find((record) => record.id === id) ?? null),
+      openPrIndex: vi.fn(
+        async (): Promise<GcOpenPrIndex> => ({
+          numbers: new Set(),
+          branches: new Set(blocked.map((record) => record.branch)),
+        }),
+      ),
+    });
+
+    const report = await executeSessionGc(planMany(records, 1), deps, {
+      dryRun: false,
+      sizes: false,
+    });
+
+    expect(deps.archiveGroup).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["ok-1"]);
+    expect(report.groups).toHaveLength(22);
+    expect(report.totals.recordsArchived).toBe(1);
   });
 });
 

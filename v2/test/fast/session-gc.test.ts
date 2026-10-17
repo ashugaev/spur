@@ -217,7 +217,7 @@ describe("planSessionGc", () => {
     expect(result.groups.map((group) => group.project)).toEqual(["api"]);
   });
 
-  it("sorts groups oldest-first and applies the limit", () => {
+  it("sorts groups oldest-first and leaves limiting to the executor", () => {
     const result = plan(
       [
         session({ id: "api-1", workspaceId: "api-1", updatedAt: "2026-06-01T00:00:00.000Z" }),
@@ -226,8 +226,8 @@ describe("planSessionGc", () => {
       { limit: 1 },
     );
 
-    expect(result.groups).toHaveLength(1);
-    expect(result.groups[0]?.sessionIds).toEqual(["api-2"]);
+    expect(result.groups.map((group) => group.sessionIds[0])).toEqual(["api-2", "api-1"]);
+    expect(result.limit).toBe(1);
   });
 });
 
@@ -326,20 +326,17 @@ describe("planSessionGc partial groups", () => {
     expect(group.blockReasons).toEqual([]);
   });
 
-  it("ages a partial group by its archived subset so the limit reaches it", () => {
-    const result = plan(
-      [
-        shared({ id: "A", updatedAt: "2026-03-01T00:00:00.000Z" }),
-        shared({ id: "R", status: "running", updatedAt: "2026-07-31T00:00:00.000Z" }),
-        session({
-          id: "Y",
-          workspaceId: "Y",
-          status: "running",
-          updatedAt: "2026-06-01T00:00:00.000Z",
-        }),
-      ],
-      { limit: 1 },
-    );
+  it("ages a partial group by its archived subset so it sorts ahead of a younger blocked group", () => {
+    const result = plan([
+      shared({ id: "A", updatedAt: "2026-03-01T00:00:00.000Z" }),
+      shared({ id: "R", status: "running", updatedAt: "2026-07-31T00:00:00.000Z" }),
+      session({
+        id: "Y",
+        workspaceId: "Y",
+        status: "running",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    ]);
 
     expect(result.groups[0]?.action).toBe("partial");
     expect(result.groups[0]?.sessionIds).toContain("A");

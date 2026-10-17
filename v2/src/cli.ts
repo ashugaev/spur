@@ -2898,7 +2898,10 @@ export function createProgram(cliEntrypoint: string): Command {
       "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
     )
     .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
-    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option(
+      "--older-than <days>",
+      "Minimum age in days of a record; the whole group for worktree removal",
+    )
     .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
     .option("--project <id>", "Only consider sessions of one configured project")
     .option("--limit <number>", "Maximum groups to act on in one run")

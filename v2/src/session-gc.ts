@@ -454,14 +454,15 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
   const sorted = [...groups].sort(
     (left, right) => right.ageDays - left.ageDays || left.key.localeCompare(right.key),
   );
-  const limited = sorted.slice(0, input.limit);
 
+  // Not sliced here: the limit counts groups that act, which only the
+  // executor knows (a planned group can still block at execution).
   return {
     olderThanDays: input.olderThanDays,
     statuses: [...input.statuses],
     limit: input.limit,
     scanned: { sessions: sessions.length, groups: groups.length },
-    groups: limited,
+    groups: sorted,
   };
 }
 
@@ -609,8 +610,10 @@ export async function executeSessionGc(
   let recordsArchived = 0;
   let freedBytes = 0;
   let errors = 0;
+  let actingGroups = 0;
 
   for (const group of plan.groups) {
+    if (actingGroups >= plan.limit) break;
     const plannedAction = group.action;
     let action: GcAction = group.action;
     let blockReasons = [...group.blockReasons];
@@ -779,6 +782,7 @@ export async function executeSessionGc(
       freedBytes += sizeBytes;
     }
 
+    if (action !== "blocked") actingGroups += 1;
     const finalArchiveIds = action === "blocked" ? [] : archiveSessionIds;
 
     groupReports.push({
