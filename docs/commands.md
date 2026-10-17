@@ -45,7 +45,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## update
 
-`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
+`spur update [version] [--force]`: install/monitor/rollback in `v2/src/update.ts`; install/reinit failures clear the active attempt and retain `lastFailure` in `~/.spur/rollback-state.json`; daemon version/PID readiness in `v2/src/update-health.ts` (shared with `reinit`).
 
 ## spawn
 
