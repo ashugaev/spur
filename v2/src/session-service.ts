@@ -6853,17 +6853,19 @@ export class SessionService {
         const probeEligible = async (requireLive = false): Promise<SessionRecord | undefined> => {
           const current = readEligible();
           if (!current) return undefined;
+          const probeRevision = this.lifecycle.snapshot(current.id).revision;
           const runtime = await this.readRuntimeSnapshot(current, { fresh: true });
           const latest = readEligible();
           if (!latest) return undefined;
           const workspace = probeWorkspace(latest.worktreePath);
           if (runtime.probeUnresponsive || runtime.diagnostic || workspace.diagnostic) {
             this.retainDetectionError(
-              latest,
+              current,
               runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
               runtime.diagnostic !== undefined || workspace.diagnostic === undefined
                 ? "runtime_probe"
                 : "other",
+              probeRevision,
             );
             return undefined;
           }
@@ -7027,12 +7029,14 @@ export class SessionService {
       ).filter((name): name is string => name !== null);
       const current = readSession(this.config.dataDir, latest.id);
       if (!current || hasRetainedSessionError(current)) return;
+      const probeRevision = this.lifecycle.snapshot(current.id).revision;
       const confirmed = await this.readRuntimeSnapshot(current, { fresh: true });
       if (confirmed.probeUnresponsive) {
         this.retainDetectionError(
           current,
           confirmed.diagnostic ?? "runtime state unknown",
           "runtime_probe",
+          probeRevision,
         );
         return;
       }
@@ -11617,15 +11621,17 @@ export class SessionService {
     const driftedSessions: { id: string; project: string }[] = [];
 
     for (const session of candidates) {
+      const probeRevision = this.lifecycle.snapshot(session.id).revision;
       const runtime = await this.readRuntimeSnapshot(session);
       const current = readSession(this.config.dataDir, session.id);
       if (!current) continue;
       const workspace = probeWorkspace(current.worktreePath);
       const reconciled = await this.reconcileUnexpectedStop(
-        current,
+        session,
         runtime,
         "boot",
         workspace.missing,
+        probeRevision,
       ).catch((error: unknown) => {
         if (
           error instanceof SessionResourceNotFoundError &&
@@ -18663,7 +18669,7 @@ export class SessionService {
 
     const workspace = probeWorkspace(session.worktreePath);
     if (workspace.diagnostic) {
-      this.retainDetectionError(current, workspace.diagnostic, "other", probeRevision);
+      this.retainDetectionError(session, workspace.diagnostic, "other", probeRevision);
       throw new TmuxProbeUnknownError(workspace.diagnostic);
     }
     const workspacePresent = workspace.exists;
@@ -22639,6 +22645,7 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
+    probeRevision = this.lifecycle.snapshot(session.id).revision,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
@@ -22646,6 +22653,7 @@ export class SessionService {
     }
     const protectedRuntime = (ownedPane?: Promise<void>) =>
       this.spawnsInFlight.has(session.id) ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision ||
       (this.paneWriteLocks.has(session.tmuxSession) &&
         this.paneWriteLocks.get(session.tmuxSession) !== ownedPane) ||
       this.lifecycle.snapshot(session.id).operation?.phase === "pending" ||
@@ -22662,6 +22670,7 @@ export class SessionService {
           session,
           runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
+          probeRevision,
         ),
         runtime,
       };
@@ -22681,7 +22690,12 @@ export class SessionService {
           confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
         } catch (error) {
           const diagnostic = error instanceof Error ? error.message : String(error);
-          const retained = this.retainDetectionError(session, diagnostic, "runtime_probe");
+          const retained = this.retainDetectionError(
+            session,
+            diagnostic,
+            "runtime_probe",
+            probeRevision,
+          );
           return {
             session: retained,
             runtime: {
@@ -22744,6 +22758,7 @@ export class SessionService {
           confirmedRuntime.diagnostic ??
             "runtime probe (tmux or ps) timed out; runtime state unknown",
           "runtime_probe",
+          probeRevision,
         );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
@@ -23027,7 +23042,7 @@ export class SessionService {
     session: SessionRecord,
     error: unknown,
     errorSource: "runtime_probe" | "other",
-    probeRevision?: number,
+    probeRevision: number,
   ): SessionStateResult {
     const diagnostic = error instanceof Error ? error.message : String(error);
     const retained = this.retainDetectionError(session, diagnostic, errorSource, probeRevision);
@@ -23053,7 +23068,7 @@ export class SessionService {
     session: SessionRecord,
     diagnostic: string,
     errorSource: "runtime_probe" | "other",
-    probeRevision?: number,
+    probeRevision: number,
   ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -23064,8 +23079,7 @@ export class SessionService {
       latest.error !== session.error ||
       latest.errorSource !== session.errorSource ||
       !this.lifecycleStateMatches(latest, this.lifecycleStamp(session)) ||
-      (probeRevision !== undefined &&
-        this.lifecycle.snapshot(session.id).revision !== probeRevision)
+      this.lifecycle.snapshot(session.id).revision !== probeRevision
     )
       return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
@@ -23277,6 +23291,7 @@ export class SessionService {
         runtime,
         "runtime_check",
         workspace.missing,
+        probeRevision,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -23992,6 +24007,7 @@ export class SessionService {
     session?: SessionRecord,
     readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    const probeRevision = session && this.lifecycle.snapshot(session.id).revision;
     try {
       const exists = await readExists();
       if (session && !readSession(this.config.dataDir, session.id)) {
@@ -24016,11 +24032,12 @@ export class SessionService {
       return { exists, paneDead };
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
-      if (session)
+      if (session && probeRevision !== undefined)
         this.retainDetectionError(
           session,
           `Resource readout ${tmuxSession}: ${error.message}`,
           "other",
+          probeRevision,
         );
       return { exists: false, paneDead: false, diagnostic: error.message };
     }

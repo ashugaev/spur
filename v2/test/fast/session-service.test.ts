@@ -26425,6 +26425,151 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it.each(
+    (["classification", "boot", "budget", "park", "reporting"] as const).flatMap((boundary) =>
+      (boundary === "classification" || boundary === "boot"
+        ? (["reject", "unknown"] as const)
+        : boundary === "reporting"
+          ? (["reject"] as const)
+          : (["unknown"] as const)
+      ).flatMap((outcome) =>
+        (["current", "lifecycle", "native", "launch", "terminal"] as const).map((guard) => ({
+          boundary,
+          outcome,
+          guard,
+        })),
+      ),
+    ),
+  )(
+    "fences deferred $boundary probe retention: $outcome $guard",
+    async ({ boundary, outcome, guard }) => {
+      loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T09:00:00.000Z") });
+      timerPromisesSleepMock.mockResolvedValue(undefined);
+      const record = runningSession({
+        agentSessionId: "observed-native",
+        agentLaunchId: "observed-launch",
+      });
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service) as SessionServiceInternals & {
+        lifecycle: SessionLifecycleRegister;
+        parkStaleSession(view: Pick<SessionView, "id">): Promise<void>;
+        readReportingPaneState(
+          tmuxSession: string,
+          session: SessionRecord,
+          readExists: () => Promise<boolean>,
+        ): Promise<unknown>;
+      };
+      let entered: () => void = () => {};
+      const probing = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release: () => void = () => {};
+      const deferred = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const diagnostic = "ps failed: delayed retry diagnostic";
+      const probe = vi
+        .spyOn(internals, "readRuntimeSnapshot")
+        .mockImplementation(async (_session, options) => {
+          if (!options?.fresh)
+            return {
+              runtimeAlive: true,
+              paneUsable: true,
+              processAlive: boundary !== "classification" && boundary !== "boot",
+              probeUnresponsive: false,
+            };
+          entered();
+          await deferred;
+          if (outcome === "reject") throw new Error(diagnostic);
+          return {
+            runtimeAlive: false,
+            paneUsable: false,
+            processAlive: false,
+            probeUnresponsive: true,
+            diagnostic,
+          };
+        });
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+      const attempt =
+        boundary === "classification"
+          ? internals.classifySessionRecord(record)
+          : boundary === "boot"
+            ? service.reconcileStoppedSessions()
+            : boundary === "budget"
+              ? internals.stopForTokenBudget(record)
+              : boundary === "park"
+                ? internals.parkStaleSession(record)
+                : internals.readReportingPaneState(record.tmuxSession, record, async () => {
+                    entered();
+                    await deferred;
+                    throw new TmuxProbeUnknownError(diagnostic);
+                  });
+      try {
+        await probing;
+        if (boundary === "classification" || boundary === "boot") {
+          expect(probe).toHaveBeenNthCalledWith(2, record, { fresh: true });
+        }
+        if (guard === "lifecycle") {
+          const owner = internals.lifecycle.begin("complete", [record.id]);
+          internals.lifecycle.settle(
+            owner,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+          expect(internals.lifecycle.snapshot(record.id).revision).toBe(2);
+        }
+        const replacement: SessionRecord = {
+          ...record,
+          ...(guard === "native"
+            ? { agentSessionId: "replacement-native" }
+            : guard === "launch"
+              ? { agentLaunchId: "replacement-launch" }
+              : guard === "terminal"
+                ? { status: "completed" }
+                : {}),
+          // Keep updatedAt identical: only lifecycle revision detects the ABA.
+          queuedMessages: { messages: ["newer first", "newer second"], awaitingPrompt: true },
+          scheduledWake: { dueAt: "2026-03-18T11:00:00.000Z", message: "newer wake" },
+        };
+        sessions.set(record.id, replacement);
+        writeSessionMock.mockClear();
+        logSpurEventMock.mockClear();
+        release();
+        await attempt;
+        const after = sessions.get(record.id);
+        expect(after?.queuedMessages).toEqual(replacement.queuedMessages);
+        expect(after?.scheduledWake).toEqual(replacement.scheduledWake);
+        if (guard === "current") {
+          expect(after?.error).toBe(
+            `Session status detection failed: ${boundary === "reporting" ? `Resource readout ${record.tmuxSession}: ` : ""}${diagnostic}`,
+          );
+          expect(after?.errorSource).toBe(boundary === "reporting" ? "other" : "runtime_probe");
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+        } else {
+          expect(after).toEqual(replacement);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) =>
+                entry.event === "session.runtime.probe_unresponsive" && entry.level === "error",
+            ),
+          ).toHaveLength(0);
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      } finally {
+        release();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
+
   it("heals a rejected fresh runtime confirmation after a live probe", async () => {
     const record = runningSession();
     const sessions = createSessionStore(record);
