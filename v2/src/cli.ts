@@ -1410,7 +1410,9 @@ export function renderSessionGcResult(report: GcReport): string {
       ? `error: ${group.error}`
       : group.action === "blocked"
         ? group.blockReasons.join(",")
-        : group.worktreePath || "(no worktree)";
+        : group.action === "partial"
+          ? `archive ${group.archiveSessionIds.length}, keep ${group.sessionIds.length - group.archiveSessionIds.length}: ${group.blockReasons.join(",")}`
+          : group.worktreePath || "(no worktree)";
     lines.push(
       `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
     );
@@ -2896,7 +2898,10 @@ export function createProgram(cliEntrypoint: string): Command {
       "Reclaim stale session worktrees and archive terminal session records (dry run unless --execute).",
     )
     .option("--execute", "Apply the plan; without this flag nothing is removed or archived")
-    .option("--older-than <days>", "Minimum age in days of a group's newest record")
+    .option(
+      "--older-than <days>",
+      "Minimum age in days of a record; the whole group for worktree removal",
+    )
     .option("--statuses <list>", "Statuses to collect, comma-separated: completed,killed,stopped")
     .option("--project <id>", "Only consider sessions of one configured project")
     .option("--limit <number>", "Maximum groups to act on in one run")

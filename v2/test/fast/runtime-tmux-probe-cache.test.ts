@@ -210,6 +210,27 @@ describe("runtime-tmux shared probe cache", () => {
     expect(execFileAsyncMock.mock.calls).toHaveLength(0);
   });
 
+  it("serves N absent-name presence reads from one list-windows fork after a refresh, but N forks when each is fresh", async () => {
+    installFleetTmuxMock();
+    const { getTmuxSessionPresence, refreshTmuxFleetSnapshot } =
+      await import("../../src/runtime-tmux.js");
+    const absentNames = Array.from({ length: SESSION_COUNT }, (_, i) => `gone-${i}`);
+    const listWindows = () =>
+      callsFor((file, args) => file === "tmux" && args.includes("list-windows"));
+
+    await refreshTmuxFleetSnapshot();
+    for (const name of absentNames) {
+      expect((await getTmuxSessionPresence(name)).present).toBe(false);
+    }
+    expect(listWindows()).toBe(1);
+
+    execFileAsyncMock.mockClear();
+    for (const name of absentNames) {
+      await getTmuxSessionPresence(name, { fresh: true });
+    }
+    expect(listWindows()).toBe(SESSION_COUNT);
+  });
+
   it("keeps a cached probe result identical to what a live probe returned in the same TTL window", async () => {
     installFleetTmuxMock();
     const { tmuxSessionExists, tmuxPaneDead, getTmuxSessionActivity, isProcessRunningInTmux } =

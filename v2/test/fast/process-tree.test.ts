@@ -1,5 +1,6 @@
-import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type * as childProcessModule from "node:child_process";
 import type * as processTreeModule from "../../src/process-tree.js";
 import {
@@ -10,7 +11,10 @@ import {
   isZombieProcessState,
   killProcessTree,
   listProcesses,
+  listSessionMemberPids,
   parseElapsedSeconds,
+  readProcessIdentity,
+  readProcessStat,
   snapshotProcesses,
   snapshotProcessLiveness,
   type ProcessSnapshotEntry,
@@ -282,6 +286,39 @@ describe("snapshotProcessLiveness bounds", () => {
     });
 
     expect(snapshot).toEqual({ status: "unavailable" });
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("readProcessStat", () => {
+  it("P1 returns the real session id and the same identity readProcessIdentity reads", async () => {
+    const { stdout } = await promisify(execFile)("ps", ["-o", "sid=", "-p", String(process.pid)]);
+    const stat = await readProcessStat(process.pid);
+    expect(stat?.sid).toBe(Number.parseInt(stdout.trim(), 10));
+    expect(stat?.identity).toBe(await readProcessIdentity(process.pid));
+  });
+
+  it("P2 returns null for a pid that does not exist", async () => {
+    expect(await readProcessStat(2 ** 22 + 1)).toBeNull();
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("listSessionMemberPids", () => {
+  it("P3 parses one pid per line and asks ps for the session", async () => {
+    let capturedArgs: string[] | undefined;
+    const pids = await listSessionMemberPids(42, async (_file, args) => {
+      capturedArgs = args;
+      return { stdout: "  10\n  11\nbad\n" };
+    });
+    expect(pids).toEqual([10, 11]);
+    expect(capturedArgs).toEqual(["-o", "pid=", "-s", "42"]);
+  });
+
+  it("P3 degrades to no members when ps fails", async () => {
+    expect(
+      await listSessionMemberPids(42, async () => {
+        throw new Error("exit 1");
+      }),
+    ).toEqual([]);
   });
 });
 
