@@ -31,6 +31,9 @@ import {
   readTelegramChoices,
   readTelegramReplyTarget,
   readWorkItemLifecycles,
+  readPendingSpawnWork,
+  writePendingSpawnWork,
+  deletePendingSpawnWork,
   readSession,
   readWorkItemRegistry,
   recordCommentSeen,
@@ -50,6 +53,7 @@ import {
 import { appendEventLog } from "../../src/event-log.js";
 import type {
   PersistedPendingBatch,
+  PersistedSpawnWork,
   SessionRecord,
   SubmitAckBaseline,
   TelegramChoice,
@@ -57,6 +61,53 @@ import type {
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+
+it("round-trips pending spawn ownership and rejects stale checkpoints and malformed births", async () => {
+  const dataDir = await newDataDir();
+  const work: PersistedSpawnWork = {
+    workId: "work",
+    revision: 0,
+    projectId: "project",
+    triggerId: "trigger",
+    sourceId: "source",
+    eventName: "cron:tick",
+    occurrenceId: "event",
+    routeFingerprint: "route",
+    eventData: {},
+    createdAt: new Date().toISOString(),
+    nextBlockIndex: 0,
+    failures: [],
+    admissionDenials: 1,
+    notBeforeAt: 10,
+    blocks: [{ birthKey: "work:0", state: "pending" }],
+  };
+  expect(writePendingSpawnWork(dataDir, work)).toBe(true);
+  expect(readPendingSpawnWork(dataDir).get("work")).toEqual(work);
+  expect(writePendingSpawnWork(dataDir, { ...work, revision: 1 }, 0)).toBe(true);
+  expect(writePendingSpawnWork(dataDir, work, 0)).toBe(false);
+  expect(deletePendingSpawnWork(dataDir, "work", 0)).toBe(false);
+  expect(deletePendingSpawnWork(dataDir, "work", 1)).toBe(true);
+  writeFileSync(
+    join(dataDir, "pending-spawn-work.json"),
+    JSON.stringify([{ ...work, blocks: [{ birthKey: "foreign", state: "pending" }] }]),
+  );
+  expect(readPendingSpawnWork(dataDir).size).toBe(0);
+  recordWorkItemLifecycle(dataDir, "project", "source", {
+    externalId: "item",
+    url: "https://example.com/item",
+    number: 1,
+    title: "task",
+    repo: "repo",
+    autoComplete: false,
+    createdAt: work.createdAt,
+    state: "pending",
+    spawnWorkId: "work",
+  });
+  expect(readWorkItemLifecycles(dataDir, "project", "source").get("item")).toMatchObject({
+    state: "pending",
+    spawnWorkId: "work",
+  });
+});
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));

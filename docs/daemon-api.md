@@ -43,7 +43,7 @@
 - `GET /sessions/:id/conversation`
 - `GET /sessions/:id/user-actions`
 - `GET /sessions/:id/subscriptions`
-- `GET /sessions/:id/logs` — `?scope=runtime|sidecar|service|all`
+- `GET /sessions/:id/logs` — `scope=runtime|sidecar|service|all`, `name`, `limit` (default 200 globally); retained pane and archived rows; existing session record and `limit>0`: 404 for named no-pane/no-archive or outputless stopped service, 502 for failed capture; absent record: archived rows (200); `v2/src/server.ts`.
 - `POST /sessions/:id/send` — response `queuedAheadReason: "no_interrupt"`: queued at the head
 - `POST /sessions/:id/source-poll-enable` — `{}`. Clears durable poll-disable registry (every file under the project, incl. removed sources) + live in-process gate per `github` source; `200 { ok, sessionId, projectId, cleared: { sourceId, prNumber }[] }`; `cleared: []` no-op; `404` unknown session. See [source](commands.md#source)
 - `POST /sessions/:id/answer`
@@ -56,7 +56,7 @@
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
-- `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/restore` — optional `operationId`, settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
