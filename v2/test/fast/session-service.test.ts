@@ -20229,12 +20229,19 @@ describe("SessionService", () => {
     }
   });
 
-  it.each(["claude", "codex", "opencode", "cursor"] as const)(
-    "retains final %s usage when boot reconciliation runs before the first get",
-    async (agent) => {
+  it.each(
+    (["claude", "codex", "opencode", "cursor"] as const).flatMap((agent) =>
+      (["boot", "get"] as const).flatMap((entry) =>
+        [false, true].map((paneAlive) => ({ agent, entry, paneAlive })),
+      ),
+    ),
+  )(
+    "retains final $agent usage once through $entry (paneAlive=$paneAlive)",
+    async ({ agent, entry, paneAlive }) => {
       const sessions = createSessionStore();
       sessions.set("api-1", runningSession({ agent, agentSessionId: "native-final" }));
-      tmuxSessionExistsMock.mockResolvedValue(false);
+      tmuxSessionExistsMock.mockResolvedValue(paneAlive);
+      isProcessRunningInTmuxMock.mockResolvedValue(false);
       const sample = {
         provider: agent,
         generationId: "native-final",
@@ -20257,18 +20264,24 @@ describe("SessionService", () => {
       }
       if (agent === "cursor") readCursorTokenUsageMock.mockResolvedValue(sample);
       const service = await createDisposedSessionService();
-      const reconcile = service.reconcileStoppedSessions();
+      const reconcile =
+        entry === "boot" ? service.reconcileStoppedSessions() : service.get("api-1");
       await vi.advanceTimersByTimeAsync(250);
-      expect(await reconcile).toMatchObject({ drifted: 1 });
+      if (entry === "boot") expect(await reconcile).toMatchObject({ drifted: 1 });
+      else expect(await reconcile).toMatchObject({ tokenUsageView: { totalTokens: 10 } });
       expect(sessions.get("api-1")).toMatchObject({
-        status: "stopped",
+        status: paneAlive ? "errored" : "stopped",
         tokenUsage: { totalTokens: 10 },
       });
       const finalReadCounts = [
         readClaudeJsonlStateMock.mock.calls.length,
         readCodexRolloutStateMock.mock.calls.length,
         readOpenCodeStructuredStateMock.mock.calls.length,
+        readCursorTokenUsageMock.mock.calls.length,
       ];
+      expect(finalReadCounts).toEqual(
+        ["claude", "codex", "opencode", "cursor"].map((provider) => (provider === agent ? 1 : 0)),
+      );
       for (let count = 0; count < 2; count += 1) {
         expect((await service.get("api-1")).tokenUsageView).toMatchObject({
           status: "available",
@@ -20280,9 +20293,27 @@ describe("SessionService", () => {
         readClaudeJsonlStateMock.mock.calls.length,
         readCodexRolloutStateMock.mock.calls.length,
         readOpenCodeStructuredStateMock.mock.calls.length,
+        readCursorTokenUsageMock.mock.calls.length,
       ]).toEqual(finalReadCounts);
     },
   );
+
+  it.each([
+    { error: "Provider request failed", errorSource: "other" as const },
+    { error: "Probe failed", errorSource: "runtime_probe" as const },
+    { serverErrorAt: "2026-03-18T10:00:00.000Z" },
+  ])("does not finalize retained failure usage after agent exit: %j", async (evidence) => {
+    const sessions = createSessionStore(runningSession(evidence));
+    isProcessRunningInTmuxMock.mockResolvedValue(false);
+    const service = await createDisposedSessionService();
+
+    await service.reconcileStoppedSessions();
+    await service.get("api-1");
+
+    expect(sessions.get("api-1")).toMatchObject(evidence);
+    expect(readClaudeJsonlStateMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.tokenUsage).toBeUndefined();
+  });
 
   it.each(["claude", "codex", "opencode", "cursor"] as const)(
     "continues boot reconciliation when final %s accounting cannot be read",

@@ -6,6 +6,30 @@ import {
   type SpurSessionView,
 } from "./fixtures.js";
 
+test("restores an exited agent from its row while the pane remains alive", async ({ page }) => {
+  const source = makeStoppedSession({
+    id: "exited-live-pane",
+    status: "errored",
+    state: "error",
+    runtimeAlive: true,
+    error: "Agent runtime exited unexpectedly.",
+  });
+  const running = { ...source, status: "running", state: "waiting", error: "" } as const;
+  let rows: SpurSessionView[] = [source];
+  let calls = 0;
+  await mockSessions(page, () => rows);
+  await page.route(`**/api/sessions/${source.id}/restore`, async (route) => {
+    calls += 1;
+    rows = [running];
+    await route.fulfill({ json: running });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: `Restore session ${source.id}` }).click();
+  await expect.poll(() => calls).toBe(1);
+  await expect(page.getByRole("button", { name: `Restore session ${source.id}` })).toHaveCount(0);
+  await expect(page.getByText("Waiting", { exact: true })).toBeVisible();
+});
+
 test("restores daemon-owned Working after reload and follows settlement before POST returns", async ({
   page,
 }) => {

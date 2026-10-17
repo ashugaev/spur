@@ -11562,10 +11562,12 @@ export class SessionService {
       if (!readSession(this.config.dataDir, session.id)) continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         if (
-          !hasRetainedSessionError(reconciled.session) &&
+          !hasRetainedSessionError(current) &&
+          !current.serverErrorAt &&
           !reconciled.runtime.probeUnresponsive &&
           !reconciled.runtime.diagnostic &&
           !workspace.diagnostic &&
+          workspace.exists &&
           (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
         ) {
           const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
@@ -22988,6 +22990,34 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // Final accounting uses the incoming record: reconciliation may just have
+    // added an inferred exit error to a previously clean running generation.
+    if (
+      !runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      !hasRetainedSessionError(session) &&
+      !session.serverErrorAt
+    ) {
+      if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      } else if (
+        session.agent === "cursor" &&
+        session.agentSessionId &&
+        runtime.paneUsable &&
+        runtime.processAlive
+      ) {
+        const usage = await readCursorTokenUsage(
+          cursorConfigDirForSession(this.config.dataDir, session.id),
+          session.agentSessionId,
+        ).catch(() => undefined);
+        if (usage) {
+          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+        }
+      }
+    }
     if (
       runtime.probeUnresponsive ||
       workspace.diagnostic ||
@@ -22996,19 +23026,6 @@ export class SessionService {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
     } else {
-      if (session.agent === "cursor" && session.agentSessionId) {
-        const usage = await readCursorTokenUsage(
-          cursorConfigDirForSession(this.config.dataDir, session.id),
-          session.agentSessionId,
-        ).catch(() => undefined);
-        if (usage) {
-          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
-        }
-      } else if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
-        const usage = await this.readFinalTokenUsage(session, runtime);
-        tokenUsage = usage.tokenUsage;
-        tokenUsages = usage.tokenUsages;
-      }
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
       } else if (!runtime.paneUsable || !runtime.processAlive) {
