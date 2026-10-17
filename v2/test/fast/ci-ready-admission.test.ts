@@ -899,7 +899,7 @@ test("PR install artifact follows Quality admission and binds the canonical expo
   });
   expect(steps.filter((step) => step.run).map((step) => step.run)).toEqual([
     "pnpm install --frozen-lockfile",
-    "bash scripts/test-deploy.sh\nprintf 'directory=%s\\n' \"$SPUR_TEST_DEPLOY_EXPORT_DIR\" >> \"$GITHUB_OUTPUT\"\n",
+    'bash scripts/test-deploy.sh\nprintf \'directory=%s\\n\' "$SPUR_TEST_DEPLOY_EXPORT_DIR" >> "$GITHUB_OUTPUT"\n',
   ]);
   expect(steps.find((step) => step.id === "candidate")?.env).toEqual({
     SPUR_TEST_DEPLOY_EXPORT_DIR:
