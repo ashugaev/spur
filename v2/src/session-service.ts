@@ -15146,7 +15146,17 @@ export class SessionService {
       return { view, attempt: null };
     }
     const activationStamp = this.lifecycleStamp(session);
-    await this.ensureReadyForQueuedSend(sessionId, activationStamp);
+    const operation = wakeClaim
+      ? createRestoreOperation(undefined, () => this.scheduledWakeClaimCurrent(wakeClaim))
+      : undefined;
+    try {
+      await this.ensureReadyForQueuedSend(sessionId, activationStamp, {
+        ...(operation ? { operation } : {}),
+        ...(wakeClaim ? { wakeClaim } : {}),
+      });
+    } finally {
+      operation?.dispose();
+    }
     const activeRecord = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const readySession = readSession(this.config.dataDir, sessionId);
       if (!readySession) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -15179,18 +15189,24 @@ export class SessionService {
   private async ensureReadyForQueuedSend(
     sessionId: string,
     expectedLifecycle?: SessionLifecycleStamp,
+    options?: { operation?: RestoreOperationContext; wakeClaim?: ScheduledWakeClaim },
   ): Promise<void> {
+    const operation = options?.operation;
+    const wakeClaim = options?.wakeClaim;
+    operation?.assertActive();
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
     this.assertTokenBudgetAllowsActivation(hint);
     const runtime = await this.readRuntimeSnapshot(hint);
+    operation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
-      await this.captureAgentSessionId(hint, 0);
+      await this.captureAgentSessionId(hint, 0, operation);
       return;
     }
     await this.withPaneWriteLock(hint.tmuxSession, async () => {
       const lifecycleIds = this.lifecycleIdsFor(hint);
       const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        operation?.assertActive();
         const current = readSession(this.config.dataDir, sessionId);
         if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
         const parkedDuringProbe =
@@ -15212,10 +15228,12 @@ export class SessionService {
         if (current.tmuxSession !== hint.tmuxSession) {
           throw new Error(`Session ${sessionId} changed before queued send`);
         }
-        return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+        return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true, ...options });
       });
       if (!ready) return;
+      operation?.assertActive();
       const generation = await this.capturePaneGeneration(ready.session);
+      operation?.assertActive();
       const stamp = this.lifecycleStamp(
         readSession(this.config.dataDir, sessionId) ?? ready.session,
       );
@@ -15225,8 +15243,10 @@ export class SessionService {
           ready.recoveryMessage.message,
           {
             ...ready.recoveryMessage.options,
+            ...(operation ? { operation } : {}),
             authorizeInput: (send) =>
               this.withSessionLifecycleLocks(lifecycleIds, async () => {
+                operation?.assertActive();
                 const current = readSession(this.config.dataDir, sessionId);
                 if (
                   !current ||
@@ -15235,25 +15255,39 @@ export class SessionService {
                 ) {
                   return false;
                 }
+                operation?.assertActive();
+                if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+                  options.wakeClaim.stage = "input-started";
                 await send();
                 return true;
               }),
           },
         );
         const outcome = await this.completeAgentMessage(submission, {
+          ...(operation ? { operation } : {}),
+          ...(wakeClaim ? { allowDelivery: () => this.scheduledWakeClaimCurrent(wakeClaim) } : {}),
           authorizeResend: (send) =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              operation?.assertActive();
               const current = readSession(this.config.dataDir, sessionId);
               if (!current || !(await this.paneGenerationMatches(current, generation))) {
                 return false;
               }
+              operation?.assertActive();
+              if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+                options.wakeClaim.stage = "input-started";
               await send();
               return true;
             }),
           recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              operation?.assertActive();
               const current = readSession(this.config.dataDir, sessionId);
-              return Boolean(current && (await this.paneGenerationMatches(current, generation)));
+              const matches = Boolean(
+                current && (await this.paneGenerationMatches(current, generation)),
+              );
+              operation?.assertActive();
+              return matches;
             }),
         });
         if (outcome === "stale") {
@@ -15261,10 +15295,12 @@ export class SessionService {
         }
       }
       await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        operation?.assertActive();
         const current = readSession(this.config.dataDir, sessionId);
         if (!current || !(await this.paneGenerationMatches(current, generation))) {
           throw new Error(`Session ${sessionId} changed during queued send recovery`);
         }
+        operation?.assertActive();
       });
     });
   }
@@ -18626,6 +18662,30 @@ export class SessionService {
     return session;
   }
 
+  private writeRecoverySession(
+    record: SessionRecord,
+    wakeClaim?: ScheduledWakeClaim,
+  ): SessionRecord {
+    if (!wakeClaim) {
+      writeSession(this.config.dataDir, record);
+      return record;
+    }
+    const latest = readSession(this.config.dataDir, record.id);
+    if (!latest || !this.scheduledWakeClaimCurrent(wakeClaim, latest)) {
+      throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${record.id}`);
+    }
+    const { scheduledWake: _previousWake, ...base } = record;
+    const recovered = withQueuedMessages(
+      { ...base, ...(latest.scheduledWake ? { scheduledWake: latest.scheduledWake } : {}) },
+      queuedMessages(latest),
+      latest.queuedMessages?.awaitingPrompt === true,
+    );
+    writeSession(this.config.dataDir, recovered);
+    // Only a known, authorized recovery write transfers runtime ownership.
+    wakeClaim.session = recovered;
+    return recovered;
+  }
+
   // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
   // confirmed dead this exact pane itself (switchAuth's relaunch path, via
   // killAgentPaneAndConfirmExit) — there, a timeout-killed probe right after
@@ -18636,17 +18696,25 @@ export class SessionService {
   // stays ambiguous and defaults to refusing recovery.
   private async ensureSessionReadyForSend(
     session: SessionRecord,
-    options?: { paneAlreadyConfirmedGone?: boolean; paneAlreadyOwned?: boolean },
+    options?: {
+      paneAlreadyConfirmedGone?: boolean;
+      paneAlreadyOwned?: boolean;
+      operation?: RestoreOperationContext;
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<ReadySessionForSend> {
+    const operation = options?.operation;
+    operation?.assertActive();
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
     this.assertTokenBudgetAllowsActivation(session);
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
     const runtime = await this.readRuntimeSnapshot(session);
+    operation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
       return {
-        session: await this.captureAgentSessionId(session, 0),
+        session: await this.captureAgentSessionId(session, 0, operation),
         recoveryMessage: null,
       };
     }
@@ -18737,26 +18805,38 @@ export class SessionService {
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
+        ...(operation ? { operation } : {}),
+        ...(options?.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
       });
     } catch (error) {
+      operation?.assertActive();
       const latest = readSession(this.config.dataDir, session.id);
       if (
         latest &&
         !hasRetainedSessionError(latest) &&
         (await this.launchResourcesMayRemain(latest))
       ) {
-        await this.retainLaunchedError(latest, error);
+        operation?.assertActive();
+        await this.retainLaunchedError(latest, error, operation);
       }
       throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
     }
-    writeSession(this.config.dataDir, recovered.session);
+    operation?.assertActive();
+    recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim);
     // After the running record is on disk: a project sidecar can take tens of
     // seconds to come up, and the reaper's running|spawning filter must cover
     // that whole window without relying on the warmup cleared just above.
-    const withSidecars = await this.startAutoStartSidecars(recovered.session, project);
+    const withSidecars = await this.startAutoStartSidecars(
+      recovered.session,
+      project,
+      undefined,
+      operation,
+    );
+    operation?.assertActive();
     await this.refreshDashboardCacheEntry(withSidecars);
+    operation?.assertActive();
     this.logEvent("session.recover.completed", {
       level: "info",
       sessionId: session.id,
@@ -18778,8 +18858,15 @@ export class SessionService {
   private async relaunchSessionInPlace(
     session: SessionRecord,
     project: ProjectConfig,
-    options?: { paneAlreadyOwned?: boolean },
+    options?: {
+      paneAlreadyOwned?: boolean;
+      operation?: RestoreOperationContext;
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<ReadySessionForSend> {
+    const operation = options?.operation;
+    const assertActive = () => operation?.assertActive();
+    assertActive();
     const launchSelection = await resolveSpawnRequestLaunchSelection(
       {
         project: session.project,
@@ -18793,6 +18880,7 @@ export class SessionService {
       this.config.models.codexHome,
       true,
     );
+    assertActive();
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
@@ -18804,14 +18892,22 @@ export class SessionService {
       await this.lookupPanePidQuietly(session.tmuxSession),
       false,
     );
-    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
-    const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    assertActive();
+    await this.killAgentPaneAndConfirmExit(session, {
+      failOnSurvivors: true,
+      ...(operation ? { operation } : {}),
+    });
+    assertActive();
+    const sessionWithAgentId = await this.captureAgentSessionId(session, 0, operation);
+    assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
+      operation,
     );
+    assertActive();
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       ...launchSelection,
@@ -18824,6 +18920,7 @@ export class SessionService {
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
+    assertActive();
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
@@ -18927,6 +19024,7 @@ export class SessionService {
     let launched = false;
     let freshOpenCodeRecord: SessionRecord | undefined;
     const launchFreshOpenCode = async (): Promise<void> => {
+      assertActive();
       const {
         agentSessionId: _staleAgentSessionId,
         error: _staleError,
@@ -18949,18 +19047,28 @@ export class SessionService {
       try {
         await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
           const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
+          assertActive();
+          if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+            options.wakeClaim.stage = "input-started";
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: baseLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            ...(operation ? { operation } : {}),
           });
-          writeSession(this.config.dataDir, currentRetentionCandidate);
+          assertActive();
+          currentRetentionCandidate = this.writeRecoverySession(
+            currentRetentionCandidate,
+            options?.wakeClaim,
+          );
           freshPhase.provisionalWritten = true;
           await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
             agent: session.agent,
+            ...(operation ? { operation } : {}),
           });
+          assertActive();
           if (
             !(await agentProcessAlive(
               {
@@ -18974,22 +19082,31 @@ export class SessionService {
             throw new Error(`Agent ${session.agent} exited before recovery became ready`);
           }
           const agentSessionId = await waitForNewOpenCodeSessionId(baseline);
+          assertActive();
           currentRetentionCandidate = {
             ...currentRetentionCandidate,
             agentSessionId,
             updatedAt: nowIso(),
           };
-          writeSession(this.config.dataDir, currentRetentionCandidate);
+          currentRetentionCandidate = this.writeRecoverySession(
+            currentRetentionCandidate,
+            options?.wakeClaim,
+          );
           recoveredAgentSessionId = agentSessionId;
         });
       } catch (error) {
+        assertActive();
         if (
           freshPhase.provisionalWritten ||
           (await this.launchResourcesMayRemain(currentRetentionCandidate))
         ) {
+          assertActive();
           if (!freshPhase.provisionalWritten)
-            writeSession(this.config.dataDir, currentRetentionCandidate);
-          await this.retainLaunchedError(currentRetentionCandidate, error);
+            currentRetentionCandidate = this.writeRecoverySession(
+              currentRetentionCandidate,
+              options?.wakeClaim,
+            );
+          await this.retainLaunchedError(currentRetentionCandidate, error, operation);
         }
         throw error;
       }
@@ -19001,8 +19118,10 @@ export class SessionService {
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
+        assertActive();
       } catch (error) {
-        await this.retainLaunchedError(currentRetentionCandidate, error);
+        assertActive();
+        await this.retainLaunchedError(currentRetentionCandidate, error, operation);
         throw error;
       }
       freshOpenCodeRecord = currentRetentionCandidate;
@@ -19012,16 +19131,20 @@ export class SessionService {
       await launchFreshOpenCode();
     } else {
       try {
+        assertActive();
+        if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+          options.wakeClaim.stage = "input-started";
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
           launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
           launchScriptDir: sessionToolDir,
           env,
+          ...(operation ? { operation } : {}),
         });
+        assertActive();
         launched = true;
-        writeSession(
-          this.config.dataDir,
+        this.writeRecoverySession(
           this.applyReservedSidecars(
             {
               ...sessionWithAgentId,
@@ -19031,13 +19154,15 @@ export class SessionService {
             },
             mcpSidecarUpdate,
           ),
+          options?.wakeClaim,
         );
         await waitForTmuxReady(
           session.tmuxSession,
           recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
           undefined,
-          { agent: session.agent },
+          { agent: session.agent, ...(operation ? { operation } : {}) },
         );
+        assertActive();
         if (
           !(await agentProcessAlive(
             {
@@ -19051,6 +19176,7 @@ export class SessionService {
           throw new Error(`Agent ${session.agent} exited before recovery became ready`);
         }
       } catch (error) {
+        assertActive();
         const failedAttempt = this.applyReservedSidecars(
           {
             ...sessionWithAgentId,
@@ -19066,7 +19192,8 @@ export class SessionService {
               : await this.launchResourcesMayRemain(failedAttempt);
         }
         if (launched) {
-          await this.retainLaunchedError(failedAttempt, error);
+          assertActive();
+          await this.retainLaunchedError(failedAttempt, error, operation);
           throw error;
         }
         if (!recoveryPlan) throw error;
@@ -19084,7 +19211,12 @@ export class SessionService {
             failure,
           },
         });
-        await this.killAgentPaneAndConfirmExit(failedAttempt, { failOnSurvivors: true });
+        assertActive();
+        await this.killAgentPaneAndConfirmExit(failedAttempt, {
+          failOnSurvivors: true,
+          ...(operation ? { operation } : {}),
+        });
+        assertActive();
         usedFreshLaunch = true;
         agentLaunchId = newAgentLaunchId();
         env = buildLaunchEnv(agentLaunchId);
@@ -19102,15 +19234,19 @@ export class SessionService {
           const freshLaunchCommand = freshPlan.launchCommand;
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
+          assertActive();
+          if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+            options.wakeClaim.stage = "input-started";
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: freshLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            ...(operation ? { operation } : {}),
           });
-          writeSession(
-            this.config.dataDir,
+          assertActive();
+          this.writeRecoverySession(
             this.applyReservedSidecars(
               {
                 ...sessionWithAgentId,
@@ -19122,10 +19258,13 @@ export class SessionService {
               },
               mcpSidecarUpdate,
             ),
+            options?.wakeClaim,
           );
           await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
             agent: session.agent,
+            ...(operation ? { operation } : {}),
           });
+          assertActive();
           if (
             !(await agentProcessAlive(
               {
@@ -19144,6 +19283,7 @@ export class SessionService {
       }
     }
 
+    assertActive();
     let recoveryMessage: PlannedAgentMessage | null = null;
     if (usedFreshLaunch) {
       // Pane confirmed alive by the checks above; deliver task context before
@@ -19230,6 +19370,7 @@ export class SessionService {
           mcpSidecarUpdate,
         ),
         project,
+        operation,
       ),
       recoveryMessage,
     };
@@ -23104,9 +23245,12 @@ export class SessionService {
   private async retainLaunchedError(
     session: SessionRecord,
     error: unknown,
+    operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
+    operation?.assertActive();
     const message = error instanceof Error ? error.message : String(error);
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
+    operation?.assertActive();
     const latest = readSession(this.config.dataDir, session.id);
     if (latest?.status === "killed") return latest;
     const retained: SessionRecord = {

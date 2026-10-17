@@ -52703,6 +52703,258 @@ describe("SessionService", () => {
         },
       );
 
+      it.each(["current", "same-values", "message-update", "newer-consumed"] as const)(
+        "authorizes real wake readiness after a deferred dead probe: %s",
+        async (change) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const entered = gate();
+          const release = gate();
+          let created = false;
+          createTmuxSessionMock.mockImplementation(async () => {
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          isProcessRunningInTmuxMock.mockImplementation(async () => created);
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: created,
+            matchedByName: created,
+            unresponsive: false,
+          }));
+          const runtime = vi.spyOn(internals, "readRuntimeSnapshot");
+          const ready = vi.spyOn(
+            service as unknown as {
+              ensureSessionReadyForSend(session: SessionRecord): Promise<unknown>;
+            },
+            "ensureSessionReadyForSend",
+          );
+          runtime.mockImplementationOnce(async () => {
+            entered.resolve();
+            await release.promise;
+            return {
+              runtimeAlive: false,
+              paneUsable: false,
+              processAlive: false,
+              probeUnresponsive: false,
+            };
+          });
+          const attempt = internals.processScheduledWakes();
+          try {
+            await entered.promise;
+            if (change === "same-values") await rearm(service, record.id, wake.message);
+            else if (change === "message-update")
+              await service.updateWakeMessage(record.id, {
+                target: "scheduled",
+                message: "replacement B",
+              });
+            else if (change === "newer-consumed") {
+              await rearm(service, record.id, "replacement B");
+              created = true;
+              await service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+              created = false;
+              sendMessageToTmuxMock.mockClear();
+              ready.mockClear();
+            }
+            const replacement = sessions.get(record.id)?.scheduledWake;
+            const sentBefore = count("session.wake.sent");
+            release.resolve();
+            await attempt;
+            if (change === "current") {
+              expect(
+                logSpurEventMock.mock.calls.filter(
+                  ([, entry]) => entry.event === "session.wake.failed",
+                ),
+              ).toEqual([]);
+              await vi.waitFor(() =>
+                expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+                  record.tmuxSession,
+                  wake.message,
+                  expect.anything(),
+                ),
+              );
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+              expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+              expect(count("session.wake.sent")).toBe(1);
+            } else {
+              expect(ready).not.toHaveBeenCalled();
+              expect(createTmuxSessionMock).not.toHaveBeenCalled();
+              expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+              expect(sessions.get(record.id)?.scheduledWake).toEqual(replacement);
+              expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+              expect(count("session.wake.sent")).toBe(sentBefore);
+            }
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it("retains an automatic occurrence across native-id discovery and accepts its current owner on the next poll", async () => {
+        const { sessions, record, service, internals, count } = await setup();
+        const { agentSessionId: _unknownNative, ...legacy } = record;
+        sessions.set(record.id, legacy);
+        let created = false;
+        createTmuxSessionMock.mockImplementation(async () => {
+          created = true;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => created);
+        isProcessRunningInTmuxMock.mockImplementation(async () => created);
+        probeTmuxProcessMatchMock.mockImplementation(async () => ({
+          alive: created,
+          matchedByName: created,
+          unresponsive: false,
+        }));
+        try {
+          await internals.processScheduledWakes();
+          expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+          expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(count("session.wake.sent")).toBe(0);
+          expect(count("session.wake.failed")).toBe(0);
+          await internals.processScheduledWakes();
+          await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(count("session.wake.sent")).toBe(1);
+          expect(count("session.wake.failed")).toBe(0);
+          await internals.processScheduledWakes();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each(
+        (["activation-plan", "binding", "input", "ack", "resend", "generation"] as const).flatMap(
+          (boundary) =>
+            (boundary === "binding" || boundary === "ack"
+              ? (["current", "lifecycle", "native", "replacement"] as const)
+              : (["current", "lifecycle", "native"] as const)
+            ).map((guard) => ({ boundary, guard })),
+        ),
+      )(
+        "authorizes real wake recovery across $boundary await: $guard",
+        async ({ boundary, guard }) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const entered = gate();
+          const release = gate();
+          let created = false;
+          let gated = false;
+          let ackScans = 0;
+          const waitAtBoundary = async () => {
+            if (gated) return;
+            gated = true;
+            entered.resolve();
+            await release.promise;
+          };
+          buildAgentResumePlanMock.mockReturnValue(null);
+          createTmuxSessionMock.mockImplementation(async () => {
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          isProcessRunningInTmuxMock.mockImplementation(async () => created);
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: created,
+            matchedByName: created,
+            unresponsive: false,
+          }));
+          if (boundary === "activation-plan")
+            setupAgentHooksMock.mockImplementationOnce(async () => {
+              await waitAtBoundary();
+              return {};
+            });
+          createAgentSubmitAckBindingMock.mockImplementation(async () => {
+            if (boundary === "binding") await waitAtBoundary();
+            return { scan: vi.fn() };
+          });
+          vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+            ackScans += 1;
+            if (boundary === "ack") await waitAtBoundary();
+            return {
+              found:
+                boundary === "generation" ? ackScans > 3 : boundary !== "resend" || ackScans > 1,
+              lastScannedFile: null,
+            };
+          });
+          vi.spyOn(internals, "paneGenerationMatches").mockImplementation(async () => {
+            if (
+              (boundary === "input" && sendMessageToTmuxMock.mock.calls.length === 0) ||
+              (boundary === "resend" && sendMessageToTmuxMock.mock.calls.length === 1) ||
+              (boundary === "generation" && sendSubmitKeyToTmuxMock.mock.calls.length === 2)
+            )
+              await waitAtBoundary();
+            return true;
+          });
+          const attempt = internals.processScheduledWakes();
+          try {
+            await entered.promise;
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Recovery removed its session");
+            let replacement: SessionRecord = {
+              ...current,
+              ...(guard === "native" ? { agentSessionId: "external-native-owner" } : {}),
+              queuedMessages: { messages: ["newer queued text"], awaitingPrompt: true },
+            };
+            if (guard === "lifecycle") {
+              const owner = internals.lifecycle.begin("complete", [record.id]);
+              internals.lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+            }
+            if (guard === "replacement") {
+              await service.updateWakeMessage(record.id, {
+                target: "scheduled",
+                message: "newer recovery wake",
+              });
+              const newer = sessions.get(record.id);
+              if (!newer) throw new Error("Replacement removed its session");
+              replacement = {
+                ...newer,
+                queuedMessages: { messages: ["newer queued text"], awaitingPrompt: true },
+              };
+            }
+            if (guard !== "current") sessions.set(record.id, replacement);
+            release.resolve();
+            await attempt;
+            if (guard === "current") {
+              await vi.waitFor(() =>
+                expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toContain(
+                  wake.message,
+                ),
+              );
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+              expect(count("session.wake.sent")).toBe(1);
+              expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            } else {
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(
+                boundary === "activation-plan" ? 0 : 1,
+              );
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(
+                boundary === "ack" || boundary === "resend" || boundary === "generation" ? 1 : 0,
+              );
+              expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(
+                boundary === "generation" ? 2 : 0,
+              );
+              expect(sessions.get(record.id)).toEqual(replacement);
+              expect(count("session.wake.sent")).toBe(0);
+            }
+            expect(internals.scheduledWakeClaims.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
       it.each([
         "same-values",
         "message-update",
@@ -62527,6 +62779,7 @@ describe("SessionService", () => {
               status: "stopped",
               stopReason: "stale_timeout",
               tmuxSession: id,
+              agentSessionId: `native-${id}`,
               scheduledWake: { dueAt: "2026-03-18T10:00:00.000Z", message: `wake ${id}` },
             }),
           );
@@ -62558,9 +62811,6 @@ describe("SessionService", () => {
         expect(runningIds).toContain("occupier");
         const wokenId = runningIds.find((id) => id !== "occupier");
         expect(wokenId).toBeDefined();
-        expect(sessions.get(wokenId as string)?.scheduledWake?.message).toBe(`wake ${wokenId}`);
-        // Relaunch changes the runtime owner; accept its wake on the next poll.
-        await advanceSeconds(1);
         expect(sessions.get(wokenId as string)?.scheduledWake).toBeUndefined();
 
         const deferredIds = ["parked-1", "parked-2", "parked-3"].filter((id) => id !== wokenId);
