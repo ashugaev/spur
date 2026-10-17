@@ -138,18 +138,12 @@ export async function prepareCandidates(exportPath, outputPath, repoRoot) {
         packageJsonPath,
         `${JSON.stringify({ ...original, version: entry.tag }, null, 2)}\n`,
       );
-      const packed = parseJson(
-        execFileSync(
-          "npm",
-          ["pack", "--ignore-scripts", "--json", "--pack-destination", resolve(outputPath)],
-          { cwd: packagePath, encoding: "utf8" },
-        ),
-      );
-      const filename = packed[0]?.filename;
-      assert(
-        typeof filename === "string" && basename(filename) === filename,
-        "invalid npm pack result",
-      );
+      const filename = execFileSync(
+        "npm",
+        ["pack", "--ignore-scripts", "--silent", "--pack-destination", resolve(outputPath)],
+        { cwd: packagePath, encoding: "utf8" },
+      ).trim();
+      assert(filename === `shugaev-spur-${entry.tag}.tgz`, "invalid npm pack result");
       const candidatePath = join(outputPath, filename);
       execFileSync("bash", [join(repoRoot, "scripts/verify-package-tarball.sh"), candidatePath]);
       const repacked = await mkdtemp(join(tmpdir(), "spur-repacked-"));

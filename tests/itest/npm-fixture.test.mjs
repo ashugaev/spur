@@ -1,12 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { validateManifest, startFixture, McpBindFault, refreshMembership } from "./npm-fixture.mjs";
+import {
+  validateManifest,
+  startFixture,
+  McpBindFault,
+  refreshMembership,
+  prepareCandidates,
+} from "./npm-fixture.mjs";
 import { createServer as createTcpServer } from "node:net";
 const { fetch } = globalThis;
 
@@ -36,6 +42,92 @@ function manifest() {
     })),
   };
 }
+
+test("candidate repacking does not buffer npm's file listing above one MiB", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "spur-pack-output-test-"));
+  try {
+    const repo = join(dir, "repo");
+    const exported = join(dir, "export");
+    const packagePath = join(dir, "package");
+    const dist = join(repo, "v2/dist");
+    const payload = join(packagePath, "payload", "x".repeat(220));
+    for (const path of [dist, exported, payload, join(repo, "scripts"), join(packagePath, "dist")])
+      await mkdir(path, { recursive: true });
+    await writeFile(join(repo, "package.json"), '{"type":"module"}');
+    const buildModule = `export const computeBuildId = () => "${runtimeBuildId}";`;
+    await writeFile(join(dist, "build-identity.js"), buildModule);
+    await writeFile(join(packagePath, "dist/build-identity.js"), buildModule);
+    await writeFile(
+      join(dist, "releases-cache.js"),
+      `export const getReleases = async () => (${JSON.stringify({
+        entries: manifest().publicReleases.entries,
+        stale: false,
+        error: null,
+      })});`,
+    );
+    await writeFile(join(repo, "scripts/verify-package-tarball.sh"), "#!/bin/sh\nexit 0\n");
+    await writeFile(
+      join(packagePath, "package.json"),
+      JSON.stringify({ name: "@shugaev/spur", version: "0.0.0-managed", type: "module" }),
+    );
+    for (let index = 0; index < 4200; index++) await writeFile(join(payload, `${index}.txt`), "");
+    assert.throws(
+      () =>
+        execFileSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
+          cwd: packagePath,
+          maxBuffer: 1024 * 1024,
+          stdio: ["ignore", "pipe", "ignore"],
+        }),
+      { code: "ENOBUFS" },
+    );
+    execFileSync("git", ["init", "--quiet", repo]);
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "fixture",
+      ],
+      { cwd: repo },
+    );
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+    const tarball = "fixture.tgz";
+    execFileSync("tar", ["-czf", join(exported, tarball), "-C", dir, "package"]);
+    await writeFile(
+      join(exported, "manifest.json"),
+      JSON.stringify({
+        sourceSha: sha,
+        runtimeBuildId,
+        packageVersion: "0.0.0-managed",
+        tarball,
+        sha256: createHash("sha256")
+          .update(await readFile(join(exported, tarball)))
+          .digest("hex"),
+      }),
+    );
+    const output = join(dir, "candidates");
+    const prepared = await prepareCandidates(exported, output, repo);
+    assert.deepEqual(
+      prepared.candidates.map((candidate) => candidate.version),
+      ["2.0.0", "2.0.1"],
+    );
+    for (const candidate of prepared.candidates)
+      assert.equal(
+        createHash("sha256")
+          .update(await readFile(join(output, candidate.tarball)))
+          .digest("hex"),
+        candidate.sha256,
+      );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("manifest rejects stale, unpublished and mismatched candidates", () => {
   assert.equal(validateManifest(manifest()).schema, 1);
