@@ -4822,7 +4822,11 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 30_000,
-        accept: (value) => value[0]?.state !== "error" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0] !== undefined &&
+          value[0].state !== "stopped" &&
+          value[0].state !== "error" &&
+          value[0].runtimeAlive === true,
       },
     );
     const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
