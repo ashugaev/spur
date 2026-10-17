@@ -2708,6 +2708,15 @@ export function createProgram(cliEntrypoint: string): Command {
     .version(getVersion(), "-V, --version", "Show version");
 
   program
+    .command("mcp")
+    .description("Serve scoped project/session MCP tools over stdio; requires a running daemon")
+    .option("--project <id...>", "Limit MCP access to these configured projects (repeatable)")
+    .action(async (options: { project?: string[] }) => {
+      const { runMcp } = await import("./mcp.js");
+      await runMcp(program.opts<{ config?: string }>().config, options.project);
+    });
+
+  program
     .command("init")
     .description("Install user systemd units and start Spur after npm install.")
     .option("--no-start", "Install units and linger only; do not start services")

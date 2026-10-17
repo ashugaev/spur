@@ -25,6 +25,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 ## Docs
 
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
+- [docs/mcp.md](docs/mcp.md) — private ChatGPT/Dot connection through OpenAI Secure MCP Tunnel
 - [docs/ci-admission.md](docs/ci-admission.md) — CI runner admission classes and limits
 - [docs/daemon-api.md](docs/daemon-api.md) — daemon HTTP routes
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
