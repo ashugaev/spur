@@ -3381,6 +3381,11 @@ projects:
     expect(detail.tmuxSession).toBe(`${spawned.id}--svc--web`);
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
+    await pollUntil(async () => captureTmuxPane(detail.tmuxSession), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("SERVICE_BOOT"),
+      label: "service pane SERVICE_BOOT",
+    });
 
     const helperLogs = JSON.parse(
       (
@@ -3393,7 +3398,15 @@ projects:
         })
       ).stdout,
     ) as SpurLogEntry[];
-    expect(helperLogs).toEqual([]);
+    expect(helperLogs).toEqual([
+      expect.objectContaining({
+        event: "service.output",
+        level: "info",
+        message: "SERVICE_BOOT",
+        sessionId: spawned.id,
+        details: { serviceId: "web" },
+      }),
+    ]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -3438,7 +3451,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
+  it("reads sidecar pane output when background runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -3489,6 +3502,13 @@ projects:
       (await context.execCli(["--config", configPath, "spawn", "api", "browser logs", "--json"]))
         .stdout,
     ) as SessionView;
+    const browserPane = spawned.sidecars.find((sidecar) => sidecar.name === "browser")?.tmuxSession;
+    if (!browserPane) throw new Error("Missing browser sidecar pane in spawned session view");
+    await pollUntil(async () => captureTmuxPane(browserPane), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("BROWSER_READY"),
+      label: "browser sidecar pane BROWSER_READY",
+    });
 
     const sidecarLogs = JSON.parse(
       (
@@ -3504,7 +3524,15 @@ projects:
         ])
       ).stdout,
     ) as SpurLogEntry[];
-    expect(sidecarLogs).toEqual([]);
+    expect(sidecarLogs).toEqual([
+      expect.objectContaining({
+        event: "sidecar.output",
+        level: "info",
+        message: "BROWSER_READY",
+        sessionId: spawned.id,
+        details: { sidecarName: "browser" },
+      }),
+    ]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {
