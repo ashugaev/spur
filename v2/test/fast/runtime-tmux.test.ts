@@ -1,4 +1,5 @@
 import type * as childProcessModule from "node:child_process";
+import type * as fsModule from "node:fs";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -1063,6 +1064,67 @@ describe("runtime-tmux", () => {
         expect(beforeLaunch).not.toHaveBeenCalled();
         expect(execFileAsyncMock).not.toHaveBeenCalled();
         expect(spawnCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(["write", "chmod"] as const)(
+      "cleans a partial env file after original %s preparation failure",
+      async (step) => {
+        const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-env-fault-"));
+        const failure = new Error(`owned env-file ${step} failure`);
+        const beforeLaunch = vi.fn();
+        let envFile: string | undefined;
+        vi.doMock("node:fs", async (importOriginal) => {
+          const actual = await importOriginal<typeof fsModule>();
+          const isEnvFile = (file: Parameters<typeof writeFileSync>[0]): file is string =>
+            typeof file === "string" && file.startsWith(join(dir, ".spur-pane-env."));
+          const fail = (file: string): never => {
+            envFile = file;
+            expect(actual.readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe(
+              "echo prepared\n",
+            );
+            expect(actual.statSync(join(dir, "agent-launch.sh")).isFile()).toBe(true);
+            expect(actual.statSync(file).size).toBeGreaterThan(0);
+            throw failure;
+          };
+          return {
+            ...actual,
+            writeFileSync: ((file, data, options) => {
+              if (step === "write" && isEnvFile(file)) {
+                actual.writeFileSync(file, "partial owned env file\n", options);
+                fail(file);
+              }
+              actual.writeFileSync(file, data, options);
+            }) satisfies typeof actual.writeFileSync,
+            chmodSync: ((file, mode) => {
+              if (step === "chmod" && isEnvFile(file)) fail(file);
+              actual.chmodSync(file, mode);
+            }) satisfies typeof actual.chmodSync,
+          };
+        });
+        try {
+          vi.resetModules();
+          const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+          await expect(
+            createTmuxSession({
+              sessionName: "boundary",
+              cwd: TEST_TMP_DIR,
+              launchCommand: "echo prepared",
+              launchScriptDir: dir,
+              beforeLaunch,
+            }),
+          ).rejects.toBe(failure);
+          expect(envFile).toBeDefined();
+          expect(envFile && existsSync(envFile)).toBe(false);
+          expect(paneEnvFiles(dir)).toEqual([]);
+          expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+          expect(beforeLaunch).not.toHaveBeenCalled();
+          expect(execFileAsyncMock).not.toHaveBeenCalled();
+          expect(spawnCalls).toHaveLength(0);
+        } finally {
+          vi.doUnmock("node:fs");
+          vi.resetModules();
+        }
       },
     );
 
