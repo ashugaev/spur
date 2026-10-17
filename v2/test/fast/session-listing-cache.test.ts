@@ -226,16 +226,19 @@ describe("session directory listing cache", () => {
     const dataDir = await newDataDir();
     seedFleet(dataDir, 1, 0);
     const dir = projectDir(dataDir, "api");
-    // Whole-ms mtime, so restoring it below reproduces the exact fingerprint.
-    const mtime = new Date();
-    utimesSync(dir, mtime, mtime);
-    expect(statSync(dir).mtimeMs).toBe(mtime.getTime());
+    // Whole-second mtime: utimes round-trips it exactly (a whole-ms Date can
+    // read back as .999), so restoring it below reproduces the fingerprint.
+    // The clock is pinned 500ms past it, so the listing is young on every run.
+    const mtimeSec = Math.floor(Date.now() / 1_000) - 10;
+    utimesSync(dir, mtimeSec, mtimeSec);
+    expect(statSync(dir).mtimeMs).toBe(mtimeSec * 1_000);
+    vi.spyOn(Date, "now").mockReturnValue(mtimeSec * 1_000 + 500);
     expect(ids(listSessions(dataDir))).toEqual(["api-0"]);
 
     // A create landing inside the stat's timestamp tick: the dir fingerprint
     // does not move.
     writeSession(dataDir, session("api-1", "api", "same tick"));
-    utimesSync(dir, mtime, mtime);
+    utimesSync(dir, mtimeSec, mtimeSec);
 
     expect(ids(listSessions(dataDir))).toEqual(["api-0", "api-1"]);
   });
