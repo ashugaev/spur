@@ -11780,10 +11780,22 @@ export class SessionService {
 
     const existing = readServiceInstance(this.config.dataDir, sessionId, serviceId);
     if (existing) {
-      const existingRuntimeAlive = await tmuxSessionExists(existing.tmuxSession);
-      const existingPaneDead = existingRuntimeAlive
-        ? await tmuxPaneDead(existing.tmuxSession)
-        : true;
+      const presence = await getTmuxSessionPresence(existing.tmuxSession);
+      if (presence.unresponsive || presence.diagnostic) {
+        throw new SidecarProbeUnresponsiveError(
+          `Service ${serviceId} tmux state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
+      const panePresence = presence.present
+        ? await getTmuxPanePresence(existing.tmuxSession)
+        : null;
+      if (panePresence?.unresponsive || panePresence?.diagnostic) {
+        throw new SidecarProbeUnresponsiveError(
+          `Service ${serviceId} pane state is unreadable (tmux did not answer); retry shortly`,
+        );
+      }
+      const existingRuntimeAlive = presence.present;
+      const existingPaneDead = panePresence?.dead ?? true;
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
