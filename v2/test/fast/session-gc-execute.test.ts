@@ -741,7 +741,7 @@ describe("executeSessionGc partial groups", () => {
 
 describe("executeSessionGc limit", () => {
   it("counts only acting groups, so groups blocked at execution never starve eligible ones", async () => {
-    const blocked = Array.from({ length: 21 }, (_, index) =>
+    const blocked = Array.from({ length: 1 }, (_, index) =>
       makeSession({
         id: `blocked-${index}`,
         branch: `feature/open-${index}`,
@@ -771,8 +771,74 @@ describe("executeSessionGc limit", () => {
 
     expect(deps.archiveGroup).toHaveBeenCalledTimes(1);
     expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["ok-1"]);
-    expect(report.groups).toHaveLength(22);
+    expect(report.groups).toHaveLength(2);
     expect(report.totals.recordsArchived).toBe(1);
+  });
+
+  describe("bounded probes and report", () => {
+    const LIMIT = 3;
+    const execBlocked = (count: number) =>
+      Array.from({ length: count }, (_, index) =>
+        makeSession({
+          id: `eb-${index}`,
+          branch: `feature/open-${index}`,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+    const planBlocked = (count: number) =>
+      Array.from({ length: count }, (_, index) =>
+        makeSession({
+          id: `pb-${index}`,
+          status: "running",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+    const depsFor = (records: SessionRecord[], blocked: SessionRecord[]) =>
+      makeDeps({
+        readGroupMembers: (ids) =>
+          ids.map((id) => records.find((record) => record.id === id) ?? null),
+        openPrIndex: vi.fn(
+          async (): Promise<GcOpenPrIndex> => ({
+            numbers: new Set(),
+            branches: new Set(blocked.map((record) => record.branch)),
+          }),
+        ),
+      });
+
+    it("caps plan-blocked entries at the limit and still archives behind fewer than 2x exec-blocked groups", async () => {
+      const blocked = execBlocked(5);
+      const records = [
+        ...planBlocked(10),
+        ...blocked,
+        makeSession({ id: "ok-1", updatedAt: "2026-02-01T00:00:00.000Z" }),
+      ];
+      const deps = depsFor(records, blocked);
+
+      const report = await executeSessionGc(planMany(records, LIMIT), deps, {
+        dryRun: false,
+        sizes: true,
+      });
+
+      expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["ok-1"]);
+      expect(deps.measureSize).toHaveBeenCalledTimes(6);
+      expect(deps.probeGuards).toHaveBeenCalledTimes(6);
+      expect(report.groups).toHaveLength(LIMIT + 6);
+    });
+
+    it("stops probing after 2x limit groups when every group blocks at execution", async () => {
+      const blocked = execBlocked(10);
+      const deps = depsFor(blocked, blocked);
+
+      const report = await executeSessionGc(planMany(blocked, LIMIT), deps, {
+        dryRun: false,
+        sizes: true,
+      });
+
+      expect(deps.measureSize).toHaveBeenCalledTimes(LIMIT * 2);
+      expect(deps.probeGuards).toHaveBeenCalledTimes(LIMIT * 2);
+      expect(report.groups).toHaveLength(LIMIT * 2);
+      expect(deps.archiveGroup).not.toHaveBeenCalled();
+    });
   });
 });
 

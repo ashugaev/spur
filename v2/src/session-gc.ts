@@ -611,9 +611,21 @@ export async function executeSessionGc(
   let freedBytes = 0;
   let errors = 0;
   let actingGroups = 0;
+  let probedGroups = 0;
+  let planBlockedReported = 0;
 
   for (const group of plan.groups) {
     if (actingGroups >= plan.limit) break;
+    if (group.action === "blocked") {
+      // No IO and no slot; reported only up to `limit` for diagnostics.
+      if (planBlockedReported >= plan.limit) continue;
+      planBlockedReported += 1;
+    } else {
+      // Groups blocked at execution still cost du/probe/gh calls, so the
+      // walk past them is bounded.
+      if (probedGroups >= plan.limit * 2) break;
+      probedGroups += 1;
+    }
     const plannedAction = group.action;
     let action: GcAction = group.action;
     let blockReasons = [...group.blockReasons];
