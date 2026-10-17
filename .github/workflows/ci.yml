@@ -47,6 +47,38 @@ jobs:
       - run: bash v2/test/npm-init.test.sh
       - run: bash v2/test/install-and-restart.test.sh
 
+  install-candidate:
+    name: Install Candidate
+    if: github.event_name == 'pull_request'
+    needs: quality
+    runs-on: self-hosted
+    timeout-minutes: 20
+    env:
+      SPUR_BUILD_RESTART: "0"
+      SPUR_TEST_DEPLOY_EXPORT_DIR: ${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - run: bash scripts/test-deploy.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spur-install-candidate-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/manifest.json
+            ${{ env.SPUR_TEST_DEPLOY_EXPORT_DIR }}/*.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
   playwright-admission:
     needs: quality
     if: github.event_name == 'pull_request'
