@@ -56,7 +56,7 @@
 - `POST /sessions/:id/complete` — optional correlation `operationId`, group `completedIds`/outcomes, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/self-destruct`
 - `POST /sessions/:id/kill`
-- `POST /sessions/:id/restore` — optional correlation `operationId`, settled receipt, lifecycle 409/503; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
+- `POST /sessions/:id/restore` — optional `operationId`, settled receipt, lifecycle 409/503, 20-minute deadline 504, disconnect cancellation; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/reopen` — restore request fields and single reopen receipt; `v2/src/session-lifecycle.ts`, `v2/src/server.ts`.
 - `POST /sessions/:id/handoff` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.
 - `POST /sessions/:id/respawn` — `reasoningEffort`: omitted carries same-agent override, agent switch drops it, `null` uses project default; `v2/src/session-service.ts`.

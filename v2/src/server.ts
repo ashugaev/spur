@@ -6,6 +6,7 @@ import {
   lifecycleErrorReceipt,
   parseLifecycleOperationId,
   SessionLifecycleError,
+  RestoreOperationError,
 } from "./session-lifecycle.js";
 import { parseAgentName } from "./agents/index.js";
 import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
@@ -2094,7 +2095,22 @@ export async function startServer(
           );
           return;
         }
-        sendJson(response, 200, await service.restore(restoreSessionId, body));
+        const controller = new AbortController();
+        const abort = (): void => controller.abort();
+        const close = (): void => {
+          if (!response.writableFinished) abort();
+        };
+        request.once("aborted", abort);
+        response.once("close", close);
+        try {
+          const restored = await service.restore(restoreSessionId, body, {
+            signal: controller.signal,
+          });
+          if (!response.destroyed) sendJson(response, 200, restored);
+        } finally {
+          request.off("aborted", abort);
+          response.off("close", close);
+        }
         return;
       }
 
@@ -2251,6 +2267,16 @@ export async function startServer(
           path,
           payload: { error: message, ...error.payload },
         });
+        return;
+      }
+      if (error instanceof RestoreOperationError) {
+        if (!response.destroyed) {
+          failRequest(response, error.statusCode, message, {
+            method,
+            path,
+            payload: { error: message, code: error.code },
+          });
+        }
         return;
       }
       if (error instanceof AutoPingError) {
@@ -2418,7 +2444,6 @@ export async function startServer(
         resolve();
       });
     });
-    await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("daemon.startup.failed", {
@@ -2451,6 +2476,20 @@ export async function startServer(
       level: "warn",
       message: `Reconcile at boot failed: ${message}`,
     });
+  }
+
+  try {
+    await startAutomation();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.failed", {
+      level: "error",
+      message: `Spur daemon failed during startup: ${message}`,
+    });
+    service.dispose();
+    autoPing.dispose();
+    await closeServer();
+    throw error;
   }
 
   try {
