@@ -7836,8 +7836,8 @@ export class SessionService {
         limit: gcConfig.maxGroupsPerSweep,
         pathExists: (path) => workspaceExists(path),
       });
-      // sizes: true so the sweep can report freed bytes; the du cost is bounded
-      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      // sizes: true so the sweep can report freed bytes; only reclaim groups
+      // are measured, and the executor probes at most 2 * maxGroupsPerSweep.
       const report = await executeSessionGc(
         plan,
         // A stale-parked session (isStaleParked) merely went idle — it is
@@ -7860,7 +7860,10 @@ export class SessionService {
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
-        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+        details: {
+          totals: report.totals,
+          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+        },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -12488,6 +12491,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -13115,6 +13119,18 @@ export class SessionService {
     }
   }
 
+  // The reuse context is captured before awaits (preflight, id reservation);
+  // session GC can archive the workspace anchor in between. Checked
+  // synchronously right before the placeholder write, so in this process the
+  // child is either visible to GC's membership recheck or refused here.
+  private assertReuseAnchorPresent(reuseCtx: { workspaceId: string } | null | undefined): void {
+    if (reuseCtx && !readSession(this.config.dataDir, reuseCtx.workspaceId)) {
+      throw new Error(
+        `reuseWorkspaceSessionId: workspace anchor ${reuseCtx.workspaceId} was archived`,
+      );
+    }
+  }
+
   private resolveWorkspaceReuseContext(
     request: SpawnSessionRequest,
     project: ProjectConfig,
@@ -13507,6 +13523,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
