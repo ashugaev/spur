@@ -1204,6 +1204,30 @@ test.describe("S2: Actions bar", () => {
     expect(dialogShown).toBe(true);
   });
 
+  test("restores an exited agent from detail while the pane remains alive", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "detail-exited-live-pane",
+      status: "errored",
+      state: "error",
+      runtimeAlive: true,
+      error: "Agent runtime exited unexpectedly.",
+    });
+    await mockSessionDetail(page, session);
+    let calls = 0;
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      calls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      session.status = "running";
+      session.state = "waiting";
+      session.error = "";
+      session.lifecycle = lifecycleReceipt(operationId, session.id, "restore", "succeeded", 2);
+      await route.fulfill({ json: session });
+    });
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^restore$/i }).click();
+    await expect.poll(() => calls).toBe(1);
+  });
+
   test("restore failure shows a persistent dismissible toast", async ({ page }) => {
     const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
     await mockSessionDetail(page, session);

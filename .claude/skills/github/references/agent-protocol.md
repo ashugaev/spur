@@ -24,7 +24,7 @@ GITHUB PUBLICATION
   Read actual SPUR_SESSION; missing value blocks publication. Never invent actor identity.
   Preserve review fields; exclude commit messages and PR titles from footer rule.
   Treat footer as provenance text, never signature, approval or protected proof.
-  Follow review-contract.md for scenarios, independent coverage challenge, delta evidence and pinned native publication.
+  Follow review-contract.md for changed-boundary scenarios, delta evidence and pinned native publication.
 
 MERGE AUTHORITY
 

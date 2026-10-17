@@ -3,7 +3,7 @@
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
 Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
-`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
+`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; row evidence required, legacy coverage optional; `v2/src/review-app.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
 `mcp [--http]`, `mcp-tunnel`: full-access daemon MCP over stdio/loopback HTTP, optional supervised tunnel; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [client setup](mcp.md).
 
@@ -18,7 +18,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## gc
 
-`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
+`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. `--limit` caps groups that act and listed blocked groups; execution probes at most 2x `--limit` groups. Group actions: `reclaim`, `archive`, `partial`, `blocked`. `--older-than` is the minimum age of a record; worktree removal needs every group member eligible; otherwise `partial` archives only eligible records (`archiveSessionIds` in `--json`) and keeps ineligible records, desk anchors they reference, and one record per existing worktree. A dirty, unpushed or open-PR worktree degrades `reclaim` to `partial` with a keeper record. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
 
