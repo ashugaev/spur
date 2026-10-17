@@ -96,6 +96,12 @@ describe("MCP daemon boundary", () => {
       hasMoreAfter: true,
     });
     expect(
+      fixture.calls.some(
+        (call) =>
+          call.path === `/sessions/${session.id}/conversation?view=messages&limit=3&from=10`,
+      ),
+    ).toBe(true);
+    expect(
       (await call("spawn_session", { project: "test", prompt: "  task  " })).structuredContent,
     ).toEqual(projected);
     expect(
@@ -227,6 +233,8 @@ describe("MCP daemon boundary", () => {
   it("bounds multibyte conversation output, truncates metadata and preserves source cursor", async () => {
     const { fixture, call } = await setup();
     fixture.state.conversation = {
+      messages: [],
+      durationMs: 0,
       state: "waiting",
       startIndex: 0,
       totalEntries: 10,
@@ -261,6 +269,8 @@ describe("MCP daemon boundary", () => {
   it("consumes a single escaped oversized message after explicit truncation", async () => {
     const { fixture, call } = await setup();
     fixture.state.conversation = {
+      messages: [],
+      durationMs: 0,
       state: "waiting",
       startIndex: 0,
       totalEntries: 1,
@@ -308,5 +318,47 @@ describe("MCP daemon boundary", () => {
     await client.close();
     await failed;
     expect(fixture.calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it.each([
+    { sessionId: "wrong" },
+    { nextFrom: 9 },
+    { nextFrom: 15 },
+    { hasMoreBefore: false },
+    { messages: [{ index: 13, role: "assistant", text: "bad range" }] },
+    {
+      messages: [
+        { index: 12, role: "assistant", text: "x" },
+        { index: 12, role: "user", text: "duplicate" },
+      ],
+    },
+    { messages: [{ index: 12, role: "assistant", text: "x".repeat(8193) }] },
+    { messages: [{ index: 12, role: "tool", text: "hidden" }] },
+  ])("rejects malformed conversation page %j then recovers on same connection", async (change) => {
+    const { fixture, call } = await setup();
+    fixture.state.override = (path) =>
+      path.includes("/conversation")
+        ? {
+            value: {
+              sessionId: session.id,
+              state: "waiting",
+              messages: [{ index: 12, role: "assistant", text: "x" }],
+              startIndex: 10,
+              totalEntries: 14,
+              nextFrom: 13,
+              hasMoreBefore: true,
+              hasMoreAfter: true,
+              ...change,
+            },
+          }
+        : undefined;
+    expect((await call("get_conversation", { sessionId: session.id, limit: 3 })).isError).toBe(
+      true,
+    );
+    fixture.state.override = undefined;
+    expect((await call("get_conversation", { sessionId: session.id })).isError).toBeUndefined();
+    expect(fixture.calls.at(-1)?.path).toBe(
+      `/sessions/${session.id}/conversation?view=messages&limit=50`,
+    );
   });
 });

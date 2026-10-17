@@ -1,6 +1,6 @@
 # Connect ChatGPT and Dot to Spur
 
-Run `spur mcp` on the host with an existing, running Spur daemon.
+Run `spur mcp` on the host with a running daemon from the same Spur version.
 Use [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for private access without public inbound ports.
 
 ## Select access

@@ -13,6 +13,7 @@ import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/model
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { projectConversationPage } from "./conversation-page.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -1719,13 +1720,36 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
+        const view = url.searchParams.get("view");
+        const limitValue = url.searchParams.get("limit");
+        const limit = limitValue === null ? 50 : Number(limitValue);
+        if (view !== null && view !== "messages") {
+          sendError(response, 400, "Unsupported conversation view");
+          return;
+        }
+        if (
+          view === "messages" &&
+          (!/^\d+$/.test(limitValue ?? "50") ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 100)
+        ) {
+          sendError(response, 400, "Conversation limit must be an integer from 1 to 100");
+          return;
+        }
         const fromValue = url.searchParams.get("from");
         const from =
           fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        const conversation = await service.getConversation(
+          conversationSessionId,
+          from !== undefined ? { from } : {},
+        );
         sendJson(
           response,
           200,
-          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+          view === "messages"
+            ? projectConversationPage(conversation, conversationSessionId, limit)
+            : conversation,
         );
         return;
       }

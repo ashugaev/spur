@@ -1971,6 +1971,23 @@ export type TranscriptEntry =
       timestampMs?: number;
     };
 
+export interface ConversationPage {
+  sessionId: string;
+  state: SessionState;
+  messages: {
+    index: number;
+    role: "user" | "assistant";
+    text: string;
+    timestampMs?: number;
+    textTruncated?: boolean;
+  }[];
+  startIndex: number;
+  totalEntries: number;
+  nextFrom: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
+
 export interface ConversationResponse {
   messages: ConversationMessage[];
   entries: TranscriptEntry[];

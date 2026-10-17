@@ -2,7 +2,8 @@ import { createServer, type IncomingHttpHeaders } from "node:http";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempDir } from "../helpers/common.js";
-import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
+import { SPUR_DAEMON_API_VERSION, type ConversationResponse } from "../../src/types.js";
+import { projectConversationPage } from "../../src/conversation-page.js";
 
 export const session = {
   id: "test-one",
@@ -39,6 +40,8 @@ export async function mcpFixture(host = "127.0.0.1") {
     ],
     info: { ok: true, apiVersion: SPUR_DAEMON_API_VERSION, configPath },
     conversation: {
+      messages: [],
+      durationMs: 0,
       state: "waiting",
       startIndex: 10,
       totalEntries: 14,
@@ -48,7 +51,7 @@ export async function mcpFixture(host = "127.0.0.1") {
         { kind: "message", role: "assistant", text: "Answer", timestampMs: 123 },
         { kind: "message", role: "user", text: "Followup" },
       ],
-    },
+    } as ConversationResponse,
     override: undefined as
       | undefined
       | ((
@@ -79,7 +82,11 @@ export async function mcpFixture(host = "127.0.0.1") {
           : path.startsWith("/sessions?")
             ? fixture.sessions
             : path.includes("/conversation")
-              ? fixture.conversation
+              ? projectConversationPage(
+                  fixture.conversation,
+                  session.id,
+                  Number(new URL(path, "http://localhost").searchParams.get("limit") ?? 50),
+                )
               : path === "/sessions/background"
                 ? session
                 : fixture.sessions.find(

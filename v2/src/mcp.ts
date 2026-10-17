@@ -4,11 +4,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { loadInstanceConfigReadOnly } from "./config.js";
+import { CONVERSATION_PAGE_BYTES, CONVERSATION_MESSAGE_CHARACTERS } from "./conversation-page.js";
 import { SESSION_STATES, SPUR_DAEMON_API_VERSION } from "./types.js";
 import { getVersion } from "./version.js";
 
 const BODY_BYTES = 8 * 1024 * 1024;
-const DATA_BYTES = 48 * 1024;
 const RESULT_BYTES = 128 * 1024;
 const id = z.string().min(1).max(256);
 const sessionId = id.refine(
@@ -45,25 +45,41 @@ const sessionSchema = z.object({
   slots: z.object({ title: z.string().optional() }).optional(),
   error: z.string().optional(),
 });
-const entrySchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("message"),
-    role: z.enum(["user", "assistant"]),
-    text: z.string(),
-    timestampMs: z.number().finite().optional(),
-  }),
-  z.object({ kind: z.literal("tool") }),
-  z.object({ kind: z.literal("reasoning") }),
-  z.object({ kind: z.literal("question") }),
-]);
 const conversationSchema = z
   .object({
+    sessionId,
     state,
-    entries: z.array(entrySchema),
+    messages: z
+      .array(
+        z.object({
+          index: offset,
+          role: z.enum(["user", "assistant"]),
+          text: z.string().max(CONVERSATION_MESSAGE_CHARACTERS),
+          timestampMs: z.number().finite().optional(),
+          textTruncated: z.boolean().optional(),
+        }),
+      )
+      .max(100),
     startIndex: offset,
     totalEntries: offset,
+    nextFrom: offset,
+    hasMoreBefore: z.boolean(),
+    hasMoreAfter: z.boolean(),
   })
-  .refine((value) => value.startIndex + value.entries.length <= value.totalEntries);
+  .refine(
+    (value) =>
+      value.startIndex <= value.nextFrom &&
+      value.nextFrom <= value.totalEntries &&
+      value.hasMoreBefore === value.startIndex > 0 &&
+      value.hasMoreAfter === value.nextFrom < value.totalEntries &&
+      (value.startIndex === value.totalEntries || value.nextFrom > value.startIndex) &&
+      value.messages.every(
+        (message, index) =>
+          message.index >= value.startIndex &&
+          message.index < value.nextFrom &&
+          message.index > (value.messages[index - 1]?.index ?? -1),
+      ),
+  );
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -76,7 +92,7 @@ function bytes(value: unknown): number {
 }
 
 function result(data: NonNullable<CallToolResult["structuredContent"]>): CallToolResult {
-  if (bytes(data) > DATA_BYTES)
+  if (bytes(data) > CONVERSATION_PAGE_BYTES)
     throw new Error("Result exceeds MCP data limit; request a smaller page");
   const output: CallToolResult = {
     structuredContent: data,
@@ -335,47 +351,16 @@ export async function createMcpServer(
       const value = parse(
         conversationSchema,
         await request(
-          `/sessions/${encodeURIComponent(input.sessionId)}/conversation${input.from === undefined ? "" : `?from=${input.from}`}`,
+          `/sessions/${encodeURIComponent(input.sessionId)}/conversation?view=messages&limit=${input.limit ?? 50}${input.from === undefined ? "" : `&from=${input.from}`}`,
           signal,
         ),
       );
-      const messages: {
-        index: number;
-        role: "user" | "assistant";
-        text: string;
-        timestampMs?: number;
-        textTruncated?: boolean;
-      }[] = [];
-      let consumed = 0;
-      for (const entry of value.entries.slice(0, input.limit ?? 50)) {
-        if (entry.kind === "message") {
-          const message = {
-            index: value.startIndex + consumed,
-            role: entry.role,
-            text: entry.text.slice(0, 8192),
-            ...(entry.timestampMs !== undefined ? { timestampMs: entry.timestampMs } : {}),
-            ...(entry.text.length > 8192 ? { textTruncated: true } : {}),
-          };
-          while (messages.length === 0 && bytes(message) > DATA_BYTES - 2048) {
-            message.text = message.text.slice(0, Math.floor(message.text.length / 2));
-            message.textTruncated = true;
-          }
-          if (bytes(messages) + bytes(message) > DATA_BYTES - 2048) break;
-          messages.push(message);
-        }
-        consumed++;
-      }
-      const nextFrom = value.startIndex + consumed;
-      return {
-        sessionId: input.sessionId,
-        state: value.state,
-        messages,
-        startIndex: value.startIndex,
-        totalEntries: value.totalEntries,
-        nextFrom,
-        hasMoreBefore: value.startIndex > 0,
-        hasMoreAfter: nextFrom < value.totalEntries,
-      };
+      if (
+        value.sessionId !== input.sessionId ||
+        value.nextFrom - value.startIndex > (input.limit ?? 50)
+      )
+        throw new Error("Invalid daemon conversation page");
+      return value;
     },
   );
   register(
