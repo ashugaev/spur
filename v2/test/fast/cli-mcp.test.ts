@@ -148,6 +148,80 @@ describe("built spur mcp stdio", () => {
     expect(code).toBe(0);
   });
 
+  it.each([false, true])(
+    "startup EOF aborts a hung probe with buffered frames=%s",
+    async (buffered) => {
+      let pending = false,
+        aborted = false;
+      const { dir, config, requests } = await fixture((_request, response) => {
+        pending = true;
+        response.once("close", () => {
+          aborted = true;
+        });
+      });
+      const processChild = spawn(process.execPath, [cli, "--config", config, "mcp"], {
+        cwd: dir,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      cleanups.push(async () => {
+        processChild.kill("SIGKILL");
+      });
+      let stdout = "",
+        stderr = "";
+      let exit: unknown;
+      processChild.stdout.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
+      processChild.stderr.on("data", (data: Buffer) => {
+        stderr += data.toString();
+      });
+      processChild.once("exit", (code, signal) => {
+        exit = [code, signal];
+      });
+      await vi.waitFor(() => expect(pending).toBe(true), { timeout: 5000 });
+      if (buffered)
+        processChild.stdin.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-11-25",
+              capabilities: {},
+              clientInfo: { name: "test", version: "1" },
+            },
+          }) + "\n",
+        );
+      processChild.stdin.end();
+      await vi.waitFor(
+        () => {
+          expect(aborted).toBe(true);
+          expect(exit).toEqual([0, null]);
+        },
+        { timeout: 1500 },
+      );
+      expect(stdout).toBe("");
+      expect(stderr).toBe("");
+      expect(requests.map((request) => request.path)).toEqual(["/info"]);
+    },
+  );
+
+  it("preserves SDK initialize frames buffered during the startup probe", async () => {
+    let probe: ServerResponse | undefined;
+    const { dir, config } = await fixture((_request, response) => {
+      probe = response;
+    });
+    const connecting = child(config, dir);
+    const release = vi
+      .waitFor(() => expect(probe).toBeDefined(), { timeout: 5000 })
+      .then(() => {
+        probe?.end(JSON.stringify({ ok: true, apiVersion: SPUR_DAEMON_API_VERSION, pid: 123 }));
+      });
+    const [{ client, errors }] = await Promise.all([connecting, release]);
+    expect((await client.listTools()).tools).toHaveLength(6);
+    expect(errors).toEqual([]);
+  });
+
   it("EOF aborts an in-flight daemon request and exits without a signal", async () => {
     let pending = false,
       aborted = false;
@@ -193,7 +267,7 @@ describe("built spur mcp stdio", () => {
         params: { name: "get_session", arguments: { sessionId: "s" } },
       }) + "\n",
     );
-    await vi.waitFor(() => expect(pending).toBe(true));
+    await vi.waitFor(() => expect(pending).toBe(true), { timeout: 5000 });
     processChild.stdin.end();
     const [code, signal] = await exited;
     expect(code).toBe(0);
@@ -219,7 +293,7 @@ describe("built spur mcp stdio", () => {
     const call = client
       .callTool({ name: "get_session", arguments: { sessionId: "s" } })
       .catch(() => undefined);
-    await vi.waitFor(() => expect(pending).toBe(true));
+    await vi.waitFor(() => expect(pending).toBe(true), { timeout: 5000 });
     if (!transport.pid) throw new Error("Missing child pid");
     process.kill(transport.pid, "SIGTERM");
     await vi.waitFor(() => expect(aborted).toBe(true));

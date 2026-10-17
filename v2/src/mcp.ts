@@ -1,5 +1,7 @@
+import { PassThrough } from "node:stream";
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { connectDaemon, type ConnectedDaemon } from "./client.js";
@@ -313,6 +315,7 @@ export function createMcpServer(
 
 export async function runMcp(configPath?: string): Promise<void> {
   const shutdown = new AbortController();
+  const input = new PassThrough({ highWaterMark: STDIO_DEFAULT_MAX_BUFFER_SIZE });
   let server: McpServer | undefined;
   const close = () => {
     shutdown.abort();
@@ -321,6 +324,8 @@ export async function runMcp(configPath?: string): Promise<void> {
   process.once("SIGTERM", close);
   process.once("SIGINT", close);
   process.stdin.once("end", close);
+  // Drain stdin during the probe; retain frames until the SDK attaches.
+  process.stdin.pipe(input);
   try {
     const daemon = await connectDaemon(configPath, shutdown.signal);
     if (shutdown.signal.aborted) return;
@@ -332,14 +337,18 @@ export async function runMcp(configPath?: string): Promise<void> {
         void runningServer.close();
       }
     });
-    await runningServer.connect(new StdioServerTransport());
+    await runningServer.connect(new StdioServerTransport(input));
     await closed;
+  } catch (error) {
+    if (!shutdown.signal.aborted) throw error;
   } finally {
     shutdown.abort();
     await server?.close();
     process.removeListener("SIGTERM", close);
     process.removeListener("SIGINT", close);
     process.stdin.removeListener("end", close);
+    process.stdin.unpipe(input);
+    input.destroy();
     process.stdin.pause();
   }
 }
