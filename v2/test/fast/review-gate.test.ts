@@ -1108,6 +1108,13 @@ const nativeNegativeModes = [
 ] as const;
 test.each([
   "clean",
+  "causal-approved-churn",
+  "causal-blocked-churn",
+  "causal-foreign-head",
+  "causal-foreign-head-unfiltered",
+  "built-causal-approved-churn",
+  "built-causal-blocked-churn",
+  "built-causal-foreign-head",
   ...nativeNegativeModes,
   "native-page-two",
   "native-page-fault",
@@ -1139,9 +1146,32 @@ test.each([
   "abort-during-success",
 ])(
   "producer API fixture %s writes in_progress before evidence and never stale success",
-  async (mode) => {
-    const snapshot = mode.startsWith("coupled-") ? sameRepositoryFixture() : fixture();
-    if (mode.startsWith("coupled-")) snapshot.unresolved = 1;
+  async (scenario) => {
+    const built = scenario.startsWith("built-");
+    const mode = built ? scenario.slice("built-".length) : scenario;
+    const gate: Pick<GateReader, "GateGitHub"> = built
+      ? await import(/* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate.js`).href)
+      : { GateGitHub };
+    const producer: typeof produceGates = built
+      ? (
+          await import(
+            /* @vite-ignore */ pathToFileURL(`${process.cwd()}/dist/review-gate-producer.js`).href
+          )
+        ).produceGates
+      : produceGates;
+    const snapshot =
+      mode.startsWith("coupled-") || mode.startsWith("causal-")
+        ? sameRepositoryFixture()
+        : fixture();
+    if (mode.startsWith("coupled-") || mode === "causal-blocked-churn") snapshot.unresolved = 1;
+    if (mode.startsWith("causal-foreign-head"))
+      snapshot.runs.push({
+        ...snapshot.runs[0],
+        id: 2,
+        head_sha: "f".repeat(40),
+        display_title: `Spur CI v1 REF=refs/pull/5/merge M=${"e".repeat(40)}`,
+        pull_requests: [{ number: 5, head: { sha: "f".repeat(40) }, base: { sha: B } }],
+      });
     const negative = nativeNegativeModes.some((value) => value === mode);
     if (["missing-code", "negative-outsider", "negative-threads"].includes(mode))
       snapshot.reviews = snapshot.reviews.filter((row) => row.id !== policy.codeActor);
@@ -1208,6 +1238,7 @@ test.each([
     let jobReads = 0;
     let requestsAfterAbort = 0;
     const requestPaths: string[] = [];
+    const runQueries: (string | null)[] = [];
     const prNumbers: number[] = [];
     let reviewRequests = 0;
     let checkCreates = 0;
@@ -1272,6 +1303,19 @@ test.each([
         reads++;
         if (reads === 3) {
           changeEquivalent(snapshot, mode === "lane-blocked-churn" ? "updated-at" : mode);
+          if (mode === "causal-approved-churn" || mode === "causal-blocked-churn") {
+            for (const name of ["head", "base"])
+              Object.assign((snapshot.pr[name] as { repo: Record<string, unknown> }).repo, {
+                pushed_at: "changed",
+                updated_at: "changed",
+                open_issues_count: 99,
+                forks_count: 99,
+              });
+            if (mode === "causal-approved-churn") {
+              Object.assign(snapshot.pr, { updated_at: "changed", comments: 99 });
+              addOtherPr(snapshot);
+            }
+          }
           if (mode.startsWith("coupled-")) {
             for (const name of ["head", "base"])
               (snapshot.pr[name] as { repo: Record<string, unknown> }).repo.pushed_at = "changed";
@@ -1329,11 +1373,17 @@ test.each([
         if ((mode === "runs-502" || mode === "runs-502-two-prs") && reads === 3)
           return new Response("bad gateway", { status: 502 });
         const headSha = new URL(String(url)).searchParams.get("head_sha");
+        runQueries.push(headSha);
         return Response.json({
-          workflow_runs: snapshot.runs.filter((run) => run.head_sha === headSha),
+          workflow_runs: snapshot.runs.filter(
+            (run) =>
+              !headSha || mode === "causal-foreign-head-unfiltered" || run.head_sha === headSha,
+          ),
         });
       }
       const runPath = /\/runs\/(\d+)(?:\/attempts\/\d+)?$/.exec(path);
+      if (runPath?.[1] === "2" && mode.startsWith("causal-foreign-head"))
+        return new Response("historical run unavailable", { status: 403 });
       if (runPath) return Response.json(snapshot.runs.find((run) => run.id === Number(runPath[1])));
       if (path.endsWith(`/commits/${M}`))
         return Response.json({ sha: M, parents: [{ sha: B }, { sha: H }] });
@@ -1348,7 +1398,7 @@ test.each([
       }
       throw new Error("unexpected API path");
     };
-    const api = new GateGitHub("fixture", transport, controller.signal);
+    const api = new gate.GateGitHub("fixture", transport, controller.signal);
     if (mode === "abort-after-precheck") {
       const pages = api.pages.bind(api);
       vi.spyOn(api, "pages").mockImplementation(async (path, key) => {
@@ -1384,12 +1434,14 @@ test.each([
           mode === "runs-502-two-prs"
         )
           await expect(
-            produceGates(api, policy, mode === "runs-502-two-prs" ? { number: 5 } : {}),
+            producer(api, policy, mode === "runs-502-two-prs" ? { number: 5 } : {}),
           ).rejects.toThrow("gate-reconciliation-incomplete");
-        else await produceGates(api, policy, mode === "all-native-negative" ? { number: 5 } : {});
+        else await producer(api, policy, mode === "all-native-negative" ? { number: 5 } : {});
         expect(writes[0]?.status).toBe("in_progress");
         expect(writes.at(-1)?.conclusion).toBe(
           mode === "clean" ||
+            mode === "causal-approved-churn" ||
+            mode.startsWith("causal-foreign-head") ||
             mode === "native-page-two" ||
             mode === "unlisted-churn" ||
             equivalentChanges.some((change) => change === mode)
@@ -1405,7 +1457,12 @@ test.each([
           expect(requestPaths).toHaveLength(mode === "all-native-negative" ? 9 : 5);
         }
         if (mode === "native-page-two") expect(reviewRequests).toBe(6);
+        if (mode.startsWith("causal-foreign-head")) {
+          expect(runQueries).toEqual([H, H]);
+          expect(requestPaths).not.toContain(`/repos/owner/repo/commits/${"e".repeat(40)}`);
+        }
         const expectedSummaries = {
+          "causal-blocked-churn": "unresolved-threads",
           "coupled-blocked": "unresolved-threads",
           "coupled-retained": "unresolved-threads",
           moved: "Evidence changed during evaluation: pr, ci, anchors, jobs",
@@ -1456,6 +1513,8 @@ test.each([
       }
     } finally {
       trace.mockRestore();
+      if (mode.startsWith("causal-foreign-head"))
+        expect(requestPaths.filter((path) => /\/runs\/2(?:\/|$)/.test(path))).toEqual([]);
     }
   },
 );
