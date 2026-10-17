@@ -5188,54 +5188,32 @@ export class SessionService {
             (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
           Date.parse(scheduledWake.dueAt) <= now
         ) {
-          const claim = await this.claimScheduledWake(session, false);
-          if (claim) {
-            try {
+          let claim: ScheduledWakeClaim | null = null;
+          try {
+            claim = await this.claimScheduledWake(session, false);
+            if (claim)
               await this.sendWithAttempt(session.id, { message: scheduledWake.message }, claim);
-            } catch (error) {
-              const failure = error instanceof Error ? error.message : String(error);
-              const transition = `${scheduledWake.dueAt}\n${scheduledWake.message}\n${failure}`;
-              if (
-                claim.stage !== "accepted" &&
-                this.scheduledWakeClaimCurrent(claim) &&
-                this.scheduledWakeLastFailure.get(session.id) !== transition
-              ) {
-                this.scheduledWakeLastFailure.set(session.id, transition);
-                if (error instanceof SessionAdmissionDeniedError) {
-                  this.logEvent("session.wake.deferred", {
-                    level: "warn",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
-                    details: {
-                      dueAt: scheduledWake.dueAt,
-                    },
-                  });
-                } else {
-                  this.logEvent("session.wake.failed", {
-                    level: "error",
-                    sessionId: session.id,
-                    projectId: session.project,
-                    message: `Failed to send scheduled wake to ${session.id}: ${failure}`,
-                    details: {
-                      dueAt: scheduledWake.dueAt,
-                    },
-                  });
-                }
-              }
-            } finally {
-              if (claim.stage === "accepted") {
-                this.scheduledWakeLastFailure.delete(session.id);
-                this.logEvent("session.wake.sent", {
-                  level: "info",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Sent scheduled wake to ${session.id}`,
-                  details: { dueAt: scheduledWake.dueAt },
-                });
-              }
-              this.releaseScheduledWakeClaim(claim);
+          } catch (error) {
+            if (
+              !(error instanceof SessionAdmissionDeniedError) &&
+              claim &&
+              claim.stage !== "accepted" &&
+              this.scheduledWakeClaimCurrent(claim)
+            ) {
+              this.logScheduledWakeFailure(session, scheduledWake, error);
             }
+          } finally {
+            if (claim?.stage === "accepted") {
+              this.scheduledWakeLastFailure.delete(session.id);
+              this.logEvent("session.wake.sent", {
+                level: "info",
+                sessionId: session.id,
+                projectId: session.project,
+                message: `Sent scheduled wake to ${session.id}`,
+                details: { dueAt: scheduledWake.dueAt },
+              });
+            }
+            if (claim) this.releaseScheduledWakeClaim(claim);
           }
         }
 
@@ -14476,6 +14454,9 @@ export class SessionService {
         this.lifecycle.snapshot(session.id).operation?.phase === "pending"
       )
         return null;
+      if (isStaleParked(current) || current.stopReason === "memory_shed") {
+        this.assertWakeAdmissible(current, manual ? undefined : wake);
+      }
       const claim: ScheduledWakeClaim = {
         session: current,
         wake,
@@ -14517,6 +14498,39 @@ export class SessionService {
   private releaseScheduledWakeClaim(claim: ScheduledWakeClaim): void {
     if (this.scheduledWakeClaims.get(claim.session.id) === claim)
       this.scheduledWakeClaims.delete(claim.session.id);
+  }
+
+  private logScheduledWakeFailure(
+    session: SessionRecord,
+    wake: NonNullable<SessionRecord["scheduledWake"]>,
+    error: unknown,
+  ): void {
+    const failure = error instanceof Error ? error.message : String(error);
+    const transition = `${wake.dueAt}\n${wake.message}\n${failure}`;
+    if (this.scheduledWakeLastFailure.get(session.id) === transition) return;
+    this.scheduledWakeLastFailure.set(session.id, transition);
+    const denied = error instanceof SessionAdmissionDeniedError;
+    this.logEvent(denied ? "session.wake.deferred" : "session.wake.failed", {
+      level: denied ? "warn" : "error",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `${denied ? "Deferred scheduled wake for" : "Failed to send scheduled wake to"} ${session.id}: ${failure}`,
+      details: { dueAt: wake.dueAt },
+    });
+  }
+
+  private assertWakeAdmissible(
+    session: SessionRecord,
+    scheduledWake?: NonNullable<SessionRecord["scheduledWake"]>,
+  ): void {
+    try {
+      this.assertAdmissible(session.project, "wake");
+    } catch (error) {
+      // Record the actual refusal before releasing ownership to a replacement.
+      if (scheduledWake && error instanceof SessionAdmissionDeniedError)
+        this.logScheduledWakeFailure(session, scheduledWake, error);
+      throw error;
+    }
   }
 
   private async dispatchIntervalWakeNow(session: SessionRecord): Promise<void> {
@@ -15140,6 +15154,7 @@ export class SessionService {
               observeDelivery: (stage: ScheduledWakeClaim["stage"]) => {
                 if (wakeClaim.stage !== "accepted") wakeClaim.stage = stage;
               },
+              wakeClaim,
             }
           : {}),
       });
@@ -15189,18 +15204,34 @@ export class SessionService {
   private async ensureReadyForQueuedSend(
     sessionId: string,
     expectedLifecycle?: SessionLifecycleStamp,
-    options?: { operation?: RestoreOperationContext; wakeClaim?: ScheduledWakeClaim },
+    options?: {
+      operation?: RestoreOperationContext;
+      wakeClaim?: ScheduledWakeClaim;
+      observePreparedSession?: (session: SessionRecord) => void;
+    },
   ): Promise<void> {
     const operation = options?.operation;
     const wakeClaim = options?.wakeClaim;
     operation?.assertActive();
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const preparationRevision = this.lifecycle.snapshot(sessionId).revision;
     this.assertTokenBudgetAllowsActivation(hint);
     const runtime = await this.readRuntimeSnapshot(hint);
     operation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
-      await this.captureAgentSessionId(hint, 0, operation);
+      await this.captureAgentSessionId(
+        hint,
+        0,
+        operation,
+        () =>
+          this.lifecycle.snapshot(sessionId).revision === preparationRevision &&
+          (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)),
+        (prepared) => {
+          if (wakeClaim) wakeClaim.session = prepared;
+          options?.observePreparedSession?.(prepared);
+        },
+      );
       return;
     }
     await this.withPaneWriteLock(hint.tmuxSession, async () => {
@@ -15672,6 +15703,7 @@ export class SessionService {
     sessionId: string,
     paneKey: string,
     intent: DeliveryIntent,
+    wakeClaim?: ScheduledWakeClaim,
   ): Promise<PreparedDelivery | null> {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) {
@@ -15708,7 +15740,10 @@ export class SessionService {
     const readyResult =
       intent.kind === "queued-drain"
         ? { session: current, recoveryMessage: null }
-        : await this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+        : await this.ensureSessionReadyForSend(current, {
+            paneAlreadyOwned: true,
+            ...(wakeClaim ? { wakeClaim } : {}),
+          });
     const ready = readyResult.session;
     if (ready.tmuxSession !== paneKey) return null;
     if (intent.kind === "queued-drain") {
@@ -15813,6 +15848,7 @@ export class SessionService {
       interactive?: boolean;
       allowDelivery?: () => boolean;
       observeDelivery?: (stage: "input-started" | "accepted") => void;
+      wakeClaim?: ScheduledWakeClaim;
     },
   ): Promise<{
     record: SessionRecord | null;
@@ -15828,7 +15864,7 @@ export class SessionService {
       const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
         options?.allowDelivery?.() === false
           ? Promise.resolve(null)
-          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
+          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
       );
       if (!prepared) return { record: null, recovered: null };
 
@@ -16198,6 +16234,7 @@ export class SessionService {
       hasAttachments?: boolean;
       allowDelivery?: () => boolean;
       observeDelivery?: (stage: "input-started" | "accepted") => void;
+      wakeClaim?: ScheduledWakeClaim;
     },
   ): Promise<SessionView> {
     // send and flush are user-driven: short ack pacing, and a live-process ack
@@ -16234,6 +16271,7 @@ export class SessionService {
           interactive,
           ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           ...(options.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
+          ...(options.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
         },
       );
       const persisted = result.record ?? readSession(this.config.dataDir, sessionId);
@@ -18529,8 +18567,10 @@ export class SessionService {
     timeoutMs: number,
     operation?: RestoreOperationContext,
     allowWrite?: () => boolean,
+    observePersistence?: (session: SessionRecord) => void,
   ): Promise<SessionRecord> {
     operation?.assertActive();
+    const discoveryRevision = this.lifecycle.snapshot(session.id).revision;
     if (allowWrite?.() === false) return readSession(this.config.dataDir, session.id) ?? session;
     if (!session.worktreePath) {
       return session;
@@ -18617,8 +18657,21 @@ export class SessionService {
           );
           return { ...session, agentSessionId };
         }
+        if (
+          observePersistence &&
+          (latest.agentSessionId !== undefined ||
+            !sameSessionRuntimeOwner(latest, session) ||
+            latest.agentLaunchId !== session.agentLaunchId ||
+            !this.lifecycleStateMatches(latest, this.lifecycleStamp(session)) ||
+            this.lifecycle.snapshot(session.id).revision !== discoveryRevision)
+        ) {
+          return latest;
+        }
+        operation?.assertActive();
+        if (allowWrite?.() === false) return latest;
+        const persisted = { ...latest, agentSessionId };
         try {
-          writeSession(this.config.dataDir, { ...latest, agentSessionId });
+          writeSession(this.config.dataDir, persisted);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.logEvent("session.agent_session_id.persist_failed", {
@@ -18638,6 +18691,7 @@ export class SessionService {
           );
           return { ...session, agentSessionId };
         }
+        observePersistence?.(persisted);
         this.agentSessionIdPersistBackoffUntil.delete(session.id);
         this.logEvent("session.agent_session_id.discovered", {
           level: "info",
@@ -18713,8 +18767,21 @@ export class SessionService {
     const runtime = await this.readRuntimeSnapshot(session);
     operation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
+      const wakeClaim = options?.wakeClaim;
       return {
-        session: await this.captureAgentSessionId(session, 0, operation),
+        session: await this.captureAgentSessionId(
+          session,
+          0,
+          operation,
+          () =>
+            this.lifecycle.snapshot(session.id).revision === probeRevision &&
+            (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)),
+          wakeClaim
+            ? (prepared) => {
+                wakeClaim.session = prepared;
+              }
+            : undefined,
+        ),
         recoveryMessage: null,
       };
     }
@@ -18788,7 +18855,10 @@ export class SessionService {
       isStaleParked(session) ||
       (session.status === "stopped" && session.stopReason === "memory_shed")
     ) {
-      this.assertAdmissible(session.project, "wake");
+      this.assertWakeAdmissible(
+        session,
+        options?.wakeClaim && !options.wakeClaim.manual ? options.wakeClaim.wake : undefined,
+      );
     }
 
     const project = this.getProject(session.project);
@@ -21290,12 +21360,18 @@ export class SessionService {
     // `opencode export`), and remove/flush must not 409 while nothing is
     // being typed.
     let claimed = false;
+    let preparedObservation = session;
     try {
       let nextMessage: string | undefined;
       try {
-        await this.ensureReadyForQueuedSend(sessionId, this.lifecycleStamp(session));
+        await this.ensureReadyForQueuedSend(sessionId, this.lifecycleStamp(session), {
+          observePreparedSession: (prepared) => {
+            preparedObservation = prepared;
+          },
+        });
         const readySession = readSession(this.config.dataDir, sessionId);
         if (!readySession) return false;
+        let settleObservation = readySession;
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
@@ -21309,7 +21385,14 @@ export class SessionService {
         // delay it by another full window. The agent's transcript is inherently
         // scoped to the agent and is untouched by both.
         const settleRemainingMs = async (): Promise<number | null> => {
-          const classified = await this.classifySessionRecord(readySession);
+          const classified = await this.classifySessionRecord(
+            settleObservation,
+            undefined,
+            (prepared) => {
+              settleObservation = prepared;
+              preparedObservation = prepared;
+            },
+          );
           if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
             return null;
           }
@@ -21365,7 +21448,12 @@ export class SessionService {
         // attempt, not only the send itself). The message stays queued; the
         // loop's own sleep-and-continue retries it on the next poll.
         if (error instanceof TmuxProbeUnknownError) {
-          this.retainDetectionError(session, error.message, "runtime_probe", probeRevision);
+          this.retainDetectionError(
+            preparedObservation,
+            error.message,
+            "runtime_probe",
+            probeRevision,
+          );
         }
         const failure = error instanceof Error ? error.message : String(error);
         // Log-once-per-transition: a permanently broken session (e.g. a
@@ -23055,6 +23143,7 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     workspacePresent: boolean,
     probeRevision: number,
+    observePromotion?: (session: SessionRecord) => void,
   ): SessionRecord {
     // Shepherd included, for the reason spelled out in
     // reconcileStaleStoppedSession above.
@@ -23095,6 +23184,7 @@ export class SessionService {
     }
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
+    observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -23164,10 +23254,15 @@ export class SessionService {
   private async classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
+    let observation = session;
     try {
-      return await this.classifySessionRecordKnown(session, options);
+      return await this.classifySessionRecordKnown(session, options, (prepared) => {
+        observation = prepared;
+        observePreparation?.(prepared);
+      });
     } catch (error) {
       if (
         error instanceof SessionResourceNotFoundError &&
@@ -23175,7 +23270,7 @@ export class SessionService {
       ) {
         throw error;
       }
-      return this.classificationErrorResult(session, error, "other", probeRevision);
+      return this.classificationErrorResult(observation, error, "other", probeRevision);
     }
   }
 
@@ -23294,6 +23389,7 @@ export class SessionService {
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
     const scanPane = options?.scanPane ?? true;
@@ -23354,12 +23450,29 @@ export class SessionService {
         !sameSessionRuntimeOwner(observed, session) ||
         observed.agentLaunchId !== session.agentLaunchId)
     ) {
-      return this.classificationErrorResult(
-        session,
-        new Error("Session changed during runtime probe"),
-        "runtime_probe",
-        probeRevision,
-      );
+      const protectedSnapshot =
+        isTerminalSessionStatus(session.status) ||
+        session.stopReason === "manual_pause" ||
+        session.stopReason === "token_budget" ||
+        isStaleParked(session);
+      const current = protectedSnapshot ? session : observed;
+      this.lastClassifiedLogStates.delete(session.id);
+      return {
+        session: current,
+        runtime: {
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+          probeUnresponsive: true,
+        },
+        state: hasRetainedSessionError(current) ? "error" : statusFallbackState(current),
+        source: "status",
+        historySourcePath: null,
+        workspacePresent: workspace.exists,
+        serverError: false,
+        agentActivityAt: null,
+      };
     }
     let effectiveSession = session;
     let runtimeOwnerChanged = false;
@@ -23400,6 +23513,7 @@ export class SessionService {
         const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
+        observePreparation?.(effectiveSession);
         this.stateCache.delete(session.id);
         if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
       }
@@ -23451,6 +23565,7 @@ export class SessionService {
         runtime,
         workspace.exists,
         probeRevision,
+        observePreparation,
       );
     }
 

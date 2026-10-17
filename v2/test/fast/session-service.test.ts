@@ -14400,6 +14400,88 @@ describe("SessionService", () => {
     },
   );
 
+  it.each([false, true])(
+    "retains the current ACK diagnostic after its own historical heal with unresponsive %s",
+    async (unresponsive) => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = runningSession({
+        agentSessionId: "pinned-native",
+        error: "Session status detection failed: ps failed: malformed process table output",
+        errorSource: "other",
+        queuedMessages: { messages: ["first queued", "later queued"], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      const internals = sessionServiceInternals(service);
+      let releaseRun: () => void = () => {};
+      // A production drain already owns this registration. Keep the heal from
+      // starting a second attempt that could hide this attempt's stale catch.
+      internals.deliveryRuns.set(
+        record.id,
+        new Promise<void>((resolve) => {
+          releaseRun = resolve;
+        }),
+      );
+      getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, `healed-diagnostic-ack-${unresponsive}.jsonl`),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+      });
+      probeTmuxProcessMatchMock.mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? {
+              alive: false,
+              matchedByName: false,
+              unresponsive,
+              diagnostic: "ack process probe denied after historical heal",
+            }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+      vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: null,
+      });
+      try {
+        await internals.tryDeliverQueuedMessage(record.id);
+        const after = sessions.get(record.id);
+        expect(after?.error).toBe(
+          "Session status detection failed: ack process probe denied after historical heal",
+        );
+        expect(after?.errorSource).toBe("runtime_probe");
+        expect(after?.agentSessionId).toBe(record.agentSessionId);
+        expect(after?.queuedMessages).toEqual({
+          messages: ["later queued"],
+          awaitingPrompt: true,
+        });
+        expect(after?.queuedMessageTyped).toMatchObject({
+          message: "first queued",
+          ackBaseline: baseline,
+        });
+        expect(after?.submitUnconfirmedAt).toBe(after?.queuedMessageTyped?.typedAt);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "session.message.delivery_recovered" ||
+              entry.event === "session.message.sent",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        service.dispose();
+        releaseRun();
+      }
+    },
+  );
+
   it("deliver keeps the queued message and never recovers when the submit ack liveness probe was unresponsive", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
@@ -52782,6 +52864,75 @@ describe("SessionService", () => {
               expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
               expect(count("session.wake.sent")).toBe(sentBefore);
             }
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["current", "same-id-writer", "native", "launch", "lifecycle", "terminal"] as const)(
+        "authorizes manual first-native-id preparation only for its own current write: %s",
+        async (change) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const { agentSessionId: _unknownNative, ...legacy } = record;
+          sessions.set(record.id, legacy);
+          const entered = gate();
+          const release = gate();
+          findAgentSessionIdMock.mockImplementation(async () => {
+            entered.resolve();
+            await release.promise;
+            return "session-uuid";
+          });
+          vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+            found: true,
+            lastScannedFile: null,
+          });
+          const attempt = service
+            .dispatchWake(record.id, { target: "scheduled", dispatch: true })
+            .then(
+              (value) => ({ value, error: null }),
+              (error: unknown) => ({ value: null, error }),
+            );
+          try {
+            await entered.promise;
+            const current = sessions.get(record.id) as SessionRecord;
+            if (change === "lifecycle") {
+              const owner = internals.lifecycle.begin("complete", [record.id]);
+              internals.lifecycle.settle(owner, true, () => "succeeded", () => true);
+            } else {
+              sessions.set(record.id, {
+                ...current,
+                slots: { title: "concurrent metadata", links: [] },
+                ...(change === "same-id-writer"
+                  ? { agentSessionId: "session-uuid" }
+                  : change === "native"
+                    ? { agentSessionId: "foreign-native" }
+                    : change === "launch"
+                      ? { agentLaunchId: "foreign-launch" }
+                      : change === "terminal"
+                        ? { status: "completed" as const }
+                        : {}),
+              });
+            }
+            release.resolve();
+            const result = await attempt;
+            if (change === "current") {
+              expect(result.error).toBeNull();
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+              expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+              expect(sessions.get(record.id)?.slots?.title).toBe("concurrent metadata");
+              expect(count("session.wake.sent")).toBe(1);
+            } else {
+              expect(result.error).toBeTruthy();
+              expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+              expect(count("session.wake.sent")).toBe(0);
+              expect(count("session.agent_session_id.discovered")).toBe(0);
+            }
+            expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
           } finally {
             release.resolve();
             await attempt;
