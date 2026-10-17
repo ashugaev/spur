@@ -1134,6 +1134,86 @@ describe("captureCodexRolloutBaseline", () => {
 });
 
 describe("scanCodexRolloutForMessage", () => {
+  it.each(
+    [
+      {
+        name: "content missing",
+        type: "response_item",
+        payload: { type: "message", role: "user" },
+      },
+      {
+        name: "content null",
+        type: "response_item",
+        payload: { type: "message", role: "user", content: null },
+      },
+      {
+        name: "content object",
+        type: "response_item",
+        payload: { type: "message", role: "user", content: {} },
+      },
+      { name: "message missing", type: "event_msg", payload: { type: "user_message" } },
+      { name: "message null", type: "event_msg", payload: { type: "user_message", message: null } },
+      { name: "message number", type: "event_msg", payload: { type: "user_message", message: 7 } },
+      { name: "message object", type: "event_msg", payload: { type: "user_message", message: {} } },
+    ].flatMap((envelope) =>
+      (["alone", "before-match", "after-match"] as const).map((position) => ({
+        ...envelope,
+        position,
+      })),
+    ),
+  )(
+    "keeps malformed recognized user envelope uncertain: $name $position",
+    async ({ type, payload, position }) => {
+      const realFs = await vi.importActual<typeof Fs>("node:fs");
+      const realOs = await vi.importActual<typeof Os>("node:os");
+      const realPromises = await vi.importActual<typeof FsPromises>("node:fs/promises");
+      const realReadline = await vi.importActual<typeof Readline>("node:readline");
+      const previousFs = { ...(await import("node:fs")) };
+      const previousPromises = { ...(await import("node:fs/promises")) };
+      const previousReadline = { ...(await import("node:readline")) };
+      const root = await realPromises.mkdtemp(join(realOs.tmpdir(), "spur-codex-envelope-"));
+      const file = join(root, "original.jsonl");
+      const prefix =
+        JSON.stringify({ type: "session_meta", payload: { id: "native", cwd: "/worktree" } }) +
+        "\n";
+      const malformed = JSON.stringify({ type, payload }) + "\n";
+      const receipt =
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "held" } }) +
+        "\n";
+      await realPromises.writeFile(file, prefix);
+      const baseline = new Map([[file, Buffer.byteLength(prefix)]]);
+      await realPromises.appendFile(
+        file,
+        position === "before-match"
+          ? malformed + receipt
+          : position === "after-match"
+            ? receipt + malformed
+            : malformed,
+      );
+      vi.doMock("node:fs", () => realFs);
+      vi.doMock("node:fs/promises", () => realPromises);
+      vi.doMock("node:readline", () => realReadline);
+      vi.resetModules();
+      try {
+        const actual = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+        const strict = await actual.scanCodexRolloutForMessage(root, "held", baseline, {
+          nativeSessionId: "native",
+          worktreePath: "/worktree",
+        });
+        expect(strict.found).toBe(false);
+        expect(strict.qualifiedNoMatch).not.toBe(true);
+        const legacy = await actual.scanCodexRolloutForMessage(root, "held", baseline);
+        expect(legacy.found).toBe(position !== "alone");
+        expect(legacy.qualifiedNoMatch).not.toBe(true);
+      } finally {
+        vi.doMock("node:fs", () => previousFs);
+        vi.doMock("node:fs/promises", () => previousPromises);
+        vi.doMock("node:readline", () => previousReadline);
+        await realPromises.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     "exact",
     "response-item",
@@ -1142,6 +1222,10 @@ describe("scanCodexRolloutForMessage", () => {
     "malformed-text-missing",
     "malformed-text-object",
     "image-and-text",
+    "image-only",
+    "empty-content",
+    "valid-nonmatch",
+    "qualified-empty",
     "whitespace",
     "wrong-uuid",
     "mixed-record-uuid",
@@ -1206,14 +1290,18 @@ describe("scanCodexRolloutForMessage", () => {
       guard === "response-item" ||
         guard === "assistant" ||
         guard.startsWith("malformed-text-") ||
-        guard === "image-and-text"
+        guard === "image-and-text" ||
+        guard === "image-only" ||
+        guard === "empty-content"
         ? {
             type: "response_item",
             payload: {
               type: "message",
               role: guard === "assistant" ? "assistant" : "user",
               content: [
-                { type: "input_text", text: message },
+                ...(["image-only", "empty-content"].includes(guard)
+                  ? []
+                  : [{ type: "input_text", text: message }]),
                 ...(guard.startsWith("malformed-text-")
                   ? [
                       {
@@ -1231,13 +1319,19 @@ describe("scanCodexRolloutForMessage", () => {
                       },
                     ]
                   : []),
-                ...(guard === "image-and-text"
+                ...(guard === "image-and-text" || guard === "image-only"
                   ? [{ type: "input_image", image_url: "fixture" }]
                   : []),
               ],
             },
           }
-        : { type: "event_msg", payload: { type: "user_message", message } },
+        : {
+            type: "event_msg",
+            payload: {
+              type: "user_message",
+              message: guard === "valid-nonmatch" ? "different text" : message,
+            },
+          },
     );
     const conflictingMeta =
       JSON.stringify({
@@ -1271,9 +1365,11 @@ describe("scanCodexRolloutForMessage", () => {
         ? conflictingMeta + user + "\n"
         : guard === "malformed"
           ? "{broken}\n"
-          : guard === "before-offset"
-            ? "{}\n"
-            : user + (guard === "partial-line" ? "" : "\n"),
+          : guard === "qualified-empty"
+            ? ""
+            : guard === "before-offset"
+              ? "{}\n"
+              : user + (guard === "partial-line" ? "" : "\n"),
     );
     if (guard === "malformed-after-ack") await realPromises.appendFile(file, "{broken}\n");
     if (guard === "conflicting-after-ack") await realPromises.appendFile(file, conflictingMeta);
@@ -1337,6 +1433,8 @@ describe("scanCodexRolloutForMessage", () => {
           guard === "coherent-duplicate" ||
           guard === "image-and-text",
       );
+      if (["image-only", "empty-content", "valid-nonmatch", "qualified-empty"].includes(guard))
+        expect(result.qualifiedNoMatch).toBe(true);
       if (["replacement", "truncation", "append-during-scan"].includes(guard))
         expect(changed).toBe(true);
     } finally {
