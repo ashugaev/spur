@@ -69,7 +69,7 @@ const ROOT_ORDER: readonly {
   { id: "session-artifacts", reclaimedByDiskGc: false, reclaimedBy: "artifacts-gc" },
   { id: "worktrees", reclaimedByDiskGc: false, reclaimedBy: "spur gc" },
   { id: "session-tools", reclaimedByDiskGc: false, reclaimedBy: "none" },
-  { id: "opencode-store", reclaimedByDiskGc: false, reclaimedBy: "none" },
+  { id: "opencode-store", reclaimedByDiskGc: false, reclaimedBy: "opencode-gc" },
   { id: "npm-cacache", reclaimedByDiskGc: false, reclaimedBy: "spur cache" },
   { id: "npm-npx", reclaimedByDiskGc: false, reclaimedBy: "spur cache" },
   { id: "playwright-browsers", reclaimedByDiskGc: true, reclaimedBy: "disk-gc" },
