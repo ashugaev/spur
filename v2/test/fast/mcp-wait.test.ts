@@ -1,12 +1,92 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { McpGateway } from "../../src/mcp-gateway.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 import { encodeMcpResult } from "../../src/mcp-results.js";
 import nativeFollowups from "../fixtures/mcp-followup-correlation.json" with { type: "json" };
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => {
-  for (const close of cleanups.splice(0).reverse()) await close();
+type WaitMode = "observe" | "expire";
+let time: ReturnType<typeof controlledTime>;
+beforeEach(() => {
+  time = controlledTime();
 });
+afterEach(async () => {
+  try {
+    time.abort();
+    for (const close of cleanups.splice(0).reverse()) await close();
+  } finally {
+    time.restore();
+  }
+});
+function controlledTime() {
+  let now = Date.now();
+  let active: { mode: WaitMode; deadline: number; timeout?: AbortController } | undefined;
+  const controllers: AbortController[] = [];
+  const nativeFetch = globalThis.fetch;
+  const date = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    if (active && !active.timeout) active.timeout = controller;
+    return controller.signal;
+  });
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const response = await nativeFetch(input, init);
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (
+      active &&
+      (init?.method ?? "GET") === "GET" &&
+      url.pathname.endsWith("/conversation") &&
+      url.searchParams.get("view") === "messages"
+    ) {
+      const value: unknown = await response.clone().json();
+      if (
+        !value ||
+        typeof value !== "object" ||
+        !("hasMoreAfter" in value) ||
+        typeof value.hasMoreAfter !== "boolean"
+      )
+        throw new Error("Expected projected conversation page");
+      if (active.mode === "expire" && !value.hasMoreAfter) now = active.deadline;
+    }
+    return response;
+  });
+  return {
+    async wait(
+      gateway: McpGateway,
+      input: Parameters<McpGateway["wait"]>[0],
+      signal: AbortSignal,
+      mode: WaitMode,
+    ) {
+      if (active) throw new Error("Overlapping controlled waits are unsupported");
+      active = { mode, deadline: now + (input.timeoutMs ?? 55_000) };
+      try {
+        return await gateway.wait(input, signal);
+      } finally {
+        active = undefined;
+      }
+    },
+    expireSignal() {
+      if (!active?.timeout) throw new Error("No active wait timeout");
+      active.timeout.abort(new DOMException("Controlled wait timeout", "TimeoutError"));
+    },
+    abort() {
+      for (const controller of controllers) controller.abort();
+    },
+    restore() {
+      fetch.mockRestore();
+      timeout.mockRestore();
+      date.mockRestore();
+    },
+  };
+}
+function wait(
+  gateway: McpGateway,
+  input: Parameters<McpGateway["wait"]>[0],
+  signal: AbortSignal,
+  mode: WaitMode = "observe",
+) {
+  return time.wait(gateway, input, signal, mode);
+}
 async function setup() {
   const fixture = await mcpFixture();
   cleanups.push(fixture.close);
@@ -43,7 +123,8 @@ it.each(Object.entries(nativeFollowups))(
     ];
     fixture.state.conversation.totalEntries = 2;
     expect(
-      await gateway.wait(
+      await wait(
+        gateway,
         { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
         AbortSignal.timeout(1000),
       ),
@@ -71,7 +152,12 @@ it("never treats old idle as send completion; recognizes matching new user then 
   );
   const after = String(receipt.after);
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 5 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 5 },
+      AbortSignal.timeout(1000),
+      "expire",
+    ),
   ).toMatchObject({ reason: "timeout", submitted: false });
   fixture.state.conversation = {
     messages: [],
@@ -85,7 +171,7 @@ it("never treats old idle as send completion; recognizes matching new user then 
     totalEntries: 2,
   };
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 50 }, AbortSignal.timeout(1000)),
+    await wait(gateway, { sessionId: session.id, after, timeoutMs: 50 }, AbortSignal.timeout(1000)),
   ).toMatchObject({ reason: "ready", submitted: true, progressed: true });
 });
 it("keeps attachment delivery unconfirmed and detects daemon instance reset", async () => {
@@ -99,14 +185,17 @@ it("keeps attachment delivery unconfirmed and detects daemon instance reset", as
     AbortSignal.timeout(5000),
   );
   expect(
-    await gateway.wait(
+    await wait(
+      gateway,
       { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
       AbortSignal.timeout(1000),
+      "expire",
     ),
   ).toMatchObject({ reason: "timeout", unconfirmed: true });
   fixture.state.info.lifecycleInstanceId = "new";
   expect(
-    await gateway.wait(
+    await wait(
+      gateway,
       { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
       AbortSignal.timeout(1000),
     ),
@@ -142,75 +231,51 @@ it("holds queued/unconfirmed submissions and reports question, terminal and canc
     startIndex: 0,
     totalEntries: 2,
   };
-  let now = Date.now();
-  const nativeTimeout = AbortSignal.timeout;
-  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
-  const timeout = vi
-    .spyOn(AbortSignal, "timeout")
-    .mockImplementation((milliseconds) =>
-      milliseconds === 100
-        ? new AbortController().signal
-        : nativeTimeout.call(AbortSignal, milliseconds),
-    );
-  try {
-    let advanced = false;
-    fixture.state.override = (path) => {
-      const url = new URL(path, "http://localhost");
-      if (
-        url.pathname === `/sessions/${session.id}/conversation` &&
-        url.searchParams.get("view") === "messages" &&
-        !advanced
-      ) {
-        now += 100;
-        advanced = true;
-      }
-      return path === `/sessions/${session.id}`
-        ? {
-            value: {
-              ...session,
-              queuedMessages: { messages: ["next"], awaitingPrompt: true },
-              submitUnconfirmedAt: "2026-01-01",
-            },
-          }
-        : undefined;
-    };
-    expect(
-      await gateway.wait(
-        { sessionId: session.id, after, timeoutMs: 100 },
-        AbortSignal.timeout(1000),
-      ),
-    ).toMatchObject({ reason: "timeout", pending: true });
-    fixture.state.override = (path) =>
-      path === `/sessions/${session.id}`
-        ? { value: { ...session, state: "needs_input" } }
-        : undefined;
-    expect(
-      await gateway.wait(
-        { sessionId: session.id, after, timeoutMs: 100 },
-        AbortSignal.timeout(1000),
-      ),
-    ).toMatchObject({
-      reason: "ready",
-      state: "needs_input",
-      question: { operationId: "get_conversation" },
-    });
-    fixture.state.override = (path) =>
-      path === `/sessions/${session.id}`
-        ? { value: { ...session, status: "completed" } }
-        : undefined;
-    expect(
-      await gateway.wait(
-        { sessionId: session.id, after, until: "terminal", timeoutMs: 100 },
-        AbortSignal.timeout(1000),
-      ),
-    ).toMatchObject({ reason: "terminal", status: "completed" });
-    await expect(
-      gateway.wait({ sessionId: session.id }, AbortSignal.abort(new Error("cancelled"))),
-    ).rejects.toThrow("cancelled");
-  } finally {
-    timeout.mockRestore();
-    clock.mockRestore();
-  }
+  fixture.state.override = (path) =>
+    path === `/sessions/${session.id}`
+      ? {
+          value: {
+            ...session,
+            queuedMessages: { messages: ["next"], awaitingPrompt: true },
+            submitUnconfirmedAt: "2026-01-01",
+          },
+        }
+      : undefined;
+  expect(
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+      "expire",
+    ),
+  ).toMatchObject({ reason: "timeout", pending: true });
+  fixture.state.override = (path) =>
+    path === `/sessions/${session.id}`
+      ? { value: { ...session, state: "needs_input" } }
+      : undefined;
+  expect(
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+    ),
+  ).toMatchObject({
+    reason: "ready",
+    state: "needs_input",
+    question: { operationId: "get_conversation" },
+  });
+  fixture.state.override = (path) =>
+    path === `/sessions/${session.id}` ? { value: { ...session, status: "completed" } } : undefined;
+  expect(
+    await wait(
+      gateway,
+      { sessionId: session.id, after, until: "terminal", timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+    ),
+  ).toMatchObject({ reason: "terminal", status: "completed" });
+  await expect(
+    wait(gateway, { sessionId: session.id }, AbortSignal.abort(new Error("cancelled"))),
+  ).rejects.toThrow("cancelled");
 });
 it("bounds escaped wait previews while retaining resolvable raw history", async () => {
   const { fixture, gateway } = await setup();
@@ -226,7 +291,8 @@ it("bounds escaped wait previews while retaining resolvable raw history", async 
     startIndex: 0,
     totalEntries: 3,
   };
-  const result = await gateway.wait(
+  const result = await wait(
+    gateway,
     { sessionId: session.id, timeoutMs: 1000 },
     AbortSignal.timeout(1500),
   );
@@ -238,6 +304,31 @@ it("bounds escaped wait previews while retaining resolvable raw history", async 
   });
   expect(Buffer.byteLength(JSON.stringify(encodeMcpResult(result)))).toBeLessThanOrEqual(131072);
 });
+it.each(["own timeout", "caller cancellation"] as const)(
+  "distinguishes %s after a real conversation request is held",
+  async (abort) => {
+    const { fixture, gateway } = await setup();
+    const requested = new Promise<void>((resolve) => {
+      fixture.state.override = (path) => {
+        if (path.includes("/conversation?view=messages")) {
+          resolve();
+          return { hold: true };
+        }
+        return undefined;
+      };
+    });
+    const caller = new AbortController();
+    const result = wait(gateway, { sessionId: session.id, timeoutMs: 100 }, caller.signal);
+    await requested;
+    if (abort === "own timeout") {
+      time.expireSignal();
+      expect(await result).toMatchObject({ reason: "timeout", sessionId: session.id });
+    } else {
+      caller.abort(new Error("controlled caller cancellation"));
+      await expect(result).rejects.toThrow("controlled caller cancellation");
+    }
+  },
+);
 it("requires a new indexed question after submission and waits through delayed queue before answer flow", async () => {
   const { fixture, gateway } = await setup();
   let state = "needs_input";
@@ -275,7 +366,12 @@ it("requires a new indexed question after submission and waits through delayed q
   fixture.state.conversation.entries.push({ kind: "message", role: "user", text: "next" });
   fixture.state.conversation.totalEntries = 2;
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+      "expire",
+    ),
   ).toMatchObject({ reason: "timeout", submitted: true, progressed: false });
   // Even a misbehaving upstream returning an old row must not pass its index.
   fixture.state.override = (path) =>
@@ -285,7 +381,12 @@ it("requires a new indexed question after submission and waits through delayed q
         ? { value: { ...session, state, agentSessionId: "generation-1" } }
         : undefined;
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+      "expire",
+    ),
   ).toMatchObject({ reason: "timeout", progressed: false });
   fixture.state.override = (path) =>
     path === `/sessions/${session.id}`
@@ -309,11 +410,20 @@ it("requires a new indexed question after submission and waits through delayed q
   fixture.state.conversation.totalEntries = 3;
   queued = true;
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+      "expire",
+    ),
   ).toMatchObject({ reason: "timeout", pending: true, progressed: true });
   queued = false;
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+    ),
   ).toMatchObject({ reason: "ready", state: "needs_input", submitted: true, progressed: true });
   expect(
     await gateway.dispatch(
@@ -338,7 +448,11 @@ it("requires a new indexed question after submission and waits through delayed q
   });
   fixture.state.conversation.totalEntries = 4;
   expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
+    await wait(
+      gateway,
+      { sessionId: session.id, after, timeoutMs: 100 },
+      AbortSignal.timeout(1000),
+    ),
   ).toMatchObject({ reason: "ready", state: "waiting", progressed: true });
 });
 it("scans beyond100 entries and rejects progress belonging to an earlier identical submission", async () => {
@@ -371,9 +485,11 @@ it("scans beyond100 entries and rejects progress belonging to an earlier identic
   ];
   fixture.state.conversation.totalEntries = 150;
   expect(
-    await gateway.wait(
+    await wait(
+      gateway,
       { sessionId: session.id, after: String(receipt.after), timeoutMs: 200 },
       AbortSignal.timeout(1000),
+      "expire",
     ),
   ).toMatchObject({ reason: "timeout", submitted: true, progressed: false, nextFrom: 150 });
   fixture.state.conversation.entries.push({
@@ -383,7 +499,8 @@ it("scans beyond100 entries and rejects progress belonging to an earlier identic
   });
   fixture.state.conversation.totalEntries = 151;
   expect(
-    await gateway.wait(
+    await wait(
+      gateway,
       { sessionId: session.id, after: String(receipt.after), timeoutMs: 200 },
       AbortSignal.timeout(1000),
     ),
@@ -421,10 +538,12 @@ async function correlation(agent: string, intended: string, observed: string, re
     fixture,
     gateway,
     after: String(receipt.after),
-    wait: () =>
-      gateway.wait(
+    wait: (mode: WaitMode = "observe") =>
+      wait(
+        gateway,
         { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
         AbortSignal.timeout(1000),
+        mode,
       ),
   };
 }
@@ -482,7 +601,7 @@ it.each([
   if (agent === undefined || intended === undefined || observed === undefined)
     throw new Error("Invalid correlation case");
   const scenario = await correlation(agent, intended, observed);
-  expect(await scenario.wait()).toMatchObject({
+  expect(await scenario.wait("expire")).toMatchObject({
     reason: "timeout",
     submitted: false,
     progressed: false,
@@ -527,7 +646,7 @@ it.each([
       )
     ).json()) as { messages: { textTruncated?: boolean }[] };
     expect(projected.messages[0]?.textTruncated).toBe(true);
-    const result = await scenario.wait();
+    const result = await scenario.wait("expire");
     expect(result).toMatchObject({ reason: "timeout", submitted: false, progressed: false });
     expect(Buffer.byteLength(JSON.stringify(encodeMcpResult(result)))).toBeLessThanOrEqual(131072);
   },
@@ -536,7 +655,7 @@ it.each(Object.entries(nativeFollowups))(
   "requires later progress and cleared delivery holds for native %s",
   async (agent, native) => {
     const scenario = await correlation(agent, native.sent, native.observed, false);
-    expect(await scenario.wait()).toMatchObject({
+    expect(await scenario.wait("expire")).toMatchObject({
       reason: "timeout",
       submitted: true,
       progressed: false,
@@ -554,7 +673,7 @@ it.each(Object.entries(nativeFollowups))(
     ]) {
       scenario.fixture.state.override = (path) =>
         path === `/sessions/${session.id}` ? { value: { ...session, agent, ...hold } } : undefined;
-      expect(await scenario.wait()).toMatchObject({
+      expect(await scenario.wait("expire")).toMatchObject({
         reason: "timeout",
         submitted: true,
         progressed: true,
@@ -598,10 +717,12 @@ it.each(Object.entries(nativeFollowups))(
       },
       AbortSignal.timeout(1000),
     );
-    const wait = () =>
-      gateway.wait(
+    const wait = (mode: WaitMode = "observe") =>
+      time.wait(
+        gateway,
         { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
         AbortSignal.timeout(1000),
+        mode,
       );
     fixture.state.conversation.entries.push({
       kind: "message",
@@ -609,14 +730,18 @@ it.each(Object.entries(nativeFollowups))(
       text: "Unrelated progress",
     });
     fixture.state.conversation.totalEntries = 3;
-    expect(await wait()).toMatchObject({ reason: "timeout", submitted: false });
+    expect(await wait("expire")).toMatchObject({ reason: "timeout", submitted: false });
     fixture.state.conversation.entries.push(
       { kind: "message", role: "user", text: native.observed },
       { kind: "message", role: "assistant", text: "Earlier answer" },
       { kind: "message", role: "user", text: native.observed },
     );
     fixture.state.conversation.totalEntries = 6;
-    expect(await wait()).toMatchObject({ reason: "timeout", submitted: true, progressed: false });
+    expect(await wait("expire")).toMatchObject({
+      reason: "timeout",
+      submitted: true,
+      progressed: false,
+    });
     fixture.state.conversation.entries.push({
       kind: "message",
       role: "assistant",
@@ -656,9 +781,11 @@ it("selects transformations from current session agent rather than receipt or re
   fixture.state.conversation.totalEntries = 2;
   agent = "codex";
   expect(
-    await gateway.wait(
+    await wait(
+      gateway,
       { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
       AbortSignal.timeout(1000),
+      "expire",
     ),
   ).toMatchObject({ reason: "timeout", submitted: false, progressed: false });
 });
@@ -686,10 +813,12 @@ it.each(Object.entries(nativeFollowups))(
       },
       AbortSignal.timeout(1000),
     );
-    const wait = () =>
-      gateway.wait(
+    const wait = (mode: WaitMode = "observe") =>
+      time.wait(
+        gateway,
         { sessionId: session.id, after: String(receipt.after), timeoutMs: 100 },
         AbortSignal.timeout(1000),
+        mode,
       );
     fixture.state.conversation.entries.push({
       kind: "message",
@@ -697,7 +826,11 @@ it.each(Object.entries(nativeFollowups))(
       text: native.observed,
     });
     fixture.state.conversation.totalEntries = 2;
-    expect(await wait()).toMatchObject({ reason: "timeout", submitted: true, progressed: false });
+    expect(await wait("expire")).toMatchObject({
+      reason: "timeout",
+      submitted: true,
+      progressed: false,
+    });
     fixture.state.conversation.entries.push({
       kind: "question",
       header: "New",
