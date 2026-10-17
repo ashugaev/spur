@@ -21,7 +21,7 @@ import {
   type CodexRolloutReaderState,
   type CodexRolloutReadResult,
 } from "../../src/agents/codex.js";
-import { PREFIX_VERIFY_BYTES } from "../../src/agent-history-delta.js";
+import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../../src/agent-history-delta.js";
 import { SCAN_CHUNK_BYTES } from "../../src/jsonl-scan.js";
 import { reconcileTokenUsage } from "../../src/token-usage.js";
 
@@ -33,6 +33,9 @@ const probe = vi.hoisted(() => ({
   peak: 0,
   delayReads: false,
   statFail: new Set<string>(),
+  readFail: new Set<string>(),
+  closeFail: new Set<string>(),
+  beforeRead: undefined as (() => Promise<void>) | undefined,
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -55,13 +58,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<unknown>;
       const close = handle.close.bind(handle);
       (handle as unknown as { read: unknown }).read = async (...a: unknown[]) => {
+        await probe.beforeRead?.();
         if (probe.delayReads) await new Promise((resolve) => setTimeout(resolve, 0));
         probe.reads.push({ path, length: a[2] as number, position: a[3] as number });
+        if (probe.readFail.has(path)) throw new Error("read failed");
         return read(...a);
       };
       handle.close = async () => {
         probe.live -= 1;
         await close();
+        if (probe.closeFail.delete(path)) throw new Error("close failed");
       };
       return handle;
     },
@@ -75,6 +81,9 @@ beforeEach(() => {
   probe.peak = 0;
   probe.delayReads = false;
   probe.statFail.clear();
+  probe.readFail.clear();
+  probe.closeFail.clear();
+  probe.beforeRead = undefined;
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1166,12 +1175,13 @@ describe("readCodexRolloutState incremental chunked reads", () => {
       const content = await readFile(join(FIXTURE_DIR, name), "utf8");
       expect(await coldRead(content, name), name).toEqual(golden[name]);
 
+      const sessionsDir = await makeSessionsDir("", name);
       for (
         let split = content.indexOf("\n") + 1;
         split > 0;
         split = content.indexOf("\n", split) + 1
       ) {
-        const sessionsDir = await makeSessionsDir(content.slice(0, split), name);
+        await writeFile(rolloutPath(sessionsDir, name), content.slice(0, split), "utf8");
         const reader: CodexRolloutReaderState = { files: new Map() };
         await readCodexRolloutState(sessionsDir, reader);
         await appendFile(rolloutPath(sessionsDir, name), content.slice(split));
@@ -1179,7 +1189,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
         expect(incremental, `${name} split ${split}`).toEqual(golden[name]);
       }
     }
-  });
+  }, 60_000);
 
   it("extracts cumulative structured components from a sanitized rollout fixture", async () => {
     const result = await coldRead(
@@ -1242,7 +1252,8 @@ describe("readCodexRolloutState incremental chunked reads", () => {
       previousSize - PREFIX_VERIFY_BYTES,
     );
     const totalBytes = reads.reduce((sum, read) => sum + read.length, 0);
-    expect(totalBytes).toBeLessThanOrEqual(Buffer.byteLength(appended) + 2 * PREFIX_VERIFY_BYTES);
+    expect(totalBytes).toBeLessThanOrEqual(Buffer.byteLength(appended) + PREFIX_VERIFY_BYTES);
+    expect(totalBytes).toBe(4206);
     expect(reader.files.get(filePath)?.offset).toBe(previousSize + Buffer.byteLength(appended));
   });
 
@@ -1264,6 +1275,59 @@ describe("readCodexRolloutState incremental chunked reads", () => {
 
     expect(second).toEqual(await coldRead(`${started}\n${complete}\n`, "rollout-partial.jsonl"));
     expect(second.rollout?.state).toBe("waiting");
+  });
+
+  it("retains exact cached raw tails across appends, partial lines and refolds", async () => {
+    let content = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n \t\r\n`;
+    const sessionsDir = await makeSessionsDir(content);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    const checkTail = async (): Promise<void> => {
+      await readCodexRolloutState(sessionsDir, reader);
+      const entry = reader.files.get(filePath);
+      if (!entry) throw new Error("expected cache entry");
+      const raw = Buffer.from(content);
+      const tail = raw.subarray(Math.max(0, entry.offset - PREFIX_VERIFY_BYTES), entry.offset);
+      expect(entry.tail).toEqual(tail);
+      expect(entry.tailHash).toBe(hashHistoryTail(tail));
+    };
+    await checkTail();
+    const original = reader.files.get(filePath);
+    const originalTail = Buffer.from(original?.tail ?? []);
+    const originalHash = original?.tailHash;
+    for (const append of [
+      ` \t${JSON.stringify({ type: "unknown", text: "é🙂" })}\r\n`,
+      `${JSON.stringify({ type: "unknown", text: "é🙂".repeat(900) })}\n`,
+      '{"partial":',
+      '"é🙂"}',
+      "\n",
+    ]) {
+      const previousEntry = reader.files.get(filePath);
+      probe.reads.length = 0;
+      content += append;
+      await appendFile(filePath, append);
+      await checkTail();
+      expect(Math.min(...probe.reads.map((read) => read.position))).toBeGreaterThanOrEqual(
+        Math.max(0, (previousEntry?.offset ?? 0) - PREFIX_VERIFY_BYTES),
+      );
+      if (append === '{"partial":') {
+        expect(reader.files.get(filePath)?.offset).toBe(previousEntry?.offset);
+        expect(reader.files.get(filePath)?.tail).toEqual(previousEntry?.tail);
+        expect(reader.files.get(filePath)?.tailHash).toBe(previousEntry?.tailHash);
+      }
+    }
+    expect(original?.tail).toEqual(originalTail);
+    expect(original?.tailHash).toBe(originalHash);
+    const beforeRewrite = reader.files.get(filePath);
+    content = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n${JSON.stringify({ text: "x".repeat(7000) })}\n`;
+    await writeFile(filePath, content);
+    await checkTail();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(reader.files.get(filePath)?.fold).not.toBe(beforeRewrite?.fold);
+    content = `${eventLine("2026-05-10T10:02:00.000Z", "task_started", {})}\n`;
+    await writeFile(filePath, content);
+    await checkTail();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
   });
 
   it("T5 refolds from scratch after an in-place rewrite", async () => {
@@ -1313,6 +1377,8 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     const sessionsDir = await makeSessionsDir(prefix, "rollout-overlap.jsonl");
     const reader: CodexRolloutReaderState = { files: new Map() };
     await readCodexRolloutState(sessionsDir, reader);
+    const oldEntry = reader.files.get(rolloutPath(sessionsDir, "rollout-overlap.jsonl"));
+    const oldFold = structuredClone(oldEntry?.fold);
     await appendFile(rolloutPath(sessionsDir, "rollout-overlap.jsonl"), rest);
 
     const [left, right] = await Promise.all([
@@ -1324,6 +1390,134 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     expect(cold.tokenUsage).toBeDefined();
     expect(normalizeResult(left)).toEqual(cold);
     expect(normalizeResult(right)).toEqual(cold);
+    expect(oldEntry?.fold).toEqual(oldFold);
+  });
+
+  it.each([false, true])("coalesces overlapping scans after warm=%s", async (warm) => {
+    const started = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(started);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    if (warm) {
+      await readCodexRolloutState(sessionsDir, reader);
+      await appendFile(
+        filePath,
+        `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`,
+      );
+    }
+    probe.reads.length = 0;
+    probe.delayReads = true;
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => readCodexRolloutState(sessionsDir, reader)),
+    );
+
+    expect(
+      results.every((result) => result.rollout?.state === (warm ? "waiting" : "working")),
+    ).toBe(true);
+    // Cold: scan. Append: old hash + appended scan.
+    expect(probe.reads.filter((read) => read.path === filePath)).toHaveLength(warm ? 2 : 1);
+    expect(probe.live).toBe(0);
+  });
+
+  it("restats queued calls so an append during a scan stays fresh", async () => {
+    const started = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" })}\n`;
+    const completed = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", { turn_id: "t1" })}\n`;
+    const sessionsDir = await makeSessionsDir(started);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    probe.beforeRead = async () => {
+      probe.beforeRead = undefined;
+      enter();
+      await release;
+    };
+    const first = readCodexRolloutState(sessionsDir, reader);
+    await entered;
+    await appendFile(rolloutPath(sessionsDir, "rollout-test.jsonl"), completed);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    resume();
+
+    expect((await first).rollout?.state).toBe("working");
+    expect((await second).rollout?.state).toBe("waiting");
+    expect(normalizeResult(await readCodexRolloutState(sessionsDir, reader))).toEqual(
+      await coldRead(started + completed, "rollout-test.jsonl"),
+    );
+  });
+
+  it("releases rejected reader operations and retries failed scans", async () => {
+    const sessionsDir = await makeSessionsDir(
+      `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`,
+    );
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    probe.closeFail.add(filePath);
+    const first = readCodexRolloutState(sessionsDir, reader);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    await expect(first).rejects.toThrow("close failed");
+    expect((await second).rollout?.state).toBe("working");
+
+    await appendFile(filePath, `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`);
+    probe.readFail.add(filePath);
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout).toBeNull();
+    expect(reader.files.has(filePath)).toBe(false);
+    probe.readFail.clear();
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(probe.live).toBe(0);
+  });
+
+  it("drops removed files and keeps restarted readers independent", async () => {
+    const sessionsDir = await makeSessionsDir(
+      `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`,
+    );
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const restarted: CodexRolloutReaderState = { files: new Map() };
+    probe.reads.length = 0;
+    await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, restarted),
+    ]);
+    expect(probe.reads.filter((read) => read.path === filePath)).toHaveLength(1);
+    expect(restarted.files.get(filePath)).not.toBe(reader.files.get(filePath));
+    await rm(filePath);
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout).toBeNull();
+    expect(reader.files.size).toBe(0);
+  });
+
+  it("preserves structured quota and state across error and unknown records", async () => {
+    const prefix = `${sessionMeta("quota-thread")}\n${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+    const appended =
+      [
+        eventLine("2026-05-10T10:01:00.000Z", "token_count", {
+          rate_limits: { primary: { used_percent: 100 } },
+        }),
+        eventLine("2026-05-10T10:02:00.000Z", "error", { message: "synthetic error" }),
+        eventLine("2026-05-10T10:03:00.000Z", "unknown", {}),
+        "null",
+        "{malformed}",
+      ].join("\n") + "\n";
+    const sessionsDir = await makeSessionsDir(prefix);
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    await appendFile(rolloutPath(sessionsDir, "rollout-test.jsonl"), appended);
+
+    const [left, right] = await Promise.all([
+      readCodexRolloutState(sessionsDir, reader),
+      readCodexRolloutState(sessionsDir, reader),
+    ]);
+
+    expect(left.rateLimit).not.toBeNull();
+    expect(left.rollout?.state).toBe("working");
+    expect(left).toEqual(right);
+    expect(normalizeResult(left)).toEqual(await coldRead(prefix + appended, "rollout-test.jsonl"));
   });
 
   it("T8 never scans more rollout files at once than the gate allows", async () => {

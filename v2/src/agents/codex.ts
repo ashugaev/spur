@@ -19,6 +19,7 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { createConcurrencyGate } from "../concurrency-gate.js";
 import { readJsonlTailHash, scanJsonlLines } from "../jsonl-scan.js";
+import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../agent-history-delta.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 import { agentExecutableCommand } from "./executable.js";
 import type { ProviderTokenUsageSample } from "../token-usage.js";
@@ -935,6 +936,7 @@ interface CodexRolloutFileEntry extends CodexRolloutFileFingerprint {
   offset: number;
   // Hash of the PREFIX_VERIFY_BYTES before `offset`, to detect an in-place rewrite.
   tailHash: string;
+  tail: Buffer;
   fold: CodexRolloutFold;
   candidate: CodexRolloutCandidate | null;
 }
@@ -946,6 +948,7 @@ export interface CodexRolloutReaderState {
 // Rollouts reach 100+ MB and every session's reader is cold at daemon boot.
 export const CODEX_ROLLOUT_READ_MAX_CONCURRENCY = 4;
 const codexRolloutReadGate = createConcurrencyGate(CODEX_ROLLOUT_READ_MAX_CONCURRENCY);
+const codexRolloutReaderQueues = new WeakMap<CodexRolloutReaderState, Promise<void>>();
 
 function readRolloutString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
@@ -1375,6 +1378,7 @@ async function readCodexRolloutFile(
   return codexRolloutReadGate.run(async () => {
     let fold = newCodexRolloutFold();
     let offset = 0;
+    let previousTail: Buffer = Buffer.alloc(0);
     if (
       fingerprint &&
       cached &&
@@ -1384,6 +1388,7 @@ async function readCodexRolloutFile(
     ) {
       fold = cloneCodexRolloutFold(cached.fold);
       offset = cached.offset;
+      previousTail = cached.tail;
     }
     const scan = await scanJsonlLines(
       filePath,
@@ -1408,9 +1413,14 @@ async function readCodexRolloutFile(
         : { result, mtimeMs: fingerprint?.mtimeMs ?? 0 };
     if (!fingerprint) return { candidate };
     const endOffset = offset + scan.consumedBytes;
-    const tailHash = await readJsonlTailHash(filePath, endOffset);
-    if (tailHash === null) return null;
-    return { candidate, entry: { ...fingerprint, offset: endOffset, tailHash, fold, candidate } };
+    const tail = Buffer.from(
+      Buffer.concat([previousTail, scan.tail]).subarray(-PREFIX_VERIFY_BYTES),
+    );
+    const tailHash = hashHistoryTail(tail);
+    return {
+      candidate,
+      entry: { ...fingerprint, offset: endOffset, tailHash, tail, fold, candidate },
+    };
   });
 }
 
@@ -1418,6 +1428,31 @@ export async function readCodexRolloutState(
   sessionsDir: string,
   reader?: CodexRolloutReaderState,
   rootThreadId?: string,
+): Promise<CodexRolloutReadResult> {
+  if (!reader) return readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId);
+  // Serialize collection, stat, and cache publication together. Queued callers
+  // see both the preceding scan's cache and any append made while it ran.
+  const previous = codexRolloutReaderQueues.get(reader);
+  let complete!: () => void;
+  const completed = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  codexRolloutReaderQueues.set(reader, completed);
+  await previous;
+  try {
+    return await readCodexRolloutStateSnapshot(sessionsDir, reader, rootThreadId);
+  } finally {
+    complete();
+    if (codexRolloutReaderQueues.get(reader) === completed) {
+      codexRolloutReaderQueues.delete(reader);
+    }
+  }
+}
+
+async function readCodexRolloutStateSnapshot(
+  sessionsDir: string,
+  reader: CodexRolloutReaderState | undefined,
+  rootThreadId: string | undefined,
 ): Promise<CodexRolloutReadResult> {
   let files: string[];
   try {

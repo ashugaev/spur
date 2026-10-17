@@ -7,6 +7,7 @@ import { PREFIX_VERIFY_BYTES, hashHistoryTail } from "../../src/agent-history-de
 import { SCAN_CHUNK_BYTES, readJsonlTailHash, scanJsonlLines } from "../../src/jsonl-scan.js";
 
 const readLengths: number[] = [];
+const readBuffers: Buffer[] = [];
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FsPromises>();
@@ -17,6 +18,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<unknown>;
       (handle as unknown as { read: unknown }).read = (...a: unknown[]) => {
         readLengths.push(a[2] as number);
+        readBuffers.push(a[0] as Buffer);
         return read(...a);
       };
       return handle;
@@ -28,6 +30,7 @@ let dir = "";
 
 beforeEach(async () => {
   readLengths.length = 0;
+  readBuffers.length = 0;
   dir = await mkdtemp(join(tmpdir(), "jsonl-scan-"));
 });
 
@@ -57,6 +60,59 @@ async function collect(
 }
 
 describe("scanJsonlLines", () => {
+  it.each([
+    { body: "", offset: 0, size: 0, accept: true },
+    { body: ' \t\r\n{"a":"é🙂"}\r\n \t', offset: 0, accept: true },
+    { body: '{"skip":1}\n \t{"a":"é🙂"} \r', offset: 11, accept: true },
+    { body: '{"a":1}\n{"partial"', offset: 0, accept: false },
+    { body: '{"a":1}\n{"b":2}\n', offset: 0, size: 8, accept: true },
+    { body: " \t\r", offset: 0, accept: true },
+    { body: `{"long":"${"é🙂".repeat(SCAN_CHUNK_BYTES / 2)}"}\n`, offset: 0, accept: true },
+  ])("returns an owned raw consumed tail for case %#", async ({ body, offset, size, accept }) => {
+    const path = join(dir, "raw-tail.jsonl");
+    const raw = Buffer.from(body);
+    await writeFile(path, raw);
+    const flags: boolean[] = [];
+    const scan = await scanJsonlLines(
+      path,
+      offset,
+      (_line, terminated) => {
+        flags.push(terminated);
+        return accept;
+      },
+      size,
+    );
+    expect(scan).not.toBeNull();
+    if (!scan) throw new Error("expected scan");
+    const end = offset + scan.consumedBytes;
+    const expected = raw.subarray(Math.max(offset, end - PREFIX_VERIFY_BYTES), end);
+    expect(scan.tail).toEqual(expected);
+    expect(scan.tail.length).toBe(Math.min(PREFIX_VERIFY_BYTES, scan.consumedBytes));
+    expect(readLengths.reduce((sum, length) => sum + length, 0)).toBe(
+      (size ?? raw.length) - offset,
+    );
+    for (const buffer of readBuffers) buffer.fill(0);
+    expect(scan.tail).toEqual(expected);
+    if (body.endsWith('{"partial"')) {
+      expect(scan.consumedBytes).toBe(8);
+      expect(flags).toEqual([true, false]);
+    }
+    if (body === " \t\r") {
+      expect(scan.consumedBytes).toBe(0);
+      expect(flags).toEqual([]);
+    }
+  });
+
+  it("returns null when a callback throws", async () => {
+    const path = join(dir, "callback-error.jsonl");
+    await writeFile(path, '{"a":1}\n');
+    expect(
+      await scanJsonlLines(path, 0, () => {
+        throw new Error("callback failed");
+      }),
+    ).toBeNull();
+  });
+
   it("yields every line once across a multi-chunk file in bounded reads", async () => {
     const filler = "x".repeat(1000);
     const lines = Array.from({ length: 3 * Math.ceil(SCAN_CHUNK_BYTES / 1000) + 7 }, (_, i) =>

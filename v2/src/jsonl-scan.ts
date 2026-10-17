@@ -12,20 +12,27 @@ export const SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
  * `consumedBytes` counts whole terminated lines. A trailing unterminated line
  * is consumed only when `onLine(line, false)` returns true; a rejected one is
  * excluded and re-read once its completing bytes arrive. The return value is
- * ignored for terminated lines. Returns null on any fs error.
+ * ignored for terminated lines. `tail` copies the last PREFIX_VERIFY_BYTES of
+ * bytes consumed in this scan. Returns null on any fs error.
  */
 export async function scanJsonlLines(
   filePath: string,
   offset: number,
   onLine: (line: string, terminated: boolean) => boolean,
   size?: number,
-): Promise<{ consumedBytes: number } | null> {
+): Promise<{ consumedBytes: number; tail: Buffer } | null> {
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
     fd = await open(filePath, "r");
     const end = size ?? (await fd.stat()).size;
     let position = offset;
     let pending = Buffer.alloc(0);
+    let tail: Buffer = Buffer.alloc(0);
+    const retainTail = (bytes: Buffer): void => {
+      tail = Buffer.from(
+        Buffer.concat([tail, bytes.subarray(-PREFIX_VERIFY_BYTES)]).subarray(-PREFIX_VERIFY_BYTES),
+      );
+    };
     while (position < end) {
       const length = Math.min(SCAN_CHUNK_BYTES, end - position);
       const chunk = Buffer.alloc(length);
@@ -48,11 +55,15 @@ export async function scanJsonlLines(
         const trimmed = line.trim();
         if (trimmed) onLine(trimmed, true);
       }
+      retainTail(combined.subarray(0, lastNewline + 1));
       pending = combined.subarray(lastNewline + 1);
     }
     const trailing = pending.toString("utf8").trim();
-    if (trailing && onLine(trailing, false)) pending = Buffer.alloc(0);
-    return { consumedBytes: position - offset - pending.length };
+    if (trailing && onLine(trailing, false)) {
+      retainTail(pending);
+      pending = Buffer.alloc(0);
+    }
+    return { consumedBytes: position - offset - pending.length, tail };
   } catch {
     return null;
   } finally {
