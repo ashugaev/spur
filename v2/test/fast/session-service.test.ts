@@ -1400,6 +1400,11 @@ type SessionServiceInternals = {
     messageText: string,
     windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
+  settleSubmitHold(
+    session: SessionRecord,
+    state: SessionState,
+    agentActivityAt: Date | null,
+  ): Promise<SessionRecord>;
   paneGenerationMatches(session: SessionRecord, expected: unknown): Promise<boolean>;
   sendAgentMessage(
     session: {
@@ -28186,6 +28191,20 @@ describe("SessionService", () => {
           () => {
             vi.setSystemTime(Date.now() + 60_000);
             expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+            if (origin !== "direct") {
+              expect(
+                logSpurEventMock.mock.calls.filter(
+                  ([dataDir, event]) =>
+                    dataDir === TEST_DATA_DIR &&
+                    event.event === "session.message.sent" &&
+                    event.sessionId === record.id &&
+                    event.projectId === record.project &&
+                    event.details?.agentSessionId === record.agentSessionId &&
+                    event.details?.interrupt === false &&
+                    event.details?.messageLength === "later after probe".length,
+                ),
+              ).toHaveLength(1);
+            }
           },
           { timeout: 3_000 },
         );
@@ -28229,6 +28248,181 @@ describe("SessionService", () => {
       service.dispose();
     }
   });
+
+  it.each(["queued", "flush"] as const)(
+    "late ACK commit preserves later typed ownership: %s",
+    async (origin) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const text = `held head ${origin}`;
+      const later = "later after probe";
+      const record = runningSession({
+        agentLaunchId: "late-ack-ownership-generation",
+        agentSessionId: "session-uuid",
+        queuedMessages: { messages: [text, later], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      const file = join(TEST_ARTIFACTS_ROOT, `late-ack-ownership-${origin}.jsonl`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+      );
+      const originalBaseline = { agent: "claude" as const, file, size: statSync(file).size };
+      const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+      const scans: { message: string; found: boolean }[] = [];
+      let releaseLater: () => void = () => {};
+      const laterGate = new Promise<void>((resolve) => {
+        releaseLater = resolve;
+      });
+      let laterEntered = false;
+      let laterBaseline: typeof originalBaseline | undefined;
+      const binding = (baseline: typeof originalBaseline) => ({
+        baseline,
+        async scan(message: string) {
+          const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+          scans.push({ message, found });
+          const result = { found, lastScannedFile: file };
+          if (message === later && found) {
+            laterEntered = true;
+            await laterGate;
+          }
+          return result;
+        },
+      });
+      createAgentSubmitAckBindingMock.mockImplementation(async () => {
+        const baseline = { agent: "claude" as const, file, size: statSync(file).size };
+        if (sendMessageToTmuxMock.mock.calls.length === 1) laterBaseline = baseline;
+        return binding(baseline);
+      });
+      resumeAgentSubmitAckBindingMock.mockImplementation(
+        async (_agent: string, _context: unknown, baseline: typeof originalBaseline) =>
+          binding(baseline),
+      );
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        if (message === later)
+          appendFileSync(
+            file,
+            JSON.stringify({ type: "user", message: { role: "user", content: message } }) + "\n",
+          );
+      });
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (current, message) =>
+        current.scan(message),
+      );
+      let failed = false;
+      probeTmuxProcessMatchMock.mockImplementation(
+        async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+          if (options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0 && !failed) {
+            failed = true;
+            return {
+              alive: false,
+              matchedByName: false,
+              unresponsive: false,
+              diagnostic: "ps failed: malformed process table output after paste",
+            };
+          }
+          return { alive: true, matchedByName: true, unresponsive: false };
+        },
+      );
+      const sentEvents = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([dataDir, event]) =>
+            dataDir === TEST_DATA_DIR &&
+            event.event === "session.message.sent" &&
+            event.sessionId === record.id &&
+            event.projectId === record.project &&
+            event.details?.agentSessionId === record.agentSessionId &&
+            event.details?.interrupt === false &&
+            event.details?.messageLength === later.length,
+        );
+      const confirmations = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([dataDir, event]) =>
+            dataDir === TEST_DATA_DIR &&
+            event.event === "session.submit.confirmed" &&
+            event.sessionId === record.id &&
+            event.details?.evidence === "ack",
+        );
+      const attempt = (
+        origin === "flush"
+          ? service.flushQueuedMessage(record.id, text)
+          : internals.tryDeliverQueuedMessage(record.id)
+      ).catch((error: unknown) => error);
+      try {
+        await attempt;
+        const held = structuredClone(sessions.get(record.id));
+        expect(held?.submitUnconfirmedAt).toBeDefined();
+        expect(held?.queuedMessageTyped?.message).toBe(text);
+        expect(held?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(scans).toEqual([{ message: text, found: false }]);
+        if (!held?.submitUnconfirmedAt) throw new Error("Missing actual head submit hold");
+        const settle = internals.settleSubmitHold.bind(internals);
+        let confirmedHead: { state: SessionState; activity: Date | null } | undefined;
+        vi.spyOn(internals, "settleSubmitHold").mockImplementation(
+          async (current, state, activity) => {
+            const before = confirmations().length;
+            const result = await settle(current, state, activity);
+            if (
+              current.submitUnconfirmedAt === held.submitUnconfirmedAt &&
+              current.queuedMessageTyped?.typedAt === held.queuedMessageTyped?.typedAt &&
+              confirmations().length === before + 1
+            )
+              confirmedHead = { state, activity };
+            return result;
+          },
+        );
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+        );
+        vi.setSystemTime(Date.now() + 20_000);
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 5_000 });
+        await service.get(record.id);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => expect(laterEntered).toBe(true), { timeout: 3_000 });
+        const pending = structuredClone(sessions.get(record.id));
+        expect(pending?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(pending?.submitUnconfirmedAt).toBeUndefined();
+        expect(laterBaseline).toBeDefined();
+        expect(pending?.queuedMessageTyped).toEqual({
+          message: later,
+          typedAt: expect.any(String),
+          ackBaseline: laterBaseline,
+        });
+        expect(pending?.agentSessionId).toBe(record.agentSessionId);
+        expect(pending?.agentLaunchId).toBe(record.agentLaunchId);
+        expect(scans).toContainEqual({ message: later, found: true });
+        expect(sentEvents()).toHaveLength(0);
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text, later]);
+        expect(confirmations()).toHaveLength(1);
+        expect(confirmedHead?.activity).toBeInstanceOf(Date);
+        if (!confirmedHead) throw new Error("Missing normal head confirmation arguments");
+        const headScans = scans.filter((scan) => scan.message === text && scan.found).length;
+        await settle(held, confirmedHead.state, confirmedHead.activity);
+        expect(scans.filter((scan) => scan.message === text && scan.found)).toHaveLength(
+          headScans + 1,
+        );
+        expect(sessions.get(record.id)).toEqual(pending);
+        expect(confirmations()).toHaveLength(1);
+        expect(sentEvents()).toHaveLength(0);
+        releaseLater();
+        await vi.waitFor(() => expect(sentEvents()).toHaveLength(1), { timeout: 3_000 });
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text, later]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        releaseLater();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
 
   it.each(
     (["direct", "queued"] as const).flatMap((origin) =>
