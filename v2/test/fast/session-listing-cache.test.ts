@@ -264,6 +264,7 @@ describe("session directory listing cache", () => {
 
     expect(ids(listSessions(dataDir))).toEqual(["api-0"]);
     expect(ids(listSessions(dataDir))).toEqual(["api-0", "api-1"]);
+    expect(ids(listSessions(dataDir))).toEqual(["api-0", "api-1"]);
   });
 
   it("lists an unindexed record in a project dir named like an indexed session id", async () => {
