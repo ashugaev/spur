@@ -117,6 +117,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 
 Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
 
+`stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
+
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
@@ -148,6 +150,8 @@ A session bound to a PR GitHub reports as nonexistent stops signal polling after
 ## Events
 
 Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+
+Trigger spawn retry: cap/memory denials persist across restarts, preserve successful desk members; source-type/trigger changes or removal discard pending work (`v2/src/triggers.ts`).
 
 Event names by source:
 
