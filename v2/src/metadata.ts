@@ -18,6 +18,7 @@ import {
   CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
+  type PersistedSpawnWork,
   type ReviewProviderId,
   type ReviewSignal,
   type ReviewSnapshot,
@@ -648,6 +649,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         result.set(raw.externalId, {
           ...base,
           state,
+          ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
         });
         continue;
       }
@@ -1076,8 +1078,26 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  // The request is an equality fingerprint, never replayed as executable input.
+  const birthRequest = normalizedSession.triggerBirthRequest;
+  const triggerBirth =
+    typeof normalizedSession.triggerBirthKey === "string" &&
+    normalizedSession.triggerBirthKey.trim().length > 0 &&
+    isRecord(birthRequest) &&
+    birthRequest.project === normalizedSession.project &&
+    (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
+      ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const sidecarLaunches: Record<string, string> = {};
+  if (isRecord(normalizedSession.sidecarLaunches)) {
+    for (const [name, launchId] of Object.entries(normalizedSession.sidecarLaunches)) {
+      if (name.length > 0 && typeof launchId === "string" && launchId.length > 0) {
+        sidecarLaunches[name] = launchId;
+      }
+    }
+  }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
@@ -1097,6 +1117,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    ...triggerBirth,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1165,6 +1186,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(Object.keys(sidecarLaunches).length > 0 ? { sidecarLaunches } : {}),
     ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
@@ -2022,6 +2044,114 @@ export function deleteWorkItemLifecycle(
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
   const path = pendingSendBatchesFilePath(dataDir);
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function readPendingSpawnWork(dataDir: string): Map<string, PersistedSpawnWork> {
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(join(dataDir, "pending-spawn-work.json"), "utf8"),
+    );
+    if (!Array.isArray(value)) return new Map();
+    const result = new Map<string, PersistedSpawnWork>();
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      if (
+        ![
+          "workId",
+          "projectId",
+          "triggerId",
+          "sourceId",
+          "eventName",
+          "occurrenceId",
+          "routeFingerprint",
+          "createdAt",
+        ].every((key) => typeof record[key] === "string")
+      )
+        continue;
+      if (
+        ![
+          record.revision,
+          record.nextBlockIndex,
+          record.admissionDenials,
+          record.notBeforeAt,
+        ].every(
+          (number) => typeof number === "number" && Number.isSafeInteger(number) && number >= 0,
+        )
+      )
+        continue;
+      if (
+        (record.anchorSessionId !== undefined && typeof record.anchorSessionId !== "string") ||
+        (record.lastSessionId !== undefined && typeof record.lastSessionId !== "string")
+      )
+        continue;
+      if (
+        !Array.isArray(record.failures) ||
+        !record.failures.every((error) => typeof error === "string") ||
+        !Array.isArray(record.blocks) ||
+        record.blocks.length === 0
+      )
+        continue;
+      if (
+        !record.blocks.every((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const outcome = block as Record<string, unknown>;
+          return (
+            typeof outcome.birthKey === "string" &&
+            (outcome.state === "pending" ||
+              (outcome.state === "succeeded" && typeof outcome.sessionId === "string") ||
+              (outcome.state === "failed" &&
+                typeof outcome.error === "string" &&
+                (outcome.sessionId === undefined || typeof outcome.sessionId === "string")))
+          );
+        })
+      )
+        continue;
+      const work = item as PersistedSpawnWork;
+      if (
+        work.nextBlockIndex > work.blocks.length ||
+        work.blocks.some(
+          (block, index) =>
+            block.birthKey !== `${work.workId}:${index}` ||
+            index < work.nextBlockIndex === (block.state === "pending"),
+        )
+      )
+        continue;
+      const successful = work.blocks.filter((block) => block.state === "succeeded");
+      if (
+        work.lastSessionId !== successful.at(-1)?.sessionId ||
+        (work.anchorSessionId !== undefined &&
+          !successful.some((block) => block.sessionId === work.anchorSessionId))
+      )
+        continue;
+      result.set(work.workId, work);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+export function writePendingSpawnWork(
+  dataDir: string,
+  work: PersistedSpawnWork,
+  expectedRevision?: number,
+): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  const existing = records.get(work.workId);
+  if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+  if (expectedRevision === undefined && existing) return false;
+  records.set(work.workId, work);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
+}
+
+export function deletePendingSpawnWork(dataDir: string, workId: string, revision: number): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  if (records.get(workId)?.revision !== revision) return false;
+  records.delete(workId);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
 }
 
 /**

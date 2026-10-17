@@ -1,11 +1,12 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseCompleteSessionRequest,
   parseRestoreSessionRequest,
   startServer,
+  type StartedServer,
 } from "../../src/server.js";
 import {
   annotateLifecycleError,
@@ -13,7 +14,9 @@ import {
   SessionLifecycleRegister,
 } from "../../src/session-lifecycle.js";
 import { SessionService } from "../../src/session-service.js";
-import type { SessionView } from "../../src/types.js";
+import * as eventSources from "../../src/event-sources/index.js";
+import { writeSession } from "../../src/metadata.js";
+import type { SessionRecord, SessionView } from "../../src/types.js";
 import { findFreePort } from "../helpers/common.js";
 
 describe("parseRestoreSessionRequest", () => {
@@ -55,7 +58,137 @@ describe("parseRestoreSessionRequest", () => {
 // A8: the override reaches the daemon over HTTP and is forwarded unchanged
 // to the service call — this is the only body either route reads.
 describe("POST /sessions/:id/restore and /reopen forward the force override", () => {
-  async function withServer(run: (port: number) => Promise<void>): Promise<void> {
+  it("starts source automation only after startup reconcile while routes remain unready", async () => {
+    let reconciled = false;
+    const original = SessionService.prototype.reconcileStoppedSessions;
+    const reconcile = vi
+      .spyOn(SessionService.prototype, "reconcileStoppedSessions")
+      .mockImplementation(async function (this: SessionService) {
+        const response = await fetch(`http://127.0.0.1:${this.config.server.port}/sessions`);
+        expect(response.status).toBe(503);
+        const result = await original.call(this);
+        reconciled = true;
+        return result;
+      });
+    const start = eventSources.startConfiguredSources;
+    const sources = vi
+      .spyOn(eventSources, "startConfiguredSources")
+      .mockImplementation(async (options) => {
+        expect(reconciled).toBe(true);
+        return start(options);
+      });
+    try {
+      await withServer(async () => {
+        expect(reconcile).toHaveBeenCalledOnce();
+        expect(sources).toHaveBeenCalledOnce();
+      });
+    } finally {
+      reconcile.mockRestore();
+      sources.mockRestore();
+    }
+  });
+
+  it.each(["disconnect", "deadline"])(
+    "cancels an HTTP restore on %s behind the real pane lock and permits its successor",
+    async (cause) => {
+      await withServer(async (port, server) => {
+        const session: SessionRecord = {
+          id: "demo-1",
+          project: "demo",
+          agent: "claude",
+          prompt: "restore",
+          branch: "demo-1",
+          worktree: false,
+          worktreePath: server.config.worktreeDir,
+          tmuxSession: "demo-1",
+          launchCommand: "claude",
+          status: "stopped",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        writeSession(server.config.dataDir, session);
+        const seam = server as unknown as {
+          withPaneWriteLock<T>(key: string, task: () => Promise<T>): Promise<T>;
+          restoreLocked(): Promise<SessionView>;
+          lifecycle: SessionLifecycleRegister;
+        };
+        const restoreBody = vi
+          .spyOn(seam, "restoreLocked")
+          .mockResolvedValue({ id: session.id } as SessionView);
+        let release!: () => void;
+        const predecessor = seam.withPaneWriteLock(
+          session.tmuxSession,
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        );
+        await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+        // Accelerate only the restore deadline; HTTP and lock scheduling stay real.
+        const schedule = globalThis.setTimeout;
+        const deadline =
+          cause === "deadline"
+            ? vi
+                .spyOn(globalThis, "setTimeout")
+                .mockImplementation((callback, delay, ...args) =>
+                  schedule(callback, delay === 20 * 60_000 ? 500 : delay, ...args),
+                )
+            : undefined;
+        const controller = new AbortController();
+        const response = fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
+          method: "POST",
+          body: JSON.stringify({ operationId: "cancelled" }),
+          signal: controller.signal,
+        });
+        const failedFetch = cause === "disconnect" ? expect(response).rejects.toThrow() : undefined;
+        try {
+          await vi.waitFor(() =>
+            expect(seam.lifecycle.snapshot(session.id).operation?.phase).toBe("pending"),
+          );
+          if (cause === "disconnect") {
+            controller.abort();
+            await failedFetch;
+          } else {
+            const timedOut = await response;
+            expect(timedOut.status).toBe(504);
+            expect(await timedOut.json()).toMatchObject({
+              code: "restore_deadline",
+              lifecycle: { operation: { phase: "failed" } },
+            });
+          }
+          deadline?.mockRestore();
+          await vi.waitFor(() =>
+            expect(seam.lifecycle.snapshot(session.id).operation?.phase).toBe("failed"),
+          );
+          const successor = fetch(`http://127.0.0.1:${port}/sessions/demo-1/restore`, {
+            method: "POST",
+            body: JSON.stringify({ operationId: "successor" }),
+          });
+          await vi.waitFor(() =>
+            expect(seam.lifecycle.snapshot(session.id).operation?.operationId).toBe("successor"),
+          );
+          expect(restoreBody).not.toHaveBeenCalled();
+          release();
+          await predecessor;
+          expect((await successor).status).toBe(200);
+          expect(restoreBody).toHaveBeenCalledTimes(1);
+          expect(seam.lifecycle.snapshot(session.id).operation).toMatchObject({
+            operationId: "successor",
+            phase: "succeeded",
+          });
+        } finally {
+          deadline?.mockRestore();
+          release();
+          await predecessor;
+          restoreBody.mockRestore();
+        }
+      });
+    },
+  );
+
+  async function withServer(
+    run: (port: number, server: StartedServer) => Promise<void>,
+  ): Promise<void> {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");
@@ -79,7 +212,7 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
     );
     const server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
     try {
-      await run(port);
+      await run(port, server);
     } finally {
       await server.stop();
     }
@@ -90,7 +223,7 @@ describe("POST /sessions/:id/restore and /reopen forward the force override", ()
     const reopen = SessionService.prototype.reopen;
     const complete = SessionService.prototype.complete;
     const calls: unknown[] = [];
-    const mock: typeof restore = async (id, request) => {
+    const mock = async (id: string, request: unknown) => {
       calls.push(request);
       return { id } as SessionView;
     };
