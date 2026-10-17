@@ -31,6 +31,31 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function matchesFollowup(
+  agent: unknown,
+  observed: string,
+  intended: string,
+  truncated: unknown,
+): boolean {
+  if (truncated === true) return false;
+  if (observed === intended) return true;
+  if (agent === "opencode") return observed === `${intended} `;
+  if (agent !== "cursor") return false;
+  const envelope =
+    /^<timestamp>([^<>\r\n\u2028\u2029]+)<\/timestamp>\n<user_query>\n([\s\S]*)\n<\/user_query>(?![\s\S])/u.exec(
+      observed,
+    );
+  const header = envelope?.[1];
+  const payload = envelope?.[2];
+  return (
+    typeof header === "string" &&
+    /\S/u.test(header) &&
+    typeof payload === "string" &&
+    !/<\/?(?:timestamp|user_query)\b/iu.test(payload) &&
+    payload === intended
+  );
+}
+
 export class McpGateway {
   readonly lifetime = new AbortController();
   private readonly cursors = new Map<string, WaitCursor>();
@@ -334,7 +359,9 @@ export class McpGateway {
             message.role === "user" &&
             cursor?.message &&
             typeof message.text === "string" &&
-            (cursor.spawn ? message.text.includes(cursor.message) : message.text === cursor.message)
+            (cursor.spawn
+              ? message.text.includes(cursor.message)
+              : matchesFollowup(session.agent, message.text, cursor.message, message.textTruncated))
           ) {
             submitted = true;
             progressed = false;
