@@ -62527,9 +62527,16 @@ describe("SessionService", () => {
           );
           expect.soft(sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
           expect.soft(sessions.get("api-1")?.queuedMessageTyped).toBeUndefined();
-          // A independently heals this eligible diagnostic on healthy runtime evidence.
-          expect.soft(sessions.get("api-1")?.error).toBeUndefined();
-          expect.soft(sessions.get("api-1")?.errorSource).toBeUndefined();
+          expect
+            .soft(sessions.get("api-1")?.error)
+            .toBe(
+              state === "historical-other"
+                ? "Session status detection failed: ps failed: malformed process table output"
+                : undefined,
+            );
+          expect
+            .soft(sessions.get("api-1")?.errorSource)
+            .toBe(state === "historical-other" ? "other" : undefined);
           expect.soft(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["later"]);
           expect
             .soft(eventsNamed("session.submit.confirmed"))
@@ -62896,7 +62903,367 @@ describe("SessionService", () => {
       },
     );
 
+    it.each(
+      (["runtime", "scan"] as const).flatMap((phase) =>
+        (["current", "replacement"] as const).map((owner) => ({ phase, owner })),
+      ),
+    )("Codex receipt metadata cache replacement: $phase $owner", async ({ phase, owner }) => {
+      const fixture = await historicalAckFixture(`metadata-${phase}-${owner}`);
+      const actual = await vi.importActual<typeof metadataModule>("../../src/metadata.js");
+      const dataDir = join(fixture.root, "metadata");
+      const original = fixture.sessions.get("api-1");
+      if (!original) throw new Error("Missing original metadata hold");
+      actual.writeSession(dataDir, original);
+      readSessionMock.mockImplementation((_dir: string, id: string) =>
+        actual.readSession(dataDir, id),
+      );
+      writeSessionMock.mockImplementation((_dir: string, record: SessionRecord) =>
+        actual.writeSession(dataDir, record),
+      );
+      listSessionsMock.mockImplementation(() => actual.listSessions(dataDir));
+      const cached = actual.readSession(dataDir, original.id);
+      expect(actual.listSessions(dataDir)).toEqual([cached]);
+      expect(actual.readSession(dataDir, original.id)).toBe(cached);
+      expect(actual.listSessions(dataDir)[0]).toBe(cached);
+      if (!cached) throw new Error("Missing cached metadata hold");
+      const before = structuredClone(cached);
+      const path = join(dataDir, "sessions", cached.project, `${cached.id}.json`);
+      const inode = statSync(path).ino;
+      const entered = deferred<undefined>();
+      const release = deferred<undefined>();
+      probeTmuxProcessMatchMock.mockImplementation(async () => {
+        if (phase === "runtime") {
+          entered.resolve(undefined);
+          await release.promise;
+        }
+        return {
+          alive: false,
+          matchedByName: false,
+          unresponsive: false,
+          diagnostic: "ps failed: metadata boundary",
+        };
+      });
+      resumeAgentSubmitAckBindingMock.mockImplementation(
+        async (...args: Parameters<typeof fixture.realAgents.resumeAgentSubmitAckBinding>) => {
+          const binding = await fixture.realAgents.resumeAgentSubmitAckBinding(...args);
+          return binding
+            ? {
+                ...binding,
+                scan: async (text: string) => {
+                  if (phase === "scan") {
+                    entered.resolve(undefined);
+                    await release.promise;
+                  }
+                  return binding.scan(text);
+                },
+              }
+            : null;
+        },
+      );
+      const observing = sessionServiceInternals(fixture.service).classifySessionRecord(cached);
+      try {
+        await entered.promise;
+        const replacement =
+          owner === "replacement" ? { ...before, agentLaunchId: "replacement-launch" } : before;
+        if (owner === "replacement") {
+          actual.writeSession(dataDir, replacement);
+          expect(statSync(path).ino).not.toBe(inode);
+          expect(actual.readSession(dataDir, original.id)).not.toBe(cached);
+          expect(actual.listSessions(dataDir)[0]).toBe(actual.readSession(dataDir, original.id));
+        }
+        release.resolve(undefined);
+        await observing;
+        const latest = actual.readSession(dataDir, original.id);
+        expect(cached).toEqual(before);
+        expect(latest?.agentLaunchId).toBe(replacement.agentLaunchId);
+        expect(latest?.queuedMessages).toEqual(before.queuedMessages);
+        expect(latest?.scheduledWake).toEqual(before.scheduledWake);
+        if (owner === "replacement") {
+          expect(latest?.queuedMessageTyped).toEqual(before.queuedMessageTyped);
+          expect(latest?.submitUnconfirmedAt).toBe(before.submitUnconfirmedAt);
+        } else {
+          expect(latest?.queuedMessageTyped).toBeUndefined();
+          expect(latest?.submitUnconfirmedAt).toBeUndefined();
+          if (!latest) throw new Error("Missing confirmed metadata record");
+          await sessionServiceInternals(fixture.service).classifySessionRecord(latest);
+        }
+        expect(eventsNamed("session.submit.confirmed")).toHaveLength(owner === "current" ? 1 : 0);
+        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+        expect(eventsNamed("session.submit.released")).toHaveLength(0);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        release.resolve(undefined);
+        await observing;
+        fixture.close();
+      }
+    });
+
     describe("Codex receipt delivery recovery", () => {
+      async function exerciseReceipt(
+        {
+          origin,
+          activity,
+          receipt,
+        }: {
+          origin: "queued" | "flush";
+          activity: "null" | "old";
+          receipt: "late-ack" | "historical-other" | "no-ack" | "foreign" | "lifecycle" | "launch";
+        },
+        defaultPacing = false,
+      ) {
+        const sessions = createSessionStore();
+        const text = `actual Codex ${origin} ${activity} ${receipt}`;
+        const record = runningSession({
+          agent: "codex",
+          agentSessionId: "original-native",
+          agentLaunchId: "original-launch",
+          launchCommand: "codex",
+          queuedMessages: { messages: [text, "later one", "later two"], awaitingPrompt: false },
+        });
+        const root = join(
+          TEST_ARTIFACTS_ROOT,
+          `actual-${origin}-${activity}-${receipt}`,
+          "sessions",
+        );
+        const file = join(root, "original.jsonl");
+        mkdirSync(root, { recursive: true });
+        const header =
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: record.agentSessionId, cwd: record.worktreePath },
+          }) + "\n";
+        writeFileSync(file, header);
+        const user = (message: string) =>
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: message }],
+            },
+          }) + "\n";
+        const previousCodex = { ...(await import("../../src/agents/codex.js")) };
+        const realCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+        vi.doMock("../../src/agents/codex.js", () => ({
+          ...realCodex,
+          codexHookHomePath: codexHookHomePathMock,
+          readCodexRolloutState: readCodexRolloutStateMock,
+        }));
+        codexHookHomePathMock.mockReturnValue(dirname(root));
+        const service = await deferredService();
+        const realAgents = await vi.importActual<typeof AgentsModule>("../../src/agents/index.js");
+        createAgentSubmitAckBindingMock.mockImplementation(realAgents.createAgentSubmitAckBinding);
+        resumeAgentSubmitAckBindingMock.mockImplementation(realAgents.resumeAgentSubmitAckBinding);
+        agentSubmitAckPacingMock.mockImplementation(
+          defaultPacing
+            ? realAgents.agentSubmitAckPacing
+            : () => ({ windowMs: 5_000, maxResends: 0 }),
+        );
+        agentStateStrategyMock.mockReturnValue("hook");
+        readAgentHookStateMock.mockReturnValue({
+          state: "waiting",
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        });
+        sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+          if (message !== text) appendFileSync(file, user(message));
+        });
+        vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+          async (binding, message) => binding.scan(message),
+        );
+        const entered = deferred<undefined>();
+        const release = deferred<undefined>();
+        let fault = false;
+        let paused = false;
+        probeTmuxProcessMatchMock.mockImplementation(
+          async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+            if (!paused && options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0) {
+              paused = true;
+              entered.resolve(undefined);
+              await release.promise;
+            }
+            return fault
+              ? {
+                  alive: false,
+                  matchedByName: false,
+                  unresponsive: false,
+                  diagnostic: "ps failed: malformed process table output",
+                }
+              : { alive: true, matchedByName: true, unresponsive: false };
+          },
+        );
+        sessions.set(record.id, record);
+        const attempt = (
+          origin === "flush"
+            ? service.flushQueuedMessage(record.id, text)
+            : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
+        ).catch((error: unknown) => error);
+        try {
+          await Promise.race([
+            entered.promise,
+            attempt.then((result) => {
+              throw new Error(`Actual paste did not reach its ACK-window probe: ${String(result)}`);
+            }),
+          ]);
+          expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text]);
+          release.resolve(undefined);
+          await attempt;
+          const held = sessions.get(record.id);
+          expect(held?.queuedMessageTyped?.ackBaseline).toEqual({
+            agent: "codex",
+            offsets: { [file]: Buffer.byteLength(header) },
+          });
+          expect(held?.submitUnconfirmedAt).toBe(held?.queuedMessageTyped?.typedAt);
+          expect(held?.queuedMessages?.messages).toEqual(["later one", "later two"]);
+          expect(held?.agentSessionId).toBe(record.agentSessionId);
+          expect(held?.agentLaunchId).toBe(record.agentLaunchId);
+          expect(held?.status).toBe(record.status);
+          expect(held?.stopReason).toBe(record.stopReason);
+          expect(held?.error).toBeUndefined();
+          expect(held?.errorSource).toBeUndefined();
+          expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(defaultPacing ? 3 : 0);
+          expect(eventsNamed("session.message.delivery_recovered")).toHaveLength(1);
+          fault = true;
+          readAgentHookStateMock.mockReturnValue(
+            activity === "null"
+              ? null
+              : { state: "waiting", updatedAt: "2026-03-18T08:00:00.000Z" },
+          );
+          if (receipt !== "no-ack" && receipt !== "foreign") appendFileSync(file, user(text));
+          if (receipt === "foreign")
+            writeFileSync(
+              join(root, "foreign.jsonl"),
+              JSON.stringify({
+                type: "session_meta",
+                payload: { id: "foreign-native", cwd: record.worktreePath },
+              }) +
+                "\n" +
+                user(text),
+            );
+          if (!held) throw new Error("Expected actual paste hold");
+          if (receipt === "historical-other")
+            sessions.set(record.id, {
+              ...held,
+              error: "Session status detection failed: ps failed: malformed process table output",
+              errorSource: "other",
+            });
+          if (receipt === "lifecycle" || receipt === "launch") {
+            const scanning = deferred<undefined>();
+            const continueScan = deferred<undefined>();
+            resumeAgentSubmitAckBindingMock.mockImplementation(
+              async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+                const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+                if (!binding) return null;
+                return {
+                  ...binding,
+                  scan: async (message: string) => {
+                    scanning.resolve(undefined);
+                    await continueScan.promise;
+                    return binding.scan(message);
+                  },
+                };
+              },
+            );
+            const observing = sessionServiceInternals(service).classifySessionRecord(held);
+            try {
+              await scanning.promise;
+              if (receipt === "launch")
+                sessions.set(record.id, { ...held, agentLaunchId: "replacement-launch" });
+              else {
+                const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister })
+                  .lifecycle;
+                const owner = lifecycle.begin("restore", [record.id]);
+                lifecycle.settle(
+                  owner,
+                  true,
+                  () => "succeeded",
+                  () => true,
+                );
+              }
+              continueScan.resolve(undefined);
+              await observing;
+            } finally {
+              continueScan.resolve(undefined);
+              await observing;
+            }
+          } else {
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Missing held target");
+            await sessionServiceInternals(service).classifySessionRecord(current);
+          }
+          const confirmed = receipt === "late-ack" || receipt === "historical-other";
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(confirmed ? 1 : 0);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([
+            "later one",
+            "later two",
+          ]);
+          expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(defaultPacing ? 3 : 0);
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(killTmuxSessionMock).not.toHaveBeenCalled();
+          const observationError =
+            "Session status detection failed: ps failed: malformed process table output";
+          expect(sessions.get(record.id)?.error).toBe(
+            receipt === "launch" ? held.error : observationError,
+          );
+          expect(sessions.get(record.id)?.errorSource).toBe(
+            receipt === "launch"
+              ? held.errorSource
+              : receipt === "historical-other"
+                ? "other"
+                : "runtime_probe",
+          );
+          if (!confirmed) {
+            expect(sessions.get(record.id)?.queuedMessageTyped).toEqual(held.queuedMessageTyped);
+            expect(sessions.get(record.id)?.submitUnconfirmedAt).toBe(held.submitUnconfirmedAt);
+            expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          } else {
+            expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+            expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+            expect(sessions.get(record.id)?.error).toBe(observationError);
+            fault = false;
+            probeTmuxProcessMatchMock.mockResolvedValue({
+              alive: true,
+              matchedByName: true,
+              unresponsive: false,
+            });
+            vi.setSystemTime(Date.now() + 60_000);
+            readAgentHookStateMock.mockReturnValue({
+              state: "waiting",
+              updatedAt: new Date(Date.now() - 30_000).toISOString(),
+            });
+            await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+            vi.setSystemTime(Date.now() + 60_000);
+            await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+            if (receipt === "historical-other") {
+              expect(sessions.get(record.id)?.error).toBe(observationError);
+              expect(sessions.get(record.id)?.errorSource).toBe("other");
+              expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text]);
+              expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([
+                "later one",
+                "later two",
+              ]);
+            } else {
+              expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+                text,
+                "later one",
+                "later two",
+              ]);
+              expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+            }
+            expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+          }
+        } finally {
+          release.resolve(undefined);
+          await attempt;
+          service.dispose();
+          codexHookHomePathMock.mockImplementation((dir: string) => `${dir}/codex-home`);
+          vi.doMock("../../src/agents/codex.js", () => previousCodex);
+        }
+      }
+
       it.each(
         (["queued", "flush"] as const).flatMap((origin) =>
           (["null", "old"] as const).flatMap((activity) =>
@@ -62905,229 +63272,14 @@ describe("SessionService", () => {
             ).map((receipt) => ({ origin, activity, receipt })),
           ),
         ),
-      )(
-        "settles actual $origin paste with $activity activity: $receipt",
-        async ({ origin, activity, receipt }) => {
-          const sessions = createSessionStore();
-          const text = `actual Codex ${origin} ${activity} ${receipt}`;
-          const record = runningSession({
-            agent: "codex",
-            agentSessionId: "original-native",
-            agentLaunchId: "original-launch",
-            launchCommand: "codex",
-            queuedMessages: { messages: [text, "later one", "later two"], awaitingPrompt: false },
-          });
-          const root = join(
-            TEST_ARTIFACTS_ROOT,
-            `actual-${origin}-${activity}-${receipt}`,
-            "sessions",
-          );
-          const file = join(root, "original.jsonl");
-          mkdirSync(root, { recursive: true });
-          const header =
-            JSON.stringify({
-              type: "session_meta",
-              payload: { id: record.agentSessionId, cwd: record.worktreePath },
-            }) + "\n";
-          writeFileSync(file, header);
-          const user = (message: string) =>
-            JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: message }],
-              },
-            }) + "\n";
-          const previousCodex = { ...(await import("../../src/agents/codex.js")) };
-          const realCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
-          vi.doMock("../../src/agents/codex.js", () => ({
-            ...realCodex,
-            codexHookHomePath: codexHookHomePathMock,
-            readCodexRolloutState: readCodexRolloutStateMock,
-          }));
-          codexHookHomePathMock.mockReturnValue(dirname(root));
-          const service = await deferredService();
-          const realAgents = await vi.importActual<typeof AgentsModule>(
-            "../../src/agents/index.js",
-          );
-          createAgentSubmitAckBindingMock.mockImplementation(
-            realAgents.createAgentSubmitAckBinding,
-          );
-          resumeAgentSubmitAckBindingMock.mockImplementation(
-            realAgents.resumeAgentSubmitAckBinding,
-          );
-          agentStateStrategyMock.mockReturnValue("hook");
-          readAgentHookStateMock.mockReturnValue({
-            state: "waiting",
-            updatedAt: new Date(Date.now() - 60_000).toISOString(),
-          });
-          sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
-            if (message !== text) appendFileSync(file, user(message));
-          });
-          vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
-            async (binding, message) => binding.scan(message),
-          );
-          const entered = deferred<undefined>();
-          const release = deferred<undefined>();
-          let fault = false;
-          probeTmuxProcessMatchMock.mockImplementation(
-            async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
-              if (!fault && options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0) {
-                fault = true;
-                entered.resolve(undefined);
-                await release.promise;
-              }
-              return fault
-                ? {
-                    alive: false,
-                    matchedByName: false,
-                    unresponsive: false,
-                    diagnostic: "ps failed: malformed process table output",
-                  }
-                : { alive: true, matchedByName: true, unresponsive: false };
-            },
-          );
-          sessions.set(record.id, record);
-          const attempt = (
-            origin === "flush"
-              ? service.flushQueuedMessage(record.id, text)
-              : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
-          ).catch((error: unknown) => error);
-          try {
-            await Promise.race([
-              entered.promise,
-              attempt.then((result) => {
-                throw new Error(
-                  `Actual paste did not reach its ACK-window probe: ${String(result)}`,
-                );
-              }),
-            ]);
-            expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text]);
-            release.resolve(undefined);
-            await attempt;
-            const held = sessions.get(record.id);
-            expect(held?.queuedMessageTyped?.ackBaseline).toEqual({
-              agent: "codex",
-              offsets: { [file]: Buffer.byteLength(header) },
-            });
-            expect(held?.submitUnconfirmedAt).toBe(held?.queuedMessageTyped?.typedAt);
-            expect(held?.queuedMessages?.messages).toEqual(["later one", "later two"]);
-            readAgentHookStateMock.mockReturnValue(
-              activity === "null"
-                ? null
-                : { state: "waiting", updatedAt: "2026-03-18T08:00:00.000Z" },
-            );
-            if (receipt !== "no-ack" && receipt !== "foreign") appendFileSync(file, user(text));
-            if (receipt === "foreign")
-              writeFileSync(
-                join(root, "foreign.jsonl"),
-                JSON.stringify({
-                  type: "session_meta",
-                  payload: { id: "foreign-native", cwd: record.worktreePath },
-                }) +
-                  "\n" +
-                  user(text),
-              );
-            if (!held) throw new Error("Expected actual paste hold");
-            if (receipt === "historical-other")
-              sessions.set(record.id, {
-                ...held,
-                error: "Session status detection failed: ps failed: malformed process table output",
-                errorSource: "other",
-              });
-            if (receipt === "lifecycle" || receipt === "launch") {
-              const scanning = deferred<undefined>();
-              const continueScan = deferred<undefined>();
-              resumeAgentSubmitAckBindingMock.mockImplementation(
-                async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
-                  const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
-                  if (!binding) return null;
-                  return {
-                    ...binding,
-                    scan: async (message: string) => {
-                      scanning.resolve(undefined);
-                      await continueScan.promise;
-                      return binding.scan(message);
-                    },
-                  };
-                },
-              );
-              const observing = sessionServiceInternals(service).classifySessionRecord(held);
-              try {
-                await scanning.promise;
-                if (receipt === "launch")
-                  sessions.set(record.id, { ...held, agentLaunchId: "replacement-launch" });
-                else {
-                  const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister })
-                    .lifecycle;
-                  const owner = lifecycle.begin("restore", [record.id]);
-                  lifecycle.settle(
-                    owner,
-                    true,
-                    () => "succeeded",
-                    () => true,
-                  );
-                }
-                continueScan.resolve(undefined);
-                await observing;
-              } finally {
-                continueScan.resolve(undefined);
-                await observing;
-              }
-            } else {
-              const current = sessions.get(record.id);
-              if (!current) throw new Error("Missing held target");
-              await sessionServiceInternals(service).classifySessionRecord(current);
-            }
-            const confirmed = receipt === "late-ack" || receipt === "historical-other";
-            expect(eventsNamed("session.submit.confirmed")).toHaveLength(confirmed ? 1 : 0);
-            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-            expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([
-              "later one",
-              "later two",
-            ]);
-            expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
-            expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
-            expect(createTmuxSessionMock).not.toHaveBeenCalled();
-            expect(killTmuxSessionMock).not.toHaveBeenCalled();
-            if (!confirmed) {
-              expect(sessions.get(record.id)?.queuedMessageTyped).toEqual(held.queuedMessageTyped);
-              expect(sessions.get(record.id)?.submitUnconfirmedAt).toBe(held.submitUnconfirmedAt);
-              expect(eventsNamed("session.message.requeued")).toHaveLength(0);
-            } else {
-              expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
-              expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
-              expect(sessions.get(record.id)?.error).toBe(held.error);
-              fault = false;
-              probeTmuxProcessMatchMock.mockResolvedValue({
-                alive: true,
-                matchedByName: true,
-                unresponsive: false,
-              });
-              vi.setSystemTime(Date.now() + 60_000);
-              readAgentHookStateMock.mockReturnValue({
-                state: "waiting",
-                updatedAt: new Date(Date.now() - 30_000).toISOString(),
-              });
-              await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
-              vi.setSystemTime(Date.now() + 60_000);
-              await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
-              expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
-                text,
-                "later one",
-                "later two",
-              ]);
-              expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
-              expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
-            }
-          } finally {
-            release.resolve(undefined);
-            await attempt;
-            service.dispose();
-            codexHookHomePathMock.mockImplementation((dir: string) => `${dir}/codex-home`);
-            vi.doMock("../../src/agents/codex.js", () => previousCodex);
-          }
+      )("settles actual $origin paste with $activity activity: $receipt", async (row) => {
+        await exerciseReceipt(row);
+      });
+
+      it.each(["queued", "flush"] as const)(
+        "Codex actual default timeout producer: %s",
+        async (origin) => {
+          await exerciseReceipt({ origin, activity: "null", receipt: "late-ack" }, true);
         },
       );
     });
