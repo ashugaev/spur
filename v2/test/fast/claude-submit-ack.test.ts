@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -456,6 +456,23 @@ describe("scanClaudeJsonlForMessage", () => {
           await scanClaudeJsonlForMessage({ file: filePath, size: 0 }, longText, "/tmp/worktree"),
         ).toBe(false);
       }
+    });
+
+    // Issue #1015: a resumed claude appends the wrapped restore prompt to the
+    // pinned transcript that already holds the wrapped launch prompt.
+    it("acks a wrapped restore prompt appended after a resumed transcript baseline", async () => {
+      const filePath = await makeJsonl("resume.jsonl", [record(wrapPaste(longText, "0a1b"))]);
+      sessionFileForIdMock.mockResolvedValue(filePath);
+      const baseline = { file: filePath, size: (await stat(filePath)).size };
+      expect(await scanClaudeJsonlForMessage(baseline, longText, "/tmp/worktree", "pinned")).toBe(
+        false,
+      );
+
+      await appendJsonl(filePath, [record(wrapPaste(longText, "2c3d"))]);
+
+      expect(await scanClaudeJsonlForMessage(baseline, longText, "/tmp/worktree", "pinned")).toBe(
+        true,
+      );
     });
 
     it("acks a send that is itself a pasted_content block, recorded raw", async () => {
