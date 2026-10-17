@@ -109,7 +109,6 @@ export interface GcGroupPlan {
   // Distinct member paths of worktrees that exist at plan time; each keeps one
   // non-archived record while its worktree stays on disk.
   ownedWorktreePaths: string[];
-  restoreLossSessionIds: string[];
   members: SessionRecord[];
 }
 
@@ -448,10 +447,6 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
       blockReasons: classification.blockReasons,
       archiveSessionIds: classification.archiveSessionIds,
       ownedWorktreePaths: classification.ownedWorktreePaths,
-      // Restore (not reopen) is the one-way loss: only "stopped" members
-      // (the sole restorable status among GC's completed|killed|stopped
-      // allow-list) had a live restore path before this run.
-      restoreLossSessionIds: stoppedIds(members, classification.archiveSessionIds),
       members,
     };
   });
@@ -693,14 +688,17 @@ export async function executeSessionGc(
               narrow(new Set(), dirtyReasons);
             }
             try {
-              const prIndex = await deps.openPrIndex(group, acted);
-              const openIds = acted
-                .filter(
-                  (member) =>
-                    (member.pr && prIndex.numbers.has(member.pr.number)) ||
-                    prIndex.branches.has(member.branch),
-                )
-                .map((member) => member.id);
+              // Nothing left to act on after dirty narrowing: no gh call.
+              const prIndex = acted.length > 0 ? await deps.openPrIndex(group, acted) : undefined;
+              const openIds = prIndex
+                ? acted
+                    .filter(
+                      (member) =>
+                        (member.pr && prIndex.numbers.has(member.pr.number)) ||
+                        prIndex.branches.has(member.branch),
+                    )
+                    .map((member) => member.id)
+                : [];
               if (openIds.length > 0) {
                 narrow(new Set([...notActed(), ...openIds]), ["open_pr"]);
               }
@@ -795,6 +793,9 @@ export async function executeSessionGc(
       action,
       blockReasons,
       archiveSessionIds: finalArchiveIds,
+      // Restore (not reopen) is the one-way loss: only "stopped" members
+      // (the sole restorable status among GC's completed|killed|stopped
+      // allow-list) had a live restore path before this run.
       restoreLossSessionIds: stoppedIds(group.members, finalArchiveIds),
       removed,
       archived,

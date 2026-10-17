@@ -574,6 +574,40 @@ describe("executeSessionGc partial groups", () => {
     expect(report.totals.recordsArchived).toBe(2);
   });
 
+  it("reports restore loss only for stopped records actually archived", async () => {
+    const records = [
+      shared({ id: "A", status: "stopped" }),
+      shared({ id: "B", workspaceId: "A", status: "stopped" }),
+      shared({ id: "C", workspaceId: "A", status: "running" }),
+      shared({ id: "D" }),
+    ];
+    const deps = makeDeps({ readGroupMembers: lookup(records) });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(report.groups[0]?.restoreLossSessionIds).toEqual(["B"]);
+  });
+
+  it("skips the PR probe and keeps the dirty reason when narrowing leaves nothing to archive", async () => {
+    const record = makeSession({ id: "api-1" });
+    const deps = makeDeps({
+      readGroupMembers: lookup([record]),
+      probeGuards: vi.fn(async () => ["uncommitted_changes"]),
+      openPrIndex: vi.fn(async () => {
+        throw new Error("gh down");
+      }),
+    });
+
+    const report = await executeSessionGc(planOne(record), deps, { dryRun: false, sizes: false });
+
+    expect(deps.openPrIndex).not.toHaveBeenCalled();
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "blocked",
+      blockReasons: ["uncommitted_changes"],
+    });
+  });
+
   it("does not probe uncommitted changes for an archive-only group", async () => {
     const records = [shared({ id: "A" }), shared({ id: "B" })];
     const deps = makeDeps({

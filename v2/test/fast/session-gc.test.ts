@@ -199,26 +199,6 @@ describe("planSessionGc", () => {
     expect(result.groups[0]?.blockReasons).toEqual(["path_outside_worktree_dir"]);
   });
 
-  it("marks restore-loss only for stopped members", () => {
-    const result = plan([
-      session({
-        id: "api-1",
-        workspaceId: "api-1",
-        status: "stopped",
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-      session({
-        id: "api-2",
-        workspaceId: "api-1",
-        status: "completed",
-        worktreePath: `${WORKTREE_DIR}/api/api-1`,
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-    ]);
-
-    expect(result.groups[0]?.restoreLossSessionIds).toEqual(["api-1"]);
-  });
-
   it("filters by project when projectFilter is set", () => {
     const result = plan(
       [
