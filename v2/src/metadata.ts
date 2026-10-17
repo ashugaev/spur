@@ -330,16 +330,18 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
-// listSessions() re-reads and re-parses every session file every call — on a
-// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
-// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// Uncached, listSessions() and readSession() re-parse session files on every
+// call — on a fleet-sized data dir (thousands of files, single digit MB of
+// JSON) that is every 2s dashboard-cache tick, and readSession runs inside
+// per-session loops, so O(N²) parses per tick. Since
 // writeJsonFile always renames a freshly created inode (never edits in
 // place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
 // last read" fingerprint — cheaper and safer than an mtime-only key, which
 // can't distinguish two writes landing in the same millisecond. The cache is
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
-// calls (see the "no in-place mutation of a listed record" contract).
+// calls and between listSessions() and readSession(): never mutate a
+// returned record in place.
 interface FileFingerprint {
   ino: number;
   mtimeMs: number;
@@ -1379,7 +1381,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
-  return path ? readSessionFile(path) : null;
+  return path ? readSessionFileCached(path) : null;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its

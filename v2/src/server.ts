@@ -13,6 +13,7 @@ import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/model
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
 import { AutoPingError, AutoPingService } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
+import { projectConversationPage } from "./conversation-page.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
 import {
   clearFailedDeploySwitchRecord,
@@ -255,7 +256,7 @@ function readParsedBody(request: IncomingMessage): unknown {
 }
 
 function parseOrigin(value: string | string[] | undefined): UserActionOrigin {
-  if (value === "cli" || value === "ui") return value;
+  if (value === "cli" || value === "ui" || value === "mcp") return value;
   return "unknown";
 }
 
@@ -277,7 +278,7 @@ export async function resolveTodoMutationActor(args: {
     const caller = await lookup(callerHeader);
     return { kind: "agent", agent: caller.agent, sessionId: caller.id };
   }
-  if (origin === "cli" || origin === "ui") return { kind: "human", origin };
+  if (origin === "cli" || origin === "ui" || origin === "mcp") return { kind: "human", origin };
   throw new InvalidTodoRequestError("ToDo mutation origin is invalid");
 }
 
@@ -301,7 +302,7 @@ async function authorizeAutoPingTarget(args: {
     }
     return;
   }
-  if (args.origin !== "cli" && args.origin !== "ui") {
+  if (args.origin !== "cli" && args.origin !== "ui" && args.origin !== "mcp") {
     throw new AutoPingError("forbidden", 403, "Auto-ping request origin is invalid");
   }
 }
@@ -321,7 +322,7 @@ function humanTodoOptions(
   origin: UserActionOrigin,
   callerHeader: string | string[] | undefined,
 ): { todoActor: TodoActor } | undefined {
-  if (callerHeader || (origin !== "cli" && origin !== "ui")) return undefined;
+  if (callerHeader || (origin !== "cli" && origin !== "ui" && origin !== "mcp")) return undefined;
   return { todoActor: { kind: "human", origin } };
 }
 
@@ -1730,13 +1731,36 @@ export async function startServer(
 
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
+        const view = url.searchParams.get("view");
+        const limitValue = url.searchParams.get("limit");
+        const limit = limitValue === null ? 50 : Number(limitValue);
+        if (view !== null && view !== "messages") {
+          sendError(response, 400, "Unsupported conversation view");
+          return;
+        }
+        if (
+          view === "messages" &&
+          (!/^\d+$/.test(limitValue ?? "50") ||
+            !Number.isInteger(limit) ||
+            limit < 1 ||
+            limit > 100)
+        ) {
+          sendError(response, 400, "Conversation limit must be an integer from 1 to 100");
+          return;
+        }
         const fromValue = url.searchParams.get("from");
         const from =
           fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
+        const conversation = await service.getConversation(conversationSessionId, {
+          ...(from !== undefined ? { from } : {}),
+          ...(view === "messages" ? { preserveEnd: true } : {}),
+        });
         sendJson(
           response,
           200,
-          await service.getConversation(conversationSessionId, from !== undefined ? { from } : {}),
+          view === "messages"
+            ? projectConversationPage(conversation, conversationSessionId, limit)
+            : conversation,
         );
         return;
       }

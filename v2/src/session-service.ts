@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { getBuildId } from "./build-identity.js";
 import {
   consentPolicy,
   proposeConsent,
@@ -1591,11 +1592,20 @@ function foldMemberRuntime(samples: readonly MemberRuntimeSample[]): WorkspaceRu
   return samples.includes("dead_looking") ? "pending" : "dead";
 }
 
-function clampPageStart(from: number, floor: number, totalEntries: number): number {
+function clampPageStart(
+  from: number,
+  floor: number,
+  totalEntries: number,
+  preserveEnd = false,
+): number {
   const boundedFloor = Math.max(floor, 0);
   if (totalEntries <= 0) return boundedFloor;
   const candidate = Math.max(from, boundedFloor);
-  if (candidate < totalEntries && boundedFloor <= totalEntries) return candidate;
+  if (
+    (candidate < totalEntries || (preserveEnd && candidate === totalEntries)) &&
+    boundedFloor <= totalEntries
+  )
+    return candidate;
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
@@ -1999,6 +2009,7 @@ function createRuntimeInfo(
 ): RuntimeInfo {
   return {
     lifecycleInstanceId,
+    buildId: getBuildId(),
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: getVersion(),
@@ -11203,7 +11214,7 @@ export class SessionService {
 
   async getConversation(
     sessionId: string,
-    options?: { from?: number },
+    options?: { from?: number; preserveEnd?: boolean },
   ): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -11226,7 +11237,8 @@ export class SessionService {
       const tail = await this.readConversationSerialized(session);
       if (!tail) {
         const entries = await readFullEntries();
-        const startIndex = from === undefined ? 0 : clampPageStart(from, 0, entries.length);
+        const startIndex =
+          from === undefined ? 0 : clampPageStart(from, 0, entries.length, options?.preserveEnd);
         return buildConversationResponse(
           entries.slice(startIndex),
           entries.length,
@@ -11243,14 +11255,14 @@ export class SessionService {
         const sliceStart =
           from === undefined
             ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : clampPageStart(from, tailStartIndex, totalEntries);
+            : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
         const entries = tailEntries.slice(sliceStart - tailStartIndex);
         return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
       }
 
       // Deep scroll-back below the retained window: fall back to a full read.
       const fullEntries = await readFullEntries();
-      const startIndex = clampPageStart(from, 0, fullEntries.length);
+      const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
       return buildConversationResponse(
         fullEntries.slice(startIndex),
         fullEntries.length,
@@ -11264,7 +11276,7 @@ export class SessionService {
     const startIndex =
       from === undefined
         ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
-        : clampPageStart(from, 0, entries.length);
+        : clampPageStart(from, 0, entries.length, options?.preserveEnd);
     return buildConversationResponse(
       entries.slice(startIndex),
       entries.length,
@@ -11549,9 +11561,10 @@ export class SessionService {
       }
     }
     operation?.assertActive();
-    delete updated.stopReason;
-    delete updated.staleSidecars;
-    return updated;
+    // `updated` can be readSession's shared cached record: copy, never delete
+    // in place.
+    const { stopReason: _clearedStale, staleSidecars: _replayed, ...awake } = updated;
+    return awake;
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {

@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -2441,6 +2449,79 @@ describe("listSessions record cache", () => {
     const dataDir2Second = listSessions(dataDir2).find((s) => s.id === "other-1");
     expect(dataDir1Second).not.toBe(dataDir1First);
     expect(dataDir2Second).toBe(dataDir2First);
+  });
+
+  it("shares the cached record between readSession and listSessions", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+
+    const listed = listSessions(dataDir).find((s) => s.id === "api-1");
+    const read = readSession(dataDir, "api-1");
+    expect(read).toBe(listed);
+    expect(readSession(dataDir, "api-1")).toBe(read);
+
+    writeSession(dataDir, { ...fixtureSession("api-1"), status: "completed" });
+    const reread = readSession(dataDir, "api-1");
+    expect(reread).not.toBe(read);
+    expect(reread?.status).toBe("completed");
+  });
+
+  it("reads an external atomic replacement with matching mtime and size", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    const timestamp = new Date("2026-03-18T10:02:00.000Z");
+    utimesSync(path, timestamp, timestamp);
+    const first = readSession(dataDir, "api-1");
+    const before = statSync(path);
+    const replacement = `${path}.external`;
+    writeFileSync(replacement, readFileSync(path, "utf-8").replace("ship it", "test it"));
+    utimesSync(replacement, timestamp, timestamp);
+    renameSync(replacement, path);
+
+    const after = statSync(path);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).not.toBe(before.ino);
+    const updated = readSession(dataDir, "api-1");
+    expect(updated).not.toBe(first);
+    expect(updated?.prompt).toBe("test it");
+    expect(listSessions(dataDir)[0]).toBe(updated);
+  });
+
+  it("reads external in-place edits when size or mtime changes", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    const timestamp = new Date("2026-03-18T10:02:00.000Z");
+    utimesSync(path, timestamp, timestamp);
+    const first = readSession(dataDir, "api-1");
+    const before = statSync(path);
+    writeFileSync(path, readFileSync(path, "utf-8").replace("ship it", "test it"));
+    utimesSync(path, new Date(timestamp.getTime() + 1000), new Date(timestamp.getTime() + 1000));
+    expect(statSync(path).ino).toBe(before.ino);
+    expect(statSync(path).size).toBe(before.size);
+    const edited = readSession(dataDir, "api-1");
+    expect(edited).not.toBe(first);
+    expect(edited?.prompt).toBe("test it");
+
+    writeFileSync(path, readFileSync(path, "utf-8").replace("test it", "test it again"));
+    utimesSync(path, timestamp, new Date(timestamp.getTime() + 1000));
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("test it again");
+  });
+
+  it("rejects a warmed file emptied externally and returns null after deletion", async () => {
+    const dataDir = await newDataDir();
+    writeSession(dataDir, fixtureSession("api-1"));
+    expect(readSession(dataDir, "api-1")?.id).toBe("api-1");
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    writeFileSync(path, "");
+    expect(() => readSession(dataDir, "api-1")).toThrow(/Invalid session metadata JSON/);
+    await rm(path);
+    expect(readSession(dataDir, "api-1")).toBeNull();
+
+    writeSession(dataDir, { ...fixtureSession("api-1"), prompt: "restored" });
+    expect(readSession(dataDir, "api-1")?.prompt).toBe("restored");
   });
 
   it("lists a session file that has no index entry", async () => {

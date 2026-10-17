@@ -1133,7 +1133,8 @@ function createSessionStore(...initial: SessionRecord[]) {
   // every call (clone() always allocates a new object), which contradicts
   // the real listSessions() and would make the tick's record-change
   // detection untestable. readSessionMock/writeSessionMock stay a raw clone
-  // per call, mirroring production where only listSessions is stat-gated.
+  // per call: production readSession shares the same cache, but no caller
+  // relies on its identity.
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
@@ -3276,8 +3277,10 @@ describe("SessionService", () => {
     const outcome = first.catch((error: unknown) => error);
     let pid = 0;
     try {
-      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
-      pid = Number(readFileSync(pidFile, "utf8"));
+      await vi.waitFor(() => {
+        pid = Number(readFileSync(pidFile, "utf8"));
+        expect(pid).toBeGreaterThan(0);
+      });
       const canceledAt = Date.now();
       controller.abort();
       expect(await outcome).toMatchObject({ statusCode: 499 });
@@ -58239,6 +58242,42 @@ describe("SessionService", () => {
           "api-1",
           "hi",
           expect.objectContaining({}),
+        );
+        expect(result.status).toBe("running");
+        const persisted = sessions.get("api-1");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted).not.toHaveProperty("staleSidecars");
+      });
+
+      it("replays stale sidecars without mutating a readSession record in place", async () => {
+        // Production readSession returns metadata.ts' shared cached record;
+        // freezing every read makes any in-place delete throw.
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...staleParkableSession(),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+        });
+        const readClone = readSessionMock.getMockImplementation();
+        readSessionMock.mockImplementation((dataDir: string, sessionId: string) => {
+          const record = readClone?.(dataDir, sessionId) ?? null;
+          return record ? Object.freeze(record) : null;
+        });
+        const service = await createDisposedSessionService();
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        const result = await service.send("api-1", { message: "hi" });
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
         );
         expect(result.status).toBe("running");
         const persisted = sessions.get("api-1");
