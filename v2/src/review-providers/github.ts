@@ -512,7 +512,7 @@ const GITHUB_REVIEW_BATCH_PR_FIELDS = `id number title url headRefName headRepos
   reviewThreads(last:100){nodes{${GITHUB_REVIEW_THREAD_FIELDS}} pageInfo{hasPreviousPage startCursor}}
   reviews(last:100){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}
   latestOpinionatedReviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}}
-  comments(last:100){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}
+  comments(last:100){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}
   reviewRequests(last:${GITHUB_REVIEW_REQUEST_COUNT}){nodes{requestedReviewer{... on User{login}}}}`;
 
 function reviewBatchTargetLimit(bound: boolean): number {
@@ -644,6 +644,9 @@ function issueCommentsFromPrNode(value: Record<string, unknown>): IssueComment[]
     const id = readNumber(raw.databaseId);
     const body = readString(raw.body);
     if (id === null || body === null) return [];
+    // GitHub App and Actions posts (`__typename: "Bot"`) are status chatter, not
+    // PR feedback; dropping them here keeps them from waking the bound session.
+    if (isRecord(raw.author) && raw.author.__typename === "Bot") return [];
     const author = isRecord(raw.author) ? readString(raw.author.login) : null;
     return [{ id, body, user: { login: author } }];
   });
@@ -1670,7 +1673,7 @@ function signalPageField(index: number, page: PullRequestSignalPage): string {
       ? `commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100,before:$before${index}){nodes{${GITHUB_CHECK_CONTEXT_FIELDS}} pageInfo{hasPreviousPage startCursor}}}}}}`
       : page.kind === "reviews"
         ? `reviews(last:100,before:$before${index}){nodes{databaseId state body author{login}} pageInfo{hasPreviousPage startCursor}}`
-        : `comments(last:100,before:$before${index}){nodes{databaseId body author{login}} pageInfo{hasPreviousPage startCursor}}`;
+        : `comments(last:100,before:$before${index}){nodes{databaseId body author{__typename login}} pageInfo{hasPreviousPage startCursor}}`;
   return `s${index}:node(id:$id${index}){... on PullRequest{${connection}}}`;
 }
 
