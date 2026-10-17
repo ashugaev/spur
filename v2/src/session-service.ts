@@ -12872,7 +12872,10 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              runningRecord.worktreePath,
+            )))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -14099,7 +14102,10 @@ export class SessionService {
         if (
           agent === "opencode" &&
           (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
+            !(await waitForOpenCodeLaunchMessage(
+              runningRecord.agentSessionId,
+              runningRecord.worktreePath,
+            )))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -18796,7 +18802,7 @@ export class SessionService {
       try {
         if (
           !recoveredAgentSessionId ||
-          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId))
+          !(await waitForOpenCodeLaunchMessage(recoveredAgentSessionId, session.worktreePath))
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
@@ -22793,6 +22799,7 @@ export class SessionService {
     if (session.agent === "opencode") {
       const result = await readOpenCodeStructuredState(
         session.agentSessionId,
+        session.worktreePath,
         runtime.tmuxActivityAt?.getTime() ?? null,
         true,
       ).catch<Awaited<ReturnType<typeof readOpenCodeStructuredState>>>(() => ({ state: null }));
@@ -23221,6 +23228,7 @@ export class SessionService {
       } else {
         const structured = await readOpenCodeStructuredState(
           session.agentSessionId,
+          session.worktreePath,
           runtime.tmuxActivityAt?.getTime() ?? null,
         );
         const structuredState = structured.state;
