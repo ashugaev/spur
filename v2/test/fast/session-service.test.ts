@@ -10640,6 +10640,43 @@ describe("SessionService", () => {
     expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps resending the codex launch Enter until codex leaves its startup composer", async () => {
+    // Codex <0.156 ignores Enter in its startup composer, which can last 30s+
+    // past the ready markers; the submit lands on the first Enter after it.
+    // Codex launch pacing, pinned against the adapter in agents-index.test.ts.
+    agentSubmitAckPacingMock.mockImplementation(() => ({ windowMs: 10_000, maxResends: 9 }));
+    agentHasLaunchSubmitAckMock.mockImplementation(
+      (agent: string) => agent === "claude" || agent === "codex",
+    );
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValueOnce({ found: false, lastScannedFile: null })
+      .mockResolvedValue({ found: true, lastScannedFile: "/some/rollout.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "ship the task",
+        { freshLaunch: true },
+      ),
+    ).resolves.toBe("submitted");
+    expect(waitForAckMock).toHaveBeenCalledTimes(5);
+    expect(waitForAckMock).toHaveBeenCalledWith(expect.anything(), "ship the task", 10_000);
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(4);
+  });
+
   it("throws on an exhausted launch send when the agent process is gone", async () => {
     createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
       agent === "claude" ? { scan: vi.fn() } : null,
