@@ -617,8 +617,9 @@ function recoverableRuntimeError(session: SessionRecord): boolean {
   )
     return false;
   if (session.errorSource === "runtime_probe") return true;
-  if (session.errorSource !== undefined) return false;
   const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
+  if (session.errorSource === "other") return diagnostic.startsWith("ps failed:");
+  if (session.errorSource !== undefined) return false;
   return (
     diagnostic === "runtime state unknown" ||
     diagnostic === "runtime probe (tmux or ps) timed out; runtime state unknown" ||

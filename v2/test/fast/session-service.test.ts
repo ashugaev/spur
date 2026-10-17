@@ -26369,12 +26369,15 @@ describe("SessionService", () => {
     }
   });
 
-  it("automatically drains queued delivery after already-running runtime probe heals", async () => {
+  it.each([
+    { status: "running" as const, errorSource: "runtime_probe" as const },
+    { status: "errored" as const, errorSource: "other" as const },
+  ])("drains queued delivery after $status ps recovery", async (patch) => {
     const sessions = createSessionStore();
     const service = await createDisposedSessionService();
     const record = runningSession({
       error: "Session status detection failed: ps failed: controlled",
-      errorSource: "runtime_probe",
+      ...patch,
       queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
     });
     sessions.set(record.id, record);
@@ -26382,6 +26385,20 @@ describe("SessionService", () => {
     isProcessRunningInTmuxMock.mockResolvedValue(true);
     mockClaudeJsonlState("waiting");
     try {
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+        diagnostic: "ps failed: controlled",
+      });
+      expect((await service.get(record.id)).state).toBe("error");
+      expect(sessions.get(record.id)?.status).toBe(patch.status);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: true,
+        matchedByName: true,
+        unresponsive: false,
+      });
       expect((await service.get(record.id)).status).toBe("running");
       await vi.waitFor(() => {
         expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
@@ -26391,9 +26408,121 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.errorSource).toBeUndefined();
       await service.get(record.id);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
     } finally {
       service.dispose();
     }
+  });
+
+  it.each([
+    { boundary: "direct", diagnostic: "ps failed: malformed process table output" },
+    { boundary: "queued", diagnostic: "ps failed: malformed process table output" },
+    {
+      boundary: "direct",
+      diagnostic: "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+    },
+    {
+      boundary: "queued",
+      diagnostic: "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+    },
+  ])("heals ps failure from $boundary send: $diagnostic", async (sample) => {
+    const { boundary, diagnostic } = sample;
+    const sessions = createSessionStore();
+    let service = await createDisposedSessionService();
+    const record = runningSession({
+      agent: "codex",
+      launchCommand: agentLaunchCommand("codex"),
+      queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
+    });
+    sessions.set(record.id, record);
+    mockAgentWaitingState("codex");
+    probeTmuxProcessMatchMock.mockImplementation(async (_name, _matchers, options) =>
+      options?.fresh
+        ? { alive: false, matchedByName: false, unresponsive: false, diagnostic }
+        : { alive: true, matchedByName: true, unresponsive: false },
+    );
+    try {
+      if (boundary === "direct") {
+        await expect(
+          service.send(record.id, { message: "blocked by probe", queue: false }),
+        ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
+      } else {
+        await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+      }
+      expect(sessions.get(record.id)).toMatchObject({
+        status: "running",
+        error: `Session status detection failed: ${diagnostic}`,
+        errorSource: "other",
+        queuedMessages: record.queuedMessages,
+      });
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+        diagnostic,
+      });
+      expect((await service.get(record.id)).state).toBe("error");
+      expect(sessions.get(record.id)?.error).toContain(diagnostic);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+
+      service.dispose();
+      service = await createDisposedSessionService();
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: true,
+        matchedByName: true,
+        unresponsive: false,
+      });
+      expect((await service.get(record.id)).state).toBe("waiting");
+      await vi.waitFor(() => {
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+      });
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        record.tmuxSession,
+        "resume after probe",
+        expect.anything(),
+      );
+      expect(sessions.get(record.id)?.error).toBeUndefined();
+      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+      await service.get(record.id);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(removeWorktreeMock).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("retains a new workspace failure over historical ps provenance after probes recover", async () => {
+    const record = runningSession({
+      error: "Session status detection failed: ps failed: malformed process table output",
+      errorSource: "other",
+      queuedMessages: { messages: ["keep queued"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+    probeWorkspaceMock.mockReturnValue({
+      exists: false,
+      missing: false,
+      diagnostic: "workspace stat failed: permission denied",
+    });
+    expect((await service.get(record.id)).state).toBe("error");
+    const retained = "Session status detection failed: workspace stat failed: permission denied";
+    expect(sessions.get(record.id)).toMatchObject({
+      error: retained,
+      errorSource: "other",
+      queuedMessages: record.queuedMessages,
+    });
+    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+    expect((await service.get(record.id)).state).toBe("error");
+    expect(sessions.get(record.id)?.error).toBe(retained);
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("does not arm queued delivery for a promoted unrelated error", async () => {
@@ -26578,8 +26707,22 @@ describe("SessionService", () => {
   it.each([
     { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
     {
-      error: "Session status detection failed: ps failed: classifier",
+      error: "Session status detection failed: tmux list-panes failed: classifier",
       errorSource: "other" as const,
+    },
+    {
+      error: "Session status detection failed: classifier unavailable",
+      errorSource: "other" as const,
+    },
+    {
+      error: "Session status detection failed: Resource readout api-1__dev: ps failed: denied",
+      errorSource: "other" as const,
+    },
+    { error: "Session status detection failed: workspace failed", errorSource: "other" as const },
+    {
+      error: "Session status detection failed: ps failed: malformed process table output",
+      errorSource: "other" as const,
+      serverErrorAt: "2026-03-18T10:01:00.000Z",
     },
     { error: "Session status detection failed: workspace failed" },
     { error: "Provider request failed" },
