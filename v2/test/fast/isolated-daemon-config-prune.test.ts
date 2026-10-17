@@ -155,6 +155,7 @@ async function runPrune(options: {
   psArgsFail?: boolean;
   psPidOutput?: string;
   psPidFail?: boolean;
+  fileSizeLimit?: 0;
   fakeBinDir: string;
   // GATE C (859/B2): HOME + GIT_CONFIG_GLOBAL for the real `git` calls
   // inside dir_has_unsaved_work. Without HOME, `git status` in a fixture
@@ -210,7 +211,8 @@ exit 97
 `,
   );
 
-  const script = `set -euo pipefail\n${extractPruneFunctionSource()}\nprune_stale_config_dirs\n`;
+  const limits = options.fileSizeLimit === 0 ? "ulimit -c 0\nulimit -f 0\n" : "";
+  const script = `set -euo pipefail\n${limits}${extractPruneFunctionSource()}\nprune_stale_config_dirs\n`;
   await execFileAsync("bash", ["-c", script], {
     env: {
       PATH: `${fakeBinDir}:${process.env["PATH"] ?? ""}`,
@@ -256,6 +258,51 @@ describe("spur-isolated-daemon.sh prune_stale_config_dirs", () => {
     });
 
     expect(existsSync(stale)).toBe(true);
+  });
+
+  it("keeps a stale dir matched early in a ps listing larger than the pipe buffer (GATE A, #1012)", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live-big-ps", 120);
+    // ~90 KB, past the 64 KB pipe buffer, under the 128 KB per-env-string cap.
+    const filler = Array.from({ length: 2_500 }, (_, i) => `/usr/bin/unrelated-process --id ${i}`);
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psArgsOutput: [
+        `node /some/cli.js --config ${stale}/config.yaml daemon start`,
+        ...filler,
+      ].join("\n"),
+      fakeBinDir: join(tmpRoot, "bin"),
+    });
+
+    expect(existsSync(stale)).toBe(true);
+  });
+
+  it("keeps a late literal ps match when the child cannot write temporary files (GATE A, #1012)", async () => {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "spur-prune-test-"));
+    cleanupPaths.push(tmpRoot);
+    const configDir = join(tmpRoot, "spur-isolated-daemon.self");
+    mkdirSync(configDir, { recursive: true });
+    const live = await makeStaleDir(tmpRoot, "spur-isolated-daemon.live [literal]", 120);
+    const stale = await makeStaleDir(tmpRoot, "spur-isolated-daemon.unreferenced", 120);
+    const filler = Array.from({ length: 2_500 }, (_, i) => `/usr/bin/unrelated-process --id ${i}`);
+
+    await runPrune({
+      tmpRoot,
+      configDir,
+      psArgsOutput: [...filler, `node /some/cli.js --config ${live}/config.yaml daemon start`].join(
+        "\n",
+      ),
+      fakeBinDir: join(tmpRoot, "bin"),
+      fileSizeLimit: 0,
+    });
+
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(stale)).toBe(false);
   });
 
   it("keeps a stale dir a live own-uid pid has as its cwd, including a cwd under <dir>/worktrees (GATE B)", async () => {

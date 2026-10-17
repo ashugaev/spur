@@ -131,7 +131,8 @@ prune_stale_config_dirs() {
   while IFS= read -r -d '' dir; do
     [[ "$dir" == "$CONFIG_DIR" ]] && continue
 
-    if printf '%s' "$ps_output" | grep -qF -- "$dir"; then
+    # Match in Bash: pipelines can SIGPIPE and large here-strings need temp files.
+    if [[ "$ps_output" == *"$dir"* ]]; then
       continue
     fi
 
