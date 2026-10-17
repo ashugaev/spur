@@ -283,9 +283,8 @@ export function createRealUpdateDeps(
         ? probeDaemonIdentity(target, {
             version: readInstalledVersion(cliEntrypoint),
             pid: await unitMainPidWith(scope, SERVICE_UNITS.daemon),
-            buildId: computeBuildId(),
             ...(instanceConfig.status === "ok"
-              ? { configPath: instanceConfig.config.configPath }
+              ? { buildId: computeBuildId(), configPath: instanceConfig.config.configPath }
               : {}),
           })
         : target.id === "mcp" || target.id === "tunnel"

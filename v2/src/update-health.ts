@@ -8,6 +8,7 @@ import type { SystemdScope } from "./host-install.js";
 import { DEFAULT_MCP_PORT, DEFAULT_UI_PORT } from "./ports.js";
 import { computeBuildId } from "./build-identity.js";
 import { mcpTunnelEnvPath, readMcpTunnelStatus } from "./mcp-tunnel.js";
+import { probeMcpServer } from "./mcp-http.js";
 import { SPUR_DAEMON_API_VERSION, type HeadroomReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -298,7 +299,6 @@ export async function probeMcpIdentity(
       ? { ok: true }
       : { ok: false, reason: "identity-mismatch" };
   }
-  const { probeMcpServer } = await import("./mcp-http.js");
   const result = await probeMcpServer({
     url: target.url,
     expectedBuildId: computeBuildId(),
