@@ -32,6 +32,7 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 - [docs/web-terminal.md](docs/web-terminal.md) — recent web links in terminal output
 - [docs/claude-accounts.md](docs/claude-accounts.md) — claude account rotation and per-session credential switch
 - [docs/voice.md](docs/voice.md) — voice input setup
+- [docs/openai-mcp.md](docs/openai-mcp.md) — connect ChatGPT and dots to Spur through MCP
 - [docs/https-tailscale.md](docs/https-tailscale.md) — HTTPS on the tailnet hostname (required for voice)
 - [docs/install-from-npm.md](docs/install-from-npm.md) — install from npm (official)
 - [docs/install-from-source.md](docs/install-from-source.md) — install from source (contributors only)
