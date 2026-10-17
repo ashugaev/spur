@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { parseConsent, type InterfaceConsent } from "./review-interface-consent.js";
 import {
   isSessionState,
@@ -1282,19 +1282,63 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
-// sessions/ holds project dirs (sessions/<project>/<id>.json) next to
-// per-session log shard dirs (sessions/<id>/), hundreds of them on a live
-// fleet. A dir named after an indexed session id is a shard, unless an indexed
-// record lives inside it. Keyed on the cached index object, so a hit rebuilds
-// nothing.
-const shardDirNamesCache = new WeakMap<Readonly<Record<string, string>>, ReadonlySet<string>>();
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
 
-function indexedShardDirNames(index: Readonly<Record<string, string>>): ReadonlySet<string> {
-  const cached = shardDirNamesCache.get(index);
-  if (cached) return cached;
-  const projectDirNames = new Set(Object.values(index).map((path) => basename(dirname(path))));
-  const names = new Set(Object.keys(index).filter((id) => !projectDirNames.has(id)));
-  shardDirNamesCache.set(index, names);
+// Keyed on the absolute subdirectory path under dataDir/sessions. That dir
+// holds a handful of project dirs next to one log-shard dir per session
+// (sessions/<id>/), hundreds on a live fleet, none holding *.json. Caches the
+// *.json FILE NAMES only: content still goes through readSessionFileCached's
+// per-file fingerprint.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only once the directory mtime is older than this,
+// measured at STORE time: a mutation landing after the readdir but inside the
+// same timestamp tick as the pre-readdir stat is never cached.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Sound because the
+// directory mtime advances on every entry create, rename and unlink; ino also
+// changes on rm -r + mkdir unless the inode is reused, and then the fresh
+// mtime catches it.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Vanished between the root readdir and this stat: surface the same
+    // readdir error as an uncached listing.
+    sessionDirListingCache.delete(dir);
+    return readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
+  // readdir is stored under the older mtime, so the next stat misses once.
+  if (Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
   return names;
 }
 
@@ -1302,17 +1346,18 @@ export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
-  const shardDirNames = indexedShardDirNames(readSessionIndex(dataDir));
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || shardDirNames.has(entry.name)) continue;
+    if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
       const session = tryReadSessionFile(filePath);
@@ -1323,6 +1368,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
