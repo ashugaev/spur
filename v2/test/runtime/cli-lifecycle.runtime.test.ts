@@ -610,7 +610,7 @@ async function runRestoreScenario(args: {
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for an "error" state that can never arrive.
+    // below times out waiting for the agent to stop.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -620,13 +620,8 @@ async function runRestoreScenario(args: {
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
-  // A manual pause kills the tmux session outright (runtimeAlive false, status
-  // "stopped"). An agent process exiting on its own leaves the tmux pane/session
-  // alive with no matching agent process, which reconcileUnexpectedStop treats
-  // as an unexpected crash (status "errored") rather than a clean stop — see
-  // "fix(session): preserve agent exit errors".
-  const expectedState = stopMode === "pause" ? "stopped" : "error";
-  const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
+  // Pause removes the tmux session; an exited agent leaves its pane alive.
+  // Both stop the session, with distinct reasons for explicit pause/runtime loss.
   const exited = await pollUntil(
     async () =>
       JSON.parse(
@@ -635,9 +630,10 @@ async function runRestoreScenario(args: {
     {
       timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.state === expectedState &&
+        value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === expectedStatus,
+        value[0]?.status === "stopped" &&
+        value[0]?.stopReason === (stopMode === "pause" ? "manual_pause" : "runtime_lost"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -674,7 +670,10 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 45_000,
-      accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.status === "running" &&
+        value[0]?.runtimeAlive === true &&
+        value[0]?.state === "waiting",
     },
   );
   if (!args.agent) {
@@ -685,7 +684,7 @@ async function runRestoreScenario(args: {
     timeoutMs: 15_000,
     accept: (value) =>
       expectRestorePrompt
-        ? value.includes(restorePrompt)
+        ? value.includes(`ack: ${restorePrompt}`)
         : value.includes(readyMarker) && !value.includes(restorePrompt),
   });
 
@@ -695,6 +694,8 @@ async function runRestoreScenario(args: {
   });
 
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
+  expect(restored[0]?.id).toBe(spawned.id);
+  expect(restored[0]?.worktreePath).toBe(spawned.worktreePath);
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
   if (expectRestorePrompt) {
@@ -702,6 +703,13 @@ async function runRestoreScenario(args: {
   } else {
     expect(pane).not.toContain(restorePrompt);
   }
+
+  const probe = `restored-${spawned.id}`;
+  await context.execCli(["--config", configPath, "send", spawned.id, probe, "--json"]);
+  await pollUntil(async () => captureTmuxPane(spawned.id), {
+    timeoutMs: 15_000,
+    accept: (value) => value.includes(`ack: ${probe}`),
+  });
 
   return { context, restored, spawned, pane };
 }
@@ -4768,7 +4776,7 @@ projects:
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for an "error" state that can never arrive.
+    // below times out waiting for the agent to stop.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4777,10 +4785,7 @@ projects:
     });
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
-    // The agent process exits on its own, leaving the tmux pane/session alive
-    // with no matching process — reconcileUnexpectedStop treats that as an
-    // unexpected crash (status "errored"), not a clean stop. See
-    // "fix(session): preserve agent exit errors".
+    // The pane survives the agent's exit, but the missing process stops the session.
     await pollUntil(
       async () =>
         JSON.parse(
@@ -4788,7 +4793,11 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 45_000,
-        accept: (value) => value[0]?.state === "error" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0]?.state === "stopped" &&
+          value[0]?.status === "stopped" &&
+          value[0]?.stopReason === "runtime_lost" &&
+          value[0]?.runtimeAlive === true,
       },
     );
 
@@ -4820,18 +4829,22 @@ projects:
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
-        timeoutMs: 30_000,
-        accept: (value) => value[0]?.state !== "error" && value[0]?.runtimeAlive === true,
+        timeoutMs: 45_000,
+        accept: (value) =>
+          value[0]?.status === "running" &&
+          value[0]?.runtimeAlive === true &&
+          value[0]?.state === "waiting",
       },
     );
     const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
       timeoutMs: 30_000,
-      accept: (value) => value.includes("This session was restored after the agent exited."),
+      accept: (value) => value.includes("ack: This session was restored after the agent exited."),
     });
 
     await sendKeysToTmux(controllerSessionName, "q");
 
     expect(restored[0]?.id).toBe(spawned.id);
+    expect(restored[0]?.worktreePath).toBe(spawned.worktreePath);
     expect(restored[0]?.runtimeAlive).toBe(true);
     expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
     expect(restoredPane).toContain("Original task:");
@@ -4842,6 +4855,13 @@ projects:
     const lastStartupLine = startupLines[startupLines.length - 1] ?? "";
     expect(lastStartupLine).toContain("startup:launch:");
     expect(lastStartupLine).toContain(`--session-id ${pinnedSessionId}`);
+
+    const probe = `restored-${spawned.id}`;
+    await context.execCli(["--config", configPath, "send", spawned.id, probe, "--json"]);
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(`ack: ${probe}`),
+    });
   });
 
   it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
