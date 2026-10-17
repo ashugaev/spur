@@ -46,15 +46,30 @@ export function validateManifest(manifest, now = Date.now()) {
     Array.isArray(manifest.candidates) && manifest.candidates.length === 2,
     "two candidates required",
   );
+  const selection = manifest.initialPublicReleases ?? evidence;
+  assert(
+    selection.stale === false &&
+      selection.error === null &&
+      Array.isArray(selection.entries) &&
+      selection.entries.length >= 2,
+    "untrusted initial release selection",
+  );
   for (const [index, candidate] of manifest.candidates.entries()) {
-    const entry = evidence.entries[1 - index];
+    const entry = selection.entries[1 - index];
+    const current = evidence.entries.find((release) => release.tag === candidate.version);
     assert(
-      entry && Object.keys(entry).every((key) => key === "tag" || key === "publishedAt"),
+      entry &&
+        current &&
+        [entry, current].every((release) =>
+          Object.keys(release).every((key) => key === "tag" || key === "publishedAt"),
+        ),
       "release entry must come from production discovery",
     );
     assert(/^\d+\.\d+\.\d+$/.test(candidate.version), "invalid release version");
     assert(
-      candidate.version === entry?.tag && Number.isFinite(Date.parse(entry.publishedAt)),
+      candidate.version === entry.tag &&
+        Number.isFinite(Date.parse(entry.publishedAt)) &&
+        Number.isFinite(Date.parse(current.publishedAt)),
       "candidate absent from fresh public releases",
     );
     assert(
@@ -372,9 +387,9 @@ export async function refreshMembership(manifestPath, releasesModule) {
   const { getReleases } = await import(pathToFileURL(resolve(releasesModule)).href);
   const current = await readJson(manifestPath);
   const previous = current.publicReleases;
+  if (!current.initialPublicReleases) current.initialPublicReleases = previous;
   current.publicReleases = { ...(await getReleases()), fetchedAt: new Date().toISOString() };
   validateManifest(current);
-  if (!current.initialPublicReleases) current.initialPublicReleases = previous;
   await writeFile(manifestPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
 }
 

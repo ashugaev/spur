@@ -39,6 +39,9 @@ function manifest() {
 
 test("manifest rejects stale, unpublished and mismatched candidates", () => {
   assert.equal(validateManifest(manifest()).schema, 1);
+  const unselected = manifest();
+  unselected.publicReleases.entries.unshift({ tag: "2.0.2", publishedAt: "2026-01-03" });
+  assert.throws(() => validateManifest(unselected));
   for (const mutate of [
     (m) => {
       m.publicReleases.stale = true;
@@ -122,6 +125,29 @@ test("registry serves only exact candidate payloads and rejects checksum/version
     ])
       assert.equal((await fetch(`${origin}${denied}`)).status, 404);
     assert.equal((await fetch(`${origin}/@shugaev%2fspur`, { method: "POST" })).status, 404);
+    const laterModule = join(dir, "later-release.mjs");
+    await writeFile(
+      laterModule,
+      `export const getReleases = async () => (${JSON.stringify({
+        entries: [{ tag: "2.0.2", publishedAt: "2026-01-03" }, ...value.publicReleases.entries],
+        stale: false,
+        error: null,
+      })});`,
+    );
+    await refreshMembership(path, laterModule);
+    await new Promise((done) => server.close(done));
+    server = await startFixture(path);
+    const restarted = `http://127.0.0.1:${server.address().port}`;
+    const refreshedMetadata = await (await fetch(`${restarted}/@shugaev%2fspur`)).json();
+    assert.equal(refreshedMetadata["dist-tags"].latest, "2.0.0");
+    assert.deepEqual(Object.keys(refreshedMetadata.versions), ["2.0.0", "2.0.1"]);
+    const refreshedBytes = Buffer.from(
+      await (await fetch(refreshedMetadata.versions["2.0.0"].dist.tarball)).arrayBuffer(),
+    );
+    assert.equal(
+      createHash("sha256").update(refreshedBytes).digest("hex"),
+      value.candidates[0].sha256,
+    );
     value.candidates[0].sha256 = "d".repeat(64);
     await writeFile(path, JSON.stringify(value));
     await assert.rejects(startFixture(path), /checksum/);
@@ -220,6 +246,20 @@ test("fixture reboot refresh requires fresh production discovery and preserves i
       `export const getReleases = async () => (${JSON.stringify({ ...productionResult, stale: true, error: "offline" })});`,
     );
     await assert.rejects(refreshMembership(path, staleModule), /untrusted release/);
+    for (const [name, entries] of [
+      ["missing", [productionResult.entries[0], { tag: "3.0.0", publishedAt: "2026-02-01" }]],
+      [
+        "deprecated",
+        [productionResult.entries[0], { ...productionResult.entries[1], deprecated: true }],
+      ],
+    ]) {
+      const rejectedModule = join(dir, `${name}.mjs`);
+      await writeFile(
+        rejectedModule,
+        `export const getReleases = async () => (${JSON.stringify({ entries, stale: false, error: null })});`,
+      );
+      await assert.rejects(refreshMembership(path, rejectedModule));
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
