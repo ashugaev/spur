@@ -190,16 +190,18 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Claude: agent exit → error", async () => {
+  it("Claude: agent exit → stopped with runtime_lost", async () => {
     const { context, configPath, port } = await setup("claude-exit");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "error");
-    expect(view.state).toBe("error");
-    expect(view.status).toBe("errored");
-    expect(view.error).toMatch(/\S/);
+    const view = await waitForState(port, session.id, "stopped");
+    expect(view.state).toBe("stopped");
+    expect(view.status).toBe("stopped");
+    expect(view.stopReason).toBe("runtime_lost");
+    expect(view.runtimeAlive).toBe(true);
+    expect(view.error).toBeUndefined();
   });
 
   it("Claude: state history records transitions", async () => {
@@ -306,16 +308,18 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Codex: agent exit → error", async () => {
+  it("Codex: agent exit → stopped with runtime_lost", async () => {
     const { context, configPath, port } = await setup("codex-exit");
     const session = await spawnSession(context, configPath, "codex");
     await waitForState(port, session.id, "waiting", 45_000);
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "error");
-    expect(view.state).toBe("error");
-    expect(view.status).toBe("errored");
-    expect(view.error).toMatch(/\S/);
+    const view = await waitForState(port, session.id, "stopped");
+    expect(view.state).toBe("stopped");
+    expect(view.status).toBe("stopped");
+    expect(view.stopReason).toBe("runtime_lost");
+    expect(view.runtimeAlive).toBe(true);
+    expect(view.error).toBeUndefined();
   });
 
   // ── Cursor JSONL transcript state detection ───────────────────────────
@@ -370,14 +374,16 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Cursor: agent exit → error", async () => {
+  it("Cursor: agent exit → stopped with runtime_lost", async () => {
     const { context, configPath, port } = await setup("cursor-exit");
     const session = await spawnSession(context, configPath, "cursor");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "error");
-    expect(view.state).toBe("error");
-    expect(view.status).toBe("errored");
-    expect(view.error).toMatch(/\S/);
+    const view = await waitForState(port, session.id, "stopped");
+    expect(view.state).toBe("stopped");
+    expect(view.status).toBe("stopped");
+    expect(view.stopReason).toBe("runtime_lost");
+    expect(view.runtimeAlive).toBe(true);
+    expect(view.error).toBeUndefined();
   });
 });
