@@ -610,7 +610,7 @@ async function runRestoreScenario(args: {
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for an "error" state that can never arrive.
+    // below times out waiting for a "stopped" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -622,11 +622,8 @@ async function runRestoreScenario(args: {
 
   // A manual pause kills the tmux session outright (runtimeAlive false, status
   // "stopped"). An agent process exiting on its own leaves the tmux pane/session
-  // alive with no matching agent process, which reconcileUnexpectedStop treats
-  // as an unexpected crash (status "errored") rather than a clean stop — see
-  // "fix(session): preserve agent exit errors".
-  const expectedState = stopMode === "pause" ? "stopped" : "error";
-  const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
+  // alive with no matching agent process. Both become stopped; process loss
+  // carries runtime_lost while the pane remains available for native resume.
   const exited = await pollUntil(
     async () =>
       JSON.parse(
@@ -635,9 +632,10 @@ async function runRestoreScenario(args: {
     {
       timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.state === expectedState &&
+        value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === expectedStatus,
+        value[0]?.status === "stopped" &&
+        (stopMode === "pause" || value[0]?.stopReason === "runtime_lost"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -674,7 +672,7 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 45_000,
-      accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
+      accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
     },
   );
   if (!args.agent) {
@@ -4768,7 +4766,7 @@ projects:
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for an "error" state that can never arrive.
+    // below times out waiting for a "stopped" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4778,9 +4776,8 @@ projects:
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
-    // with no matching process — reconcileUnexpectedStop treats that as an
-    // unexpected crash (status "errored"), not a clean stop. See
-    // "fix(session): preserve agent exit errors".
+    // with no matching process. Reconciliation persists stopped/runtime_lost
+    // while preserving the pane for the native-resume attempt.
     await pollUntil(
       async () =>
         JSON.parse(
@@ -4788,7 +4785,11 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 45_000,
-        accept: (value) => value[0]?.state === "error" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0]?.state === "stopped" &&
+          value[0]?.status === "stopped" &&
+          value[0]?.stopReason === "runtime_lost" &&
+          value[0]?.runtimeAlive === true,
       },
     );
 
