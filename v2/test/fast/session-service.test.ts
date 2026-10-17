@@ -3277,8 +3277,10 @@ describe("SessionService", () => {
     const outcome = first.catch((error: unknown) => error);
     let pid = 0;
     try {
-      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
-      pid = Number(readFileSync(pidFile, "utf8"));
+      await vi.waitFor(() => {
+        pid = Number(readFileSync(pidFile, "utf8"));
+        expect(pid).toBeGreaterThan(0);
+      });
       const canceledAt = Date.now();
       controller.abort();
       expect(await outcome).toMatchObject({ statusCode: 499 });
