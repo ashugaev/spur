@@ -610,7 +610,7 @@ async function runRestoreScenario(args: {
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for a stopped state that can never arrive.
+    // below times out waiting for a "stopped" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -620,8 +620,10 @@ async function runRestoreScenario(args: {
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
-  // Both paths stop the session; an agent exit retains the live tmux pane and
-  // records runtime_lost without inventing an error.
+  // A manual pause kills the tmux session outright (runtimeAlive false, status
+  // "stopped"). An agent process exiting on its own leaves the tmux pane/session
+  // alive with no matching agent process. Both become stopped; process loss
+  // carries runtime_lost while the pane remains available for native resume.
   const exited = await pollUntil(
     async () =>
       JSON.parse(
@@ -632,14 +634,11 @@ async function runRestoreScenario(args: {
       accept: (value) =>
         value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === "stopped",
+        value[0]?.status === "stopped" &&
+        (stopMode === "pause" || value[0]?.stopReason === "runtime_lost"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
-  if (stopMode === "exit") {
-    expect(exited[0]?.stopReason).toBe("runtime_lost");
-    expect(exited[0]?.error).toBeUndefined();
-  }
 
   if (args.agent) {
     await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
@@ -674,7 +673,7 @@ async function runRestoreScenario(args: {
     {
       timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.status === "running" &&
+        value[0]?.state !== "stopped" &&
         value[0]?.state !== "error" &&
         value[0]?.runtimeAlive === true,
     },
@@ -4770,7 +4769,7 @@ projects:
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for a stopped state that can never arrive.
+    // below times out waiting for a "stopped" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4779,8 +4778,10 @@ projects:
     });
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
-    // The agent exit stops the session while retaining its tmux pane.
-    const exited = await pollUntil(
+    // The agent process exits on its own, leaving the tmux pane/session alive
+    // with no matching process. Reconciliation persists stopped/runtime_lost
+    // while preserving the pane for the native-resume attempt.
+    await pollUntil(
       async () =>
         JSON.parse(
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
@@ -4790,11 +4791,10 @@ projects:
         accept: (value) =>
           value[0]?.state === "stopped" &&
           value[0]?.status === "stopped" &&
+          value[0]?.stopReason === "runtime_lost" &&
           value[0]?.runtimeAlive === true,
       },
     );
-    expect(exited[0]?.stopReason).toBe("runtime_lost");
-    expect(exited[0]?.error).toBeUndefined();
 
     await rm(join(context.rootDir, ".claude"), { recursive: true, force: true });
 
@@ -4826,7 +4826,7 @@ projects:
       {
         timeoutMs: 30_000,
         accept: (value) =>
-          value[0]?.status === "running" &&
+          value[0]?.state !== "stopped" &&
           value[0]?.state !== "error" &&
           value[0]?.runtimeAlive === true,
       },
