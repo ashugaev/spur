@@ -2868,7 +2868,7 @@ describe("SessionService", () => {
     { reason: "boot", tmux: true },
     { reason: "runtime_check", tmux: true },
   ])(
-    "reconciles runtime_lost with retained error evidence on $reason (tmux=$tmux)",
+    "reconciles agent loss with retained error evidence on $reason (tmux=$tmux)",
     async ({ reason, tmux }) => {
       const record = runningSession({
         error: "provider failure retained",
@@ -2890,14 +2890,14 @@ describe("SessionService", () => {
         if (reason === "boot") await service.reconcileStoppedSessions();
         else await service.get(record.id);
         expect(sessions.get(record.id)).toMatchObject({
-          status: "stopped",
-          stopReason: "runtime_lost",
+          status: tmux ? "errored" : "stopped",
           error: record.error,
           errorSource: record.errorSource,
           serverErrorAt: record.serverErrorAt,
           queuedMessages: record.queuedMessages,
           sidecarPorts: record.sidecarPorts,
         });
+        expect(sessions.get(record.id)?.stopReason).toBe(tmux ? undefined : "runtime_lost");
         expect((await service.getHeadroom()).live.count).toBe(0);
         expect((await service.getHeadroom()).live.byProject[record.project] ?? 0).toBe(0);
       } finally {
@@ -23443,8 +23443,9 @@ describe("SessionService", () => {
     );
   });
 
-  it("persists runtime_lost when the agent process is missing in a live pane", async () => {
-    createSessionStore(runningSession());
+  it("persists an inferred exit error when the agent process is missing in a live pane", async () => {
+    const sidecarPorts = { dev: { SPUR_RESERVED_PORT_DEV: 3000 } };
+    createSessionStore(runningSession({ sidecarPorts }));
     isProcessRunningInTmuxMock.mockResolvedValue(false);
 
     const { SessionService } = await loadSessionServiceModule();
@@ -23454,14 +23455,17 @@ describe("SessionService", () => {
     await vi.advanceTimersByTimeAsync(250);
     const result = await resultPromise;
 
-    expect(result.status).toBe("stopped");
-    expect(result.state).toBe("stopped");
+    expect(result.status).toBe("errored");
+    expect(result.state).toBe("error");
+    expect(result.runtimeAlive).toBe(true);
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
-      status: "stopped",
-      stopReason: "runtime_lost",
+      status: "errored",
+      error: "Agent runtime exited unexpectedly.",
+      errorSource: "inferred_runtime_exit",
+      sidecarPorts,
     });
-    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("error");
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("stopReason");
   });
 
   it("does not persist stopped on a transient runtime probe miss", async () => {

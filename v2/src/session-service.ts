@@ -22484,10 +22484,7 @@ export class SessionService {
     }
 
     const terminalUnavailable =
-      !workspaceGone &&
-      (!confirmedRuntime.runtimeAlive ||
-        !confirmedRuntime.paneUsable ||
-        !confirmedRuntime.processAlive);
+      !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
     // Runtime absence does not prove sidecar absence. Keep ownership evidence
     // for the existing sidecar reaper; reconciliation performs no teardown.
@@ -22503,8 +22500,14 @@ export class SessionService {
       updated = {
         ...latest,
         status: "errored",
-        error: workspaceGone ? "Agent worktree is missing." : INFERRED_RUNTIME_EXIT_ERROR,
-        errorSource: workspaceGone ? "other" : "inferred_runtime_exit",
+        ...(workspaceGone
+          ? { error: "Agent worktree is missing.", errorSource: "other" as const }
+          : hasSessionErrorEvidence(latest)
+            ? {}
+            : {
+                error: INFERRED_RUNTIME_EXIT_ERROR,
+                errorSource: "inferred_runtime_exit" as const,
+              }),
         updatedAt,
       };
     }
