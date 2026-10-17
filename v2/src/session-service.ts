@@ -16336,6 +16336,7 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
+      if (options.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim)) throw error;
       if (initialSession && options.allowDelivery?.() === false) {
         return this.enrich(readSession(this.config.dataDir, sessionId) ?? initialSession);
       }
@@ -18824,14 +18825,19 @@ export class SessionService {
     },
   ): Promise<ReadySessionForSend> {
     const operation = options?.operation;
-    operation?.assertActive();
+    const assertActive = () => {
+      operation?.assertActive();
+      if (options?.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim))
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    };
+    assertActive();
     const probeRevision = this.lifecycle.snapshot(session.id).revision;
     this.assertTokenBudgetAllowsActivation(session);
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
     const runtime = await this.readRuntimeSnapshot(session);
-    operation?.assertActive();
+    assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
       const wakeClaim = options?.wakeClaim;
       return {
@@ -18946,14 +18952,14 @@ export class SessionService {
         ...(options?.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
       });
     } catch (error) {
-      operation?.assertActive();
+      assertActive();
       const latest = readSession(this.config.dataDir, session.id);
       if (
         latest &&
         !hasRetainedSessionError(latest) &&
         (await this.launchResourcesMayRemain(latest))
       ) {
-        operation?.assertActive();
+        assertActive();
         await this.retainLaunchedError(latest, error, operation);
       }
       throw error;
@@ -19001,7 +19007,15 @@ export class SessionService {
     },
   ): Promise<ReadySessionForSend> {
     const operation = options?.operation;
-    const assertActive = () => operation?.assertActive();
+    const assertActive = () => {
+      operation?.assertActive();
+      if (options?.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim))
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    };
+    const beforeLaunch = () => {
+      assertActive();
+      if (options?.wakeClaim?.stage === "unattempted") options.wakeClaim.stage = "input-started";
+    };
     assertActive();
     const launchSelection = await resolveSpawnRequestLaunchSelection(
       {
@@ -19193,14 +19207,13 @@ export class SessionService {
         await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
           const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
           assertActive();
-          if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
-            options.wakeClaim.stage = "input-started";
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: baseLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            beforeLaunch,
             ...(operation ? { operation } : {}),
           });
           assertActive();
@@ -19280,14 +19293,13 @@ export class SessionService {
     } else {
       try {
         assertActive();
-        if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
-          options.wakeClaim.stage = "input-started";
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
           launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
           launchScriptDir: sessionToolDir,
           env,
+          beforeLaunch,
           ...(operation ? { operation } : {}),
         });
         assertActive();
@@ -19340,6 +19352,7 @@ export class SessionService {
               ? await this.agentLaunchResourcesMayRemain(failedAttempt)
               : await this.launchResourcesMayRemain(failedAttempt);
         }
+        assertActive();
         if (launched) {
           assertActive();
           await this.retainLaunchedError(failedAttempt, error, operation);
@@ -19384,14 +19397,13 @@ export class SessionService {
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
           assertActive();
-          if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
-            options.wakeClaim.stage = "input-started";
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: freshLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            beforeLaunch,
             ...(operation ? { operation } : {}),
           });
           assertActive();

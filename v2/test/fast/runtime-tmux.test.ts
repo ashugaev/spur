@@ -5,6 +5,7 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -1008,6 +1009,171 @@ describe("runtime-tmux", () => {
       expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "respawn-pane")).toBe(
         false,
       );
+    });
+  });
+
+  describe("agent launch input-attempt boundary", () => {
+    it.each(["direct", "1", "auto"])(
+      "observes fully prepared files immediately before %s dispatch",
+      async (scope) => {
+        process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = scope;
+        const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-"));
+        const order: string[] = [];
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        execFileAsyncMock.mockImplementation(async (_file, args) => {
+          expect(order).toEqual(["before"]);
+          expect(args).toContain("new-session");
+          order.push("dispatch");
+          return { stdout: "", stderr: "" };
+        });
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: dir,
+          beforeLaunch: () => {
+            expect(execFileAsyncMock).not.toHaveBeenCalled();
+            expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+            expect(paneEnvFiles(dir)).toHaveLength(1);
+            order.push("before");
+          },
+        };
+        await createTmuxSession(input);
+        expect(order).toEqual(["before", "dispatch"]);
+        expect(execFileAsyncMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["script", "env"])(
+      "does not observe or dispatch failed %s preparation",
+      async (step) => {
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        const dir = join(TEST_TMP_DIR, `boundary-fail-${step}`);
+        if (step === "script") writeFileSync(dir, "owned regular file");
+        const beforeLaunch = vi.fn();
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: dir,
+          ...(step === "env" ? { env: { INVALID: "nul\0value" } } : {}),
+          beforeLaunch,
+        };
+        await expect(createTmuxSession(input)).rejects.toThrow();
+        expect(beforeLaunch).not.toHaveBeenCalled();
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+        expect(spawnCalls).toHaveLength(0);
+      },
+    );
+
+    it.each([false, true])(
+      "authorizes each auto fallback dispatch; revoked=%s",
+      async (revoked) => {
+        process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        const order: string[] = [];
+        const refusal = new Error("claim revoked");
+        const beforeLaunch = vi.fn(() => {
+          order.push("before");
+          if (revoked && beforeLaunch.mock.calls.length === 2) throw refusal;
+        });
+        execFileAsyncMock.mockImplementation(async (file) => {
+          order.push(file);
+          if (file === "systemd-run")
+            throw Object.assign(new Error("spawn systemd-run ENOENT"), { code: "ENOENT" });
+          return { stdout: "", stderr: "" };
+        });
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: mkdtempSync(join(TEST_TMP_DIR, "boundary-auto-")),
+          beforeLaunch,
+        };
+        if (revoked) await expect(createTmuxSession(input)).rejects.toBe(refusal);
+        else await createTmuxSession(input);
+        expect(order).toEqual(
+          revoked
+            ? ["before", "systemd-run", "before"]
+            : ["before", "systemd-run", "before", "tmux"],
+        );
+        expect(beforeLaunch).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("does not classify first-hook refusal as unavailable systemd", async () => {
+      process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const refusal = new Error("Failed to connect to bus");
+      const input = {
+        sessionName: "boundary",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "echo prepared",
+        launchScriptDir: mkdtempSync(join(TEST_TMP_DIR, "boundary-refused-")),
+        beforeLaunch: () => {
+          throw refusal;
+        },
+      };
+      await expect(createTmuxSession(input)).rejects.toBe(refusal);
+      expect(execFileAsyncMock).not.toHaveBeenCalled();
+    });
+
+    it("rechecks cancellation after preparation before observing a dispatch", async () => {
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const controller = new AbortController();
+      const operation = createRestoreOperation(controller.signal);
+      const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-cancel-"));
+      const beforeLaunch = vi.fn();
+      try {
+        await expect(
+          createTmuxSession({
+            sessionName: "boundary",
+            cwd: TEST_TMP_DIR,
+            launchCommand: "echo prepared",
+            launchScriptDir: dir,
+            env: {
+              get CANCEL_DURING_PREPARATION() {
+                controller.abort();
+                return "prepared";
+              },
+            },
+            operation,
+            beforeLaunch,
+          }),
+        ).rejects.toThrow("cancelled");
+        expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+        expect(paneEnvFiles(dir)).toEqual([]);
+        expect(beforeLaunch).not.toHaveBeenCalled();
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+        expect(spawnCalls).toHaveLength(0);
+      } finally {
+        operation.dispose();
+      }
+    });
+
+    it("preserves callback refusal when env-file cleanup also fails", async () => {
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-cleanup-"));
+      const refusal = new Error("original claim refusal");
+      let envFile: string | undefined;
+      const input = {
+        sessionName: "boundary",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "echo prepared",
+        launchScriptDir: dir,
+        beforeLaunch: () => {
+          envFile = join(dir, paneEnvFiles(dir)[0] ?? "missing-env");
+          rmSync(envFile);
+          mkdirSync(envFile);
+          throw refusal;
+        },
+      };
+      try {
+        await expect(createTmuxSession(input)).rejects.toBe(refusal);
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+      } finally {
+        if (envFile) rmSync(envFile, { recursive: true, force: true });
+      }
     });
   });
 

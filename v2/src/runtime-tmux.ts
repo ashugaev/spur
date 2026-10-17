@@ -597,16 +597,23 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 async function runTmuxNewSession(
   args: string[],
   operation?: RestoreOperationContext,
+  beforeLaunch?: () => void,
 ): Promise<void> {
   const run = (file: string, commandArgs: string[]): Promise<unknown> =>
     operation ? runRestoreCommand(file, commandArgs, operation) : execFileAsync(file, commandArgs);
   const mode = systemdScopeMode();
   if (mode === "direct") {
+    operation?.assertActive();
+    beforeLaunch?.();
     await run("tmux", args);
     return;
   }
+  const scopedArgs = ["--user", "--scope", "--quiet", "--collect", "tmux", ...args];
+  operation?.assertActive();
+  beforeLaunch?.();
   try {
-    await run("systemd-run", ["--user", "--scope", "--quiet", "--collect", "tmux", ...args]);
+    await run("systemd-run", scopedArgs);
+    return;
   } catch (error) {
     operation?.assertActive();
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
@@ -620,11 +627,13 @@ async function runTmuxNewSession(
             "KillMode=process.\n",
         );
       }
-      await run("tmux", args);
-      return;
+    } else {
+      throw error;
     }
-    throw error;
   }
+  operation?.assertActive();
+  beforeLaunch?.();
+  await run("tmux", args);
 }
 
 // Claude Code identity markers. The spur daemon (or whatever shell spawned
@@ -1166,6 +1175,7 @@ export async function createTmuxSession(input: {
   launchScriptDir: string;
   env?: Record<string, string>;
   operation?: RestoreOperationContext;
+  beforeLaunch?: () => void;
 }): Promise<void> {
   input.operation?.assertActive();
   const paneEnv = buildPaneEnv(input.env);
@@ -1188,9 +1198,14 @@ export async function createTmuxSession(input: {
         buildAgentPaneShellCommand(scriptPath, envFile),
       ],
       input.operation,
+      input.beforeLaunch,
     );
   } catch (error) {
-    rmSync(envFile, { force: true });
+    try {
+      rmSync(envFile, { force: true });
+    } catch {
+      // Preserve the launch/authorization failure when local cleanup also fails.
+    }
     throw error;
   }
   invalidateFleetProbeCaches();
