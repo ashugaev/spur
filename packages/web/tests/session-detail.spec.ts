@@ -1216,7 +1216,12 @@ test.describe("S2: Actions bar", () => {
     let calls = 0;
     await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
       calls += 1;
-      await route.fulfill({ json: { ...session, status: "running", state: "waiting", error: "" } });
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      session.status = "running";
+      session.state = "waiting";
+      session.error = "";
+      session.lifecycle = lifecycleReceipt(operationId, session.id, "restore", "succeeded", 2);
+      await route.fulfill({ json: session });
     });
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^restore$/i }).click();

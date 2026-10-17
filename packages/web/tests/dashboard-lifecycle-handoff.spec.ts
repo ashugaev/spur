@@ -14,12 +14,29 @@ test("restores an exited agent from its row while the pane remains alive", async
     runtimeAlive: true,
     error: "Agent runtime exited unexpectedly.",
   });
-  const running = { ...source, status: "running", state: "waiting", error: "" } as const;
   let rows: SpurSessionView[] = [source];
   let calls = 0;
   await mockSessions(page, () => rows);
   await page.route(`**/api/sessions/${source.id}/restore`, async (route) => {
     calls += 1;
+    const { operationId } = route.request().postDataJSON() as { operationId: string };
+    const running: SpurSessionView = {
+      ...source,
+      status: "running",
+      state: "waiting",
+      error: "",
+      lifecycle: {
+        instanceId: "test-instance",
+        revision: 2,
+        operation: {
+          operationId,
+          action: "restore",
+          phase: "succeeded",
+          targetIds: [source.id],
+          outcomes: [{ sessionId: source.id, phase: "succeeded" }],
+        },
+      },
+    };
     rows = [running];
     await route.fulfill({ json: running });
   });
