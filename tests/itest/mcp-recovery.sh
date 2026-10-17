@@ -126,6 +126,7 @@ NODE
     : "${ITEST_MCP_TARGET_VERSION:?set selected public candidate version}"
     [[ "$ITEST_MCP_TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
     snapshot > "$ITEST_MCP_EVIDENCE_DIR/$mode.before"
+    read -r _ before_mcp_pid < <(grep '^spur-mcp.service ' "$ITEST_MCP_EVIDENCE_DIR/$mode.before")
     if [[ "$mode" = cli-update ]]; then
       node "$ITEST_MCP_PACKAGE_ROOT/dist/cli.js" update "$ITEST_MCP_TARGET_VERSION" > "$ITEST_MCP_EVIDENCE_DIR/$mode.command" 2>&1
     else
@@ -146,12 +147,17 @@ const [root, version] = process.argv.slice(2);
 try { const meta = JSON.parse(await readFile(`${root}/package.json`, 'utf8')); if (meta.version !== version) process.exit(1); } catch { process.exit(1); }
 NODE
       then
-        if verify 1; then ready=true; break; fi
+        if verify 1; then
+          read -r _ after_mcp_pid < <(grep '^spur-mcp.service ' "$ITEST_MCP_EVIDENCE_DIR/$mode.after")
+          if [[ "$after_mcp_pid" =~ ^[1-9][0-9]*$ && "$after_mcp_pid" != "$before_mcp_pid" ]]; then
+            ready=true
+            break
+          fi
+        fi
       fi
       sleep 2
     done
     [[ "$ready" = true ]]
-    [[ "$(grep '^spur-mcp.service ' "$ITEST_MCP_EVIDENCE_DIR/$mode.before")" != "$(grep '^spur-mcp.service ' "$ITEST_MCP_EVIDENCE_DIR/$mode.after")" ]]
     ;;
   rollback)
     [[ "$ITEST_MCP_SCOPE" = user ]]
