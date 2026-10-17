@@ -12485,6 +12485,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -13112,6 +13113,18 @@ export class SessionService {
     }
   }
 
+  // The reuse context is captured before awaits (preflight, id reservation);
+  // session GC can archive the workspace anchor in between. Checked
+  // synchronously right before the placeholder write, so in this process the
+  // child is either visible to GC's membership recheck or refused here.
+  private assertReuseAnchorPresent(reuseCtx: { workspaceId: string } | null | undefined): void {
+    if (reuseCtx && !readSession(this.config.dataDir, reuseCtx.workspaceId)) {
+      throw new Error(
+        `reuseWorkspaceSessionId: workspace anchor ${reuseCtx.workspaceId} was archived`,
+      );
+    }
+  }
+
   private resolveWorkspaceReuseContext(
     request: SpawnSessionRequest,
     project: ProjectConfig,
@@ -13504,6 +13517,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;

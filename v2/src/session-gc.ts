@@ -260,7 +260,9 @@ export function retainClosure(
       }
     }
     for (const path of ownedPaths) {
-      const withPath = members.filter((member) => memberPath(member) === path);
+      // Only a worktree:true record keeps the worktree visible: an alias
+      // (worktree:false) has no owned path, so a later sweep would archive it.
+      const withPath = members.filter((member) => member.worktree && memberPath(member) === path);
       if (withPath.some((member) => retained.has(member.id))) continue;
       const newest = [...withPath].sort(
         (left, right) =>
@@ -280,7 +282,9 @@ export function retainClosure(
       (member) =>
         retained.has(member.id) &&
         (actedAnchorIds.has(member.id) ||
-          (ownedPaths.includes(memberPath(member)) && actedPaths.has(memberPath(member)))),
+          (member.worktree &&
+            ownedPaths.includes(memberPath(member)) &&
+            actedPaths.has(memberPath(member)))),
     )
     .map((member) => member.id);
   return { retainedIds: retained, keeperIds };
@@ -481,14 +485,17 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
 // ---------------------------------------------------------------------------
 
 export interface GcOpenPrIndex {
+  // Branch keys are `owner/name#branch`. Unbound members match against
+  // `checkoutRepo`, the repo of the group's checkout (absent when unresolved).
+  checkoutRepo?: string;
   // Repo-qualified (`owner/name#123`): a bound PR number is only meaningful in
   // its own repo.
   numbers: Set<string>;
   branches: Set<string>;
 }
 
-function prKey(repo: string, number: number): string {
-  return `${repo}#${number}`;
+function prKey(repo: string, numberOrBranch: number | string): string {
+  return `${repo}#${numberOrBranch}`;
 }
 
 export interface SessionGcExecutorDeps {
@@ -746,12 +753,14 @@ export async function executeSessionGc(
               const prIndex = acted.length > 0 ? await deps.openPrIndex(group, acted) : undefined;
               const openIds = prIndex
                 ? acted
-                    .filter(
-                      (member) =>
+                    .filter((member) => {
+                      const repo = member.pr?.repo ?? prIndex.checkoutRepo;
+                      return (
                         (member.pr &&
                           prIndex.numbers.has(prKey(member.pr.repo, member.pr.number))) ||
-                        prIndex.branches.has(member.branch),
-                    )
+                        (repo !== undefined && prIndex.branches.has(prKey(repo, member.branch)))
+                      );
+                    })
                     .map((member) => member.id)
                 : [];
               if (openIds.length > 0) {
@@ -982,17 +991,23 @@ export function createGcDeps(
       // cannot be resolved or listed throws, which blocks the whole group.
       const repos = new Set(freshMembers.flatMap((member) => (member.pr ? [member.pr.repo] : [])));
       const hasCheckout = Boolean(group.worktreePath) && existsSync(group.worktreePath);
+      let checkoutRepo: string | undefined;
       if (hasCheckout && (repos.size === 0 || freshMembers.some((member) => !member.pr))) {
-        repos.add(await resolveRepoSlug(group.worktreePath));
+        checkoutRepo = await resolveRepoSlug(group.worktreePath);
+        repos.add(checkoutRepo);
       }
-      const index: GcOpenPrIndex = { numbers: new Set(), branches: new Set() };
+      const index: GcOpenPrIndex = {
+        ...(checkoutRepo !== undefined ? { checkoutRepo } : {}),
+        numbers: new Set(),
+        branches: new Set(),
+      };
       const listings = await Promise.all(
         [...repos].map((repoSlug) => {
           let cached = openPrIndexCache.get(repoSlug);
           if (!cached) {
             cached = listOpenPullRequests(repoSlug).then((items) => ({
               numbers: new Set(items.map((item) => prKey(repoSlug, item.number))),
-              branches: new Set(items.map((item) => item.headRefName)),
+              branches: new Set(items.map((item) => prKey(repoSlug, item.headRefName))),
             }));
             openPrIndexCache.set(repoSlug, cached);
           }

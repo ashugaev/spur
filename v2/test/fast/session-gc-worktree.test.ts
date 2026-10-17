@@ -352,6 +352,29 @@ describe("session gc against a real git worktree", () => {
     expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
   });
 
+  it("keeps the worktree:true record across successive sweeps when a newer alias shares a dirty worktree", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      workspaceId: "api-2",
+      worktree: false,
+      tmuxSession: "api-2",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    });
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    for (let sweep = 0; sweep < 2; sweep += 1) {
+      await executeSessionGc(planFor(fixture.config), depsWithoutGh(fixture.config, NO_OPEN_PRS), {
+        dryRun: false,
+        sizes: false,
+      });
+    }
+
+    expect(listSessions(fixture.config.dataDir).map((session) => session.id)).toEqual(["api-1"]);
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
+  });
+
   it("blocks a worktree holding unpushed commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.worktreePath, "feature.txt"), "local only\n", "utf8");
@@ -374,8 +397,9 @@ describe("session gc against a real git worktree", () => {
     const report = await executeSessionGc(
       planFor(fixture.config),
       depsWithoutGh(fixture.config, {
+        checkoutRepo: "acme/api",
         numbers: new Set(),
-        branches: new Set(["feature/gc-one"]),
+        branches: new Set(["acme/api#feature/gc-one"]),
       }),
       { dryRun: false, sizes: false },
     );

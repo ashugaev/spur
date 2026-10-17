@@ -5220,6 +5220,42 @@ describe("SessionService", () => {
     );
   });
 
+  it.each(["spawn", "spawnInBackground"] as const)(
+    "%s refuses to reuse a workspace whose anchor was archived while the id was being reserved",
+    async (method) => {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        sessionRecord({
+          id: "api-1",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      // Reservation runs after the reuse context is captured: session GC
+      // archives the anchor inside that window.
+      reserveNextSessionIdMock.mockImplementation(async () => {
+        sessions.delete("api-1");
+        return "api-2";
+      });
+      workspaceExistsMock.mockReturnValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service[method]({
+          project: "api",
+          prompt: "continue the task",
+          reuseWorkspaceSessionId: "api-1",
+        }),
+      ).rejects.toThrow("workspace anchor api-1 was archived");
+
+      expect(sessions.has("api-2")).toBe(false);
+    },
+  );
+
   it("keeps workspaceId on the errored record left behind by a spawn failure that reused a workspace", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();

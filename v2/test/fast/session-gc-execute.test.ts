@@ -345,8 +345,9 @@ describe("executeSessionGc", () => {
       readGroupMembers: (ids) => ids.map(() => record),
       openPrIndex: vi.fn(
         async (): Promise<GcOpenPrIndex> => ({
+          checkoutRepo: "acme/api",
           numbers: new Set(),
-          branches: new Set(["feature/x"]),
+          branches: new Set(["acme/api#feature/x"]),
         }),
       ),
     });
@@ -830,8 +831,9 @@ describe("executeSessionGc limit", () => {
         ids.map((id) => records.find((record) => record.id === id) ?? null),
       openPrIndex: vi.fn(
         async (): Promise<GcOpenPrIndex> => ({
+          checkoutRepo: "acme/api",
           numbers: new Set(),
-          branches: new Set(blocked.map((record) => record.branch)),
+          branches: new Set(blocked.map((record) => `acme/api#${record.branch}`)),
         }),
       ),
     });
@@ -871,8 +873,9 @@ describe("executeSessionGc limit", () => {
           ids.map((id) => records.find((record) => record.id === id) ?? null),
         openPrIndex: vi.fn(
           async (): Promise<GcOpenPrIndex> => ({
+            checkoutRepo: "acme/api",
             numbers: new Set(),
-            branches: new Set(blocked.map((record) => record.branch)),
+            branches: new Set(blocked.map((record) => `acme/api#${record.branch}`)),
           }),
         ),
       });

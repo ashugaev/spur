@@ -329,12 +329,18 @@ describe("planSessionGc partial groups", () => {
   it("keeps one record of an existing owned worktree in a mixed archive group", () => {
     const path = `${WORKTREE_DIR}/api/mixed`;
     const group = archivedOf([
-      session({ id: "m1", worktree: false, worktreePath: path, updatedAt: OLD }),
+      // The alias is newer, yet only the worktree:true record may be kept.
+      session({
+        id: "m1",
+        worktree: false,
+        worktreePath: path,
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      }),
       session({ id: "m2", worktree: true, worktreePath: path, updatedAt: OLD }),
     ]);
 
     expect(group.action).toBe("partial");
-    expect(group.archiveSessionIds).toEqual(["m2"]);
+    expect(group.archiveSessionIds).toEqual(["m1"]);
     expect(group.blockReasons).toEqual(["owned_worktree"]);
   });
 

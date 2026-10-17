@@ -12,7 +12,12 @@ vi.mock("../../src/session-pr.js", () => ({
 
 const NOW = new Date("2026-08-01T00:00:00.000Z");
 
-function record(id: string, number: number, repo: string): SessionRecord {
+function record(
+  id: string,
+  number: number,
+  repo: string,
+  overrides: Partial<SessionRecord> = {},
+): SessionRecord {
   return {
     id,
     project: "api",
@@ -28,6 +33,7 @@ function record(id: string, number: number, repo: string): SessionRecord {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     pr: { number, repo, url: `https://github.com/${repo}/pull/${number}` },
+    ...overrides,
   };
 }
 
@@ -88,6 +94,36 @@ describe("createGcDeps openPrIndex across repos", () => {
     const { archiveGroup } = await run([record("A", 11, "acme/one"), record("B", 22, "acme/two")]);
 
     expect(archiveGroup.mock.calls[0]?.[0].map((member) => member.id).sort()).toEqual(["A", "B"]);
+  });
+
+  it("matches an open branch only in its own repo", async () => {
+    listOpenPullRequestsMock.mockImplementation(async (repo: string) =>
+      repo === "acme/two" ? [{ number: 99, headRefName: "feature/shared" }] : [],
+    );
+
+    const { report, archiveGroup } = await run([
+      record("A", 11, "acme/one", { branch: "feature/shared" }),
+      record("B", 22, "acme/two", { branch: "feature/shared" }),
+    ]);
+
+    expect(archiveGroup.mock.calls[0]?.[0].map((member) => member.id)).toEqual(["A"]);
+    expect(report.groups[0]?.blockReasons).toContain("open_pr");
+  });
+
+  it("matches an unbound member's branch against the checkout repo only", async () => {
+    resolveRepoSlugMock.mockResolvedValue("acme/one");
+    listOpenPullRequestsMock.mockImplementation(async (repo: string) =>
+      repo === "acme/two" ? [{ number: 99, headRefName: "feature/shared" }] : [],
+    );
+    // "/tmp" exists, so the checkout repo resolves for the unbound member.
+    const unbound = record("C", 0, "acme/one", { branch: "feature/shared", worktreePath: "/tmp" });
+    delete unbound.pr;
+    const { archiveGroup } = await run([
+      unbound,
+      record("D", 22, "acme/two", { branch: "other", worktreePath: "/tmp" }),
+    ]);
+
+    expect(archiveGroup.mock.calls[0]?.[0].map((member) => member.id).sort()).toEqual(["C", "D"]);
   });
 
   it("blocks the whole group when any bound repo cannot be listed", async () => {
