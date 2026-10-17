@@ -49,6 +49,7 @@ import {
   ensureInstanceConfig,
   findProjectConfigPath,
   findProjectConfigPathInDirectory,
+  isDefaultInstanceConfigPath,
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
@@ -4763,16 +4764,20 @@ export function createProgram(cliEntrypoint: string): Command {
       // MUST FIX 1: a source-install / main-deploy host that never runs
       // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
       // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
-      // silently ignores a missing globalconfig file. Every real daemon boot
-      // writes it instead (see npm-prefix.ts). A read-only filesystem or a
+      // silently ignores a missing globalconfig file. Every default-instance
+      // daemon boot writes it instead (see npm-prefix.ts). A read-only filesystem or a
       // permissions error writing into `<home>/.spur/` must never abort
       // daemon boot, so failures are reported and swallowed, not thrown.
-      try {
-        ensureNpmPinFile();
-      } catch (error) {
-        writeStderr(
-          `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      // Default instance config only: a non-default `--config` (isolated
+      // daemon, sidecar, worktree daemon) must not touch the host pin file.
+      if (isDefaultInstanceConfigPath(configPath)) {
+        try {
+          ensureNpmPinFile();
+        } catch (error) {
+          writeStderr(
+            `spur: failed to write npm global-prefix pin file: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       // Own try/catch, kept separate from the pin-file one above: a skill
       // failure must stay distinguishable in stderr from a pin-file failure,

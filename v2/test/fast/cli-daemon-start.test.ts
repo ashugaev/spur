@@ -31,6 +31,7 @@ const assertConfigMayUseProdSlotMock = vi.fn();
 const restartDaemonIfRunningMock = vi.fn();
 const stopDaemonIfRunningMock = vi.fn();
 const installHostSkillsForDaemonStartMock = vi.fn(() => []);
+const isDefaultInstanceConfigPathMock = vi.fn((_configPath: string) => true);
 
 vi.mock("../../src/npm-prefix.js", () => ({
   ensureNpmPinFile: ensureNpmPinFileMock,
@@ -58,6 +59,7 @@ vi.mock("../../src/config.js", () => ({
   ensureInstanceConfig: ensureInstanceConfigMock,
   findProjectConfigPath: vi.fn(),
   findProjectConfigPathInDirectory: vi.fn(),
+  isDefaultInstanceConfigPath: isDefaultInstanceConfigPathMock,
   loadConfig: vi.fn(() => ({
     tmux: { socketName: "spur-test" },
   })),
@@ -106,6 +108,8 @@ describe("spur daemon CLI", () => {
     assertConfigMayUseProdSlotMock.mockImplementation(() => {});
     installHostSkillsForDaemonStartMock.mockClear();
     installHostSkillsForDaemonStartMock.mockImplementation(() => []);
+    isDefaultInstanceConfigPathMock.mockReset();
+    isDefaultInstanceConfigPathMock.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -118,6 +122,20 @@ describe("spur daemon CLI", () => {
     expect(ensureNpmPinFileMock).toHaveBeenCalledTimes(1);
     expect(startServerMock).toHaveBeenCalledTimes(1);
     expect(callOrder).toEqual(["ensureNpmPinFile", "startServer"]);
+  });
+
+  it("skips the npm pin file for a non-default instance config", async () => {
+    isDefaultInstanceConfigPathMock.mockReturnValue(false);
+
+    await parseCli(["daemon", "start", "--json"]);
+
+    expect(isDefaultInstanceConfigPathMock).toHaveBeenCalledWith("/tmp/spur.yaml");
+    expect(ensureNpmPinFileMock).not.toHaveBeenCalled();
+    expect(startServerMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(["startServer"]);
+    expect(writeStderrMock).not.toHaveBeenCalledWith(expect.stringContaining("pin file"));
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledTimes(1);
+    expect(installHostSkillsForDaemonStartMock).toHaveBeenCalledWith("/tmp/spur.yaml");
   });
 
   it("reports a pin-file write failure via stderr instead of aborting the boot", async () => {
