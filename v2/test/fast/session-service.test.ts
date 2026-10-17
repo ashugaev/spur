@@ -5913,6 +5913,88 @@ describe("SessionService", () => {
     ]);
   });
 
+  it.each(["resolve", "reject"] as const)(
+    "dispatches one background executor before response enrichment can %s",
+    async (viewOutcome) => {
+      const sessions = createSessionStore();
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
+      const internals = service as unknown as {
+        enrich(record: SessionRecord): Promise<SessionView>;
+        runBackgroundSpawnAttempt(prepared: unknown, attempt: number): Promise<"completed">;
+        spawnsInFlight: Set<string>;
+        backgroundSpawnRuns: Set<Promise<void>>;
+      };
+      let releaseView: () => void = () => {};
+      const viewGate = new Promise<void>((resolve) => {
+        releaseView = resolve;
+      });
+      let releaseWorker: () => void = () => {};
+      const workerGate = new Promise<void>((resolve) => {
+        releaseWorker = resolve;
+      });
+      let enteredView: () => void = () => {};
+      const viewing = new Promise<void>((resolve) => {
+        enteredView = resolve;
+      });
+      const enrich = internals.enrich.bind(service);
+      vi.spyOn(internals, "enrich").mockImplementationOnce(async (record) => {
+        enteredView();
+        await viewGate;
+        if (viewOutcome === "reject") throw new Error("response projection unavailable");
+        return enrich(record);
+      });
+      const worker = vi
+        .spyOn(internals, "runBackgroundSpawnAttempt")
+        .mockImplementation(async () => {
+          await workerGate;
+          return "completed";
+        });
+      const response = service.spawnInBackground({ project: "api", prompt: "hello" }).then(
+        (view) => ({ ok: true as const, view }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await viewing;
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sessions.get("api-1")).toMatchObject({ status: "spawning", prompt: "hello" });
+        expect(worker).toHaveBeenCalledTimes(1);
+        expect(internals.backgroundSpawnRuns.size).toBe(1);
+        expect(internals.spawnsInFlight.has("api-1")).toBe(true);
+        releaseView();
+        const result = await response;
+        if (viewOutcome === "resolve") {
+          expect(result).toMatchObject({
+            ok: true,
+            view: { id: "api-1", prompt: "hello", launchCommand: "", artifacts: [] },
+          });
+        } else {
+          expect(result).toMatchObject({
+            ok: false,
+            error: { message: "response projection unavailable" },
+          });
+        }
+        expect(worker).toHaveBeenCalledTimes(1);
+        expect(internals.backgroundSpawnRuns.size).toBe(1);
+        expect(internals.spawnsInFlight.has("api-1")).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("spawning");
+        expect(
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === "session.spawn.failed"),
+        ).toHaveLength(0);
+      } finally {
+        releaseView();
+        releaseWorker();
+        await response;
+        await service.settleBackgroundSpawns();
+        service.dispose();
+      }
+      expect(internals.backgroundSpawnRuns.size).toBe(0);
+      expect(internals.spawnsInFlight.has("api-1")).toBe(false);
+    },
+  );
+
   it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
     mockClaudeJsonlState("waiting");
     createSessionStore();
@@ -50525,18 +50607,51 @@ describe("SessionService", () => {
       });
       mockClaudeJsonlState("waiting");
       const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z", {
+        deferBackgroundLoops: true,
+      });
       reserveNextSessionIdMock.mockResolvedValue("shp-2");
-
-      const result = await service.spawnShepherd({
-        prompt: "Restart Shepherd",
+      const stopped = structuredClone(sessions.get("shp-stopped"));
+      let releaseSend: () => void = () => {};
+      const sendGate = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      let enteredSend: () => void = () => {};
+      const sending = new Promise<void>((resolve) => {
+        enteredSend = resolve;
+      });
+      sendMessageToTmuxMock.mockImplementationOnce(async () => {
+        enteredSend();
+        await sendGate;
       });
 
-      expect(result.disposition).toBe("spawned");
-      expect(result.session.id).toBe("shp-2");
-      expect(result.session.status).toBe("spawning");
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      service.dispose();
+      try {
+        const result = await service.spawnShepherd({ prompt: "Restart Shepherd" });
+        await sending;
+        expect(result.disposition).toBe("spawned");
+        expect(result.session.id).toBe("shp-2");
+        expect(result.session.status).toBe("spawning");
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionName: "shp-2" }),
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith(
+          "shp-2",
+          expect.stringContaining("Restart Shepherd"),
+          { agent: "claude" },
+        );
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        expect(sessions.get("shp-2")?.status).toBe("running");
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(sessions.get("shp-stopped")).toEqual(stopped);
+      } finally {
+        releaseSend();
+        await service.settleBackgroundSpawns();
+        service.dispose();
+      }
     });
 
     function seedRunningShepherdSession(sessions: Map<string, SessionRecord>): void {
