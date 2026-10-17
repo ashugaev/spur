@@ -622,7 +622,8 @@ async function runRestoreScenario(args: {
 
   // A manual pause kills the tmux session outright (runtimeAlive false, status
   // "stopped"). An agent process exiting on its own leaves the tmux pane/session
-  // alive with no matching agent process, which retains an inferred exit error.
+  // alive with no matching agent process. That unexpected exit becomes errored;
+  // runtime_lost is reserved for an unavailable terminal.
   const expectedState = stopMode === "pause" ? "stopped" : "error";
   const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
   const exited = await pollUntil(
@@ -4785,7 +4786,8 @@ projects:
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
-    // with no matching process and a retained inferred exit error.
+    // with no matching process. Reconciliation persists an inferred exit error
+    // while preserving the pane for the native-resume attempt.
     const exited = await pollUntil(
       async () =>
         JSON.parse(
