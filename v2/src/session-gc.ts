@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
-import { archiveSessions, readSession } from "./metadata.js";
+import { archiveSessions, listSessions, readSession } from "./metadata.js";
 import { listOpenPullRequests, resolveRepoSlug } from "./session-pr.js";
 import { workspaceIdOf } from "./session-desk.js";
 import {
@@ -397,12 +397,22 @@ function classifyGroup(
     ownedWorktreePaths,
   });
 
+  // An archive group never removes a worktree, so an existing owned one (a
+  // worktree:true member whose path exists) keeps one visible record.
+  const archiveKeepingWorktrees = () => {
+    const { retainedIds } = retainClosure(members, new Set(), ownedWorktreePaths);
+    if (retainedIds.size === 0) return whole("archive");
+    const archiveSessionIds = allIds.filter((id) => !retainedIds.has(id));
+    if (archiveSessionIds.length === 0) return whole("blocked", ["owned_worktree"]);
+    return { ...whole("partial", ["owned_worktree"]), archiveSessionIds };
+  };
+
   if (members.some((member) => !member.worktree)) {
-    return whole("archive");
+    return archiveKeepingWorktrees();
   }
 
   if (!worktreePath) {
-    return whole("archive");
+    return archiveKeepingWorktrees();
   }
 
   const rel = relative(worktreeDir, worktreePath);
@@ -411,7 +421,7 @@ function classifyGroup(
   }
 
   if (!pathExists(worktreePath)) {
-    return whole("archive");
+    return archiveKeepingWorktrees();
   }
 
   return whole("reclaim");
@@ -471,8 +481,14 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
 // ---------------------------------------------------------------------------
 
 export interface GcOpenPrIndex {
-  numbers: Set<number>;
+  // Repo-qualified (`owner/name#123`): a bound PR number is only meaningful in
+  // its own repo.
+  numbers: Set<string>;
   branches: Set<string>;
+}
+
+function prKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
 }
 
 export interface SessionGcExecutorDeps {
@@ -482,6 +498,9 @@ export interface SessionGcExecutorDeps {
   // live (restore/recovery warmup). This synchronous check sits directly at
   // each destructive boundary so no awaited probe can stale its answer.
   checkGroupLiveness: (sessionIds: readonly string[]) => "inactive" | "live" | "unknown";
+  // Every current record, read synchronously at the destructive boundary to
+  // catch a spawn that joined the group (reused a workspace) after planning.
+  listSessionRecords: () => readonly SessionRecord[];
   // Uncommitted/unpushed checks only — the PR probe is `openPrIndex` below.
   // Returns block reasons (empty when guards pass); any probe throw inside
   // must be translated to ["probe_failed"], never rethrown.
@@ -600,6 +619,26 @@ function currentRecordsBlockReason(
   return undefined;
 }
 
+// A spawn that reuses a workspace after planning joins the group (same
+// workspace id) or its worktree path; archiving or removing under it would
+// dangle the new record's anchor or path.
+function newMemberBlockReason(
+  deps: Pick<SessionGcExecutorDeps, "listSessionRecords">,
+  group: GcGroupPlan,
+): string | undefined {
+  const known = new Set(group.sessionIds);
+  const workspaceIds = new Set(group.workspaceIds);
+  const paths = new Set(group.members.map(memberPath).filter(Boolean));
+  const joined = deps
+    .listSessionRecords()
+    .some(
+      (record) =>
+        !known.has(record.id) &&
+        (workspaceIds.has(workspaceIdOf(record)) || paths.has(memberPath(record))),
+    );
+  return joined ? "changed_during_run" : undefined;
+}
+
 export async function executeSessionGc(
   plan: GcPlan,
   deps: SessionGcExecutorDeps,
@@ -709,7 +748,8 @@ export async function executeSessionGc(
                 ? acted
                     .filter(
                       (member) =>
-                        (member.pr && prIndex.numbers.has(member.pr.number)) ||
+                        (member.pr &&
+                          prIndex.numbers.has(prKey(member.pr.repo, member.pr.number))) ||
                         prIndex.branches.has(member.branch),
                     )
                     .map((member) => member.id)
@@ -749,7 +789,8 @@ export async function executeSessionGc(
           if (action === "reclaim" && !options.dryRun) {
             const livenessBlock =
               currentLivenessBlockReason(deps, actedIds) ??
-              currentRecordsBlockReason(deps.readGroupMembers, actedIds, plannedFinal);
+              currentRecordsBlockReason(deps.readGroupMembers, actedIds, plannedFinal) ??
+              newMemberBlockReason(deps, group);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
@@ -768,7 +809,8 @@ export async function executeSessionGc(
               currentRecordsBlockReason(deps.readGroupMembers, actedIds, plannedFinal) ??
               (keeperIds.length > 0 && deps.readGroupMembers(keeperIds).some((member) => !member)
                 ? "changed_during_run"
-                : undefined);
+                : undefined) ??
+              newMemberBlockReason(deps, group);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
@@ -776,6 +818,8 @@ export async function executeSessionGc(
               const result = deps.archiveGroup(
                 acted.map((member) => ({ id: member.id, project: member.project })),
               );
+              // The receipt, not the plan, is what actually moved.
+              archiveSessionIds = result.archivedIds;
               archived = result.archivedIds.length > 0;
               recordsArchived += result.archivedIds.length;
             }
@@ -903,6 +947,7 @@ export function createGcDeps(
     cwd: process.cwd(),
     readGroupMembers,
     checkGroupLiveness,
+    listSessionRecords: () => listSessions(config.dataDir),
     probeGuards: async (group, freshMembers) => {
       if (!group.worktreePath || !existsSync(group.worktreePath)) {
         return [];
@@ -931,20 +976,33 @@ export function createGcDeps(
       return [];
     },
     openPrIndex: async (group, freshMembers) => {
-      if (!group.worktreePath || !existsSync(group.worktreePath)) {
-        return { numbers: new Set(), branches: new Set() };
+      // Every repo a member is bound to, plus the checkout's repo when some
+      // member has no binding (its branch is matched there). A repo that
+      // cannot be resolved or listed throws, which blocks the whole group.
+      const repos = new Set(freshMembers.flatMap((member) => (member.pr ? [member.pr.repo] : [])));
+      const hasCheckout = Boolean(group.worktreePath) && existsSync(group.worktreePath);
+      if (hasCheckout && (repos.size === 0 || freshMembers.some((member) => !member.pr))) {
+        repos.add(await resolveRepoSlug(group.worktreePath));
       }
-      const boundRepo = freshMembers.find((member) => member.pr)?.pr?.repo;
-      const repoSlug = boundRepo ?? (await resolveRepoSlug(group.worktreePath));
-      let cached = openPrIndexCache.get(repoSlug);
-      if (!cached) {
-        cached = listOpenPullRequests(repoSlug).then((items) => ({
-          numbers: new Set(items.map((item) => item.number)),
-          branches: new Set(items.map((item) => item.headRefName)),
-        }));
-        openPrIndexCache.set(repoSlug, cached);
+      const index: GcOpenPrIndex = { numbers: new Set(), branches: new Set() };
+      const listings = await Promise.all(
+        [...repos].map((repoSlug) => {
+          let cached = openPrIndexCache.get(repoSlug);
+          if (!cached) {
+            cached = listOpenPullRequests(repoSlug).then((items) => ({
+              numbers: new Set(items.map((item) => prKey(repoSlug, item.number))),
+              branches: new Set(items.map((item) => item.headRefName)),
+            }));
+            openPrIndexCache.set(repoSlug, cached);
+          }
+          return cached;
+        }),
+      );
+      for (const listing of listings) {
+        for (const key of listing.numbers) index.numbers.add(key);
+        for (const branch of listing.branches) index.branches.add(branch);
       }
-      return cached;
+      return index;
     },
     measureSize: measureWorktreeSize,
     removeWorktree: async (group, freshMembers) => {

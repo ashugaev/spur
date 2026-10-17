@@ -326,6 +326,18 @@ describe("planSessionGc partial groups", () => {
     expect(group.blockReasons).toEqual([]);
   });
 
+  it("keeps one record of an existing owned worktree in a mixed archive group", () => {
+    const path = `${WORKTREE_DIR}/api/mixed`;
+    const group = archivedOf([
+      session({ id: "m1", worktree: false, worktreePath: path, updatedAt: OLD }),
+      session({ id: "m2", worktree: true, worktreePath: path, updatedAt: OLD }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds).toEqual(["m2"]);
+    expect(group.blockReasons).toEqual(["owned_worktree"]);
+  });
+
   it("ages a partial group by its archived subset so it sorts ahead of a younger blocked group", () => {
     const result = plan([
       shared({ id: "A", updatedAt: "2026-03-01T00:00:00.000Z" }),

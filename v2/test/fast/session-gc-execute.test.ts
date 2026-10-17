@@ -45,6 +45,7 @@ function makeDeps(overrides: Partial<SessionGcExecutorDeps> = {}): SessionGcExec
     cwd: "/home/dev",
     readGroupMembers: (ids) => ids.map((id) => makeSession({ id })),
     checkGroupLiveness: vi.fn<SessionGcExecutorDeps["checkGroupLiveness"]>(() => "inactive"),
+    listSessionRecords: () => [],
     probeGuards: vi.fn(async () => []),
     openPrIndex: vi.fn(
       async (): Promise<GcOpenPrIndex> => ({ numbers: new Set(), branches: new Set() }),
@@ -74,7 +75,7 @@ describe("executeSessionGc", () => {
         }),
         openPrIndex: vi.fn(async () => {
           if (boundary === "pr") current = { ...record, error: "probe failed" };
-          return { numbers: new Set<number>(), branches: new Set<string>() };
+          return { numbers: new Set<string>(), branches: new Set<string>() };
         }),
       });
 
@@ -323,7 +324,10 @@ describe("executeSessionGc", () => {
     const deps = makeDeps({
       readGroupMembers: (ids) => ids.map(() => record),
       openPrIndex: vi.fn(
-        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([42]), branches: new Set() }),
+        async (): Promise<GcOpenPrIndex> => ({
+          numbers: new Set(["acme/api#42"]),
+          branches: new Set(),
+        }),
       ),
     });
 
@@ -685,7 +689,10 @@ describe("executeSessionGc partial groups", () => {
     const deps = makeDeps({
       readGroupMembers: lookup(records),
       openPrIndex: vi.fn(
-        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([7]), branches: new Set() }),
+        async (): Promise<GcOpenPrIndex> => ({
+          numbers: new Set(["acme/api#7"]),
+          branches: new Set(),
+        }),
       ),
     });
 
@@ -711,7 +718,10 @@ describe("executeSessionGc partial groups", () => {
     const deps = makeDeps({
       readGroupMembers: lookup(records),
       openPrIndex: vi.fn(
-        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([7]), branches: new Set() }),
+        async (): Promise<GcOpenPrIndex> => ({
+          numbers: new Set(["acme/api#7"]),
+          branches: new Set(),
+        }),
       ),
     });
 
@@ -721,6 +731,68 @@ describe("executeSessionGc partial groups", () => {
     expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["x2"]);
     expect(report.groups[0]).toMatchObject({ action: "partial", removed: false });
     expect(report.groups[0]?.blockReasons).toContain("open_pr");
+  });
+
+  it("blocks archive when a spawn reuses an acted record's workspace during the PR probe", async () => {
+    const records = [shared({ id: "A" }), shared({ id: "D" })];
+    const current = [...records];
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      listSessionRecords: () => current,
+      openPrIndex: vi.fn(async (): Promise<GcOpenPrIndex> => {
+        current.push(shared({ id: "N", workspaceId: "A", status: "spawning" }));
+        return { numbers: new Set(), branches: new Set() };
+      }),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "blocked",
+      blockReasons: ["changed_during_run"],
+      archiveSessionIds: [],
+    });
+  });
+
+  it("blocks worktree removal when a spawn reuses the workspace during the PR probe", async () => {
+    const records = deskRecords();
+    const current = [...records];
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      listSessionRecords: () => current,
+      openPrIndex: vi.fn(async (): Promise<GcOpenPrIndex> => {
+        current.push(desk({ id: "N", status: "spawning" }));
+        return { numbers: new Set(), branches: new Set() };
+      }),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]?.blockReasons).toEqual(["changed_during_run"]);
+  });
+
+  it("reports archived and restore-loss ids from the archive receipt, not the plan", async () => {
+    const records = [
+      shared({ id: "A" }),
+      shared({ id: "B", status: "stopped" }),
+      shared({ id: "D", status: "stopped" }),
+    ];
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      archiveGroup: vi.fn<SessionGcExecutorDeps["archiveGroup"]>(() => ({ archivedIds: ["B"] })),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(report.groups[0]).toMatchObject({
+      archiveSessionIds: ["B"],
+      restoreLossSessionIds: ["B"],
+      archived: true,
+    });
+    expect(report.totals.recordsArchived).toBe(1);
   });
 
   it("blocks when a kept anchor vanished before archive", async () => {

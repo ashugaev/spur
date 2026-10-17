@@ -303,6 +303,29 @@ describe("session gc against a real git worktree", () => {
     expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
   });
 
+  it("keeps a record for a dirty owned worktree shared with a worktree:false record", async () => {
+    const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, {
+      ...fixture.session,
+      id: "api-2",
+      workspaceId: "api-2",
+      worktree: false,
+      tmuxSession: "api-2",
+    });
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    const plan = planFor(fixture.config);
+    expect(plan.groups[0]?.action).toBe("partial");
+    const report = await executeSessionGc(plan, depsWithoutGh(fixture.config, NO_OPEN_PRS), {
+      dryRun: false,
+      sizes: false,
+    });
+
+    expect(report.groups[0]).toMatchObject({ action: "partial", removed: false, archived: true });
+    expect(listSessions(fixture.config.dataDir)).toHaveLength(1);
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
+  });
+
   it("blocks a worktree holding unpushed commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.worktreePath, "feature.txt"), "local only\n", "utf8");
