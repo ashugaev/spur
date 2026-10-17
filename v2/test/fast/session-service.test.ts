@@ -62672,6 +62672,108 @@ describe("SessionService", () => {
     );
 
     it.each(
+      [
+        {
+          name: "content missing",
+          type: "response_item",
+          payload: { type: "message", role: "user" },
+        },
+        {
+          name: "content null",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: null },
+        },
+        {
+          name: "content object",
+          type: "response_item",
+          payload: { type: "message", role: "user", content: {} },
+        },
+        { name: "message missing", type: "event_msg", payload: { type: "user_message" } },
+        {
+          name: "message null",
+          type: "event_msg",
+          payload: { type: "user_message", message: null },
+        },
+        {
+          name: "message number",
+          type: "event_msg",
+          payload: { type: "user_message", message: 7 },
+        },
+        {
+          name: "message object",
+          type: "event_msg",
+          payload: { type: "user_message", message: {} },
+        },
+      ].flatMap((envelope) => [false, true].map((requeued) => ({ ...envelope, requeued }))),
+    )(
+      "retains malformed recognized user envelope hold: $name requeued=$requeued",
+      async ({ name, type, payload, requeued }) => {
+        const fixture = await historicalAckFixture(
+          `malformed-${name.replaceAll(" ", "-")}-${requeued}`,
+        );
+        try {
+          writeFileSync(
+            fixture.file,
+            Buffer.concat([
+              readFileSync(fixture.file).subarray(0, fixture.baseline.offsets[fixture.file]),
+              Buffer.from(JSON.stringify({ type, payload }) + "\n"),
+            ]),
+          );
+          const record = fixture.sessions.get("api-1");
+          if (!record) throw new Error("missing held session");
+          if (requeued)
+            fixture.sessions.set(record.id, { ...record, submitRequeuedMessage: "typed" });
+          const before = structuredClone(fixture.sessions.get("api-1"));
+          const schedule = vi.spyOn(
+            fixture.service as unknown as { scheduleDeliveryRunner(id: string): void },
+            "scheduleDeliveryRunner",
+          );
+          const scans: Array<{ found: boolean; qualifiedNoMatch?: boolean }> = [];
+          const realAgents = fixture.realAgents;
+          resumeAgentSubmitAckBindingMock.mockImplementation(
+            async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+              const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+              if (!binding) return binding;
+              return {
+                ...binding,
+                async scan(message: string) {
+                  const result = await binding.scan(message);
+                  scans.push(result);
+                  return result;
+                },
+              };
+            },
+          );
+          const restore = vi.spyOn(fixture.service, "restore");
+          mockAgentActivity("codex", afterHold, "waiting");
+          for (let observation = 0; observation < 2; observation += 1) {
+            await fixture.service.get("api-1");
+            expect.soft(scans).toHaveLength(observation + 1);
+            expect.soft(scans[observation]?.found).toBe(false);
+            expect.soft(scans[observation]?.qualifiedNoMatch).not.toBe(true);
+            const held = fixture.sessions.get("api-1");
+            expect.soft(held?.submitUnconfirmedAt).toBe(before?.submitUnconfirmedAt);
+            expect.soft(held?.queuedMessageTyped).toEqual(before?.queuedMessageTyped);
+            expect.soft(held?.submitRequeuedMessage).toBe(before?.submitRequeuedMessage);
+            expect.soft(held?.submitFailedMessage).toBeUndefined();
+            expect.soft(held?.queuedMessages).toEqual(before?.queuedMessages);
+            expect.soft(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+            expect.soft(eventsNamed("session.message.requeued")).toHaveLength(0);
+            expect.soft(eventsNamed("session.submit.released")).toHaveLength(0);
+            expect.soft(eventsNamed("session.message.queued")).toHaveLength(0);
+            expect.soft(schedule).not.toHaveBeenCalled();
+            expect.soft(restore).not.toHaveBeenCalled();
+            expect.soft(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect.soft(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+            expect.soft(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          }
+        } finally {
+          fixture.close();
+        }
+      },
+    );
+
+    it.each(
       (["append", "replace"] as const).flatMap((mutation) =>
         [false, true].map((requeued) => ({ mutation, requeued })),
       ),

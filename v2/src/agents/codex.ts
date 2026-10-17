@@ -857,6 +857,8 @@ function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): st
 
   if (type === "response_item") {
     const p = payload as unknown as RolloutResponseItemPayload;
+    if (strict && p.type === "message" && p.role === "user" && !Array.isArray(p.content))
+      throw new Error("Malformed original rollout user content");
     if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
       if (
         strict &&
@@ -875,6 +877,8 @@ function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): st
 
   if (type === "event_msg") {
     const p = payload as unknown as RolloutEventMsgPayload;
+    if (strict && p.type === "user_message" && typeof p.message !== "string")
+      throw new Error("Malformed original rollout user message");
     if (p.type === "user_message" && typeof p.message === "string") {
       return p.message;
     }
