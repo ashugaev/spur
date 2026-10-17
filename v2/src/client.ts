@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
-import { isDefaultInstanceConfigPath, loadConfig } from "./config.js";
+import { isDefaultInstanceConfigPath, loadConfig, loadInstanceConfigReadOnly } from "./config.js";
 import { resolveSystemdScope } from "./host-install.js";
 import { SPUR_SIDECAR_NAME_ENV } from "./sidecar-runtime.js";
 import {
@@ -29,6 +29,7 @@ const PROBE_DEADLINE_MS = 10_000;
 const STOP_PROBE_DEADLINE_MS = 1_000;
 const READ_DEADLINE_MS = 120_000;
 const MUTATION_DEADLINE_MS = 1_800_000;
+const MCP_REQUEST_DEADLINE_MS = 60_000;
 const LIVENESS_INTERVAL_MS = 60_000;
 const WATCHDOG_ABORT_REASON = "daemon-unresponsive";
 
@@ -75,27 +76,45 @@ function unresponsiveDaemonError(baseUrl: string): Error {
   );
 }
 
-async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+interface RequestPolicy {
+  deadlineMs: number;
+  signal?: AbortSignal;
+}
+
+async function requestJson<T>(
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+  policy?: RequestPolicy,
+): Promise<T> {
   const method = init?.method ?? "GET";
   const mutation = method !== "GET";
   const startedAt = Date.now();
-  const request = deadlineController(mutation ? MUTATION_DEADLINE_MS : READ_DEADLINE_MS);
+  const request = deadlineController(
+    policy?.deadlineMs ?? (mutation ? MUTATION_DEADLINE_MS : READ_DEADLINE_MS),
+  );
   const watchdogController = new AbortController();
-  const watchdog = setInterval(() => {
-    void probeDaemonWithin(baseUrl, PROBE_DEADLINE_MS, watchdogController.signal).then((probe) => {
-      if (probe !== "cancelled" && probe.state === "unresponsive") {
-        request.controller.abort(WATCHDOG_ABORT_REASON);
-      }
-    });
-  }, LIVENESS_INTERVAL_MS);
-  watchdog.unref();
+  const watchdog = policy
+    ? undefined
+    : setInterval(() => {
+        void probeDaemonWithin(baseUrl, PROBE_DEADLINE_MS, watchdogController.signal).then(
+          (probe) => {
+            if (probe !== "cancelled" && probe.state === "unresponsive") {
+              request.controller.abort(WATCHDOG_ABORT_REASON);
+            }
+          },
+        );
+      }, LIVENESS_INTERVAL_MS);
+  watchdog?.unref();
   const withOrigin: RequestInit = {
     ...init,
-    signal: request.controller.signal,
+    signal: policy?.signal
+      ? AbortSignal.any([request.controller.signal, policy.signal])
+      : request.controller.signal,
     headers: {
       ...(init?.headers ?? {}),
-      "x-spur-origin": "cli",
-      ...(process.env["SPUR_SESSION"]
+      ...(!policy ? { "x-spur-origin": "cli" } : {}),
+      ...(!policy && process.env["SPUR_SESSION"]
         ? { "x-spur-caller-session": process.env["SPUR_SESSION"] }
         : {}),
     },
@@ -127,6 +146,52 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   }
 
   return payload as T;
+}
+
+export interface ConnectedDaemon {
+  get(path: string, signal?: AbortSignal): Promise<unknown>;
+  post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown>;
+}
+
+/** Connect without config writes, CLI identity, retries or daemon lifecycle actions. */
+export async function connectDaemon(
+  configPath?: string,
+  signal?: AbortSignal,
+): Promise<ConnectedDaemon> {
+  const loaded = loadInstanceConfigReadOnly(configPath);
+  if (loaded.status !== "ok")
+    throw new Error("Spur MCP requires a valid existing instance config.");
+  const baseUrl = `http://${loaded.config.server.host}:${loaded.config.server.port}`;
+  const policy = (deadlineMs: number, requestSignal?: AbortSignal): RequestPolicy => ({
+    deadlineMs,
+    ...(requestSignal ? { signal: requestSignal } : {}),
+  });
+  try {
+    const info = await requestJson<unknown>(
+      baseUrl,
+      "/info",
+      undefined,
+      policy(PROBE_DEADLINE_MS, signal),
+    );
+    if (!isCompatibleRuntimeInfo(info)) throw new Error("incompatible");
+  } catch {
+    throw new Error("Spur MCP requires a running compatible daemon.");
+  }
+  return {
+    get: (path, requestSignal) =>
+      requestJson(baseUrl, path, undefined, policy(MCP_REQUEST_DEADLINE_MS, requestSignal)),
+    post: (path, body, requestSignal) =>
+      requestJson(
+        baseUrl,
+        path,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        policy(MCP_REQUEST_DEADLINE_MS, requestSignal),
+      ),
+  };
 }
 
 function isSidecarPortConflictPayload(payload: unknown): payload is SidecarPortConflictPayload {

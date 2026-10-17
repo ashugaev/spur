@@ -12,6 +12,141 @@ const loadConfigMock = vi.fn();
 const isDefaultInstanceConfigPathMock = vi.fn();
 const tempDirs: string[] = [];
 
+describe("client.connectDaemon", () => {
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function config() {
+    const dir = await mkdtemp(join(tmpdir(), "spur-connect-only-"));
+    tempDirs.push(dir);
+    const path = join(dir, "config.yaml");
+    await writeFile(path, "server:\n  host: 127.0.0.1\n  port: 12345\nprojects: {}\n");
+    return path;
+  }
+
+  it("omits CLI attribution and inherited caller on probe/read/write without lifecycle actions", async () => {
+    const path = await config();
+    vi.stubEnv("SPUR_SESSION", "must-not-leak");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo())))
+      .mockImplementation(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+    spawnMock.mockClear();
+    loadConfigMock.mockClear();
+    const { connectDaemon } = await loadClientModule();
+    const daemon = await connectDaemon(path);
+    await daemon.get("/projects");
+    await daemon.post("/sessions/background", { project: "TEST", prompt: "task" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:12345/info",
+      "http://127.0.0.1:12345/projects",
+      "http://127.0.0.1:12345/sessions/background",
+    ]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.headers).not.toHaveProperty("x-spur-origin");
+      expect(init.headers).not.toHaveProperty("x-spur-caller-session");
+    }
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing config or incompatible daemon without bootstrap or stop", async () => {
+    const path = await config();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(-1))));
+    vi.stubGlobal("fetch", fetchMock);
+    spawnMock.mockClear();
+    loadConfigMock.mockClear();
+    const { connectDaemon } = await loadClientModule();
+    await expect(connectDaemon(`${path}.absent`)).rejects.toThrow("valid existing instance config");
+    await expect(connectDaemon(path)).rejects.toThrow("running compatible daemon");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("aborts one accepted mutation at 60 seconds with no watchdog, lifecycle action or retry", async () => {
+    const path = await config();
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo())))
+      .mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            signal = init.signal ?? undefined;
+            signal?.addEventListener("abort", () => reject(new Error("aborted after acceptance")), {
+              once: true,
+            });
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { connectDaemon } = await loadClientModule();
+    const daemon = await connectDaemon(path);
+    const pending = daemon
+      .post("/sessions/background", { project: "TEST", prompt: "task" })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toBeInstanceOf(Error);
+    expect(signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("forwards caller cancellation and clears deadline timers", async () => {
+    const path = await config();
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo())))
+      .mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(new Error("cancelled")), {
+              once: true,
+            });
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { connectDaemon } = await loadClientModule();
+    const daemon = await connectDaemon(path);
+    const controller = new AbortController();
+    const pending = daemon.get("/projects", controller.signal).catch((error: unknown) => error);
+    controller.abort();
+    expect(await pending).toBeInstanceOf(Error);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds startup probe at 10 seconds without retry", async () => {
+    const path = await config();
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockImplementationOnce(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new Error("hung probe")), {
+            once: true,
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { connectDaemon } = await loadClientModule();
+    const pending = connectDaemon(path).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await pending).toMatchObject({
+      message: "Spur MCP requires a running compatible daemon.",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof ChildProcess>()),
   spawn: spawnMock,
