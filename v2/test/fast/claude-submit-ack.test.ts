@@ -19,8 +19,12 @@ vi.mock("../../src/agents/claude.js", () => ({
 
 import {
   captureClaudeSubmitBaseline,
-  scanClaudeJsonlForMessage,
+  scanClaudeJsonlForMessage as scanClaudeJsonlForResult,
 } from "../../src/agents/claude-submit-ack.js";
+
+const scanClaudeJsonlForMessage = async (
+  ...args: Parameters<typeof scanClaudeJsonlForResult>
+): Promise<boolean> => (await scanClaudeJsonlForResult(...args)).found;
 
 const tempDirs: string[] = [];
 
@@ -250,6 +254,52 @@ describe("scanClaudeJsonlForMessage", () => {
 
     const found = await scanClaudeJsonlForMessage(baseline, "new", "/tmp/worktree");
     expect(found).toBe(true);
+  });
+
+  it("reports the re-resolved file, not the baseline file, as scannedFile", async () => {
+    const baselineFile = await makeJsonl("baseline.jsonl", [
+      { type: "user", message: { role: "user", content: "old" } },
+    ]);
+    const rotatedFile = await makeJsonl("rotated.jsonl", [
+      { type: "user", message: { role: "user", content: "new" } },
+    ]);
+    findLatestSessionFileMock.mockResolvedValue(rotatedFile);
+
+    const hit = await scanClaudeJsonlForResult(
+      { file: baselineFile, size: 0 },
+      "new",
+      "/tmp/worktree",
+    );
+    expect(hit).toEqual({ found: true, scannedFile: rotatedFile });
+    const miss = await scanClaudeJsonlForResult(
+      { file: baselineFile, size: 0 },
+      "absent",
+      "/tmp/worktree",
+    );
+    expect(miss).toEqual({ found: false, scannedFile: rotatedFile });
+  });
+
+  it("reports the baseline file on a baseline hit and when no other file resolves", async () => {
+    const baselineFile = await makeJsonl("baseline.jsonl", [
+      { type: "user", message: { role: "user", content: "here" } },
+    ]);
+    const baseline = { file: baselineFile, size: 0 };
+
+    findLatestSessionFileMock.mockResolvedValue(null);
+    expect(await scanClaudeJsonlForResult(baseline, "here", "/tmp/worktree")).toEqual({
+      found: true,
+      scannedFile: baselineFile,
+    });
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
+
+    findLatestSessionFileMock.mockResolvedValue(baselineFile);
+    expect(await scanClaudeJsonlForResult(baseline, "absent", "/tmp/worktree")).toEqual({
+      found: false,
+      scannedFile: baselineFile,
+    });
   });
 
   it("resolves the pinned id when the constructed baseline file never appears", async () => {

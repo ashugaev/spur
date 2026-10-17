@@ -112,9 +112,8 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
-    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     await handle.stop();
   });
@@ -128,14 +127,13 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
     await flushPollCycle();
+    await handle.stop();
 
     expect(ghTransportMock).toHaveBeenCalledTimes(0);
     const disabledEvents = logSpurEventMock.mock.calls
       .map(([, entry]) => entry as { event?: string })
       .filter((entry) => entry.event === "source.poll.disabled");
     expect(disabledEvents).toHaveLength(0);
-
-    await handle.stop();
   });
 
   it("case 3 (mutation check): removing the registry file re-arms polling", async () => {
@@ -156,9 +154,8 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handle = await startHandle(dataDir);
     handle.runOnStart?.();
-    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     await handle.stop();
   });
@@ -176,8 +173,8 @@ describe("github poll-disabled registry survives a real restart", () => {
     const handleBeforeWindow = await startHandle(dataDir);
     handleBeforeWindow.runOnStart?.();
     await flushPollCycle();
-    expect(ghTransportMock).toHaveBeenCalledTimes(0);
     await handleBeforeWindow.stop();
+    expect(ghTransportMock).toHaveBeenCalledTimes(0);
 
     const registryPath = join(
       dataDir,
@@ -202,8 +199,7 @@ describe("github poll-disabled registry survives a real restart", () => {
 
     const handleAfterWindow = await startHandle(dataDir);
     handleAfterWindow.runOnStart?.();
-    await flushPollCycle();
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
 
     await handleAfterWindow.stop();
   });

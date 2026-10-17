@@ -89,8 +89,8 @@ describe("captureCursorSubmitBaseline", () => {
   });
 
   // AC4: a pinned path that does not yet exist yields a WAITING baseline, never
-  // null. session-service.ts:10468-10470 treats a null binding as an
-  // unconditional un-waited "submitted", so a nonexistent-but-pinned baseline
+  // null. the `!binding` branch in session-service.ts treats a null
+  // binding as an unconditional un-waited "submitted", so a nonexistent-but-pinned baseline
   // must still make the caller wait.
   it("yields a waiting baseline for a pinned id whose transcript does not exist yet", async () => {
     findCursorAckTranscriptFileMock.mockResolvedValue(null);

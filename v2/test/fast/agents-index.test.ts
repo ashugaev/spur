@@ -492,12 +492,15 @@ describe("createAgentSubmitAckBinding", () => {
 
   it("returns a binding for claude that scans the captured baseline", async () => {
     captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
-    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: true,
+      scannedFile: "/some/rotated.jsonl",
+    });
 
     const binding = await createAgentSubmitAckBinding("claude", ctx);
     expect(binding).not.toBeNull();
     const result = await binding?.scan("hello");
-    expect(result).toEqual({ found: true, lastScannedFile: "/some/file.jsonl" });
+    expect(result).toEqual({ found: true, lastScannedFile: "/some/rotated.jsonl" });
     expect(scanClaudeJsonlForMessageMock).toHaveBeenCalledWith(
       { file: "/some/file.jsonl", size: 42 },
       "hello",
@@ -508,7 +511,10 @@ describe("createAgentSubmitAckBinding", () => {
 
   it("threads the pinned agentSessionId into claude baseline and scan", async () => {
     captureClaudeSubmitBaselineMock.mockResolvedValue({ file: "/some/file.jsonl", size: 42 });
-    scanClaudeJsonlForMessageMock.mockResolvedValue(true);
+    scanClaudeJsonlForMessageMock.mockResolvedValue({
+      found: true,
+      scannedFile: "/some/file.jsonl",
+    });
 
     const pinnedCtx = { ...ctx, agentSessionId: "pinned-uuid" };
     const binding = await createAgentSubmitAckBinding("claude", pinnedCtx);
