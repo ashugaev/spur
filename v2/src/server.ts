@@ -1252,7 +1252,18 @@ export async function startServer(
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
         const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
         const view = requestedView === "dashboard" ? "dashboard" : "full";
-        const sessions = await service.list({ includeCompleted, view });
+        const abort = new AbortController();
+        response.once("close", () => {
+          if (!response.writableEnded) abort.abort();
+        });
+        let sessions: Awaited<ReturnType<typeof service.list>>;
+        try {
+          sessions = await service.list({ includeCompleted, view, signal: abort.signal });
+        } catch (error) {
+          if (abort.signal.aborted) return;
+          throw error;
+        }
+        if (abort.signal.aborted) return;
         response.setHeader("x-spur-lifecycle-instance-id", service.info().lifecycleInstanceId);
         sendJson(response, 200, sessions);
         return;
