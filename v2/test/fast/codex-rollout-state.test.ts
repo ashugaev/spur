@@ -328,6 +328,46 @@ describe("readCodexRolloutState", () => {
       reason: "task_started",
       turnId: "019e1300-bbbb-7000-9000-000000000003",
     });
+    expect(result.lastProgressMs).toBe(Date.parse("2026-05-10T11:00:02.000Z"));
+  });
+
+  it("reports lastProgressMs from a trailing non-state line while rollout keeps the task_started time", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019e1300-bbbb-7000-9000-000000000004",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:01.000Z",
+          type: "response_item",
+          payload: { type: "function_call", name: "exec_command", call_id: "call_Y" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:02.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call_Y" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:05:00.000Z",
+          type: "event_msg",
+          payload: { type: "token_count", info: null, rate_limits: null },
+        }),
+      ].join("\n"),
+      "rollout-trailing-token-count.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result.rollout).toMatchObject({
+      reason: "task_started",
+      timestampMs: Date.parse("2026-05-10T11:00:00.000Z"),
+    });
+    expect(result.lastProgressMs).toBe(Date.parse("2026-05-10T11:05:00.000Z"));
   });
 
   it("reads waiting from a real task_complete rollout tail", async () => {

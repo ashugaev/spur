@@ -889,6 +889,8 @@ export interface CodexRolloutStateRecord {
 export interface CodexRolloutReadResult {
   rollout: CodexRolloutStateRecord | null;
   rateLimit: RateLimitDetection | null;
+  /** Timestamp of the newest parseable rollout line of any kind. */
+  lastProgressMs?: number;
   threadId?: string;
   isSubagent?: boolean;
   model?: string;
@@ -1310,6 +1312,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   let rollout: CodexRolloutStateRecord | null = null;
   let rateLimit: RateLimitDetection | null = null;
   let model: string | undefined;
+  let lastProgressMs: number | undefined;
   const tokenUsage = extractCodexLifetimeTokenUsage(lines, generationId, replayBeforeMs);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     // Parse each changed rollout line once and share it across the extractors.
@@ -1321,6 +1324,10 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
     }
     if (!isRecord(parsed)) {
       continue;
+    }
+    if (lastProgressMs === undefined && typeof parsed["timestamp"] === "string") {
+      const lineMs = Date.parse(parsed["timestamp"]);
+      if (Number.isFinite(lineMs)) lastProgressMs = lineMs;
     }
     if (rateLimit === null) {
       const detection = detectCodexRateLimit(extractCodexRateLimitsLine(parsed));
@@ -1348,6 +1355,7 @@ function readCodexRolloutFromLines(filePath: string, lines: string[]): CodexRoll
   return {
     rollout,
     rateLimit,
+    ...(lastProgressMs !== undefined ? { lastProgressMs } : {}),
     ...(threadId ? { threadId } : {}),
     ...(isSubagent ? { isSubagent: true } : {}),
     ...(model ? { model } : {}),
