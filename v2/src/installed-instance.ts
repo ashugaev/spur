@@ -16,10 +16,10 @@ import { isMap, parseDocument } from "yaml";
 import {
   ensureInstanceConfig,
   isDefaultInstanceConfigPath,
-  loadInstanceConfigReadOnly,
+  loadInstanceConnectionConfigReadOnly,
+  type InstanceConnectionConfig,
 } from "./config.js";
 import { defaultMcpPort } from "./ports.js";
-import type { AppConfig } from "./types.js";
 
 function hasControlCharacters(value: string): boolean {
   return [...value].some(
@@ -158,22 +158,29 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
     }
   }
   selected = validatePath(selected);
-  const loaded = loadInstanceConfigReadOnly(selected);
+  const loaded = loadInstanceConnectionConfigReadOnly(selected);
   if (loaded.status === "absent" && allowMissingDefault && isDefaultInstanceConfigPath(selected))
     return selected;
-  if (loaded.status !== "ok")
-    throw new Error("Selected installed instance configuration is missing or invalid");
+  if (loaded.status === "invalid")
+    throw new Error(`Selected installed instance configuration: ${loaded.error}`);
+  if (loaded.status === "absent")
+    throw new Error("Selected installed instance configuration is missing");
   return realpathSync(loaded.config.configPath);
 }
 
-export function prepareInstallationConfig(configPath: string, actualWebPort: number): AppConfig {
-  let loaded = loadInstanceConfigReadOnly(configPath);
+export function prepareInstallationConfig(
+  configPath: string,
+  actualWebPort: number,
+): InstanceConnectionConfig {
+  let loaded = loadInstanceConnectionConfigReadOnly(configPath);
   if (loaded.status === "absent" && isDefaultInstanceConfigPath(configPath)) {
     ensureInstanceConfig(configPath);
-    loaded = loadInstanceConfigReadOnly(configPath);
+    loaded = loadInstanceConnectionConfigReadOnly(configPath);
   }
-  if (loaded.status !== "ok")
-    throw new Error("Selected installed instance configuration is invalid");
+  if (loaded.status === "invalid")
+    throw new Error(`Selected installed instance configuration: ${loaded.error}`);
+  if (loaded.status === "absent")
+    throw new Error("Selected installed instance configuration is missing");
   if (loaded.config.mcp.port !== actualWebPort) return loaded.config;
   const target = realpathSync(configPath);
   const document = parseDocument(readFileSync(target, "utf8"));
@@ -187,14 +194,20 @@ export function prepareInstallationConfig(configPath: string, actualWebPort: num
   const temporary = `${target}.${process.pid}.tmp`;
   try {
     writeFileSync(temporary, document.toString(), { mode: statSync(target).mode & 0o777 });
-    const candidate = loadInstanceConfigReadOnly(temporary);
-    if (candidate.status !== "ok") throw new Error("Generated MCP port migration is invalid");
+    const candidate = loadInstanceConnectionConfigReadOnly(temporary);
+    if (candidate.status !== "ok")
+      throw new Error(
+        `Generated MCP port migration: ${candidate.status === "invalid" ? candidate.error : "configuration is missing"}`,
+      );
     renameSync(temporary, target);
   } finally {
     rmSync(temporary, { force: true });
   }
-  const migrated = loadInstanceConfigReadOnly(configPath);
-  if (migrated.status !== "ok") throw new Error("Migrated MCP port configuration is invalid");
+  const migrated = loadInstanceConnectionConfigReadOnly(configPath);
+  if (migrated.status !== "ok")
+    throw new Error(
+      `Migrated MCP port configuration: ${migrated.status === "invalid" ? migrated.error : "configuration is missing"}`,
+    );
   return migrated.config;
 }
 

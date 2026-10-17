@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import { loadInstanceConnectionConfigReadOnly } from "./config.js";
 import { getDaemonOperation } from "./daemon-contracts.js";
 import { SPUR_DAEMON_API_VERSION } from "./types.js";
 import { McpResults } from "./mcp-results.js";
@@ -60,16 +60,17 @@ export class McpGateway {
   readonly lifetime = new AbortController();
   private readonly cursors = new Map<string, WaitCursor>();
   private constructor(
-    readonly config: ReturnType<typeof loadInstanceConfigReadOnly> & { status: "ok" },
+    readonly config: ReturnType<typeof loadInstanceConnectionConfigReadOnly> & { status: "ok" },
     readonly results: McpResults,
     private readonly baseUrl: string,
     private readonly configIdentity: string,
   ) {}
 
   static async create(configPath?: string): Promise<McpGateway> {
-    const loaded = loadInstanceConfigReadOnly(configPath);
-    if (loaded.status !== "ok")
-      throw new Error("MCP requires an existing valid Spur instance config");
+    const loaded = loadInstanceConnectionConfigReadOnly(configPath);
+    if (loaded.status === "invalid") throw new Error(`MCP configuration: ${loaded.error}`);
+    if (loaded.status === "absent")
+      throw new Error("MCP requires an existing Spur instance config");
     const host =
       loaded.config.server.host === "0.0.0.0"
         ? "127.0.0.1"

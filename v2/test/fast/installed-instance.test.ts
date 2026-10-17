@@ -146,6 +146,31 @@ describe("installed instance selection", () => {
     expect(readFileSync(explicit, "utf8")).toBe(prior);
   });
 
+  it("selects and migrates connection fields without resolving daemon-only source secrets", () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
+    const selected = config(
+      "secret.yaml",
+      `# retained\nserver:\n  port: 4311\nui:\n  port: 4312\nprojects:\n  test:\n    path: ${directory}\n    sources:\n      telegram:\n        type: telegram\n        token: \${TELEGRAM_BOT_TOKEN}\n        allowedUsers: [123]\n`,
+    );
+    api.writeInstalledInstance(selected);
+    expect(api.resolveInstallationConfig(options())).toBe(selected);
+    expect(api.prepareInstallationConfig(selected, 4313)).toMatchObject({
+      configPath: selected,
+      server: { port: 4311 },
+      mcp: { port: 4314 },
+    });
+    expect(readFileSync(selected, "utf8")).toContain("${TELEGRAM_BOT_TOKEN}");
+    expect(process.env["TELEGRAM_BOT_TOKEN"]).toBeUndefined();
+    expect(execFileSyncMock).not.toHaveBeenCalled();
+    const invalid = config("invalid.yaml", "mcp:\n  port: wrong\n");
+    expect(() => api.resolveInstallationConfig({ ...options(), configPath: invalid })).toThrow(
+      "mcp.port",
+    );
+    expect(() => api.prepareInstallationConfig(invalid, 4313)).toThrow("mcp.port");
+    expect(readFileSync(invalid, "utf8")).toBe("mcp:\n  port: wrong\n");
+    expect(api.readInstalledInstancePath()).toBe(selected);
+  });
+
   it("rejects malformed, expanded or unknown receipt shapes", () => {
     mkdirSync(join(directory, ".spur"));
     for (const value of [

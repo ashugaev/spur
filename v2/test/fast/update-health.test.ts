@@ -1,8 +1,12 @@
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTempDir } from "../helpers/common.js";
+import {
+  writeInstalledInstance,
+  installedInstanceReceiptPath,
+} from "../../src/installed-instance.js";
 import {
   makeTargets,
   parseWebUnitOptions,
@@ -12,6 +16,7 @@ import {
   resolveDaemonPort,
   resolveDaemonPortReadOnly,
   resolveWebPort,
+  resolveMcpPort,
   type FetchLike,
   type JsonFetchLike,
 } from "../../src/update-health.js";
@@ -21,12 +26,38 @@ const initialSpurConfig = process.env["SPUR_CONFIG"];
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   if (initialSpurConfig === undefined) {
     delete process.env["SPUR_CONFIG"];
   } else {
     process.env["SPUR_CONFIG"] = initialSpurConfig;
   }
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+it("resolves selected transport ports with daemon secrets absent and preserves invalid field cause", async () => {
+  const dir = await createTempDir("spur-update-secret-config-");
+  tempDirs.push(dir);
+  const path = join(dir, "instance.yaml");
+  writeFileSync(
+    path,
+    `server:\n  port: 43218\nmcp:\n  port: 43220\nprojects:\n  test:\n    path: ${dir}\n    sources:\n      telegram:\n        type: telegram\n        token: \${TELEGRAM_BOT_TOKEN}\n        allowedUsers: [123]\n`,
+  );
+  vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
+  process.env["SPUR_CONFIG"] = path;
+  expect(resolveDaemonPortReadOnly()).toBe(43218);
+  expect(resolveMcpPort()).toBe(43220);
+  writeFileSync(path, "mcp:\n  port: wrong\n");
+  expect(() => resolveDaemonPortReadOnly()).toThrow("mcp.port");
+  expect(() => resolveMcpPort()).toThrow("mcp.port");
+  vi.stubEnv("HOME", dir);
+  delete process.env["SPUR_CONFIG"];
+  writeInstalledInstance(path, dir);
+  writeFileSync(installedInstanceReceiptPath(dir), '{"configPath":"relative.yaml"}', {
+    mode: 0o600,
+  });
+  expect(() => resolveDaemonPortReadOnly()).toThrow("absolute");
+  expect(() => resolveMcpPort()).toThrow("absolute");
 });
 
 describe("probeDaemonIdentity", () => {

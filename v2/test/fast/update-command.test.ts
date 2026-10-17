@@ -353,6 +353,27 @@ describe("createRealUpdateDeps launch", () => {
     expect(spawnCalls).toEqual([]);
   });
 
+  it("retains selected update identity without daemon-only source secrets and rejects malformed fields", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spur-update-secret-"));
+    const selectedConfig = join(dir, "instance.yaml");
+    await writeFile(
+      selectedConfig,
+      `server:\n  port: 43218\nmcp:\n  port: 43220\nprojects:\n  test:\n    path: ${dir}\n    sources:\n      telegram:\n        type: telegram\n        token: \${P2_DAEMON_ONLY_TOKEN}\n        allowedUsers: [123]\n`,
+    );
+    expect(process.env["P2_DAEMON_ONLY_TOKEN"]).toBeUndefined();
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(dir, "state.json"), selectedConfig);
+    expect(deps.readDaemonPort()).toBe(43218);
+    expect(deps.readMcpPort()).toBe(43220);
+    deps.launch();
+    expect(execFileSyncCalls.find((call) => call.file === "systemd-run")?.args).toEqual(
+      expect.arrayContaining(["--config", selectedConfig]),
+    );
+    await writeFile(selectedConfig, "mcp:\n  port: wrong\n");
+    expect(() =>
+      createRealUpdateDeps("/tmp/cli.js", join(dir, "state.json"), selectedConfig),
+    ).toThrow("mcp.port");
+  });
+
   it("falls back to a detached, unref'd spawn when systemd-run is absent", async () => {
     systemdRunAvailable = false;
     const home = await mkdtemp(join(tmpdir(), "spur-update-home-"));

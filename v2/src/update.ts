@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import { loadInstanceConnectionConfigReadOnly } from "./config.js";
 import {
   deploySwitchStatePath,
   readDeploySwitchState,
@@ -271,9 +271,9 @@ export function createRealUpdateDeps(
   // The CLI has no daemon call and no config path of its own. An absent or
   // invalid instance config yields no dataDir, so the events are dropped and
   // `spur update` still runs — a default at the boundary, not in the flow.
-  const instanceConfig = loadInstanceConfigReadOnly(configPath);
+  const instanceConfig = loadInstanceConnectionConfigReadOnly(configPath);
   if (instanceConfig.status === "invalid")
-    throw new Error("Selected update instance configuration is invalid");
+    throw new Error(`Selected update instance configuration: ${instanceConfig.error}`);
   const dataDir = instanceConfig.status === "ok" ? instanceConfig.config.dataDir : null;
   return {
     now: () => Date.now(),

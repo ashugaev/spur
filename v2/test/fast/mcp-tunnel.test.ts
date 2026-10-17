@@ -23,7 +23,11 @@ describe("configured MCP tunnel health", () => {
     const directory = mkdtempSync(join(tmpdir(), "spur-tunnel-runner-"));
     const configPath = join(directory, "config.yaml");
     const envPath = join(directory, "tunnel.env");
-    writeFileSync(configPath, `dataDir: ${directory}\nmcp:\n  port: 43217\n`);
+    writeFileSync(
+      configPath,
+      `dataDir: ${directory}\nmcp:\n  port: 43217\nprojects:\n  test:\n    path: ${directory}\n    sources:\n      telegram:\n        type: telegram\n        token: \${TELEGRAM_BOT_TOKEN}\n        allowedUsers: [123]\n`,
+    );
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
     writeFileSync(envPath, "fixture=true\n", { mode: 0o600 });
     vi.stubEnv("SPUR_MCP_TUNNEL_ENV_FILE", envPath);
     vi.stubEnv("SPUR_MCP_TUNNEL_PROFILE", "test-profile");
@@ -49,6 +53,7 @@ describe("configured MCP tunnel health", () => {
         { stdio: "inherit" },
       );
       expect(statSync(join(directory, "mcp-tunnel.json")).mode & 0o777).toBe(0o600);
+      expect(process.env["TELEGRAM_BOT_TOKEN"]).toBeUndefined();
       child.emit("exit", 0, null);
       await running;
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
@@ -59,6 +64,19 @@ describe("configured MCP tunnel health", () => {
       writeFileSync(envPath, "");
       await expect(runMcpTunnel(configPath)).rejects.toThrow("environment file is empty");
       expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("preserves selected field diagnostics before spawning and keeps syntax contents private", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "spur-tunnel-invalid-"));
+    const path = join(directory, "config.yaml");
+    try {
+      writeFileSync(path, "mcp:\n  port: invalid\n");
+      await expect(runMcpTunnel(path)).rejects.toThrow("mcp.port");
+      writeFileSync(path, 'projects: [private-token: "unterminated\n');
+      await expect(runMcpTunnel(path)).rejects.toThrow("YAML is invalid");
+      expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

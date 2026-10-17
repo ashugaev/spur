@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, expect, it } from "vitest";
@@ -94,7 +94,7 @@ it("documents HTTP help and rejects missing config without bootstrap", async () 
   ).rejects.toMatchObject({
     code: 1,
     stdout: "",
-    stderr: expect.stringContaining("existing valid Spur instance config"),
+    stderr: expect.stringContaining("existing Spur instance config"),
   });
   expect(await readdir(fixture.root)).toEqual(["instance.yaml"]);
 });
@@ -106,6 +106,12 @@ it("selects an installed receipt without loading daemon secrets and preserves ex
   const buildId = computeBuildId(fileURLToPath(new URL("../../dist/", import.meta.url)));
   selected.state.info.buildId = buildId;
   override.state.info.buildId = buildId;
+  for (const fixture of [selected, override]) {
+    await appendFile(
+      fixture.configPath,
+      `projects:\n  test:\n    path: ${fixture.root}\n    sources:\n      telegram:\n        type: telegram\n        token: \${P2_DAEMON_ONLY_TOKEN}\n        allowedUsers: [123]\n`,
+    );
+  }
   writeInstalledInstance(selected.configPath, selected.root);
   await writeFile(
     join(selected.root, ".spur", "daemon.env"),

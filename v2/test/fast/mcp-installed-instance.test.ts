@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import { chmodSync } from "node:fs";
 import type * as ChildProcess from "node:child_process";
 import { createMcpServer } from "../../src/mcp.js";
 import { startMcpHttp, probeMcpServer } from "../../src/mcp-http.js";
@@ -34,9 +35,14 @@ async function fixtureWithMcpPort() {
   if (!address || typeof address === "string") throw new Error("Missing reserved port");
   await new Promise<void>((resolve) => reservation.close(() => resolve()));
   await appendFile(fixture.configPath, `mcp:\n  port: ${address.port}\n`);
+  await appendFile(
+    fixture.configPath,
+    `projects:\n  test:\n    path: ${fixture.root}\n    sources:\n      telegram:\n        type: telegram\n        token: \${TELEGRAM_BOT_TOKEN}\n        allowedUsers: [123]\n`,
+  );
   return { ...fixture, mcpUrl: `http://127.0.0.1:${address.port}/mcp` };
 }
 async function setup() {
+  vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
   const selected = await fixtureWithMcpPort();
   const override = await fixtureWithMcpPort();
   const home = join(selected.root, "home");
@@ -114,10 +120,29 @@ it("refuses an invalid installed receipt without fallback, bootstrap or probing;
   await writeFile(path, '{"configPath":"relative.yaml"}', { mode: 0o600 });
   await expect(createMcpServer()).rejects.toThrow("absolute");
   await expect(startMcpHttp()).rejects.toThrow("absolute");
+  chmodSync(path, 0o644);
+  await expect(createMcpServer()).rejects.toThrow("private");
+  await expect(startMcpHttp()).rejects.toThrow("private");
+  chmodSync(path, 0o600);
   expect((await stdioFactoryStatus(selected.configPath)).structuredContent).toMatchObject({
     ok: true,
     configPath: selected.configPath,
   });
   expect(await readFile(path, "utf8")).toBe('{"configPath":"relative.yaml"}');
   expect(vi.mocked(execFileSync).mock.calls.every(([command]) => command === "git")).toBe(true);
+});
+
+it("preserves selected field and syntax diagnostics without exposing secret YAML contents", async () => {
+  const { selected } = await setup();
+  await writeFile(selected.configPath, "mcp:\n  port: invalid\n");
+  await expect(createMcpServer()).rejects.toThrow("mcp.port");
+  await expect(startMcpHttp()).rejects.toThrow("mcp.port");
+  await writeFile(selected.configPath, 'projects: [private-secret: "unterminated\n');
+  await expect(createMcpServer()).rejects.toThrow(
+    "MCP configuration: Instance configuration YAML is invalid",
+  );
+  await expect(startMcpHttp()).rejects.toThrow(
+    "MCP configuration: Instance configuration YAML is invalid",
+  );
+  expect(await readFile(selected.configPath, "utf8")).toContain("private-secret");
 });

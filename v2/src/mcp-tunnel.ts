@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import { loadInstanceConnectionConfigReadOnly } from "./config.js";
 
 export function mcpTunnelEnvPath(): string {
   return process.env["SPUR_MCP_TUNNEL_ENV_FILE"] ?? join(homedir(), ".spur", "mcp-tunnel.env");
@@ -87,8 +87,10 @@ export async function readMcpTunnelStatus(
 }
 
 export async function runMcpTunnel(configPath?: string): Promise<void> {
-  const loaded = loadInstanceConfigReadOnly(configPath);
-  if (loaded.status !== "ok") throw new Error("MCP tunnel requires a valid instance configuration");
+  const loaded = loadInstanceConnectionConfigReadOnly(configPath);
+  if (loaded.status === "invalid") throw new Error(`MCP tunnel configuration: ${loaded.error}`);
+  if (loaded.status === "absent")
+    throw new Error("MCP tunnel requires an existing instance configuration");
   const profile = process.env["SPUR_MCP_TUNNEL_PROFILE"]?.trim();
   const key = process.env["CONTROL_PLANE_API_KEY"]?.trim();
   if (!profile || !key)

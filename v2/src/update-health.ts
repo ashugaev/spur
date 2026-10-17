@@ -2,13 +2,13 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { loadInstanceConfigReadOnly } from "./config.js";
+import { loadInstanceConnectionConfigReadOnly, type InstanceConnectionConfig } from "./config.js";
 import { readInstalledInstancePath } from "./installed-instance.js";
 import type { SystemdScope } from "./host-install.js";
 import { DEFAULT_MCP_PORT, DEFAULT_UI_PORT } from "./ports.js";
 import { computeBuildId } from "./build-identity.js";
 import { mcpTunnelEnvPath, readMcpTunnelStatus } from "./mcp-tunnel.js";
-import { SPUR_DAEMON_API_VERSION, type AppConfig, type HeadroomReport } from "./types.js";
+import { SPUR_DAEMON_API_VERSION, type HeadroomReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,9 +57,10 @@ export function resolveMcpPort(configPath?: string): number {
   return selectedPortConfig(configPath)?.mcp.port ?? DEFAULT_MCP_PORT;
 }
 
-function selectedPortConfig(configPath?: string): AppConfig | undefined {
-  const loaded = loadInstanceConfigReadOnly(configPath);
-  if (loaded.status === "invalid") throw new Error("Selected instance configuration is invalid");
+function selectedPortConfig(configPath?: string): InstanceConnectionConfig | undefined {
+  const loaded = loadInstanceConnectionConfigReadOnly(configPath);
+  if (loaded.status === "invalid")
+    throw new Error(`Selected instance configuration: ${loaded.error}`);
   if (loaded.status === "ok") return loaded.config;
   if (configPath || process.env["SPUR_CONFIG"] || readInstalledInstancePath()) {
     throw new Error("Selected instance configuration is missing");
@@ -284,7 +285,7 @@ export async function probeMcpIdentity(
   scope: SystemdScope,
   configPath?: string,
 ): Promise<ProbeResult> {
-  const loaded = loadInstanceConfigReadOnly(configPath);
+  const loaded = loadInstanceConnectionConfigReadOnly(configPath);
   if (loaded.status !== "ok") return { ok: false, reason: "identity-mismatch" };
   if (target.id === "tunnel") {
     const result = await readMcpTunnelStatus(
