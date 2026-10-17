@@ -190,7 +190,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Claude: agent exit → inferred runtime error", async () => {
+  it("Claude: agent exit → error", async () => {
     const { context, configPath, port } = await setup("claude-exit");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
@@ -308,7 +308,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Codex: agent exit → inferred runtime error", async () => {
+  it("Codex: agent exit → error", async () => {
     const { context, configPath, port } = await setup("codex-exit");
     const session = await spawnSession(context, configPath, "codex");
     await waitForState(port, session.id, "waiting", 45_000);
@@ -374,7 +374,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Cursor: agent exit → inferred runtime error", async () => {
+  it("Cursor: agent exit → error", async () => {
     const { context, configPath, port } = await setup("cursor-exit");
     const session = await spawnSession(context, configPath, "cursor");
 
