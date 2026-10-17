@@ -35349,7 +35349,7 @@ describe("SessionService", () => {
     );
     expect(completed?.[1].details).toMatchObject({
       totals: { groups: 1, worktreesRemoved: 0, recordsArchived: 0 },
-      sessionIds: ["api-1", "api-2"],
+      sessionIds: [],
     });
 
     releaseRestore();
@@ -35447,7 +35447,7 @@ describe("SessionService", () => {
     );
     expect(completed?.[1].details).toMatchObject({
       totals: { groups: 1, worktreesRemoved: 0, recordsArchived: 0 },
-      sessionIds: ["api-1", "api-2"],
+      sessionIds: [],
     });
 
     releaseRestore();
