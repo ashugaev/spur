@@ -1580,7 +1580,8 @@ export async function collectHostInstallChecks(
       });
     }
   }
-  if (instanceConfig.status === "invalid") return checks;
+  // An absent config provides no selected runtime target for health probes.
+  if (instanceConfig.status !== "ok") return checks;
   const health = await checkServiceHealth(
     scope,
     daemonActive,
