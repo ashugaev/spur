@@ -47259,6 +47259,91 @@ describe("SessionService", () => {
         });
       },
     );
+
+    // These sites run after the public entry check, so they only fire when the
+    // session record disappears mid-operation. Call them directly with no record.
+    type MidOperationInternals = {
+      restoreLocked(id: string, request: object, claim: object): Promise<unknown>;
+      switchAuthLocked(
+        id: string,
+        accountId: string,
+        opts: { reason: "manual" },
+        claim: object,
+      ): Promise<unknown>;
+      prepareHandoffLocked(id: string, request: object): Promise<unknown>;
+      deliverPrepared(
+        id: string,
+        message: string,
+        options: { entryPoint: "deliver" },
+      ): Promise<unknown>;
+    };
+    const lifecycleClaim = {
+      id: "gone-1",
+      workspaceId: "gone-1",
+      status: "running",
+      stopReason: undefined,
+      updatedAt: "2026-03-18T10:00:00.000Z",
+      tmuxSession: "gone-1",
+    };
+
+    it.each([
+      [
+        "restoreLocked",
+        (internals: MidOperationInternals) => internals.restoreLocked("gone-1", {}, lifecycleClaim),
+      ],
+      [
+        "switchAuthLocked",
+        (internals: MidOperationInternals) =>
+          internals.switchAuthLocked("gone-1", "acct", { reason: "manual" }, lifecycleClaim),
+      ],
+      [
+        "prepareHandoffLocked",
+        (internals: MidOperationInternals) => internals.prepareHandoffLocked("gone-1", {}),
+      ],
+      [
+        "deliverPrepared",
+        (internals: MidOperationInternals) =>
+          internals.deliverPrepared("gone-1", "hello", { entryPoint: "deliver" }),
+      ],
+    ] as const)(
+      "%s rejects with SessionResourceNotFoundError when the record is gone",
+      async (_name, invoke) => {
+        readSessionMock.mockReturnValue(undefined);
+
+        const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+        const promise = invoke(service as unknown as MidOperationInternals);
+        await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+        await expect(promise).rejects.toMatchObject({
+          statusCode: 404,
+          message: "Session not found: gone-1",
+        });
+        service.dispose();
+      },
+    );
+
+    it("deliver() rejects with SessionResourceNotFoundError when the record vanishes before the sensitive suffix", async () => {
+      readSessionMock.mockReturnValue(runningSession({ id: "gone-1" }));
+
+      const { SessionService, SessionResourceNotFoundError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const internals = service as unknown as {
+        deliverPrepared: (...args: unknown[]) => Promise<unknown>;
+      };
+      vi.spyOn(internals, "deliverPrepared").mockImplementation(async () => {
+        readSessionMock.mockReturnValue(undefined);
+        return {};
+      });
+
+      const promise = service.deliver("gone-1", "hello", { sensitivePromptSuffix: "suffix" });
+      await expect(promise).rejects.toBeInstanceOf(SessionResourceNotFoundError);
+      await expect(promise).rejects.toMatchObject({
+        statusCode: 404,
+        message: "Session not found: gone-1",
+      });
+      service.dispose();
+    });
   });
 
   describe("session memory", () => {
