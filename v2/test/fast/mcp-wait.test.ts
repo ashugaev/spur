@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { McpGateway } from "../../src/mcp-gateway.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 import { encodeMcpResult } from "../../src/mcp-results.js";
@@ -142,41 +142,75 @@ it("holds queued/unconfirmed submissions and reports question, terminal and canc
     startIndex: 0,
     totalEntries: 2,
   };
-  fixture.state.override = (path) =>
-    path === `/sessions/${session.id}`
-      ? {
-          value: {
-            ...session,
-            queuedMessages: { messages: ["next"], awaitingPrompt: true },
-            submitUnconfirmedAt: "2026-01-01",
-          },
-        }
-      : undefined;
-  expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
-  ).toMatchObject({ reason: "timeout", pending: true });
-  fixture.state.override = (path) =>
-    path === `/sessions/${session.id}`
-      ? { value: { ...session, state: "needs_input" } }
-      : undefined;
-  expect(
-    await gateway.wait({ sessionId: session.id, after, timeoutMs: 100 }, AbortSignal.timeout(1000)),
-  ).toMatchObject({
-    reason: "ready",
-    state: "needs_input",
-    question: { operationId: "get_conversation" },
-  });
-  fixture.state.override = (path) =>
-    path === `/sessions/${session.id}` ? { value: { ...session, status: "completed" } } : undefined;
-  expect(
-    await gateway.wait(
-      { sessionId: session.id, after, until: "terminal", timeoutMs: 100 },
-      AbortSignal.timeout(1000),
-    ),
-  ).toMatchObject({ reason: "terminal", status: "completed" });
-  await expect(
-    gateway.wait({ sessionId: session.id }, AbortSignal.abort(new Error("cancelled"))),
-  ).rejects.toThrow("cancelled");
+  let now = Date.now();
+  const nativeTimeout = AbortSignal.timeout;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const timeout = vi
+    .spyOn(AbortSignal, "timeout")
+    .mockImplementation((milliseconds) =>
+      milliseconds === 100
+        ? new AbortController().signal
+        : nativeTimeout.call(AbortSignal, milliseconds),
+    );
+  try {
+    let advanced = false;
+    fixture.state.override = (path) => {
+      const url = new URL(path, "http://localhost");
+      if (
+        url.pathname === `/sessions/${session.id}/conversation` &&
+        url.searchParams.get("view") === "messages" &&
+        !advanced
+      ) {
+        now += 100;
+        advanced = true;
+      }
+      return path === `/sessions/${session.id}`
+        ? {
+            value: {
+              ...session,
+              queuedMessages: { messages: ["next"], awaitingPrompt: true },
+              submitUnconfirmedAt: "2026-01-01",
+            },
+          }
+        : undefined;
+    };
+    expect(
+      await gateway.wait(
+        { sessionId: session.id, after, timeoutMs: 100 },
+        AbortSignal.timeout(1000),
+      ),
+    ).toMatchObject({ reason: "timeout", pending: true });
+    fixture.state.override = (path) =>
+      path === `/sessions/${session.id}`
+        ? { value: { ...session, state: "needs_input" } }
+        : undefined;
+    expect(
+      await gateway.wait(
+        { sessionId: session.id, after, timeoutMs: 100 },
+        AbortSignal.timeout(1000),
+      ),
+    ).toMatchObject({
+      reason: "ready",
+      state: "needs_input",
+      question: { operationId: "get_conversation" },
+    });
+    fixture.state.override = (path) =>
+      path === `/sessions/${session.id}`
+        ? { value: { ...session, status: "completed" } }
+        : undefined;
+    expect(
+      await gateway.wait(
+        { sessionId: session.id, after, until: "terminal", timeoutMs: 100 },
+        AbortSignal.timeout(1000),
+      ),
+    ).toMatchObject({ reason: "terminal", status: "completed" });
+    await expect(
+      gateway.wait({ sessionId: session.id }, AbortSignal.abort(new Error("cancelled"))),
+    ).rejects.toThrow("cancelled");
+  } finally {
+    timeout.mockRestore();
+    clock.mockRestore();
+  }
 });
 it("bounds escaped wait previews while retaining resolvable raw history", async () => {
   const { fixture, gateway } = await setup();
