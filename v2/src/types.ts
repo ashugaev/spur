@@ -951,6 +951,9 @@ export interface AppConfig {
   ui: {
     port: number;
   };
+  mcp: {
+    port: number;
+  };
   models: {
     codexHome: string;
   };
@@ -1638,7 +1641,7 @@ export interface CompleteSessionRequest {
 
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
-  | { kind: "human"; origin: "cli" | "ui" }
+  | { kind: "human"; origin: "cli" | "ui" | "mcp" }
   | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
@@ -1892,6 +1895,7 @@ export interface ProjectConfigMutationResponse {
 }
 
 export interface RuntimeInfo {
+  buildId: string;
   lifecycleInstanceId: string;
   ok: true;
   apiVersion: number;
@@ -1970,6 +1974,23 @@ export type TranscriptEntry =
       multiSelect?: boolean;
       timestampMs?: number;
     };
+
+export interface ConversationPage {
+  sessionId: string;
+  state: SessionState;
+  messages: {
+    index: number;
+    role: "user" | "assistant";
+    text: string;
+    timestampMs?: number;
+    textTruncated?: boolean;
+  }[];
+  startIndex: number;
+  totalEntries: number;
+  nextFrom: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
 
 export interface ConversationResponse {
   messages: ConversationMessage[];
