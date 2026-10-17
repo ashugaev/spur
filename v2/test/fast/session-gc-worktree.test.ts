@@ -240,15 +240,18 @@ describe("session gc against a real git worktree", () => {
     // archiving. A mutation dropping that second check would archive it: the
     // session vanishes from the fleet and can never be woken again.
     const fixture = await createFixture();
+    writeSession(fixture.config.dataDir, { ...fixture.session, status: "stopped" });
+    await rm(fixture.worktreePath, { recursive: true, force: true });
+
+    const plan = planFor(fixture.config);
+    expect(plan.groups[0]?.action).toBe("archive");
+    // Parked after planning, updatedAt untouched: only the pre-archive
+    // liveness recheck can see it.
     writeSession(fixture.config.dataDir, {
       ...fixture.session,
       status: "stopped",
       stopReason: "stale_timeout",
     });
-    await rm(fixture.worktreePath, { recursive: true, force: true });
-
-    const plan = planFor(fixture.config);
-    expect(plan.groups[0]?.action).toBe("archive");
 
     const report = await executeSessionGc(plan, depsWithoutGh(fixture.config, NO_OPEN_PRS), {
       dryRun: false,
@@ -261,6 +264,43 @@ describe("session gc against a real git worktree", () => {
     expect(existsSync(join(fixture.config.dataDir, "sessions-archive", "api", "api-1.json"))).toBe(
       false,
     );
+  });
+
+  it("archives all but the newest record of a dirty shared worktree and leaves the worktree intact", async () => {
+    const fixture = await createFixture();
+    const sibling = (id: string, updatedAt: string): SessionRecord => ({
+      ...fixture.session,
+      id,
+      workspaceId: "api-1",
+      tmuxSession: id,
+      updatedAt,
+    });
+    writeSession(fixture.config.dataDir, sibling("api-2", "2026-01-02T00:00:00.000Z"));
+    writeSession(fixture.config.dataDir, sibling("api-3", "2026-01-03T00:00:00.000Z"));
+    writeFileSync(join(fixture.worktreePath, "scratch.txt"), "unsaved work\n");
+
+    const report = await executeSessionGc(
+      planFor(fixture.config),
+      depsWithoutGh(fixture.config, NO_OPEN_PRS),
+      { dryRun: false, sizes: false },
+    );
+
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      blockReasons: ["uncommitted_changes"],
+      archiveSessionIds: ["api-2"],
+      removed: false,
+      archived: true,
+    });
+    expect(
+      listSessions(fixture.config.dataDir)
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual(["api-1", "api-3"]);
+    expect(existsSync(join(fixture.config.dataDir, "sessions-archive", "api", "api-2.json"))).toBe(
+      true,
+    );
+    expect(existsSync(join(fixture.worktreePath, "scratch.txt"))).toBe(true);
   });
 
   it("blocks a worktree holding unpushed commits", async () => {

@@ -86,7 +86,7 @@ describe("executeSessionGc", () => {
     },
   );
 
-  it("retains an archive-only group when a sibling gains error during guards", async () => {
+  it("retains an archive-only group when a sibling gains error during the PR probe", async () => {
     const records = [
       makeSession({ id: "api-1", workspaceId: "shared", worktree: false }),
       makeSession({ id: "api-2", workspaceId: "shared", worktree: false, status: "stopped" }),
@@ -103,11 +103,11 @@ describe("executeSessionGc", () => {
     let current = records;
     const deps = makeDeps({
       readGroupMembers: () => current,
-      probeGuards: vi.fn(async () => {
+      openPrIndex: vi.fn(async (): Promise<GcOpenPrIndex> => {
         current = records.map((record) =>
           record.status === "stopped" ? { ...record, error: "probe failed" } : record,
         );
-        return [];
+        return { numbers: new Set(), branches: new Set() };
       }),
     });
 
@@ -510,6 +510,198 @@ describe("executeSessionGc", () => {
     expect(deps.openPrIndex).not.toHaveBeenCalled();
     expect(report.groups[0]?.action).toBe("blocked");
     expect(report.groups[0]?.blockReasons).toEqual(["not_eligible_status"]);
+  });
+});
+
+function planMany(sessions: SessionRecord[]) {
+  return planSessionGc({
+    sessions,
+    worktreeDir: WORKTREE_DIR,
+    now: NOW,
+    olderThanDays: 30,
+    statuses: ["completed", "killed", "stopped"],
+    limit: 100,
+    pathExists: () => true,
+  });
+}
+
+function lookup(records: SessionRecord[]): SessionGcExecutorDeps["readGroupMembers"] {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  return (ids) => ids.map((id) => byId.get(id) ?? null);
+}
+
+describe("executeSessionGc partial groups", () => {
+  const shared = (overrides: Partial<SessionRecord> & { id: string }) =>
+    makeSession({ worktree: false, worktreePath: "/repo/api", ...overrides });
+  const sharedRecords = () => [
+    shared({ id: "A" }),
+    shared({ id: "B", workspaceId: "A" }),
+    shared({ id: "C", workspaceId: "A", status: "running" }),
+    shared({ id: "D" }),
+  ];
+  const desk = (overrides: Partial<SessionRecord> & { id: string }) =>
+    makeSession({ workspaceId: "desk", worktreePath: `${WORKTREE_DIR}/api/desk`, ...overrides });
+  const deskRecords = () => [
+    desk({ id: "desk" }),
+    desk({ id: "x1", updatedAt: "2026-01-02T00:00:00.000Z" }),
+    desk({ id: "x2", updatedAt: "2026-01-03T00:00:00.000Z" }),
+  ];
+
+  it("archives only the eligible subset, never probes or removes, and ignores kept-member churn", async () => {
+    const records = sharedRecords();
+    const plan = planMany(records);
+    const churned = records.map((record) =>
+      record.id === "C" ? { ...record, updatedAt: "2026-07-31T00:00:00.000Z" } : record,
+    );
+    const deps = makeDeps({ readGroupMembers: lookup(churned) });
+
+    const report = await executeSessionGc(plan, deps, { dryRun: false, sizes: false });
+
+    expect(plan.groups[0]?.action).toBe("partial");
+    expect(deps.archiveGroup).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["B", "D"]);
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(deps.pruneRepo).not.toHaveBeenCalled();
+    expect(deps.probeGuards).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.checkGroupLiveness).mock.calls.map((call) => call[0])).toEqual([
+      ["B", "D"],
+    ]);
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      archiveSessionIds: ["B", "D"],
+      archived: true,
+    });
+    expect(report.totals.recordsArchived).toBe(2);
+  });
+
+  it("does not probe uncommitted changes for an archive-only group", async () => {
+    const records = [shared({ id: "A" }), shared({ id: "B" })];
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      probeGuards: vi.fn(async () => ["uncommitted_changes"]),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.probeGuards).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({ action: "archive", archived: true });
+    expect(report.groups[0]?.archiveSessionIds).toEqual(["A", "B"]);
+  });
+
+  it("degrades a dirty reclaim group to a partial archive that keeps the worktree and a keeper", async () => {
+    const records = deskRecords();
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      probeGuards: vi.fn(async () => ["uncommitted_changes"]),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["x1"]);
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      blockReasons: ["uncommitted_changes"],
+      archiveSessionIds: ["x1"],
+      removed: false,
+    });
+  });
+
+  it("blocks a partial group when an acted member changed during the run", async () => {
+    const records = sharedRecords();
+    const changed = records.map((record) =>
+      record.id === "D" ? { ...record, updatedAt: "2026-07-31T00:00:00.000Z" } : record,
+    );
+    const deps = makeDeps({ readGroupMembers: lookup(changed) });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "blocked",
+      blockReasons: ["changed_during_run"],
+      archiveSessionIds: [],
+    });
+  });
+
+  it("reports a dry-run partial group without archiving", async () => {
+    const records = sharedRecords();
+    const deps = makeDeps({ readGroupMembers: lookup(records) });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: true, sizes: false });
+
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      archiveSessionIds: ["B", "D"],
+      archived: false,
+    });
+  });
+
+  it("keeps an open-PR member and its anchor while archiving the rest of an archive group", async () => {
+    const records = [
+      shared({ id: "A" }),
+      shared({
+        id: "B",
+        workspaceId: "A",
+        pr: { number: 7, repo: "acme/api", url: "https://github.com/acme/api/pull/7" },
+      }),
+      shared({ id: "C" }),
+    ];
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      openPrIndex: vi.fn(
+        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([7]), branches: new Set() }),
+      ),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["C"]);
+    expect(report.groups[0]).toMatchObject({
+      action: "partial",
+      archiveSessionIds: ["C"],
+    });
+    expect(report.groups[0]?.blockReasons).toContain("open_pr");
+  });
+
+  it("never removes a reclaim group's worktree when one member has an open PR", async () => {
+    const records = deskRecords().map((record) =>
+      record.id === "x1"
+        ? {
+            ...record,
+            pr: { number: 7, repo: "acme/api", url: "https://github.com/acme/api/pull/7" },
+          }
+        : record,
+    );
+    const deps = makeDeps({
+      readGroupMembers: lookup(records),
+      openPrIndex: vi.fn(
+        async (): Promise<GcOpenPrIndex> => ({ numbers: new Set([7]), branches: new Set() }),
+      ),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.removeWorktree).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.archiveGroup).mock.calls[0]?.[0].map((m) => m.id)).toEqual(["x2"]);
+    expect(report.groups[0]).toMatchObject({ action: "partial", removed: false });
+    expect(report.groups[0]?.blockReasons).toContain("open_pr");
+  });
+
+  it("blocks when a kept anchor vanished before archive", async () => {
+    const records = sharedRecords();
+    const deps = makeDeps({
+      readGroupMembers: lookup(records.filter((record) => record.id !== "A")),
+    });
+
+    const report = await executeSessionGc(planMany(records), deps, { dryRun: false, sizes: false });
+
+    expect(deps.archiveGroup).not.toHaveBeenCalled();
+    expect(report.groups[0]).toMatchObject({
+      action: "blocked",
+      blockReasons: ["changed_during_run"],
+    });
   });
 });
 

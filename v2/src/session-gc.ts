@@ -91,7 +91,7 @@ export async function resolveSessionCleanupContext(
 // Planning (pure, no IO)
 // ---------------------------------------------------------------------------
 
-export type GcAction = "reclaim" | "archive" | "blocked";
+export type GcAction = "reclaim" | "archive" | "partial" | "blocked";
 
 export interface GcGroupPlan {
   key: string;
@@ -103,6 +103,12 @@ export interface GcGroupPlan {
   newestUpdatedAt: string;
   action: GcAction;
   blockReasons: string[];
+  // Members this plan archives: all for reclaim/archive, the eligible subset
+  // for partial, empty for blocked.
+  archiveSessionIds: string[];
+  // Distinct member paths of worktrees that exist at plan time; each keeps one
+  // non-archived record while its worktree stays on disk.
+  ownedWorktreePaths: string[];
   restoreLossSessionIds: string[];
   members: SessionRecord[];
 }
@@ -226,6 +232,67 @@ function firstMember(members: readonly SessionRecord[], context: string): Sessio
   return first;
 }
 
+function memberPath(member: SessionRecord): string {
+  return member.worktreePath.trim();
+}
+
+// Grows a retained set until no archived record is the desk anchor of a
+// retained one (a missing anchor breaks the survivor) and every owned worktree
+// path that stays on disk keeps one visible record (PR #652: a record-driven
+// sweep never sees an archived record's worktree again). keeperIds are the
+// retained records an acted (non-retained) record depends on; the executor
+// re-reads them right before archiving.
+export function retainClosure(
+  members: readonly SessionRecord[],
+  initiallyRetained: ReadonlySet<string>,
+  ownedPaths: readonly string[],
+): { retainedIds: Set<string>; keeperIds: string[] } {
+  const retained = new Set(initiallyRetained);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const anchorIds = new Set(
+      members.filter((member) => retained.has(member.id)).map((member) => workspaceIdOf(member)),
+    );
+    for (const member of members) {
+      if (anchorIds.has(member.id) && !retained.has(member.id)) {
+        retained.add(member.id);
+        changed = true;
+      }
+    }
+    for (const path of ownedPaths) {
+      const withPath = members.filter((member) => memberPath(member) === path);
+      if (withPath.some((member) => retained.has(member.id))) continue;
+      const newest = [...withPath].sort(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id),
+      )[0];
+      if (newest) {
+        retained.add(newest.id);
+        changed = true;
+      }
+    }
+  }
+  const acted = members.filter((member) => !retained.has(member.id));
+  const actedAnchorIds = new Set(acted.map((member) => workspaceIdOf(member)));
+  const actedPaths = new Set(acted.map(memberPath));
+  const keeperIds = members
+    .filter(
+      (member) =>
+        retained.has(member.id) &&
+        (actedAnchorIds.has(member.id) ||
+          (ownedPaths.includes(memberPath(member)) && actedPaths.has(memberPath(member)))),
+    )
+    .map((member) => member.id);
+  return { retainedIds: retained, keeperIds };
+}
+
+function stoppedIds(members: readonly SessionRecord[], ids: readonly string[]): string[] {
+  return members
+    .filter((member) => member.status === "stopped" && ids.includes(member.id))
+    .map((member) => member.id);
+}
+
 function classifyGroup(
   members: SessionRecord[],
   protectedSessionIds: ReadonlySet<string>,
@@ -240,6 +307,8 @@ function classifyGroup(
   worktreePath: string;
   ageDays: number;
   newestUpdatedAt: string;
+  archiveSessionIds: string[];
+  ownedWorktreePaths: string[];
 } {
   const newestUpdatedAt = members.reduce(
     (latest, member) => (member.updatedAt > latest ? member.updatedAt : latest),
@@ -248,10 +317,22 @@ function classifyGroup(
   const ageDays = ageInDays(newestUpdatedAt, now);
   const worktreePath =
     members.find((member) => member.worktreePath.trim())?.worktreePath.trim() ?? "";
+  const ownedWorktreePaths = [
+    ...new Set(
+      members
+        .filter((member) => member.worktree && memberPath(member) && pathExists(memberPath(member)))
+        .map(memberPath),
+    ),
+  ];
+  const allIds = members.map((member) => member.id);
 
   const blockReasons: string[] = [];
   const statusSet = new Set<string>(statuses);
-  if (members.some((member) => protectedSessionIds.has(member.id))) {
+  // A stale-parked record is an in-progress task that fell idle, not an
+  // abandoned one: it counts live at plan time as it does at execution.
+  const isLive = (member: SessionRecord): boolean =>
+    protectedSessionIds.has(member.id) || isStaleParked(member);
+  if (members.some(isLive)) {
     blockReasons.push("live_session");
   }
   if (members.some((member) => hasRetainedSessionError(member))) {
@@ -264,33 +345,77 @@ function classifyGroup(
     blockReasons.push("too_recent");
   }
   if (blockReasons.length > 0) {
-    return { action: "blocked", blockReasons, worktreePath, ageDays, newestUpdatedAt };
+    // Member-level blockers keep only the offending records; the rest of the
+    // group is archived individually, never with its worktree.
+    const retained = new Set(
+      members
+        .filter(
+          (member) =>
+            isLive(member) ||
+            hasRetainedSessionError(member) ||
+            !statusSet.has(member.status) ||
+            ageInDays(member.updatedAt, now) < olderThanDays,
+        )
+        .map((member) => member.id),
+    );
+    const { retainedIds } = retainClosure(members, retained, ownedWorktreePaths);
+    const archiveSessionIds = allIds.filter((id) => !retainedIds.has(id));
+    if (archiveSessionIds.length === 0) {
+      return {
+        action: "blocked",
+        blockReasons,
+        worktreePath,
+        ageDays,
+        newestUpdatedAt,
+        archiveSessionIds,
+        ownedWorktreePaths,
+      };
+    }
+    const archiveSet = new Set(archiveSessionIds);
+    const archived = members.filter((member) => archiveSet.has(member.id));
+    const archivedNewest = archived.reduce(
+      (latest, member) => (member.updatedAt > latest ? member.updatedAt : latest),
+      firstMember(archived, "classifyGroup").updatedAt,
+    );
+    return {
+      action: "partial",
+      blockReasons,
+      worktreePath,
+      ageDays: ageInDays(archivedNewest, now),
+      newestUpdatedAt: archivedNewest,
+      archiveSessionIds,
+      ownedWorktreePaths,
+    };
   }
 
+  const whole = (action: GcAction, reasons: string[] = []) => ({
+    action,
+    blockReasons: reasons,
+    worktreePath,
+    ageDays,
+    newestUpdatedAt,
+    archiveSessionIds: action === "blocked" ? [] : allIds,
+    ownedWorktreePaths,
+  });
+
   if (members.some((member) => !member.worktree)) {
-    return { action: "archive", blockReasons: [], worktreePath, ageDays, newestUpdatedAt };
+    return whole("archive");
   }
 
   if (!worktreePath) {
-    return { action: "archive", blockReasons: [], worktreePath, ageDays, newestUpdatedAt };
+    return whole("archive");
   }
 
   const rel = relative(worktreeDir, worktreePath);
   if (rel.startsWith("..") || isAbsolute(rel)) {
-    return {
-      action: "blocked",
-      blockReasons: ["path_outside_worktree_dir"],
-      worktreePath,
-      ageDays,
-      newestUpdatedAt,
-    };
+    return whole("blocked", ["path_outside_worktree_dir"]);
   }
 
   if (!pathExists(worktreePath)) {
-    return { action: "archive", blockReasons: [], worktreePath, ageDays, newestUpdatedAt };
+    return whole("archive");
   }
 
-  return { action: "reclaim", blockReasons: [], worktreePath, ageDays, newestUpdatedAt };
+  return whole("reclaim");
 }
 
 export function planSessionGc(input: PlanSessionGcInput): GcPlan {
@@ -321,12 +446,12 @@ export function planSessionGc(input: PlanSessionGcInput): GcPlan {
       newestUpdatedAt: classification.newestUpdatedAt,
       action: classification.action,
       blockReasons: classification.blockReasons,
+      archiveSessionIds: classification.archiveSessionIds,
+      ownedWorktreePaths: classification.ownedWorktreePaths,
       // Restore (not reopen) is the one-way loss: only "stopped" members
       // (the sole restorable status among GC's completed|killed|stopped
       // allow-list) had a live restore path before this run.
-      restoreLossSessionIds: members
-        .filter((member) => member.status === "stopped")
-        .map((member) => member.id),
+      restoreLossSessionIds: stoppedIds(members, classification.archiveSessionIds),
       members,
     };
   });
@@ -390,6 +515,8 @@ export interface GcGroupReport {
   sizeBytes: number | null;
   action: GcAction;
   blockReasons: string[];
+  // Final acted records; empty when blocked.
+  archiveSessionIds: string[];
   restoreLossSessionIds: string[];
   removed: boolean;
   archived: boolean;
@@ -459,14 +586,15 @@ function currentLivenessBlockReason(
 
 function currentRecordsBlockReason(
   readGroupMembers: SessionGcExecutorDeps["readGroupMembers"],
-  group: GcGroupPlan,
+  sessionIds: readonly string[],
+  plannedMembers: readonly SessionRecord[],
 ): string | undefined {
-  const members = readGroupMembers(group.sessionIds);
+  const members = readGroupMembers(sessionIds);
   if (members.some((member) => member && hasRetainedSessionError(member))) {
     return "retained_error";
   }
   if (
-    group.members.some((planned, index) => {
+    plannedMembers.some((planned, index) => {
       const fresh = members[index];
       return !fresh || !isPlanStillFresh(planned, fresh);
     })
@@ -495,6 +623,7 @@ export async function executeSessionGc(
     let archived = false;
     let error: string | undefined;
     let sizeBytes: number | null = null;
+    let archiveSessionIds: string[] = [];
 
     try {
       // Sized before anything is removed: du on an already-deleted worktree
@@ -504,18 +633,40 @@ export async function executeSessionGc(
       }
 
       if (action !== "blocked") {
-        const freshRaw = deps.readGroupMembers(group.sessionIds);
+        // Rechecks cover only the acted records: a kept running member's
+        // updatedAt changes constantly and must not block a partial run.
+        const plannedActed = group.members.filter((member) =>
+          group.archiveSessionIds.includes(member.id),
+        );
+        const freshRaw = deps.readGroupMembers(plannedActed.map((member) => member.id));
         const freshMembers: SessionRecord[] = [];
         let changed = false;
-        for (let index = 0; index < group.members.length; index += 1) {
+        for (let index = 0; index < plannedActed.length; index += 1) {
           const fresh = freshRaw[index];
-          const planned = group.members[index];
+          const planned = plannedActed[index];
           if (!fresh || !planned || !isPlanStillFresh(planned, fresh)) {
             changed = true;
             break;
           }
           freshMembers.push(fresh);
         }
+
+        // Narrows the acted set to what survives retaining `seed` plus its
+        // closure; the group then archives individually and keeps its worktree.
+        let acted: SessionRecord[] = freshMembers;
+        const narrow = (seed: ReadonlySet<string>, reason: string[]): void => {
+          const { retainedIds } = retainClosure(group.members, seed, group.ownedWorktreePaths);
+          acted = acted.filter((member) => !retainedIds.has(member.id));
+          for (const entry of reason) {
+            if (!blockReasons.includes(entry)) blockReasons.push(entry);
+          }
+        };
+        const notActed = (): Set<string> =>
+          new Set(
+            group.members
+              .map((member) => member.id)
+              .filter((id) => !acted.some((member) => member.id === id)),
+          );
 
         if (changed) {
           action = "blocked";
@@ -527,29 +678,54 @@ export async function executeSessionGc(
           action = "blocked";
           blockReasons = ["path_is_cwd_or_ancestor"];
         } else {
-          const guardReasons = await deps.probeGuards(group, freshMembers);
-          if (guardReasons.length > 0) {
+          // Guards protect `git worktree remove --force`; archive and partial
+          // never remove a worktree.
+          const guardReasons =
+            action === "reclaim" ? await deps.probeGuards(group, freshMembers) : [];
+          const dirtyReasons = guardReasons.filter(
+            (reason) => reason === "uncommitted_changes" || reason === "unpushed_commits",
+          );
+          if (dirtyReasons.length < guardReasons.length) {
             action = "blocked";
             blockReasons = guardReasons;
           } else {
+            if (dirtyReasons.length > 0) {
+              narrow(new Set(), dirtyReasons);
+            }
             try {
-              const prIndex = await deps.openPrIndex(group, freshMembers);
-              const boundOpen = freshMembers.some(
-                (member) => member.pr && prIndex.numbers.has(member.pr.number),
-              );
-              const branchOpen = freshMembers.some((member) => prIndex.branches.has(member.branch));
-              if (boundOpen || branchOpen) {
-                action = "blocked";
-                blockReasons = ["open_pr"];
+              const prIndex = await deps.openPrIndex(group, acted);
+              const openIds = acted
+                .filter(
+                  (member) =>
+                    (member.pr && prIndex.numbers.has(member.pr.number)) ||
+                    prIndex.branches.has(member.branch),
+                )
+                .map((member) => member.id);
+              if (openIds.length > 0) {
+                narrow(new Set([...notActed(), ...openIds]), ["open_pr"]);
               }
             } catch {
               action = "blocked";
               blockReasons = ["probe_failed"];
             }
+            if (action !== "blocked") {
+              if (acted.length === 0) {
+                action = "blocked";
+              } else if (acted.length < freshMembers.length) {
+                action = "partial";
+              }
+            }
           }
         }
 
         if (action !== "blocked") {
+          const actedIds = acted.map((member) => member.id);
+          const keeperIds =
+            acted.length < group.members.length
+              ? retainClosure(group.members, notActed(), group.ownedWorktreePaths).keeperIds
+              : [];
+          const plannedFinal = plannedActed.filter((member) => actedIds.includes(member.id));
+          archiveSessionIds = actedIds;
           // Worktree first, records second — deliberately, not incidentally.
           // If archival then fails, the record survives in sessions/ pointing
           // at a deleted path, and the next run reclassifies that group as
@@ -559,8 +735,8 @@ export async function executeSessionGc(
           // can ever see again.
           if (action === "reclaim" && !options.dryRun) {
             const livenessBlock =
-              currentLivenessBlockReason(deps, group.sessionIds) ??
-              currentRecordsBlockReason(deps.readGroupMembers, group);
+              currentLivenessBlockReason(deps, actedIds) ??
+              currentRecordsBlockReason(deps.readGroupMembers, actedIds, plannedFinal);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
@@ -572,15 +748,20 @@ export async function executeSessionGc(
             }
           }
           if (action !== "blocked" && !options.dryRun) {
+            // Kept anchors and path keepers: existence only, no freshness
+            // compare (a concurrent run may have archived them).
             const livenessBlock =
-              currentLivenessBlockReason(deps, group.sessionIds) ??
-              currentRecordsBlockReason(deps.readGroupMembers, group);
+              currentLivenessBlockReason(deps, actedIds) ??
+              currentRecordsBlockReason(deps.readGroupMembers, actedIds, plannedFinal) ??
+              (keeperIds.length > 0 && deps.readGroupMembers(keeperIds).some((member) => !member)
+                ? "changed_during_run"
+                : undefined);
             if (livenessBlock) {
               action = "blocked";
               blockReasons = [livenessBlock];
             } else {
               const result = deps.archiveGroup(
-                freshMembers.map((member) => ({ id: member.id, project: member.project })),
+                acted.map((member) => ({ id: member.id, project: member.project })),
               );
               archived = result.archivedIds.length > 0;
               recordsArchived += result.archivedIds.length;
@@ -600,6 +781,8 @@ export async function executeSessionGc(
       freedBytes += sizeBytes;
     }
 
+    const finalArchiveIds = action === "blocked" ? [] : archiveSessionIds;
+
     groupReports.push({
       key: group.key,
       project: group.project,
@@ -611,7 +794,8 @@ export async function executeSessionGc(
       sizeBytes,
       action,
       blockReasons,
-      restoreLossSessionIds: group.restoreLossSessionIds,
+      archiveSessionIds: finalArchiveIds,
+      restoreLossSessionIds: stoppedIds(group.members, finalArchiveIds),
       removed,
       archived,
       ...(error ? { error } : {}),
@@ -751,7 +935,7 @@ export function createGcDeps(
       await removeWorktree(repoPath, group.worktreePath, () => {
         const blockReason =
           currentLivenessBlockReason({ checkGroupLiveness }, group.sessionIds) ??
-          currentRecordsBlockReason(readGroupMembers, group);
+          currentRecordsBlockReason(readGroupMembers, group.sessionIds, group.members);
         if (blockReason) throw new Error(`Session GC blocked: ${blockReason}`);
       });
     },

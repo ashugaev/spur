@@ -1410,7 +1410,9 @@ export function renderSessionGcResult(report: GcReport): string {
       ? `error: ${group.error}`
       : group.action === "blocked"
         ? group.blockReasons.join(",")
-        : group.worktreePath || "(no worktree)";
+        : group.action === "partial"
+          ? `archive ${group.archiveSessionIds.length}, keep ${group.sessionIds.length - group.archiveSessionIds.length}: ${group.blockReasons.join(",")}`
+          : group.worktreePath || "(no worktree)";
     lines.push(
       `  ${accent(group.action.padEnd(7))}  ${records.padEnd(10)}  ${`${group.ageDays}d`.padEnd(5)}  ${formatBytes(group.sizeBytes).padEnd(9)}  ${detail}`,
     );

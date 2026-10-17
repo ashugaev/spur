@@ -17,7 +17,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## gc
 
-`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
+`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Group actions: `reclaim`, `archive`, `partial`, `blocked`. Worktree removal needs every group member eligible; otherwise `partial` archives only eligible records (`archiveSessionIds` in `--json`) and keeps ineligible records, desk anchors they reference, and one record per existing worktree. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
 
