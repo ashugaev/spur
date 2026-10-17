@@ -11216,6 +11216,9 @@ export class SessionService {
         ...(session.agent === "codex"
           ? { codexSessionsDir: this.codexSessionsDir(session.id) }
           : {}),
+        ...(session.agent === "cursor"
+          ? { cursorConfigDir: cursorConfigDirForSession(this.config.dataDir, session.id) }
+          : {}),
         ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       }).then((result) => result ?? []);
 
