@@ -53,7 +53,14 @@ const draft = {
     dispositions: [],
   },
 };
-test("blocks absent independent challenge and failed approval rows", () => {
+test("accepts optional legacy coverage and blocks malformed coverage or failed rows", () => {
+  const { coverage, ...withoutCoverage } = draft;
+  expect(parseRequest({ ...withoutCoverage, receipt: "r" }).coverage).toBeNull();
+  expect(parseRequest({ ...draft, receipt: "r", coverage: null }).coverage).toBeNull();
+  expect(parseRequest({ ...draft, receipt: "r" }).coverage).toEqual(coverage);
+  for (const invalid of [false, [], {}, { ...coverage, output: "" }]) {
+    expect(() => parseRequest({ ...draft, receipt: "r", coverage: invalid })).toThrow();
+  }
   expect(() =>
     parseRequest({
       ...draft,
@@ -72,6 +79,23 @@ test("blocks absent independent challenge and failed approval rows", () => {
       browser: { appId: 1, keyPath: "k" },
     }),
   ).toThrow("duplicate-apps");
+});
+test("publishes and reconciles completed approval without a challenger", async () => {
+  const f = await lifecycleFixture();
+  const { coverage: _coverage, ...input } = f.request;
+  const request = parseRequest(input);
+  expect(await publishReview(f.config, request, draft.session, f.transport)).toMatchObject({
+    status: "APPROVED",
+    coverage: null,
+  });
+  expect(JSON.parse(await readFile(request.receipt, "utf8"))).toMatchObject({
+    status: "APPROVED",
+    coverage: null,
+  });
+  expect((await publishReview(f.config, request, draft.session, f.transport)).status).toBe(
+    "APPROVED",
+  );
+  expect(f.posts()).toBe(1);
 });
 test.each(["clean", "race", "denial", "ambiguous", "wrong-actor"])(
   "pinned publication %s",
