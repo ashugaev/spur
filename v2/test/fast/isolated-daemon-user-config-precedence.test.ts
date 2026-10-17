@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createTempDir } from "../helpers/common.js";
@@ -52,6 +52,58 @@ describe("spur-isolated-daemon USER_CONFIG_PATH precedence", () => {
     expect(resolved).toBe("/tmp/explicit-override/config.yaml");
   });
 });
+
+it.each([false, true])(
+  "binds final daemon children to own config through shell function=%s",
+  async (shellFunction) => {
+    const directory = await createTempDir("spur-isolated-child-config-");
+    const config = join(directory, "config.yaml");
+    const wrapper = join(directory, "wrapper");
+    const cli = join(directory, "cli.mjs");
+    const source = readFileSync(SCRIPT_PATH, "utf8");
+    const boundary = source.slice(source.lastIndexOf("\nexport SPUR_CONFIG="));
+    expect(boundary.trim()).toBe(
+      'export SPUR_CONFIG="$SPUR_ISOLATED_CONFIG"\nexec "$ISOLATED_WRAPPER" daemon start',
+    );
+    const configModule = pathToFileURL(resolve(HERE, "../../dist/config.js")).href;
+    await writeFile(
+      cli,
+      `import { resolveInstanceConfigPath } from ${JSON.stringify(configModule)};\n` +
+        'const index = process.argv.indexOf("--config");\n' +
+        "console.log(JSON.stringify({ inherited: process.env.SPUR_CONFIG, resolved: resolveInstanceConfigPath(index < 0 ? undefined : process.argv[index + 1]) }));\n",
+    );
+    if (shellFunction) {
+      await writeFile(wrapper, '#!/bin/bash\nspur() { "$VOICE_NODE" "$VOICE_CLI"; }\nspur\n');
+    } else {
+      const start = source.indexOf('cat > "$ISOLATED_WRAPPER" <<WRAPPER');
+      const end = source.indexOf("\nWRAPPER", start) + "\nWRAPPER".length;
+      expect(start).toBeGreaterThan(-1);
+      const { stdout } = await execFileAsync("bash", ["-c", source.slice(start, end)], {
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          ISOLATED_WRAPPER: wrapper,
+          CONFIG_DIR: directory,
+          PROJECT_CONFIG_RUNTIME_PATH: join(directory, "project.yaml"),
+          NODE_BIN: process.execPath,
+          CLI_PATH: cli,
+        },
+      });
+      expect(stdout).toBe("");
+    }
+    await chmod(wrapper, 0o700);
+    const { stdout } = await execFileAsync("bash", ["-c", `set -euo pipefail\n${boundary}`], {
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        SPUR_CONFIG: join(directory, "parent.yaml"),
+        SPUR_ISOLATED_CONFIG: config,
+        ISOLATED_WRAPPER: wrapper,
+        VOICE_NODE: process.execPath,
+        VOICE_CLI: cli,
+      },
+    });
+    expect(stdout.trim()).toBe(JSON.stringify({ inherited: config, resolved: config }));
+  },
+);
 
 // An isolated daemon's own web UI port genuinely cannot be known at daemon
 // boot, by construction: spur.yaml gives `isolated-ui` `dependsOn:
