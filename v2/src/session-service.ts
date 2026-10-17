@@ -99,6 +99,7 @@ import {
   resolveSidecarIdleTtlMinutes,
   type SidecarReapCandidate,
   type SidecarReapPlan,
+  type WorkspaceRuntime,
 } from "./sidecars/policy.js";
 import {
   deleteAgentHookState,
@@ -1331,6 +1332,20 @@ interface SessionRuntimeSnapshot {
   probeUnresponsive: boolean;
   diagnostic?: string;
 }
+// Plan-time facts the reap executor re-proves under the workspace lifecycle lock.
+interface SidecarReapEntryContext {
+  identity: SidecarProcessIdentity | undefined;
+  workspaceRuntime: WorkspaceRuntime | undefined;
+  // Set with workspaceRuntime "dead": member id -> runtime key of every member
+  // whose samples produced that verdict. Execute trusts the verdict only for
+  // exactly these members and runtimes.
+  confirmedMembers: ReadonlyMap<string, string> | undefined;
+}
+
+// "dead_looking" = one plain read found no live agent; it is confirmed by a
+// later fresh read before anything treats it as dead.
+type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
+
 interface SessionStateResult {
   session: SessionRecord;
   runtime: SessionRuntimeSnapshot;
@@ -1552,6 +1567,28 @@ function buildConversationResponse(
  * return zero entries with no scrollable element left to trigger a
  * recovery re-fetch.
  */
+// The fields readRuntimeSnapshot keys on (tmux name, agent, launch command)
+// plus the native session id a restore/relaunch rewrites.
+function memberRuntimeKey(
+  member: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand" | "agentSessionId">,
+): string {
+  return [member.tmuxSession, member.agent, member.launchCommand, member.agentSessionId ?? ""].join(
+    "\u0000",
+  );
+}
+
+function confirmedMemberMap(members: readonly SessionRecord[]): Map<string, string> {
+  return new Map(members.map((member) => [member.id, memberRuntimeKey(member)]));
+}
+
+// Workspace verdict: any live member wins, then any unknown; "pending" while a
+// dead-looking member still awaits its fresh confirm read.
+function foldMemberRuntime(samples: readonly MemberRuntimeSample[]): WorkspaceRuntime | "pending" {
+  if (samples.includes("live")) return "live";
+  if (samples.includes("unknown")) return "unknown";
+  return samples.includes("dead_looking") ? "pending" : "dead";
+}
+
 function clampPageStart(from: number, floor: number, totalEntries: number): number {
   const boundedFloor = Math.max(floor, 0);
   if (totalEntries <= 0) return boundedFloor;
@@ -4542,8 +4579,18 @@ export class SessionService {
     tmuxNames: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
     psSnapshot: ProcSnapshot,
-  ): Promise<SidecarReapCandidate[]> {
+  ): Promise<{
+    candidates: SidecarReapCandidate[];
+    context: Map<string, SidecarReapEntryContext>;
+  }> {
     const seenTmuxNames = new Set<string>();
+    const context = new Map<string, SidecarReapEntryContext>();
+    const memberSamples = new Map<string, Promise<MemberRuntimeSample>>();
+    const pendingRuntime: {
+      candidate: SidecarReapCandidate;
+      members: readonly SessionRecord[];
+      samples: readonly MemberRuntimeSample[];
+    }[] = [];
     const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
       let pending = connectionCache.get(port);
@@ -4632,7 +4679,7 @@ export class SessionService {
           }
         }
 
-        candidates.push({
+        const candidate: SidecarReapCandidate = {
           ownerId,
           sidecarName,
           tmuxName,
@@ -4650,10 +4697,109 @@ export class SessionService {
           ),
           connections,
           ageSeconds: identity ? (psSnapshot.byPid.get(identity.pid)?.etimes ?? null) : null,
+        };
+        // Runtime liveness is resolved only when a "dead" verdict would
+        // actually reap this candidate: every earlier veto, every workspace
+        // without retained error, and a candidate still inside its idle TTL
+        // never probe (policy stays pure; the hypothesis is evaluated here).
+        const needsRuntime =
+          workspaceRetainedError &&
+          planSidecarReap({
+            nowMs: Date.now(),
+            config: this.config.sidecarGc,
+            candidates: [{ ...candidate, workspaceRuntime: "dead" }],
+          }).reap.length > 0;
+        let samples: MemberRuntimeSample[] = [];
+        const runtimeMembers =
+          needsRuntime && owner ? this.listWorkspaceRuntimeMembers(owner, sessions) : [];
+        if (needsRuntime) {
+          samples = await Promise.all(
+            runtimeMembers.map((member) => {
+              let pending = memberSamples.get(member.id);
+              if (!pending) {
+                pending = this.sampleMemberRuntime(member, false);
+                memberSamples.set(member.id, pending);
+              }
+              return pending;
+            }),
+          );
+        }
+        const workspaceRuntime = needsRuntime ? foldMemberRuntime(samples) : undefined;
+        if (workspaceRuntime === "pending") {
+          pendingRuntime.push({ candidate, members: runtimeMembers, samples });
+        } else if (workspaceRuntime) {
+          candidate.workspaceRuntime = workspaceRuntime;
+        }
+        candidates.push(candidate);
+        context.set(tmuxName, {
+          identity,
+          workspaceRuntime: candidate.workspaceRuntime,
+          confirmedMembers: undefined,
         });
       }
     }
-    return candidates;
+    // Confirm every dead-looking member once per pass: ONE shared sleep, then
+    // an independent fresh re-sample per distinct member (a plain read could
+    // replay pane/ps caches the previous fresh call never refreshed).
+    if (pendingRuntime.length > 0) {
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+      const confirmed = new Map<string, MemberRuntimeSample>();
+      for (const { members, samples } of pendingRuntime) {
+        for (const [index, member] of members.entries()) {
+          if (samples[index] !== "dead_looking" || confirmed.has(member.id)) continue;
+          if (this.isDeliveryStopped()) return { candidates: [], context };
+          const fresh = await this.sampleMemberRuntime(member, true);
+          confirmed.set(member.id, fresh === "dead_looking" ? "dead" : fresh);
+        }
+      }
+      for (const { candidate, members, samples } of pendingRuntime) {
+        const resolved = foldMemberRuntime(
+          samples.map((sample, index) =>
+            sample === "dead_looking"
+              ? (confirmed.get(members[index]?.id ?? "") ?? "unknown")
+              : sample,
+          ),
+        );
+        // A second pending after confirm is impossible (confirmed maps
+        // dead_looking away); keep the type honest and fail closed.
+        candidate.workspaceRuntime = resolved === "pending" ? "unknown" : resolved;
+        const entry = context.get(candidate.tmuxName);
+        if (entry) {
+          entry.workspaceRuntime = candidate.workspaceRuntime;
+          if (candidate.workspaceRuntime === "dead") {
+            entry.confirmedMembers = confirmedMemberMap(members);
+          }
+        }
+      }
+    }
+    return { candidates, context };
+  }
+
+  // One member's runtime liveness for the sidecar reaper. In-flight lifecycle
+  // work reads "unknown" (never dead); a probe failure or unresponsive tmux/ps
+  // also reads "unknown". Terminal members are probed too: a live agent under
+  // a completed/killed record still holds the workspace.
+  private async sampleMemberRuntime(
+    member: SessionRecord,
+    fresh: boolean,
+  ): Promise<MemberRuntimeSample> {
+    if (
+      member.status === "spawning" ||
+      this.spawnsInFlight.has(member.id) ||
+      this.handoffsInFlight.has(member.id) ||
+      this.reopensInFlight.has(member.id) ||
+      this.isInRestoreWarmup(member.id) ||
+      this.lifecycle.snapshot(member.id).operation?.phase === "pending"
+    ) {
+      return "unknown";
+    }
+    try {
+      const runtime = await this.readRuntimeSnapshot(member, { fresh });
+      if (runtime.processAlive) return "live";
+      return runtime.probeUnresponsive ? "unknown" : "dead_looking";
+    } catch {
+      return "unknown";
+    }
   }
 
   // Signals every `reap` entry (pane-alive routes through reapSidecarByName;
@@ -4661,14 +4807,23 @@ export class SessionService {
   // killSidecar) and logs a warn-only event for every `age_cap`
   // entry. Never throws — reapSidecarByName/reapRecordedIdentity already
   // degrade a survivor to a log, not a rejected promise.
-  private async executeSidecarReapPlan(plan: SidecarReapPlan): Promise<void> {
+  private async executeSidecarReapPlan(
+    plan: SidecarReapPlan,
+    context: ReadonlyMap<string, SidecarReapEntryContext>,
+  ): Promise<void> {
     if (this.isDeliveryStopped() || (plan.reap.length === 0 && plan.warn.length === 0)) {
       return;
     }
     const selected: SidecarReapPlan["reap"] = [];
     for (const entry of plan.reap) {
       const owner = readSession(this.config.dataDir, entry.ownerId);
-      if (owner && (await this.workspaceRetainsResources(owner))) continue;
+      if (
+        owner &&
+        context.get(entry.tmuxName)?.workspaceRuntime !== "dead" &&
+        (await this.workspaceRetainsResources(owner))
+      ) {
+        continue;
+      }
       if (this.isDeliveryStopped()) return;
       selected.push(entry);
     }
@@ -4683,49 +4838,14 @@ export class SessionService {
         : { ok: false, byPid: new Map(), byPgid: new Map() };
     for (const entry of selected) {
       if (this.isDeliveryStopped()) return;
-      const owner = readSession(this.config.dataDir, entry.ownerId);
-      if (owner && (await this.workspaceRetainsResources(owner))) {
-        this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
-        continue;
-      }
-      const identity = owner?.sidecarProcs?.[entry.sidecarName];
-      if (this.isDeliveryStopped()) return;
-      const treeRssKb =
-        identity && preSignalSnapshot.ok
-          ? collectTree(identity.pid, preSignalSnapshot).reduce(
-              (sum, pid) => sum + (preSignalSnapshot.byPid.get(pid)?.rssKb ?? 0),
-              0,
-            )
-          : 0;
-
-      // touchUpdatedAt: false — a reap is the opposite of activity; bumping
-      // it here would reset the workspace idle clock and buy every other
-      // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
-      const currentOwner = readSession(this.config.dataDir, entry.ownerId);
-      if (
-        currentOwner &&
-        this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
-          hasRetainedSessionError(member),
-        )
-      ) {
-        this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
-        continue;
-      }
-      const outcome = await this.killSidecar(entry.ownerId, entry.sidecarName, {
-        touchUpdatedAt: false,
-      });
-      if (this.isDeliveryStopped()) return;
-      this.logEvent("session.sidecar.reaped", {
-        level: "info",
-        sessionId: entry.ownerId,
-        message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} reaped (${entry.reason}).`,
-        details: {
-          sidecarName: entry.sidecarName,
-          reason: entry.reason,
-          treeRssKb,
-          survivors: outcome?.survivors ?? [],
-        },
-      });
+      const entryContext = context.get(entry.tmuxName) ?? {
+        identity: undefined,
+        workspaceRuntime: undefined,
+        confirmedMembers: undefined,
+      };
+      await this.withWorkspaceLifecycleLocks(entry.ownerId, () =>
+        this.reapSidecarEntryLocked(entry, entryContext, preSignalSnapshot),
+      );
     }
     const warnThrottleMs = this.config.sidecarGc.maxAgeWarnMinutes * 60_000;
     for (const entry of plan.warn) {
@@ -4743,6 +4863,93 @@ export class SessionService {
         details: { sidecarName: entry.sidecarName, reason: entry.reason },
       });
     }
+  }
+
+  // One reap entry under the workspace lifecycle lock, re-proving every plan-
+  // time fact at execution: the sidecar is the one the plan saw, it still
+  // exists, and no workspace member runtime is live. Each skip releases the
+  // endpoint invalidation and emits nothing. No liveness-confirm sleep here
+  // (killSidecar's own reap grace runs under the lock, as in stopSidecarLocked).
+  private async reapSidecarEntryLocked(
+    entry: SidecarReapPlan["reap"][number],
+    entryContext: SidecarReapEntryContext,
+    preSignalSnapshot: ProcSnapshot,
+  ): Promise<void> {
+    if (this.isDeliveryStopped()) return;
+    const owner = readSession(this.config.dataDir, entry.ownerId);
+    const identity = owner?.sidecarProcs?.[entry.sidecarName];
+    const skip = (): void => this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
+    if (
+      identity?.pid !== entryContext.identity?.pid ||
+      identity?.starttime !== entryContext.identity?.starttime
+    ) {
+      skip();
+      return;
+    }
+    if (!(await sidecarTmuxAlive(entry.ownerId, entry.sidecarName)) && !identity) {
+      skip();
+      return;
+    }
+    if (this.isDeliveryStopped()) return;
+    if (owner) {
+      const listed = listSessions(this.config.dataDir);
+      const members = this.listDeskSessions(owner, listed);
+      if (entryContext.workspaceRuntime === "dead") {
+        // The plan confirmed death with two samples for a specific member set
+        // and runtimes; anything else needs the next pass's own confirmation.
+        const runtimeMembers = this.listWorkspaceRuntimeMembers(owner, listed);
+        if (
+          runtimeMembers.some(
+            (member) => entryContext.confirmedMembers?.get(member.id) !== memberRuntimeKey(member),
+          )
+        ) {
+          skip();
+          return;
+        }
+        for (const member of runtimeMembers) {
+          const sample = await this.sampleMemberRuntime(member, true);
+          if (sample === "live" || sample === "unknown") {
+            skip();
+            return;
+          }
+        }
+      } else if (
+        members.some((member) =>
+          hasRetainedSessionError(member, this.lastClassifiedLogStates.get(member.id)),
+        )
+      ) {
+        // An error that appeared after a plan that never confirmed death
+        // stays retained (as before this change); the next pass confirms.
+        skip();
+        return;
+      }
+    }
+    if (this.isDeliveryStopped()) return;
+    const treeRssKb =
+      identity && preSignalSnapshot.ok
+        ? collectTree(identity.pid, preSignalSnapshot).reduce(
+            (sum, pid) => sum + (preSignalSnapshot.byPid.get(pid)?.rssKb ?? 0),
+            0,
+          )
+        : 0;
+    // touchUpdatedAt: false — a reap is the opposite of activity; bumping
+    // it here would reset the workspace idle clock and buy every other
+    // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
+    const outcome = await this.killSidecar(entry.ownerId, entry.sidecarName, {
+      touchUpdatedAt: false,
+    });
+    if (this.isDeliveryStopped()) return;
+    this.logEvent("session.sidecar.reaped", {
+      level: "info",
+      sessionId: entry.ownerId,
+      message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} reaped (${entry.reason}).`,
+      details: {
+        sidecarName: entry.sidecarName,
+        reason: entry.reason,
+        treeRssKb,
+        survivors: outcome?.survivors ?? [],
+      },
+    });
   }
 
   // Shared by the SIDECAR_REAPER_INTERVAL_MS reaper tick and boot:
@@ -4779,13 +4986,17 @@ export class SessionService {
     if (!this.config.sidecarGc.enabled) {
       return { reap: [], warn: [], keep: [] };
     }
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions, psSnapshot);
+    const { candidates, context } = await this.collectSidecarReapCandidates(
+      tmuxNames,
+      sessions,
+      psSnapshot,
+    );
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
       candidates,
     });
-    await this.executeSidecarReapPlan(plan);
+    await this.executeSidecarReapPlan(plan, context);
     return plan;
   }
 
@@ -12959,6 +13170,19 @@ export class SessionService {
           workspaceIdOf(member) === anchor &&
           member.status !== "killed",
       )
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  // Every record of the workspace, killed ones included: a killed record can
+  // still own a live agent (kill path tolerates survivors), so liveness must
+  // not inherit listDeskSessions' killed filter.
+  private listWorkspaceRuntimeMembers(
+    session: SessionRecord,
+    sessionBatch: readonly SessionRecord[],
+  ): SessionRecord[] {
+    const anchor = workspaceIdOf(session);
+    return sessionBatch
+      .filter((member) => member.project === session.project && workspaceIdOf(member) === anchor)
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
