@@ -31,7 +31,10 @@ import { listSessions, writeSession } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
-const dirReads = { byPath: new Map<string, number>() };
+const dirReads: {
+  byPath: Map<string, number>;
+  afterRead: ((path: string) => void) | null;
+} = { byPath: new Map(), afterRead: null };
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
@@ -40,10 +43,12 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
       const path = args[0];
+      const result = actual.readdirSync(...args);
       if (typeof path === "string") {
         dirReads.byPath.set(path, (dirReads.byPath.get(path) ?? 0) + 1);
+        dirReads.afterRead?.(path);
       }
-      return actual.readdirSync(...args);
+      return result;
     }) as typeof actual.readdirSync,
   };
 });
@@ -67,6 +72,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  dirReads.afterRead = null;
+  vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -230,6 +237,32 @@ describe("session directory listing cache", () => {
     writeSession(dataDir, session("api-1", "api", "same tick"));
     utimesSync(dir, mtime, mtime);
 
+    expect(ids(listSessions(dataDir))).toEqual(["api-0", "api-1"]);
+  });
+
+  it("never caches a young snapshot whose reader stalls past the min age before storing it", async () => {
+    const dataDir = await newDataDir();
+    seedFleet(dataDir, 1, 0);
+    const dir = projectDir(dataDir, "api");
+    const mtime = new Date();
+    utimesSync(dir, mtime, mtime);
+
+    // Right after the readdir snapshot: a same-tick create the fingerprint
+    // cannot see, then the reader stalls 1.2s before deciding to store.
+    dirReads.afterRead = (path) => {
+      if (path !== dir) return;
+      dirReads.afterRead = null;
+      writeFileSync(
+        join(dir, "api-1.json"),
+        JSON.stringify(session("api-1", "api", "same tick")),
+        "utf-8",
+      );
+      utimesSync(dir, mtime, mtime);
+      const stalledAt = Date.now() + 1_200;
+      vi.spyOn(Date, "now").mockReturnValue(stalledAt);
+    };
+
+    expect(ids(listSessions(dataDir))).toEqual(["api-0"]);
     expect(ids(listSessions(dataDir))).toEqual(["api-0", "api-1"]);
   });
 

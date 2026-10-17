@@ -1293,9 +1293,9 @@ interface CachedDirListing extends FileFingerprint {
 // per-file fingerprint.
 const sessionDirListingCache = new Map<string, CachedDirListing>();
 
-// A listing is stored only once the directory mtime is older than this,
-// measured at STORE time: a mutation landing after the readdir but inside the
-// same timestamp tick as the pre-readdir stat is never cached.
+// A listing is stored only when the directory mtime was older than this at
+// the moment before its readdir: a mutation landing after the readdir but
+// inside the same timestamp tick as the pre-readdir stat is never cached.
 const DIR_LISTING_MIN_AGE_MS = 1_000;
 
 // Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
@@ -1328,10 +1328,13 @@ function listSessionDirJsonNames(dir: string): readonly string[] {
     return cached.names;
   }
 
+  // Eligibility is decided BEFORE the readdir: a snapshot young when taken
+  // stays uncached however long this reader stalls before storing it.
+  const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
   const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
   // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
   // readdir is stored under the older mtime, so the next stat misses once.
-  if (Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS) {
+  if (cacheable) {
     sessionDirListingCache.set(dir, {
       ino: fingerprint.ino,
       mtimeMs: fingerprint.mtimeMs,
