@@ -620,10 +620,10 @@ async function runRestoreScenario(args: {
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
   }
 
-  // A manual pause removes the tmux session. An agent exit leaves its pane
-  // alive, but the missing process becomes restorable stopped/runtime_lost.
-  const expectedState = "stopped";
-  const expectedStatus = "stopped";
+  // A manual pause kills the tmux session outright (runtimeAlive false, status
+  // "stopped"). An agent process exiting on its own leaves the tmux pane/session
+  // alive with no matching agent process. Both become stopped; process loss
+  // carries runtime_lost while the pane remains available for native resume.
   const exited = await pollUntil(
     async () =>
       JSON.parse(
@@ -632,9 +632,10 @@ async function runRestoreScenario(args: {
     {
       timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.state === expectedState &&
+        value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === expectedStatus,
+        value[0]?.status === "stopped" &&
+        (stopMode === "pause" || value[0]?.stopReason === "runtime_lost"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -675,7 +676,10 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 45_000,
-      accept: (value) => value[0]?.state !== expectedState && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.state !== "stopped" &&
+        value[0]?.state !== "error" &&
+        value[0]?.runtimeAlive === true,
     },
   );
   if (!args.agent) {
@@ -4778,7 +4782,9 @@ projects:
     });
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
-    // The live pane remains restorable after confirmed agent process loss.
+    // The agent process exits on its own, leaving the tmux pane/session alive
+    // with no matching process. Reconciliation persists stopped/runtime_lost
+    // while preserving the pane for the native-resume attempt.
     const exited = await pollUntil(
       async () =>
         JSON.parse(
@@ -4786,7 +4792,11 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 45_000,
-        accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+        accept: (value) =>
+          value[0]?.state === "stopped" &&
+          value[0]?.status === "stopped" &&
+          value[0]?.stopReason === "runtime_lost" &&
+          value[0]?.runtimeAlive === true,
       },
     );
     expect(exited[0]?.status).toBe("stopped");

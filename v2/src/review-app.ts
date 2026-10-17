@@ -42,7 +42,7 @@ interface Request extends Attempt {
   assessment: InterfaceAssessment;
   body: string;
   verdict: "APPROVED" | "CHANGES_REQUESTED";
-  coverage: { challenger: string; output: string; omissionsClosed: boolean };
+  coverage: { challenger: string; output: string; omissionsClosed: boolean } | null;
   rows: Row[];
 }
 export function parseAttempt(value: unknown): Attempt {
@@ -99,8 +99,7 @@ export function parseConfig(value: unknown): Config {
   return config;
 }
 export function parseRequest(value: unknown): Request {
-  const data = object(value),
-    coverage = object(data.coverage);
+  const data = object(value);
   const attempt = parseAttempt(value);
   if (data.verdict !== "APPROVED" && data.verdict !== "CHANGES_REQUESTED")
     throw new ReviewAppError("invalid-verdict");
@@ -111,10 +110,14 @@ export function parseRequest(value: unknown): Request {
       throw new ReviewAppError("missing-evidence");
     return { status: row.status, evidence: string(row.evidence) };
   });
-  const session = attempt.session,
-    challenger = identifier(coverage.challenger);
-  if (challenger === session || coverage.omissionsClosed !== true)
-    throw new ReviewAppError("coverage-incomplete");
+  let coverage: Request["coverage"] = null;
+  if (data.coverage !== undefined && data.coverage !== null) {
+    const legacy = object(data.coverage);
+    const challenger = identifier(legacy.challenger);
+    if (challenger === attempt.session || legacy.omissionsClosed !== true)
+      throw new ReviewAppError("coverage-incomplete");
+    coverage = { challenger, output: string(legacy.output), omissionsClosed: true };
+  }
   if (data.verdict === "APPROVED" && rows.some((row) => row.status !== "passed"))
     throw new ReviewAppError("failed-scenarios");
   return {
@@ -122,7 +125,7 @@ export function parseRequest(value: unknown): Request {
     assessment: parseAssessment(data.assessment),
     body: string(data.body),
     verdict: data.verdict,
-    coverage: { challenger, output: string(coverage.output), omissionsClosed: true },
+    coverage,
     rows,
   };
 }
@@ -375,7 +378,6 @@ async function transitionReview(
           (prior.inputDigest === null ||
             prior.reviewId === null ||
             prior.localVerdict !== prior.status ||
-            prior.coverage === null ||
             prior.evidence.length === 0)) ||
         (prior.inputDigest !== null &&
           (typeof prior.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(prior.inputDigest))) ||
