@@ -2394,7 +2394,8 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    const { isProcessRunningInTmux, isHistoricalPsProbeDiagnostic } =
+      await import("../../src/runtime-tmux.js");
 
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
@@ -2405,5 +2406,35 @@ describe("runtime-tmux", () => {
     await expect(
       isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
     ).rejects.toThrow("malformed process table output");
+    await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((error: unknown) => {
+      expect(error).toBeInstanceOf(Error);
+      expect(isHistoricalPsProbeDiagnostic((error as Error).message)).toBe(true);
+    });
+  });
+
+  it("qualifies only the two complete historical ps diagnostics", async () => {
+    const { isHistoricalPsProbeDiagnostic, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+    const failed = "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "ps") throw new Error(`Command failed: ${file} ${args.join(" ")}\n`);
+      return { stdout: "s 1 1 0 100 /dev/pts/1", stderr: "" };
+    });
+    expect((await probeTmuxProcessMatch("s", ["codex"])).diagnostic).toBe(failed);
+    expect(isHistoricalPsProbeDiagnostic(failed)).toBe(true);
+    expect(isHistoricalPsProbeDiagnostic("ps failed: malformed process table output")).toBe(true);
+    for (const diagnostic of [
+      failed.trimEnd(),
+      failed + "\n",
+      failed + "stderr",
+      " " + failed,
+      failed.replace(" -eo ", " -e "),
+      failed.replace("rss,args", "args,rss"),
+      failed.replace("ps -eo", "other -eo"),
+      "ps failed: permission denied",
+      "ps failed: malformed process table output extra",
+      "Resource readout " + failed,
+    ])
+      expect(isHistoricalPsProbeDiagnostic(diagnostic)).toBe(false);
   });
 });

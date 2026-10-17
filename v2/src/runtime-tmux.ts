@@ -868,18 +868,25 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const PS_COMMAND = "ps";
+const PS_ARGUMENTS = ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"];
+const MALFORMED_PROCESS_TABLE = "malformed process table output";
+
+export function isHistoricalPsProbeDiagnostic(diagnostic: string): boolean {
+  return (
+    diagnostic === probeDiagnostic(PS_COMMAND, MALFORMED_PROCESS_TABLE) ||
+    diagnostic ===
+      probeDiagnostic(PS_COMMAND, `Command failed: ${PS_COMMAND} ${PS_ARGUMENTS.join(" ")}\n`)
+  );
+}
 
 function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync(
-        "ps",
-        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
-        {
-          timeout: 5_000,
-          maxBuffer: PS_MAX_BUFFER_BYTES,
-        },
-      );
+      const { stdout: psOut } = await execFileAsync(PS_COMMAND, PS_ARGUMENTS, {
+        timeout: 5_000,
+        maxBuffer: PS_MAX_BUFFER_BYTES,
+      });
       const rows = psOut
         .split("\n")
         .map((line) => {
@@ -891,7 +898,7 @@ function getPsSnapshot(): Promise<PsSnapshot> {
             return null;
           }
           if (cols.length < 7 || !cols.slice(0, 4).every((col) => /^-?\d+$/.test(col))) {
-            throw new Error("malformed process table output");
+            throw new Error(MALFORMED_PROCESS_TABLE);
           }
           const pid = Number.parseInt(cols[0] ?? "", 10);
           const ppid = Number.parseInt(cols[1] ?? "", 10);
@@ -916,7 +923,7 @@ function getPsSnapshot(): Promise<PsSnapshot> {
       return {
         rows: [],
         unresponsive: isProbeTimeoutKill(error),
-        diagnostic: probeDiagnostic("ps", error),
+        diagnostic: probeDiagnostic(PS_COMMAND, error),
       };
     }
   });
