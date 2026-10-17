@@ -63,7 +63,8 @@ import {
   DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
   DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
 } from "./user-action-log.js";
-import { DEFAULT_UI_PORT } from "./ports.js";
+import { DEFAULT_MCP_PORT, DEFAULT_UI_PORT, defaultMcpPort } from "./ports.js";
+import { readInstalledInstancePath } from "./installed-instance.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -98,6 +99,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
+  mcpPort: number;
   codexHome: string;
   voiceProvider:
     | "whisper_cpp"
@@ -559,6 +561,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    mcpPort: DEFAULT_MCP_PORT,
     codexHome: join(homedir(), ".codex"),
     voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
@@ -2301,6 +2304,7 @@ function parseConfigFile(
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const mcp = mode === "instance" && root["mcp"] ? asObject(root["mcp"], "mcp") : {};
   const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
@@ -2342,6 +2346,16 @@ function parseConfigFile(
     mode === "instance"
       ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
       : resolvedDefaults.uiPort;
+  const mcpPort =
+    mode === "instance"
+      ? (asOptionalNumber(mcp["port"], "mcp.port") ?? defaultMcpPort(serverPort, uiPort))
+      : resolvedDefaults.mcpPort;
+  if (!Number.isInteger(mcpPort) || mcpPort < 1 || mcpPort > 65535) {
+    throw new Error("mcp.port must be an integer between 1 and 65535");
+  }
+  if (mcpPort === serverPort || mcpPort === uiPort) {
+    throw new Error("mcp.port must differ from server.port and ui.port");
+  }
   validateWebhookSourceBindings(
     normalizedProjects,
     { host: serverHost, port: serverPort },
@@ -2395,6 +2409,7 @@ function parseConfigFile(
     ui: {
       port: uiPort,
     },
+    mcp: { port: mcpPort },
     models: {
       codexHome:
         mode === "instance"
@@ -2602,7 +2617,8 @@ export function defaultVoiceModelPath(): string {
 }
 
 export function resolveInstanceConfigPath(input?: string): string {
-  const candidate = input?.trim() || process.env["SPUR_CONFIG"]?.trim();
+  const candidate =
+    input?.trim() || process.env["SPUR_CONFIG"]?.trim() || readInstalledInstancePath();
   return candidate
     ? resolveFrom(process.cwd(), candidate)
     : resolveFrom(process.cwd(), DEFAULT_INSTANCE_CONFIG_PATH);
@@ -2742,10 +2758,8 @@ export type InstanceConfigReadResult =
 // real, corrupt instance config sitting on disk" (an error) without ever
 // creating the file as a side effect of merely checking it.
 export function loadInstanceConfigReadOnly(input?: string): InstanceConfigReadResult {
-  if (!instanceConfigExists(input)) {
-    return { status: "absent" };
-  }
   try {
+    if (!instanceConfigExists(input)) return { status: "absent" };
     return { status: "ok", config: parseConfigFile(resolveInstanceConfigPath(input), "instance") };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
@@ -2794,6 +2808,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          mcpPort: defaults.mcp.port,
           codexHome: defaults.models.codexHome,
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,

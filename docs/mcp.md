@@ -1,55 +1,110 @@
-# Connect ChatGPT and Dot to Spur
+# Connect an MCP client to Spur
 
-Run `spur mcp` on the host with a running daemon from the same Spur version.
-Use [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) for private access without public inbound ports.
+Spur exposes the daemon API through MCP with full operator rights.
+Use stdio locally or over SSH, or the installed loopback HTTP service.
+[OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) connects private OpenAI products without public inbound ports.
 
-## Select access
+## Connect stdio or SSH
 
-Point the tunnel's stdio command at `spur --config <instance-config> mcp`.
-Use an absolute executable/config path when the tunnel runs outside your login shell.
+Configure an MCP client's stdio command:
+
+```json
+{ "command": "spur", "args": ["--config", "<instance-config>", "mcp"] }
+```
+
+For a remote host, use `ssh <host> spur --config <instance-config> mcp` as the stdio command.
+Use executable/config paths available in the remote noninteractive shell.
 `SPUR_CONFIG` selects the instance when `--config` is omitted.
-The adapter neither creates config nor starts, replaces or stops the daemon.
+Without either, use the installed selection; [config precedence](configuration.md).
+The daemon must run from the same installed runtime build.
+MCP never starts or replaces the daemon and never replays writes.
 
-Access includes every configured ordinary project by default; unconfigured and shepherd projects are excluded.
-Append `--project <id>` to restrict access; repeat for several projects.
-Read and write tools are enabled:
+## Connect HTTP
 
-- `list_projects`, `list_sessions`: discover scoped projects and sessions.
-- `get_session`, `get_conversation`: inspect state and user/assistant conversation.
-- `spawn_session`: submit a background task using project defaults; poll state/conversation for its result.
-- `send_message`: send a followup using daemon queue/interrupt defaults.
+`spur init` and source deploy install `spur-mcp.service` alongside daemon/web.
+The unit runs `spur mcp --http`; the default endpoint is `http://127.0.0.1:4311/mcp`.
+Installer collisions with the actual web listener persist an omitted MCP port in config; explicit collisions fail installation.
+Select the port in [instance config](configuration.md); HTTP stays bound to loopback.
+Use a private transport for remote access; never expose this endpoint publicly.
 
-Spawn and followup run full-access coding agents that can replace/delete files and execute commands.
-Project filtering restricts MCP targets; it does not sandbox agents' filesystem or shell access.
-Conversation access exposes task content to the connected product.
-Share the connection only with callers authorized for those reads and actions.
+The enabled unit restarts after crashes and reboot, stays available through daemon restart, and follows the installed version during updates.
+`GET /healthz` reports MCP/daemon runtime identity and readiness; daemon downtime or build mismatch returns `503`.
+Check installation, linger and logs in [npm install](install-from-npm.md) or [source install](install-from-source.md).
 
-## Connect the private tunnel
+## Discover and operate
 
-Follow the official guide's installation, tunnel permissions, workspace association and runtime-key setup.
-Keep credentials outside Spur config, command arguments and chat.
-Run `tunnel-client help quickstart`; configure a stdio profile with `tunnel-client init`, setting `--mcp-command` to the selected Spur command above.
-Validate with `tunnel-client doctor --profile <name> --explain`, then keep `tunnel-client run --profile <name>` running for discovery and calls.
-The [official guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#set-up-tunnel-client) owns tunnel options and setup commands.
+- `describe_operations`: paged daemon operation catalog, fields, defaults and examples.
+- `daemon_request`: invoke a catalog `operationId`, supplying path parameters, query and body.
+- `list_projects`, `list_sessions`, `get_session`, `get_conversation`: discovery and inspection.
+- `spawn_session`: full spawn request; background by default, `background: false` selects interactive spawn.
+- `send_message`: full daemon send request.
+- `wait_session`: wait for a new answer, question or terminal state, using the `after` cursor from spawn/send.
+- `mcp_status`: MCP and daemon identity/readiness.
 
-In ChatGPT Plugins, add a custom MCP server, select Connection: Tunnel and the associated tunnel, review permissions, then create the private plugin.
-If the tunnel is absent, check its ChatGPT workspace association and Tunnels Read + Use permission.
-Enable that plugin for [Dot](https://learn.chatgpt.com/docs/dots); availability depends on account/workspace permissions.
+The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, memory, projects, models, accounts, sidecars, shepherd and deployments.
+No project filter or read-only mode: connected callers can change/delete projects and sessions, run commands, switch versions and invoke every daemon operation.
+Grant access only to callers trusted as the host's operator.
+Agent execution has the daemon user's filesystem and shell rights.
 
-## Verify each product
+Conversation reads include raw tool/output/reasoning entries by default.
+`view: "messages"` selects the bounded user/assistant projection.
+For that projection, pass `nextFrom` as `from`; hidden entries still advance the cursor.
+Use artifact/log operation references to retrieve files and runtime output.
+Terminal WebSocket streams belong to the web service, outside the daemon API.
 
-In ChatGPT and Dot, call `list_projects`, inspect a session, submit a task, read the agent's answer, then send and inspect a followup.
-Confirm the expected project and session for each call.
-Local protocol tests do not prove tunnel connectivity or account access.
+## Read large results and stage requests
 
-## Handle limits and failures
+Tool arguments and complete results are capped at 128 KiB; HTTP requests at 256 KiB.
+Daemon replies retain HTTP status, body and `content-type`, `content-disposition`, `location`, `retry-after`, `x-spur-lifecycle-instance-id` headers, including errors.
+Inline JSON includes parsed `body` and exact UTF-8 response text in `rawBody`.
+JSON requiring byte-preserving retrieval uses pages even when small.
+Paged JSON/binary replies return a `responseId` with a base64 byte page.
+Call `read_response` with `responseId` and the returned `nextOffset` as `offset` until `eof`.
+Pages default to 16 KiB, maximum 32 KiB; decode and concatenate bytes in offset order.
+Call `release_response` with `responseId` to reclaim quota after reading; `{released: true}` means removed, and subsequent reads fail.
+Unknown, already-removed and request-upload IDs return `{released: false}`; active reads return an in-use error.
+Reading `eof` or closing a client does not dispose retained responses.
 
-Tool calls have a shared 90-second deadline; startup has 30 seconds.
-A successful spawn acknowledges a background task; read `get_session` for launch failure and `get_conversation` for agent answers.
-The adapter never replays failed writes.
-After an uncertain write, inspect session state before resubmitting.
+For large JSON writes, send sequential base64 chunks through `stage_request`, then pass its completed `bodyHandle` to `daemon_request`.
+Chunks contain at most 32 KiB decoded; total request limit is 15,000,000 bytes.
+Completed handles are consumed once at dispatch, including failed writes.
+Response/request handles expire after 10 minutes and disappear when MCP restarts.
+The host retains at most 32 handles within a 1 GiB spool budget; expiration/quota failures are explicit.
 
-Paginated reads default to 50 items/source entries, maximum 100.
-Conversation `nextFrom` counts source entries, including hidden tool/reasoning entries; pass it as `from` to continue.
-Metadata/message truncation is explicit; reduce page size after an output-limit error.
-Tool schemas and output bounds: `v2/src/mcp.ts`; CLI reference: [commands.md](commands.md).
+## Connect OpenAI products
+
+Follow the official guide for tunnel installation, permissions, workspace association and runtime-key setup.
+Point an HTTP tunnel profile at the installed `/mcp` endpoint.
+Keep credentials outside Spur config, command arguments, transcripts and chat.
+
+To supervise an existing profile, create a private environment file:
+
+```text
+SPUR_MCP_TUNNEL_PROFILE=<profile-name>
+CONTROL_PLANE_API_KEY=<runtime-key>
+```
+
+Use `~/.spur/mcp-tunnel.env` for npm user units or `/etc/spur/mcp-tunnel.env` for source system units; mode `0600`.
+Re-run the matching installer/deploy to enable `spur-mcp-tunnel.service`.
+An absent file leaves generic MCP healthy without OpenAI credentials; a configured tunnel must become ready for installation/update health to pass.
+`spur mcp-tunnel` runs the configured profile against the loopback endpoint.
+The [official guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#set-up-tunnel-client) owns profile setup and tunnel-client options.
+
+In ChatGPT, add a private MCP connection through the associated tunnel; enable it for [Dot](https://learn.chatgpt.com/docs/dots) where workspace permissions permit.
+Verify each product separately: initialize, list projects, submit a task, read the answer, send a followup, and read its answer.
+Local MCP and service recovery tests do not prove OpenAI account access or a product connection.
+
+## Recover uncertain calls
+
+Spawn acknowledges acceptance; inspect session state for launch failures.
+Tool calls have a 90-second deadline.
+`wait_session` defaults to 55 seconds, maximum 90 seconds; a timeout is a resumable observation, not task failure.
+Queued/unconfirmed submissions, old idle and pre-existing questions do not prove new progress.
+Unattributable questions time out; inspect returned raw conversation/question references.
+`messagesPreview`/`textTruncated` mark bounded wait previews; read raw conversation for full entries.
+Attachments and messages over 8192 characters remain unconfirmed by the bounded correlation view; inspect raw conversation and session state.
+Use the returned cursor and inspect questions/conversation when waiting reports a reset or timeout.
+After a disconnected or timed-out write, inspect daemon state before resubmitting.
+After a version switch, reconnect; expired handles require a fresh read.
+
+CLI/config references: [commands.md](commands.md), [configuration.md](configuration.md).

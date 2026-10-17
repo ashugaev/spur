@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { getBuildId } from "./build-identity.js";
 import {
   consentPolicy,
   proposeConsent,
@@ -1997,6 +1998,7 @@ function createRuntimeInfo(
 ): RuntimeInfo {
   return {
     lifecycleInstanceId,
+    buildId: getBuildId(),
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: getVersion(),

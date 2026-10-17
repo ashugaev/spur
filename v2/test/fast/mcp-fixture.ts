@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createTempDir } from "../helpers/common.js";
 import { SPUR_DAEMON_API_VERSION, type ConversationResponse } from "../../src/types.js";
 import { projectConversationPage } from "../../src/conversation-page.js";
+import { getBuildId } from "../../src/build-identity.js";
 
 export const session = {
   id: "test-one",
@@ -38,7 +39,14 @@ export async function mcpFixture(host = "127.0.0.1") {
       { ...session, id: "other-one", project: "other" },
       { ...session, id: "loose-one", project: "loose" },
     ],
-    info: { ok: true, apiVersion: SPUR_DAEMON_API_VERSION, configPath },
+    info: {
+      ok: true,
+      apiVersion: SPUR_DAEMON_API_VERSION,
+      configPath,
+      buildId: getBuildId(),
+      pid: process.pid,
+      lifecycleInstanceId: "test-daemon",
+    },
     conversation: {
       messages: [],
       durationMs: 0,
@@ -57,7 +65,15 @@ export async function mcpFixture(host = "127.0.0.1") {
       | ((
           path: string,
           method: string,
-        ) => { status?: number; value?: unknown; raw?: string; hold?: boolean } | undefined),
+        ) =>
+          | {
+              status?: number;
+              value?: unknown;
+              raw?: string;
+              hold?: boolean;
+              headers?: Record<string, string>;
+            }
+          | undefined),
   };
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -74,29 +90,47 @@ export async function mcpFixture(host = "127.0.0.1") {
     calls.push({ path, method, headers: request.headers, body });
     const override = fixture.override?.(path, method);
     if (override?.hold) return;
+    const from = new URL(path, "http://localhost").searchParams.get("from");
+    const startIndex = Math.min(
+      fixture.conversation.totalEntries,
+      Math.max(
+        fixture.conversation.startIndex,
+        from === null ? fixture.conversation.startIndex : Number(from),
+      ),
+    );
+    const conversation = {
+      ...fixture.conversation,
+      startIndex,
+      entries: fixture.conversation.entries.slice(startIndex - fixture.conversation.startIndex),
+    };
     const value =
       path === "/info"
         ? fixture.info
         : path === "/projects"
           ? fixture.projects
-          : path.startsWith("/sessions?")
-            ? fixture.sessions
-            : path.includes("/conversation")
-              ? projectConversationPage(
-                  fixture.conversation,
-                  session.id,
-                  Number(new URL(path, "http://localhost").searchParams.get("limit") ?? 50),
-                )
-              : path === "/sessions/background"
-                ? session
-                : fixture.sessions.find(
-                    (entry) =>
-                      path === `/sessions/${entry.id}` || path === `/sessions/${entry.id}/send`,
-                  );
+          : path === "/sessions" && method === "POST"
+            ? session
+            : path === "/sessions" || path.startsWith("/sessions?")
+              ? fixture.sessions
+              : path.includes("/conversation")
+                ? new URL(path, "http://localhost").searchParams.get("view") === "messages"
+                  ? projectConversationPage(
+                      conversation,
+                      session.id,
+                      Number(new URL(path, "http://localhost").searchParams.get("limit") ?? 50),
+                    )
+                  : conversation
+                : path === "/sessions/background"
+                  ? session
+                  : fixture.sessions.find(
+                      (entry) =>
+                        path === `/sessions/${entry.id}` || path === `/sessions/${entry.id}/send`,
+                    );
     response.writeHead(override?.status ?? (value === undefined ? 404 : 200), {
       "content-type": "application/json",
+      ...override?.headers,
     });
-    response.end(override?.raw ?? JSON.stringify(override?.value ?? value ?? {}));
+    response.end(override?.raw ?? `${JSON.stringify(override?.value ?? value ?? {})}\n`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();

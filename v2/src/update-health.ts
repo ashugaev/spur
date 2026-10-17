@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { instanceConfigExists, loadConfig } from "./config.js";
+import { loadInstanceConfigReadOnly } from "./config.js";
+import { readInstalledInstancePath } from "./installed-instance.js";
 import type { SystemdScope } from "./host-install.js";
-import { DEFAULT_UI_PORT } from "./ports.js";
-import type { HeadroomReport } from "./types.js";
+import { DEFAULT_MCP_PORT, DEFAULT_UI_PORT } from "./ports.js";
+import { computeBuildId } from "./build-identity.js";
+import { mcpTunnelEnvPath, readMcpTunnelStatus } from "./mcp-tunnel.js";
+import { SPUR_DAEMON_API_VERSION, type AppConfig, type HeadroomReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,7 +16,7 @@ const PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_WEB_PORT = DEFAULT_UI_PORT;
 export const DEFAULT_DAEMON_PORT = 4_310;
 
-export type ServiceId = "daemon" | "web";
+export type ServiceId = "daemon" | "web" | "mcp" | "tunnel";
 
 export type ProbeReason =
   | "connection-refused"
@@ -28,8 +31,8 @@ export type UnitState = "active" | "activating" | "failed" | "inactive" | "unkno
 
 export interface PollSample {
   atMs: number;
-  health: Record<ServiceId, ProbeResult>;
-  units: Record<ServiceId, UnitState>;
+  health: Partial<Record<ServiceId, ProbeResult>>;
+  units: Partial<Record<ServiceId, UnitState>>;
 }
 
 export interface ProbeTarget {
@@ -40,7 +43,29 @@ export interface ProbeTarget {
 export const SERVICE_UNITS: Record<ServiceId, string> = {
   daemon: "spur-daemon.service",
   web: "spur-web.service",
+  mcp: "spur-mcp.service",
+  tunnel: "spur-mcp-tunnel.service",
 };
+
+export function requiredServices(scope?: SystemdScope): ServiceId[] {
+  return existsSync(scope?.kind === "system" ? "/etc/spur/mcp-tunnel.env" : mcpTunnelEnvPath())
+    ? ["daemon", "web", "mcp", "tunnel"]
+    : ["daemon", "web", "mcp"];
+}
+
+export function resolveMcpPort(configPath?: string): number {
+  return selectedPortConfig(configPath)?.mcp.port ?? DEFAULT_MCP_PORT;
+}
+
+function selectedPortConfig(configPath?: string): AppConfig | undefined {
+  const loaded = loadInstanceConfigReadOnly(configPath);
+  if (loaded.status === "invalid") throw new Error("Selected instance configuration is invalid");
+  if (loaded.status === "ok") return loaded.config;
+  if (configPath || process.env["SPUR_CONFIG"] || readInstalledInstancePath()) {
+    throw new Error("Selected instance configuration is missing");
+  }
+  return undefined;
+}
 
 // The web unit carries its listen port as `Environment=PORT=<n>`; npm-init.sh
 // appends a fresh line on re-init, so the last matching line wins.
@@ -64,23 +89,8 @@ export function readWebPort(scope: SystemdScope): number {
   }
 }
 
-// Host-level daemon port resolution: read the bootstrap instance config, same
-// as the daemon itself, defaulting to 4310 when it is unset or unreadable.
-// `allowBootstrapWrite` gates whether a missing instance config may be
-// auto-created by `loadConfig` (its bootstrap side effect) before being read.
-function resolveDaemonPortImpl(allowBootstrapWrite: boolean): number {
-  try {
-    if (!allowBootstrapWrite && !instanceConfigExists()) return DEFAULT_DAEMON_PORT;
-    return loadConfig().server.port;
-  } catch {
-    return DEFAULT_DAEMON_PORT;
-  }
-}
-
-// Used by `spur update`, which always runs after `spur init` has already
-// bootstrapped `~/.spur/config.yaml`, so auto-creating it here is safe.
 export function resolveDaemonPort(): number {
-  return resolveDaemonPortImpl(true);
+  return selectedPortConfig()?.server.port ?? DEFAULT_DAEMON_PORT;
 }
 
 // Read-only daemon port resolution for `spur doctor`: never triggers
@@ -88,7 +98,7 @@ export function resolveDaemonPort(): number {
 // has never run any Spur command before. Falls back to the same default port
 // as `resolveDaemonPort` when the instance config does not exist yet.
 export function resolveDaemonPortReadOnly(): number {
-  return resolveDaemonPortImpl(false);
+  return resolveDaemonPort();
 }
 
 export interface WebUnitOptions {
@@ -126,12 +136,15 @@ export function readWebUnitOptions(scope: SystemdScope): WebUnitOptions {
 export interface ProbePorts {
   daemon: number;
   web: number;
+  mcp?: number;
 }
 
 export function makeTargets(ports: ProbePorts): Record<ServiceId, ProbeTarget> {
   return {
     daemon: { id: "daemon", url: `http://127.0.0.1:${ports.daemon}/info` },
     web: { id: "web", url: `http://127.0.0.1:${ports.web}/` },
+    mcp: { id: "mcp", url: `http://127.0.0.1:${ports.mcp ?? DEFAULT_MCP_PORT}/mcp` },
+    tunnel: { id: "tunnel", url: `http://127.0.0.1:${ports.mcp ?? DEFAULT_MCP_PORT}/healthz` },
   };
 }
 
@@ -194,7 +207,14 @@ function isInfoBody(value: unknown): value is { version: string; pid?: number } 
 }
 
 export type ProbeInfoResult =
-  | { ok: true; version: string; pid?: number }
+  | {
+      ok: true;
+      version: string;
+      pid?: number;
+      buildId?: string;
+      configPath?: string;
+      apiVersion?: number;
+    }
   | { ok: false; reason: ProbeReason };
 
 // F8 version-drift probe: fetches a target's JSON body (daemon `/info`) with
@@ -211,9 +231,21 @@ export async function probeInfoWith(
     if (!response.ok) return { ok: false, reason: "http-error" };
     const body: unknown = await response.json();
     if (!isInfoBody(body)) return { ok: false, reason: "unknown" };
-    return body.pid === undefined
-      ? { ok: true, version: body.version }
-      : { ok: true, version: body.version, pid: body.pid };
+    const info = body as {
+      version: string;
+      pid?: number;
+      buildId?: unknown;
+      configPath?: unknown;
+      apiVersion?: unknown;
+    };
+    return {
+      ok: true,
+      version: info.version,
+      ...(info.pid === undefined ? {} : { pid: info.pid }),
+      ...(typeof info.buildId === "string" ? { buildId: info.buildId } : {}),
+      ...(typeof info.configPath === "string" ? { configPath: info.configPath } : {}),
+      ...(typeof info.apiVersion === "number" ? { apiVersion: info.apiVersion } : {}),
+    };
   } catch (error) {
     return { ok: false, reason: classifyTransportError(error) };
   }
@@ -227,7 +259,7 @@ export function probeInfo(target: ProbeTarget): Promise<ProbeInfoResult> {
 
 export async function probeDaemonIdentity(
   target: ProbeTarget,
-  expected: { version: string; pid: number | undefined },
+  expected: { version: string; pid: number | undefined; buildId?: string; configPath?: string },
 ): Promise<ProbeResult> {
   const result = await probeInfo(target);
   if (!result.ok) return result;
@@ -235,6 +267,53 @@ export async function probeDaemonIdentity(
     return { ok: false, reason: "identity-mismatch" };
   }
   if (expected.pid === undefined || expected.pid <= 0 || result.pid !== expected.pid) {
+    return { ok: false, reason: "identity-mismatch" };
+  }
+  if (
+    (expected.buildId !== undefined && result.buildId !== expected.buildId) ||
+    (expected.configPath !== undefined && result.configPath !== expected.configPath) ||
+    (expected.buildId !== undefined && result.apiVersion !== SPUR_DAEMON_API_VERSION)
+  ) {
+    return { ok: false, reason: "identity-mismatch" };
+  }
+  return { ok: true };
+}
+
+export async function probeMcpIdentity(
+  target: ProbeTarget,
+  scope: SystemdScope,
+  configPath?: string,
+): Promise<ProbeResult> {
+  const loaded = loadInstanceConfigReadOnly(configPath);
+  if (loaded.status !== "ok") return { ok: false, reason: "identity-mismatch" };
+  if (target.id === "tunnel") {
+    const result = await readMcpTunnelStatus(
+      loaded.config.dataDir,
+      scope.kind === "system" ? "/etc/spur/mcp-tunnel.env" : mcpTunnelEnvPath(),
+    );
+    if (!result.ready) return { ok: false, reason: "http-error" };
+    const pid = await unitMainPidWith(scope, SERVICE_UNITS.tunnel);
+    return result.configured && pid && result.pid === pid
+      ? { ok: true }
+      : { ok: false, reason: "identity-mismatch" };
+  }
+  const { probeMcpServer } = await import("./mcp-http.js");
+  const result = await probeMcpServer({
+    url: target.url,
+    expectedBuildId: computeBuildId(),
+    expectedConfigPath: loaded.config.configPath,
+    timeoutMs: PROBE_TIMEOUT_MS,
+  });
+  if (!result.ok) return { ok: false, reason: "http-error" };
+  const pid = await unitMainPidWith(scope, SERVICE_UNITS.mcp);
+  const daemonPid = await unitMainPidWith(scope, SERVICE_UNITS.daemon);
+  if (
+    !pid ||
+    result.pid !== pid ||
+    result.configPath !== loaded.config.configPath ||
+    !daemonPid ||
+    result.daemonPid !== daemonPid
+  ) {
     return { ok: false, reason: "identity-mismatch" };
   }
   return { ok: true };

@@ -106,6 +106,8 @@ function buildRunFake(opts: {
     },
     readWebPort: () => 4311,
     readDaemonPort: () => 4310,
+    readMcpPort: () => 4311,
+    requiredServices: () => ["daemon", "web", "mcp"],
     launch: () => {
       events.push("launch");
       return { kind: "process", pid: 7 };
@@ -339,10 +341,15 @@ describe("createRealUpdateDeps launch", () => {
 
   it("launches via systemd-run when it is available", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "spur-update-launch-"));
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(stateDir, "state.json"));
+    const selectedConfig = join(stateDir, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(stateDir, "state.json"), selectedConfig);
     const ref = deps.launch();
     expect(ref).toEqual({ kind: "systemd", unit: "spur-update-monitor.service" });
     expect(execFileSyncCalls.some((call) => call.file === "systemd-run")).toBe(true);
+    expect(execFileSyncCalls.find((call) => call.file === "systemd-run")?.args).toEqual(
+      expect.arrayContaining(["--config", selectedConfig]),
+    );
     expect(spawnCalls).toEqual([]);
   });
 
@@ -350,12 +357,15 @@ describe("createRealUpdateDeps launch", () => {
     systemdRunAvailable = false;
     const home = await mkdtemp(join(tmpdir(), "spur-update-home-"));
     process.env["HOME"] = home;
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    const selectedConfig = join(home, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"), selectedConfig);
     const ref = deps.launch();
     expect(ref).toEqual({ kind: "process", pid: 4321 });
     expect(spawnUnrefCount).toBe(1);
     const monitorSpawn = spawnCalls.find((call) => call.args.includes("update-monitor"));
     expect(monitorSpawn).toBeDefined();
+    expect(monitorSpawn?.args).toEqual(expect.arrayContaining(["--config", selectedConfig]));
   });
 });
 
@@ -475,11 +485,14 @@ describe("createRealUpdateDeps reinit delegation", () => {
     );
     process.env["HOME"] = home;
 
-    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"));
+    const selectedConfig = join(home, "instance.yaml");
+    await writeFile(selectedConfig, "server:\n  port: 43218\n");
+    const deps = createRealUpdateDeps("/tmp/cli.js", join(home, "state.json"), selectedConfig);
     deps.reinit();
 
     expect(runNpmInitMock).toHaveBeenCalledOnce();
     expect(runNpmInitMock).toHaveBeenCalledWith("/tmp/cli.js", {
+      configPath: selectedConfig,
       webPort: "6200",
       exposeWeb: true,
       tailscale: false,

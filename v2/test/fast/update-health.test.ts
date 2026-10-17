@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTempDir } from "../helpers/common.js";
 import {
-  DEFAULT_DAEMON_PORT,
   makeTargets,
   parseWebUnitOptions,
   probeInfoWith,
@@ -65,32 +64,23 @@ describe("probeDaemonIdentity", () => {
 // block only pins `resolveDaemonPortReadOnly`/`resolveDaemonPort`'s own
 // bootstrap-vs-no-bootstrap behavior in isolation.
 describe("resolveDaemonPortReadOnly vs resolveDaemonPort (read-only invariant)", () => {
-  it("resolveDaemonPortReadOnly never creates the pinned instance config, and falls back to the default port", async () => {
+  it("resolveDaemonPortReadOnly refuses a missing pinned config without creating or retargeting it", async () => {
     const dir = await createTempDir("spur-daemon-port-readonly-");
     tempDirs.push(dir);
     const configPath = join(dir, "does-not-exist.yaml");
     process.env["SPUR_CONFIG"] = configPath;
 
-    const port = resolveDaemonPortReadOnly();
-
-    expect(port).toBe(DEFAULT_DAEMON_PORT);
+    expect(() => resolveDaemonPortReadOnly()).toThrow("configuration is missing");
     expect(existsSync(configPath)).toBe(false);
   });
 
-  // Since #846 only the default instance config path bootstraps, so a pinned
-  // `SPUR_CONFIG` that does not exist is refused rather than seeded. The
-  // refusal is swallowed by `resolveDaemonPortImpl`'s catch, so the resolved
-  // port is unchanged — `spur update` still reads 4310, it just no longer
-  // leaves a defaults-seeded config behind at the pinned path.
   it("resolveDaemonPort does not bootstrap-create a pinned instance config that does not exist", async () => {
     const dir = await createTempDir("spur-daemon-port-write-");
     tempDirs.push(dir);
     const configPath = join(dir, "does-not-exist.yaml");
     process.env["SPUR_CONFIG"] = configPath;
 
-    const port = resolveDaemonPort();
-
-    expect(port).toBe(DEFAULT_DAEMON_PORT);
+    expect(() => resolveDaemonPort()).toThrow("configuration is missing");
     expect(existsSync(configPath)).toBe(false);
   });
 });

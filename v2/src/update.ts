@@ -25,6 +25,9 @@ import {
   makeTargets,
   probe,
   probeDaemonIdentity,
+  probeMcpIdentity,
+  requiredServices,
+  resolveMcpPort,
   readWebPort,
   readWebUnitOptions,
   resolveDaemonPort,
@@ -48,6 +51,7 @@ import {
   type UpdateInProgress,
 } from "./update-state.js";
 import { getVersion, resolvePackageVersion } from "./version.js";
+import { computeBuildId } from "./build-identity.js";
 
 const MONITOR_UNIT = "spur-update-monitor.service";
 const PACKAGE_SPEC = "@shugaev/spur";
@@ -55,6 +59,7 @@ const VERIFY_ATTEMPTS = 5;
 const VERIFY_INTERVAL_MS = 3_000;
 
 export interface RunUpdateOptions {
+  configPath?: string;
   version?: string;
   force?: boolean;
 }
@@ -72,6 +77,8 @@ export interface UpdateDeps {
   writeState(state: RollbackState): void;
   readWebPort(): number;
   readDaemonPort(): number;
+  readMcpPort(): number;
+  requiredServices(): ServiceId[];
   launch(): MonitorRef;
   stopMonitor(ref: MonitorRef): void;
   pidAlive(pid: number): boolean;
@@ -154,7 +161,7 @@ function readInstalledVersion(cliEntrypoint: string): string {
   return resolvePackageVersion(parsed.version, new URL("../", pathToFileURL(pkgPath)));
 }
 
-function realLaunch(cliEntrypoint: string): MonitorRef {
+function realLaunch(cliEntrypoint: string, configPath: string): MonitorRef {
   try {
     execFileSync(
       "systemd-run",
@@ -164,6 +171,8 @@ function realLaunch(cliEntrypoint: string): MonitorRef {
         `--unit=${MONITOR_UNIT.replace(/\.service$/, "")}`,
         process.execPath,
         cliEntrypoint,
+        "--config",
+        configPath,
         "update-monitor",
       ],
       { stdio: "ignore" },
@@ -173,10 +182,14 @@ function realLaunch(cliEntrypoint: string): MonitorRef {
     const logPath = join(homedir(), ".spur", "logs", "update-monitor.log");
     mkdirSync(dirname(logPath), { recursive: true });
     const fd = openSync(logPath, "a");
-    const child = spawn(process.execPath, [cliEntrypoint, "update-monitor"], {
-      detached: true,
-      stdio: ["ignore", fd, fd],
-    });
+    const child = spawn(
+      process.execPath,
+      [cliEntrypoint, "--config", configPath, "update-monitor"],
+      {
+        detached: true,
+        stdio: ["ignore", fd, fd],
+      },
+    );
     child.unref();
     if (child.pid === undefined) {
       throw new Error("failed to spawn detached update monitor");
@@ -237,22 +250,30 @@ export function resolveInstallPrefix(entrypoint: string): string | null {
 // units to loopback:5555. Shared by `spur update`'s reinit dep and the
 // `spur reinit` CLI command so every migration path (CLI update, UI/deploy
 // switch, install-and-restart.sh) converges on the same unit-reinstall logic.
-export function reinitUnits(cliEntrypoint: string): void {
+export function reinitUnits(cliEntrypoint: string, configPath?: string): void {
   const scope = resolveSystemdScope(homedir());
   const { webPort, exposeWeb, tailscale } = readWebUnitOptions(scope);
-  runNpmInit(cliEntrypoint, { webPort: String(webPort), exposeWeb, tailscale });
+  runNpmInit(cliEntrypoint, {
+    webPort: String(webPort),
+    exposeWeb,
+    tailscale,
+    ...(configPath !== undefined ? { configPath } : {}),
+  });
 }
 
 export function createRealUpdateDeps(
   cliEntrypoint: string,
   statePath: string = defaultRollbackStatePath(),
+  configPath?: string,
 ): UpdateDeps {
   const scope = resolveSystemdScope(homedir());
   const installPrefix = resolveInstallPrefix(cliEntrypoint);
   // The CLI has no daemon call and no config path of its own. An absent or
   // invalid instance config yields no dataDir, so the events are dropped and
   // `spur update` still runs — a default at the boundary, not in the flow.
-  const instanceConfig = loadInstanceConfigReadOnly();
+  const instanceConfig = loadInstanceConfigReadOnly(configPath);
+  if (instanceConfig.status === "invalid")
+    throw new Error("Selected update instance configuration is invalid");
   const dataDir = instanceConfig.status === "ok" ? instanceConfig.config.dataDir : null;
   return {
     now: () => Date.now(),
@@ -262,8 +283,18 @@ export function createRealUpdateDeps(
         ? probeDaemonIdentity(target, {
             version: readInstalledVersion(cliEntrypoint),
             pid: await unitMainPidWith(scope, SERVICE_UNITS.daemon),
+            buildId: computeBuildId(),
+            ...(instanceConfig.status === "ok"
+              ? { configPath: instanceConfig.config.configPath }
+              : {}),
           })
-        : probe(target),
+        : target.id === "mcp" || target.id === "tunnel"
+          ? probeMcpIdentity(
+              target,
+              scope,
+              instanceConfig.status === "ok" ? instanceConfig.config.configPath : configPath,
+            )
+          : probe(target),
     unitState: (unit) => unitStateWith(scope, unit),
     installVersion: (target) => {
       const args = ["install", "-g"];
@@ -281,15 +312,26 @@ export function createRealUpdateDeps(
       if (installPrefix) {
         process.env["npm_config_prefix"] = installPrefix;
       }
-      reinitUnits(cliEntrypoint);
+      reinitUnits(
+        cliEntrypoint,
+        instanceConfig.status === "ok" ? instanceConfig.config.configPath : configPath,
+      );
     },
     currentVersion: getVersion(),
     readInstalledVersion: () => readInstalledVersion(cliEntrypoint),
     readState: () => readState(statePath),
     writeState: (state) => writeState(statePath, state),
     readWebPort: () => readWebPort(scope),
-    readDaemonPort: () => resolveDaemonPort(),
-    launch: () => realLaunch(cliEntrypoint),
+    readDaemonPort: () =>
+      instanceConfig.status === "ok" ? instanceConfig.config.server.port : resolveDaemonPort(),
+    readMcpPort: () =>
+      instanceConfig.status === "ok" ? instanceConfig.config.mcp.port : resolveMcpPort(configPath),
+    requiredServices: () => requiredServices(scope),
+    launch: () => {
+      if (instanceConfig.status !== "ok")
+        throw new Error("Update monitor requires a valid selected instance");
+      return realLaunch(cliEntrypoint, instanceConfig.config.configPath);
+    },
     stopMonitor: (ref) => realStopMonitor(ref),
     pidAlive: (pid) => realPidAlive(pid),
     unitActive: (unit) => isActive(scope.ctl, unit),
@@ -306,19 +348,24 @@ export function createRealUpdateDeps(
   };
 }
 
-const SERVICE_IDS: readonly ServiceId[] = ["daemon", "web"];
-
 async function buildSample(deps: UpdateDeps, atMs: number): Promise<PollSample> {
-  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-  const [[daemonH, webH], [daemonU, webU]] = await Promise.all([
-    Promise.all([deps.probe(targets.daemon), deps.probe(targets.web)]),
-    Promise.all([deps.unitState(SERVICE_UNITS.daemon), deps.unitState(SERVICE_UNITS.web)]),
-  ]);
-  return {
-    atMs,
-    health: { daemon: daemonH, web: webH },
-    units: { daemon: daemonU, web: webU },
-  };
+  const targets = makeTargets({
+    daemon: deps.readDaemonPort(),
+    web: deps.readWebPort(),
+    mcp: deps.readMcpPort(),
+  });
+  const sample: PollSample = { atMs, health: {}, units: {} };
+  await Promise.all(
+    deps.requiredServices().map(async (id) => {
+      const [health, unit] = await Promise.all([
+        deps.probe(targets[id]),
+        deps.unitState(SERVICE_UNITS[id]),
+      ]);
+      sample.health[id] = health;
+      sample.units[id] = unit;
+    }),
+  );
+  return sample;
 }
 
 function assertNotSourceCheckout(): void {
@@ -347,7 +394,7 @@ async function resolveTargetVersion(versionArg: string | undefined): Promise<str
 export async function runUpdate(
   cliEntrypoint: string,
   options: RunUpdateOptions,
-  deps: UpdateDeps = createRealUpdateDeps(cliEntrypoint),
+  deps: UpdateDeps = createRealUpdateDeps(cliEntrypoint, undefined, options.configPath),
 ): Promise<void> {
   assertNotSourceCheckout();
   const force = options.force === true;
@@ -369,18 +416,13 @@ export async function runUpdate(
       }
     }
 
-    const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
-    const [daemonH, webH] = await Promise.all([
-      deps.probe(targets.daemon),
-      deps.probe(targets.web),
-    ]);
-    const preflight: Record<ServiceId, ProbeResult> = {
-      daemon: daemonH,
-      web: webH,
-    };
-    const allHealthy = SERVICE_IDS.every((id) => preflight[id].ok);
+    const preflight = await buildSample(deps, deps.now());
+    const allHealthy = Object.values(preflight.health).every((result) => result.ok);
     if (!allHealthy && !force) {
-      const failing = SERVICE_IDS.filter((id) => !preflight[id].ok).join(", ");
+      const failing = deps
+        .requiredServices()
+        .filter((id) => !preflight.health[id]?.ok)
+        .join(", ");
       throw new Error(`preflight health check failed for: ${failing}; pass --force to override`);
     }
 
@@ -496,13 +538,12 @@ async function runRollback(deps: UpdateDeps, reason: string, cfg: DecisionConfig
 }
 
 async function verifyRollback(deps: UpdateDeps, cfg: DecisionConfig): Promise<void> {
-  const targets = makeTargets({ daemon: deps.readDaemonPort(), web: deps.readWebPort() });
   for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt += 1) {
     await deps.sleep(
       cfg.pollMs > 0 ? Math.min(cfg.pollMs, VERIFY_INTERVAL_MS) : VERIFY_INTERVAL_MS,
     );
-    const results = await Promise.all(SERVICE_IDS.map((id) => deps.probe(targets[id])));
-    if (results.every((result) => result.ok)) {
+    const sample = await buildSample(deps, deps.now());
+    if (Object.values(sample.health).every((result) => result.ok)) {
       deps.log("Rollback verified healthy.");
       return;
     }
@@ -512,9 +553,11 @@ async function verifyRollback(deps: UpdateDeps, cfg: DecisionConfig): Promise<vo
 
 export async function runUpdateMonitor(
   cliEntrypoint: string,
-  deps: UpdateDeps = createRealUpdateDeps(cliEntrypoint),
+  deps: UpdateDeps | undefined = undefined,
   cfg: DecisionConfig = DEFAULT_DECISION_CONFIG,
+  configPath?: string,
 ): Promise<void> {
+  deps ??= createRealUpdateDeps(cliEntrypoint, undefined, configPath);
   const state = deps.readState();
   if (!state.inProgress || state.inProgress.phase !== "monitoring") {
     return;

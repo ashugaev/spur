@@ -2709,11 +2709,25 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("mcp")
-    .description("Serve scoped project/session MCP tools over stdio; requires a running daemon")
-    .option("--project <id...>", "Limit MCP access to these configured projects (repeatable)")
-    .action(async (options: { project?: string[] }) => {
-      const { runMcp } = await import("./mcp.js");
-      await runMcp(program.opts<{ config?: string }>().config, options.project);
+    .description("Serve full Spur daemon MCP tools over stdio or loopback HTTP")
+    .option("--http", "Serve Streamable HTTP on the instance MCP port")
+    .action(async (options: { http?: boolean }) => {
+      const configPath = program.opts<{ config?: string }>().config;
+      if (options.http) {
+        const { runMcpHttp } = await import("./mcp-http.js");
+        await runMcpHttp(configPath);
+      } else {
+        const { runMcp } = await import("./mcp.js");
+        await runMcp(configPath);
+      }
+    });
+
+  program
+    .command("mcp-tunnel")
+    .description("Run the configured OpenAI transport for the local MCP endpoint")
+    .action(async () => {
+      const { runMcpTunnel } = await import("./mcp-tunnel.js");
+      await runMcpTunnel(program.opts<{ config?: string }>().config);
     });
 
   program
@@ -2725,6 +2739,9 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--no-tailscale", "Skip Tailscale private-access setup; web UI stays on 127.0.0.1 only")
     .action((options) => {
       runNpmInit(cliEntrypoint, {
+        ...(program.opts<{ config?: string }>().config
+          ? { configPath: program.opts<{ config?: string }>().config }
+          : {}),
         noStart: Boolean(options.noStart),
         exposeWeb: Boolean(options.exposeWeb),
         webPort: options.webPort,
@@ -2739,6 +2756,9 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--force", "Supersede a live monitor and proceed even if preflight is unhealthy")
     .action(async (versionArg: string | undefined, options: { force?: boolean }) => {
       await runUpdate(cliEntrypoint, {
+        ...(program.opts<{ config?: string }>().config
+          ? { configPath: program.opts<{ config?: string }>().config }
+          : {}),
         ...(versionArg !== undefined ? { version: versionArg } : {}),
         force: Boolean(options.force),
       });
@@ -2748,7 +2768,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("update-monitor", { hidden: true })
     .description("Internal post-update health monitor and rollback executor.")
     .action(async () => {
-      await runUpdateMonitor(cliEntrypoint);
+      await runUpdateMonitor(
+        cliEntrypoint,
+        undefined,
+        undefined,
+        program.opts<{ config?: string }>().config,
+      );
     });
 
   program
@@ -2757,7 +2782,7 @@ export function createProgram(cliEntrypoint: string): Command {
       "Reinstall user systemd units preserving the live web port/exposure/Tailscale bind, then restart and health-check.",
     )
     .action(() => {
-      reinitUnits(cliEntrypoint);
+      reinitUnits(cliEntrypoint, program.opts<{ config?: string }>().config);
     });
 
   program
@@ -4764,6 +4789,8 @@ export function createProgram(cliEntrypoint: string): Command {
       const instance = prepareInstanceConfig(command.parent?.parent as Command);
       printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
       const configPath = instance.configPath;
+      // Detached update helpers inherit the CLI selection over daemon.env.
+      process.env["SPUR_CONFIG"] = configPath;
       // MUST FIX 1: a source-install / main-deploy host that never runs
       // `spur init`/`update`/`reinit` (`runNpmInit`) never gets the pin file
       // every agent session's `NPM_CONFIG_GLOBALCONFIG` points at, and npm
