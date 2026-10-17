@@ -7656,9 +7656,19 @@ export class SessionService {
       );
       let reaped = 0;
       let liveUnderTerminal = 0;
+      // One fleet fork for the whole pass: absent records read the shared
+      // snapshot instead of each forcing their own list-windows. Holds while
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
+      // degrades to a re-fork per expired read, as before.
+      await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
         let agentAlive = false;
-        const presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        let presence = await getTmuxSessionPresence(session.tmuxSession);
+        if (presence.present) {
+          // The snapshot can be a whole pass old for later records, so a name
+          // it lists is re-probed fresh before anything acts on it.
+          presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        }
         if (presence.present) {
           // A lone "process gone" read is inconclusive, not a verdict: a
           // transient tmux/ps failure reads exactly like an exited agent.
@@ -7702,13 +7712,16 @@ export class SessionService {
           // everything else.
           continue;
         }
+        if (!session.sidecarNames?.length) continue;
+        // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || !isTerminalSessionStatus(latest.status)) continue;
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
         // terminal anchor this loop would otherwise reap the pane a restorable
         // sibling is still using. Same active-workspace semantics as the
         // policy pass (collectSidecarReapCandidates): any non-terminal member
         // holds the shared pane.
-        const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
+        const deskSiblingsAlive = this.hasActiveWorkspaceMembers(session);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's
@@ -7836,8 +7849,8 @@ export class SessionService {
         limit: gcConfig.maxGroupsPerSweep,
         pathExists: (path) => workspaceExists(path),
       });
-      // sizes: true so the sweep can report freed bytes; the du cost is bounded
-      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      // sizes: true so the sweep can report freed bytes; only reclaim groups
+      // are measured, and the executor probes at most 2 * maxGroupsPerSweep.
       const report = await executeSessionGc(
         plan,
         // A stale-parked session (isStaleParked) merely went idle — it is
@@ -7860,7 +7873,10 @@ export class SessionService {
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
-        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+        details: {
+          totals: report.totals,
+          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+        },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -11562,10 +11578,12 @@ export class SessionService {
       if (!readSession(this.config.dataDir, session.id)) continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         if (
-          !hasRetainedSessionError(reconciled.session) &&
+          !hasRetainedSessionError(current) &&
+          !current.serverErrorAt &&
           !reconciled.runtime.probeUnresponsive &&
           !reconciled.runtime.diagnostic &&
           !workspace.diagnostic &&
+          workspace.exists &&
           (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
         ) {
           const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
@@ -11573,7 +11591,11 @@ export class SessionService {
           if (persisted.status === "missing") continue;
         }
         drifted += 1;
-        if (reconciled.session.status === "stopped") {
+        if (
+          reconciled.session.status === "stopped" ||
+          (reconciled.session.errorSource === "inferred_runtime_exit" &&
+            !reconciled.session.serverErrorAt)
+        ) {
           driftedSessions.push({ id: session.id, project: session.project });
         }
       } else {
@@ -12482,6 +12504,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -13109,6 +13132,18 @@ export class SessionService {
     }
   }
 
+  // The reuse context is captured before awaits (preflight, id reservation);
+  // session GC can archive the workspace anchor in between. Checked
+  // synchronously right before the placeholder write, so in this process the
+  // child is either visible to GC's membership recheck or refused here.
+  private assertReuseAnchorPresent(reuseCtx: { workspaceId: string } | null | undefined): void {
+    if (reuseCtx && !readSession(this.config.dataDir, reuseCtx.workspaceId)) {
+      throw new Error(
+        `reuseWorkspaceSessionId: workspace anchor ${reuseCtx.workspaceId} was archived`,
+      );
+    }
+  }
+
   private resolveWorkspaceReuseContext(
     request: SpawnSessionRequest,
     project: ProjectConfig,
@@ -13501,6 +13536,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -22484,10 +22520,7 @@ export class SessionService {
     }
 
     const terminalUnavailable =
-      !workspaceGone &&
-      (!confirmedRuntime.runtimeAlive ||
-        !confirmedRuntime.paneUsable ||
-        !confirmedRuntime.processAlive);
+      !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
     // Runtime absence does not prove sidecar absence. Keep ownership evidence
     // for the existing sidecar reaper; reconciliation performs no teardown.
@@ -22503,8 +22536,14 @@ export class SessionService {
       updated = {
         ...latest,
         status: "errored",
-        error: workspaceGone ? "Agent worktree is missing." : INFERRED_RUNTIME_EXIT_ERROR,
-        errorSource: workspaceGone ? "other" : "inferred_runtime_exit",
+        ...(workspaceGone
+          ? { error: "Agent worktree is missing.", errorSource: "other" as const }
+          : hasSessionErrorEvidence(latest)
+            ? {}
+            : {
+                error: INFERRED_RUNTIME_EXIT_ERROR,
+                errorSource: "inferred_runtime_exit" as const,
+              }),
         updatedAt,
       };
     }
@@ -22981,6 +23020,34 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // Final accounting uses the incoming record: reconciliation may just have
+    // added an inferred exit error to a previously clean running generation.
+    if (
+      !runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      !hasRetainedSessionError(session) &&
+      !session.serverErrorAt
+    ) {
+      if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      } else if (
+        session.agent === "cursor" &&
+        session.agentSessionId &&
+        runtime.paneUsable &&
+        runtime.processAlive
+      ) {
+        const usage = await readCursorTokenUsage(
+          cursorConfigDirForSession(this.config.dataDir, session.id),
+          session.agentSessionId,
+        ).catch(() => undefined);
+        if (usage) {
+          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+        }
+      }
+    }
     if (
       runtime.probeUnresponsive ||
       workspace.diagnostic ||
@@ -22989,19 +23056,6 @@ export class SessionService {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
     } else {
-      if (session.agent === "cursor" && session.agentSessionId) {
-        const usage = await readCursorTokenUsage(
-          cursorConfigDirForSession(this.config.dataDir, session.id),
-          session.agentSessionId,
-        ).catch(() => undefined);
-        if (usage) {
-          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
-        }
-      } else if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
-        const usage = await this.readFinalTokenUsage(session, runtime);
-        tokenUsage = usage.tokenUsage;
-        tokenUsages = usage.tokenUsages;
-      }
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
       } else if (!runtime.paneUsable || !runtime.processAlive) {
