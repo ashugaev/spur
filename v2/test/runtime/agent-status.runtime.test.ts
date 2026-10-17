@@ -190,18 +190,18 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Claude: agent exit → runtime_lost", async () => {
+  it("Claude: agent exit → inferred error", async () => {
     const { context, configPath, port } = await setup("claude-exit");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
-    expect(view.status).toBe("stopped");
-    expect(view.stopReason).toBe("runtime_lost");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.stopReason).toBeUndefined();
     expect(view.runtimeAlive).toBe(true);
-    expect(view.error).toBeUndefined();
+    expect(view.error).toBe("Agent runtime exited unexpectedly.");
   });
 
   it("Claude: state history records transitions", async () => {
@@ -308,18 +308,18 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Codex: agent exit → runtime_lost", async () => {
+  it("Codex: agent exit → inferred error", async () => {
     const { context, configPath, port } = await setup("codex-exit");
     const session = await spawnSession(context, configPath, "codex");
     await waitForState(port, session.id, "waiting", 45_000);
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
-    expect(view.status).toBe("stopped");
-    expect(view.stopReason).toBe("runtime_lost");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.stopReason).toBeUndefined();
     expect(view.runtimeAlive).toBe(true);
-    expect(view.error).toBeUndefined();
+    expect(view.error).toBe("Agent runtime exited unexpectedly.");
   });
 
   // ── Cursor JSONL transcript state detection ───────────────────────────
@@ -374,16 +374,16 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("completed");
   });
 
-  it("Cursor: agent exit → runtime_lost", async () => {
+  it("Cursor: agent exit → inferred error", async () => {
     const { context, configPath, port } = await setup("cursor-exit");
     const session = await spawnSession(context, configPath, "cursor");
 
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
-    const view = await waitForState(port, session.id, "stopped");
-    expect(view.state).toBe("stopped");
-    expect(view.status).toBe("stopped");
-    expect(view.stopReason).toBe("runtime_lost");
+    const view = await waitForState(port, session.id, "error");
+    expect(view.state).toBe("error");
+    expect(view.status).toBe("errored");
+    expect(view.stopReason).toBeUndefined();
     expect(view.runtimeAlive).toBe(true);
-    expect(view.error).toBeUndefined();
+    expect(view.error).toBe("Agent runtime exited unexpectedly.");
   });
 });
