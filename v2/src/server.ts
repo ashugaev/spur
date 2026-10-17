@@ -43,8 +43,10 @@ import { spawnableProjects, startConfiguredSources } from "./event-sources/index
 import type { SourceWorkbench, SourceWorkSessionItem } from "./event-sources/types.js";
 import { flushGhPollCycles, initializeGhPath, setGhEventSink } from "./gh.js";
 import { writeStderr } from "./io.js";
+import { readSession } from "./metadata.js";
 import { withTimeout } from "./promise-timeout.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { captureTmuxPane } from "./runtime-tmux.js";
 import { getReleases } from "./releases-cache.js";
 import {
   AgentExitedBeforeSendError,
@@ -1605,7 +1607,91 @@ export async function startServer(
           ...(scope ? { scope } : {}),
           ...(name ? { name } : {}),
         });
-        sendJson(response, 200, entries);
+        if (limit === 0 || !readSession(info.dataDir, logsSessionId)) {
+          sendJson(response, 200, entries);
+          return;
+        }
+        const view = await service.get(logsSessionId);
+        const targets: { kind: "service" | "sidecar"; name: string; pane: string }[] = [];
+        let stoppedServiceId: string | undefined;
+        if (scope !== "sidecar") {
+          for (const serviceView of [...view.services].sort((a, b) =>
+            a.serviceId.localeCompare(b.serviceId),
+          )) {
+            if (name && serviceView.serviceId !== name) continue;
+            if (serviceView.runtimeAlive) {
+              targets.push({
+                kind: "service",
+                name: serviceView.serviceId,
+                pane: serviceView.tmuxSession,
+              });
+            } else {
+              stoppedServiceId ??= serviceView.serviceId;
+            }
+          }
+        }
+        if (scope !== "service") {
+          for (const sidecar of [...view.sidecars].sort((a, b) => a.name.localeCompare(b.name))) {
+            if (name && sidecar.name !== name) continue;
+            if (sidecar.alive || sidecar.deadPane) {
+              targets.push({ kind: "sidecar", name: sidecar.name, pane: sidecar.tmuxSession });
+            }
+          }
+        }
+        if (name && targets.length === 0 && entries.length === 0) {
+          sendError(response, 404, `No retained pane for runtime ${name}`);
+          return;
+        }
+        const sources: SpurLogEntry[][] = entries.length ? [entries] : [];
+        for (const target of targets) {
+          const captured = await captureTmuxPane(target.pane, 200, { fresh: true });
+          if (captured === null) {
+            sendError(
+              response,
+              502,
+              `Failed to capture retained pane for ${target.kind} ${target.name}`,
+            );
+            return;
+          }
+          const paneRows: SpurLogEntry[] = [];
+          for (const line of captured.split(/\r?\n/)) {
+            if (!line) continue;
+            paneRows.push({
+              timestamp: new Date().toISOString(),
+              event: `${target.kind}.output`,
+              level: "info",
+              message: line,
+              sessionId: logsSessionId,
+              details:
+                target.kind === "service"
+                  ? { serviceId: target.name }
+                  : { sidecarName: target.name },
+            });
+          }
+          if (paneRows.length) sources.push(paneRows);
+        }
+        if (stoppedServiceId && sources.length === 0) {
+          sendError(response, 404, `No retained pane for runtime ${stoppedServiceId}`);
+          return;
+        }
+        const selected = sources.map(() => [] as SpurLogEntry[]);
+        let count = 0;
+        for (let depth = 1; count < limit; depth++) {
+          let found = false;
+          for (let index = 0; index < sources.length && count < limit; index++) {
+            const row = sources[index]?.at(-depth);
+            if (!row) continue;
+            selected[index]?.push(row);
+            count++;
+            found = true;
+          }
+          if (!found) break;
+        }
+        sendJson(
+          response,
+          200,
+          selected.flatMap((rows) => rows.reverse()),
+        );
         return;
       }
 
