@@ -14482,6 +14482,329 @@ describe("SessionService", () => {
     },
   );
 
+  describe("cold queued delivery observation", () => {
+    const diagnostic = "ps failed during cold recovery acknowledgement";
+    type Observation = { session: SessionRecord; revision: number };
+    type ColdInternals = SessionServiceInternals & {
+      lifecycle: SessionLifecycleRegister;
+      writeRecoverySession(
+        record: SessionRecord,
+        claim?: unknown,
+        options?: {
+          preparedObservation: Observation;
+          observePreparedSession(record: SessionRecord): void;
+          operation?: { assertActive(): void };
+        },
+      ): SessionRecord;
+      claimScheduledWake(record: SessionRecord, manual: boolean): Promise<unknown>;
+    };
+    function gate() {
+      let resolve: () => void = () => {};
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    async function setup(unresponsive = false) {
+      mockClaudeJsonlState("waiting");
+      const record = runningSession({
+        agentSessionId: "session-uuid",
+        agentLaunchId: "original-cold-launch",
+        prompt: "original cold recovery task",
+        queuedMessages: { messages: ["cold head", "cold later"], awaitingPrompt: false },
+      });
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service) as ColdInternals;
+      const active = gate();
+      internals.deliveryRuns.set(record.id, active.promise);
+      let alive = false;
+      let fault = false;
+      tmuxSessionExistsMock.mockImplementation(async () => alive);
+      isProcessRunningInTmuxMock.mockImplementation(async () => alive);
+      probeTmuxProcessMatchMock.mockImplementation(async () =>
+        fault
+          ? { alive: false, matchedByName: false, unresponsive, diagnostic }
+          : { alive, matchedByName: alive, unresponsive: false },
+      );
+      createTmuxSessionMock.mockImplementation(async () => {
+        alive = true;
+      });
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, "cold-ack-baseline.jsonl"),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
+      vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: null,
+      });
+      return {
+        record,
+        sessions,
+        service,
+        internals,
+        baseline,
+        markAlive: () => {
+          alive = true;
+        },
+        failProbe: () => {
+          fault = true;
+        },
+        close: () => {
+          service.dispose();
+          active.resolve();
+        },
+      };
+    }
+
+    it.each([false, true])(
+      "retains resumed queued ACK diagnostics with unresponsive %s",
+      async (unresponsive) => {
+        const { record, sessions, internals, baseline, markAlive, failProbe, close } =
+          await setup(unresponsive);
+        const wake = { dueAt: "2026-03-19T10:00:00.000Z", message: "concurrent wake" };
+        createTmuxSessionMock.mockImplementation(async () => {
+          const current = sessions.get(record.id) as SessionRecord;
+          sessions.set(record.id, {
+            ...current,
+            queuedMessages: {
+              messages: ["cold head", "cold later", "concurrent tail"],
+              awaitingPrompt: false,
+            },
+            scheduledWake: wake,
+            slots: { title: "concurrent cold metadata", links: [] },
+          });
+          markAlive();
+        });
+        let killsAtPaste = 0;
+        sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+          expect(message).toBe("cold head");
+          expect(sessions.get(record.id)?.agentLaunchId).not.toBe(record.agentLaunchId);
+          killsAtPaste = killTmuxSessionMock.mock.calls.length;
+          failProbe();
+        });
+        try {
+          await internals.tryDeliverQueuedMessage(record.id);
+          const after = sessions.get(record.id);
+          expect(after?.error).toBe(`Session status detection failed: ${diagnostic}`);
+          expect(after?.errorSource).toBe("runtime_probe");
+          expect(after?.agentSessionId).toBe(record.agentSessionId);
+          expect(after?.agentLaunchId).not.toBe(record.agentLaunchId);
+          expect(after?.queuedMessages).toEqual({
+            messages: ["cold later", "concurrent tail"],
+            awaitingPrompt: true,
+          });
+          expect(after?.queuedMessageTyped).toMatchObject({
+            message: "cold head",
+            ackBaseline: baseline,
+          });
+          expect(after?.submitUnconfirmedAt).toBe(after?.queuedMessageTyped?.typedAt);
+          expect(after?.scheduledWake).toEqual(wake);
+          expect(after?.slots?.title).toBe("concurrent cold metadata");
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(buildAgentResumePlanMock).toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsAtPaste);
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) =>
+                entry.event === "session.message.sent" ||
+                entry.event === "session.message.delivery_recovered",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          close();
+        }
+      },
+    );
+
+    it("observes the fresh owner before recovery-context ACK failure", async () => {
+      const { record, sessions, internals, failProbe, close } = await setup();
+      buildAgentResumePlanMock.mockReturnValue(null);
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        expect(message).toContain(record.prompt);
+        expect(sessions.get(record.id)?.agentLaunchId).not.toBe(record.agentLaunchId);
+        failProbe();
+      });
+      try {
+        await internals.tryDeliverQueuedMessage(record.id);
+        const after = sessions.get(record.id);
+        expect(after?.error).toBe(`Session status detection failed: ${diagnostic}`);
+        expect(after?.errorSource).toBe("runtime_probe");
+        expect(after?.queuedMessages?.messages).toEqual(["cold head", "cold later"]);
+        expect(after?.queuedMessageTyped).toBeUndefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "session.message.sent" ||
+              entry.event === "session.message.delivery_recovered",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        close();
+      }
+    });
+
+    it.each(
+      (["before", "after"] as const).flatMap((boundary) =>
+        (["native", "launch", "lifecycle"] as const).map((guard) => ({ boundary, guard })),
+      ),
+    )(
+      "rejects $guard replacement $boundary the actual cold producer",
+      async ({ boundary, guard }) => {
+        const { record, sessions, internals, markAlive, close } = await setup();
+        const entered = gate();
+        const release = gate();
+        createTmuxSessionMock.mockImplementation(async () => {
+          if (boundary === "before") {
+            entered.resolve();
+            await release.promise;
+          }
+          markAlive();
+        });
+        waitForTmuxReadyMock.mockImplementation(async () => {
+          if (boundary === "after") {
+            entered.resolve();
+            await release.promise;
+          }
+        });
+        const attempt = internals.tryDeliverQueuedMessage(record.id);
+        try {
+          await entered.promise;
+          const preceding = sessions.get(record.id) as SessionRecord;
+          if (boundary === "after") expect(preceding.agentLaunchId).not.toBe(record.agentLaunchId);
+          const replacement: SessionRecord = {
+            ...preceding,
+            ...(guard === "native" ? { agentSessionId: "foreign-cold-native" } : {}),
+            ...(guard === "launch" ? { agentLaunchId: "foreign-cold-launch" } : {}),
+            queuedMessages: { messages: ["replacement queue"], awaitingPrompt: true },
+            scheduledWake: { dueAt: "2026-03-19T10:00:00.000Z", message: "replacement wake" },
+          };
+          if (guard === "lifecycle") {
+            const owner = internals.lifecycle.begin("complete", [record.id]);
+            internals.lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+          }
+          // Boundary fixture: public mutations serialize behind this active readiness lock.
+          sessions.set(record.id, replacement);
+          writeSessionMock.mockClear();
+          release.resolve();
+          await attempt;
+          expect(sessions.get(record.id)).toEqual(replacement);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) => entry.event === "session.message.sent",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          release.resolve();
+          await attempt;
+          close();
+        }
+      },
+    );
+
+    it.each(["native", "launch", "status", "error", "lifecycle", "operation"] as const)(
+      "refuses the actual observed recovery write before mutating a %s replacement",
+      async (guard) => {
+        const { record, sessions, internals, close } = await setup();
+        const observation: Observation = {
+          session: record,
+          revision: internals.lifecycle.snapshot(record.id).revision,
+        };
+        const observePreparedSession = vi.fn((prepared: SessionRecord) => {
+          observation.session = prepared;
+        });
+        const { createRestoreOperation } = await import("../../src/session-lifecycle.js");
+        const controller = new AbortController();
+        const operation = createRestoreOperation(controller.signal);
+        const replacement: SessionRecord = {
+          ...record,
+          ...(guard === "native" ? { agentSessionId: "foreign-native" } : {}),
+          ...(guard === "launch" ? { agentLaunchId: "foreign-launch" } : {}),
+          ...(guard === "status" ? { status: "stopped", stopReason: "manual_pause" } : {}),
+          ...(guard === "error" ? { error: "Foreign provider failure", errorSource: "other" } : {}),
+          queuedMessages: { messages: ["replacement queue"], awaitingPrompt: true },
+        };
+        sessions.set(record.id, replacement);
+        if (guard === "lifecycle") {
+          const owner = internals.lifecycle.begin("complete", [record.id]);
+          internals.lifecycle.settle(
+            owner,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+        }
+        if (guard === "operation") controller.abort();
+        writeSessionMock.mockClear();
+        try {
+          expect(() =>
+            internals.writeRecoverySession(
+              { ...record, agentLaunchId: "candidate-owned-launch" },
+              undefined,
+              { preparedObservation: observation, observePreparedSession, operation },
+            ),
+          ).toThrow();
+          expect(sessions.get(record.id)).toEqual(replacement);
+          expect(observation.session).toBe(record);
+          expect(observePreparedSession).not.toHaveBeenCalled();
+          expect(writeSessionMock).not.toHaveBeenCalled();
+        } finally {
+          operation.dispose();
+          close();
+        }
+      },
+    );
+
+    it("does not observe a cold write after its scheduled-wake claim is revoked", async () => {
+      const { record, sessions, service, internals, close } = await setup();
+      const armed = {
+        ...record,
+        scheduledWake: { dueAt: "2026-03-18T09:00:00.000Z", message: "original wake" },
+      };
+      sessions.set(record.id, armed);
+      const claim = await internals.claimScheduledWake(armed, true);
+      expect(claim).toBeTruthy();
+      const preceding = sessions.get(record.id) as SessionRecord;
+      const observation: Observation = {
+        session: preceding,
+        revision: internals.lifecycle.snapshot(record.id).revision,
+      };
+      const observePreparedSession = vi.fn((prepared: SessionRecord) => {
+        observation.session = prepared;
+      });
+      await service.scheduleWake(record.id, { delayMs: 60_000, message: "new wake" });
+      const replacement = sessions.get(record.id);
+      writeSessionMock.mockClear();
+      try {
+        expect(() =>
+          internals.writeRecoverySession(
+            { ...preceding, agentLaunchId: "unauthorized-launch" },
+            claim,
+            { preparedObservation: observation, observePreparedSession },
+          ),
+        ).toThrow();
+        expect(sessions.get(record.id)).toEqual(replacement);
+        expect(observePreparedSession).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        close();
+      }
+    });
+  });
+
   it("deliver keeps the queued message and never recovers when the submit ack liveness probe was unresponsive", async () => {
     mockClaudeJsonlState("waiting");
     const service = await createDisposedSessionService();
@@ -52900,7 +53223,12 @@ describe("SessionService", () => {
             const current = sessions.get(record.id) as SessionRecord;
             if (change === "lifecycle") {
               const owner = internals.lifecycle.begin("complete", [record.id]);
-              internals.lifecycle.settle(owner, true, () => "succeeded", () => true);
+              internals.lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
             } else {
               sessions.set(record.id, {
                 ...current,
