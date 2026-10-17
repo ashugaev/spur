@@ -23004,6 +23004,26 @@ export class SessionService {
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
   ): Promise<SessionStateResult> {
+    const probeLifecycle = this.lifecycle.snapshot(session.id);
+    const ackEntry = { ...session };
+    const entryTyped = structuredClone(session.queuedMessageTyped);
+    const matchesAckEntry = (current: SessionRecord | null): boolean => {
+      const lifecycle = this.lifecycle.snapshot(session.id);
+      return (
+        current !== null &&
+        sameSessionRuntimeOwner(current, ackEntry) &&
+        current.status === ackEntry.status &&
+        current.workspaceId === ackEntry.workspaceId &&
+        current.deskId === ackEntry.deskId &&
+        current.agentLaunchId === ackEntry.agentLaunchId &&
+        current.submitUnconfirmedAt === ackEntry.submitUnconfirmedAt &&
+        isDeepStrictEqual(current.queuedMessageTyped, entryTyped) &&
+        lifecycle.instanceId === probeLifecycle.instanceId &&
+        lifecycle.revision === probeLifecycle.revision &&
+        lifecycle.operation === probeLifecycle.operation &&
+        lifecycle.operation?.phase !== "pending"
+      );
+    };
     const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
@@ -23042,7 +23062,11 @@ export class SessionService {
         const result = this.classificationErrorResult(session, error, "runtime_probe");
         return {
           ...result,
-          session: await this.settleSubmitHold(result.session, result.state, null, "ack-only"),
+          session:
+            matchesAckEntry(result.session) &&
+            matchesAckEntry(readSession(this.config.dataDir, session.id))
+              ? await this.settleSubmitHold(result.session, result.state, null, "ack-only")
+              : result.session,
         };
       }
     }
@@ -23620,12 +23644,17 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
-    effectiveSession = await this.settleSubmitHold(
-      effectiveSession,
-      state,
-      agentActivityAt,
-      runtime.probeUnresponsive ? "ack-only" : "normal",
-    );
+    if (
+      !runtime.probeUnresponsive ||
+      (matchesAckEntry(effectiveSession) &&
+        matchesAckEntry(readSession(this.config.dataDir, session.id)))
+    )
+      effectiveSession = await this.settleSubmitHold(
+        effectiveSession,
+        state,
+        agentActivityAt,
+        runtime.probeUnresponsive ? "ack-only" : "normal",
+      );
 
     return {
       session: effectiveSession,
