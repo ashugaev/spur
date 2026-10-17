@@ -1,17 +1,20 @@
-import { createReadStream, existsSync } from "node:fs";
+import { constants, createReadStream, existsSync } from "node:fs";
 import {
   cp,
   lstat,
   mkdir,
+  open,
   readFile,
+  realpath,
   readdir,
   rm,
   stat,
   symlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
@@ -229,15 +232,21 @@ function sessionResumeId(line: CodexSessionLine): string | null {
   return null;
 }
 
-export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+export async function collectJsonlFiles(
+  dir: string,
+  depth = 0,
+  requireComplete = false,
+): Promise<string[]> {
   if (depth > MAX_SESSION_SCAN_DEPTH) {
+    if (requireComplete) throw new Error("Incomplete rollout directory scan");
     return [];
   }
 
   let entries: string[];
   try {
     entries = await readdir(dir);
-  } catch {
+  } catch (error) {
+    if (requireComplete) throw error;
     return [];
   }
 
@@ -250,32 +259,86 @@ export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[
     }
     try {
       if ((await lstat(filePath)).isDirectory()) {
-        files.push(...(await collectJsonlFiles(filePath, depth + 1)));
+        files.push(...(await collectJsonlFiles(filePath, depth + 1, requireComplete)));
       }
-    } catch {
+    } catch (error) {
+      if (requireComplete) throw error;
       // Ignore inaccessible entries.
     }
   }
   return files;
 }
 
+function strictSessionMeta(line: unknown): { cwd: string; threadId: string } | null | undefined {
+  if (!isRecord(line)) return null;
+  if (line["type"] !== "session_meta") return undefined;
+  const payload = line["payload"];
+  if (payload !== undefined && !isRecord(payload)) return null;
+  const ids = [line["threadId"], isRecord(payload) ? payload["id"] : undefined].filter(
+    (value) => value !== undefined,
+  );
+  const cwds = [line["cwd"], isRecord(payload) ? payload["cwd"] : undefined].filter(
+    (value) => value !== undefined,
+  );
+  const threadId = ids[0];
+  const cwd = cwds[0];
+  if (
+    typeof threadId !== "string" ||
+    !threadId.trim() ||
+    typeof cwd !== "string" ||
+    !cwd.trim() ||
+    ids.some((value) => value !== threadId) ||
+    cwds.some((value) => value !== cwd)
+  )
+    return null;
+  if (
+    line["thread_source"] === "subagent" ||
+    (isRecord(payload) && payload["thread_source"] === "subagent")
+  )
+    return null;
+  for (const source of [line["source"], isRecord(payload) ? payload["source"] : undefined]) {
+    if (source === "subagent" || (isRecord(source) && source["subagent"] !== undefined))
+      return null;
+  }
+  return { cwd, threadId };
+}
+
 async function readSessionMeta(
   filePath: string,
+  originalRange?: { fd: number; end: number },
 ): Promise<{ cwd: string; threadId: string | null; isSubagent: boolean } | null> {
   try {
-    const input = createReadStream(filePath, { encoding: "utf-8" });
+    const input = createReadStream(filePath, {
+      encoding: "utf-8",
+      ...(originalRange ? { ...originalRange, start: 0, autoClose: false } : {}),
+    });
     const reader = createInterface({ input, crlfDelay: Infinity });
     let linesRead = 0;
     let threadId: string | null = null;
+    let originalCwd: string | null = null;
     for await (const line of reader) {
-      if (linesRead >= 10) {
+      if (!originalRange && linesRead >= 10) {
         break;
       }
       linesRead += 1;
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        const raw: unknown = JSON.parse(trimmed);
+        const parsed = raw as CodexSessionLine;
+        if (originalRange) {
+          const meta = strictSessionMeta(raw);
+          if (meta === null) return null;
+          if (meta === undefined) continue;
+          if (
+            (threadId !== null && threadId !== meta.threadId) ||
+            (originalCwd !== null && originalCwd !== meta.cwd)
+          )
+            return null;
+          threadId = meta.threadId;
+          originalCwd = meta.cwd;
+          continue;
+        }
         if (isExplicitSubagentSessionMeta(parsed)) {
           continue;
         }
@@ -296,9 +359,12 @@ async function readSessionMeta(
           };
         }
       } catch {
+        if (originalRange) return null;
         // Ignore malformed lines and keep scanning the file header.
       }
     }
+    if (originalRange && originalCwd && threadId)
+      return { cwd: originalCwd, threadId, isSubagent: false };
   } catch {
     return null;
   }
@@ -757,15 +823,31 @@ interface RolloutEventMsgPayload {
   turnId?: string;
 }
 
-function extractUserTextFromLine(line: string): string | null {
+interface CodexSubmitAckScope {
+  nativeSessionId: string;
+  worktreePath: string;
+}
+
+function extractUserTextFromLine(line: string, strict?: CodexSubmitAckScope): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return null;
   }
   if (!isRecord(parsed)) {
+    if (strict) throw new Error("Malformed original rollout record");
     return null;
+  }
+  if (strict) {
+    const meta = strictSessionMeta(parsed);
+    if (
+      meta === null ||
+      (meta !== undefined &&
+        (meta.threadId !== strict.nativeSessionId || meta.cwd !== strict.worktreePath))
+    )
+      throw new Error("Conflicting original rollout metadata");
   }
   const type = parsed["type"];
   const payload = parsed["payload"];
@@ -775,7 +857,14 @@ function extractUserTextFromLine(line: string): string | null {
 
   if (type === "response_item") {
     const p = payload as unknown as RolloutResponseItemPayload;
+    if (strict && p.type === "message" && p.role === "user" && !Array.isArray(p.content))
+      throw new Error("Malformed original rollout user content");
     if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
+      if (
+        strict &&
+        p.content.some((c) => isRecord(c) && c.type === "input_text" && typeof c.text !== "string")
+      )
+        throw new Error("Malformed original rollout user text");
       const texts = p.content
         .filter(
           (c): c is { type: string; text: string } =>
@@ -788,6 +877,8 @@ function extractUserTextFromLine(line: string): string | null {
 
   if (type === "event_msg") {
     const p = payload as unknown as RolloutEventMsgPayload;
+    if (strict && p.type === "user_message" && typeof p.message !== "string")
+      throw new Error("Malformed original rollout user message");
     if (p.type === "user_message" && typeof p.message === "string") {
       return p.message;
     }
@@ -832,7 +923,8 @@ export async function scanCodexRolloutForMessage(
   sessionsDir: string,
   messageText: string,
   baseline: RolloutBaseline,
-): Promise<{ found: boolean; lastScannedFile: string | null }> {
+  strict?: CodexSubmitAckScope,
+): Promise<{ found: boolean; lastScannedFile: string | null; qualifiedNoMatch?: true }> {
   let files: string[];
   try {
     files = await collectJsonlFiles(sessionsDir);
@@ -840,31 +932,104 @@ export async function scanCodexRolloutForMessage(
     return { found: false, lastScannedFile: null };
   }
   let lastScannedFile: string | null = null;
+  let qualifiedNoMatch = false;
   const trimmedTarget = messageText.trim();
   for (const filePath of files) {
     lastScannedFile = filePath;
     const offset = baseline.get(filePath) ?? 0;
+    let original: FileHandle | undefined;
     try {
-      const input = createReadStream(filePath, { encoding: "utf-8", start: offset });
-      const reader = createInterface({ input, crlfDelay: Infinity });
-      try {
-        for await (const rawLine of reader) {
-          const trimmedLine = rawLine.trim();
-          if (!trimmedLine) continue;
-          const extracted = extractUserTextFromLine(trimmedLine);
-          if (extracted !== null && extracted.trim() === trimmedTarget) {
-            reader.close();
-            return { found: true, lastScannedFile: filePath };
-          }
-        }
-      } finally {
-        reader.close();
+      if (
+        strict &&
+        (!strict.nativeSessionId ||
+          !baseline.has(filePath) ||
+          !Number.isSafeInteger(offset) ||
+          offset <= 0 ||
+          (await realpath(sessionsDir)) !== resolve(sessionsDir) ||
+          (await realpath(filePath)) !== resolve(filePath))
+      )
+        continue;
+      original = strict
+        ? await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+        : undefined;
+      const observed = original ? await original.stat() : undefined;
+      if (observed && (!observed.isFile() || observed.size < offset)) continue;
+      if (strict && original && observed) {
+        const boundary = Buffer.alloc(1);
+        await original.read(boundary, 0, 1, offset - 1);
+        if (boundary[0] !== 10) continue;
+        const ending = Buffer.alloc(1);
+        await original.read(ending, 0, 1, observed.size - 1);
+        if (ending[0] !== 10) continue;
+        const meta = await readSessionMeta(filePath, { fd: original.fd, end: offset - 1 });
+        if (
+          !meta ||
+          meta.threadId !== strict.nativeSessionId ||
+          meta.isSubagent ||
+          meta.cwd !== strict.worktreePath
+        )
+          continue;
       }
+      let found = false;
+      if (!observed || observed.size > offset) {
+        const input = createReadStream(filePath, {
+          encoding: "utf-8",
+          start: offset,
+          ...(original && observed
+            ? { fd: original.fd, end: observed.size - 1, autoClose: false }
+            : {}),
+        });
+        const reader = createInterface({ input, crlfDelay: Infinity });
+        try {
+          for await (const rawLine of reader) {
+            const trimmedLine = rawLine.trim();
+            if (!trimmedLine) continue;
+            const extracted = extractUserTextFromLine(trimmedLine, strict);
+            if (
+              extracted !== null &&
+              (strict ? extracted === messageText : extracted.trim() === trimmedTarget)
+            ) {
+              found = true;
+              if (!strict) break;
+            }
+          }
+        } finally {
+          reader.close();
+        }
+      }
+      if (strict && !found && baseline.size === 1 && files.length === 1) {
+        const currentFiles = await collectJsonlFiles(sessionsDir, 0, true);
+        if (currentFiles.length !== 1 || !currentFiles.every((file) => baseline.has(file)))
+          continue;
+      }
+      if (original && observed) {
+        const current = await lstat(filePath);
+        const held = await original.stat();
+        if (
+          [current, held].some(
+            (entry) =>
+              entry.dev !== observed.dev ||
+              entry.ino !== observed.ino ||
+              entry.size !== observed.size ||
+              entry.mtimeMs !== observed.mtimeMs ||
+              entry.ctimeMs !== observed.ctimeMs,
+          )
+        )
+          continue;
+      }
+      if (strict && baseline.size === 1 && files.length === 1) qualifiedNoMatch = true;
+      if (found) return { found: true, lastScannedFile: filePath };
     } catch {
       // Ignore unreadable files.
+    } finally {
+      await original?.close();
     }
   }
-  return { found: false, lastScannedFile };
+  return {
+    found: false,
+    lastScannedFile,
+    ...(qualifiedNoMatch ? { qualifiedNoMatch: true as const } : {}),
+  };
 }
 
 export interface CodexRolloutStateRecord {
