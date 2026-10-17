@@ -195,7 +195,10 @@ export async function sourceSessionById(
 }
 
 export function createSourceWorkbench(
-  service: Pick<SessionService, "listProjects" | "launchOptions" | "list" | "get" | "restore">,
+  service: Pick<
+    SessionService,
+    "listProjects" | "launchOptions" | "list" | "get" | "restore" | "complete" | "kill"
+  >,
 ): SourceWorkbench {
   const assertSpawnableProject = (project: string): void => {
     if (!spawnableProjects(service.listProjects()).some((entry) => entry.id === project)) {
@@ -214,6 +217,18 @@ export function createSourceWorkbench(
     },
     async getSession(sessionId) {
       return projectSourceSession(await service.get(sessionId));
+    },
+    async completeSession(sessionId) {
+      await service.complete(
+        sessionId,
+        { prAction: "leave_open" },
+        {
+          todoActor: { kind: "human", origin: "telegram" },
+        },
+      );
+    },
+    async killSession(sessionId) {
+      await service.kill(sessionId, { prAction: "leave_open" });
     },
     async restoreSession({ sessionId, expectedProject }) {
       const current = await service.get(sessionId);
