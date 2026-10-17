@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type * as FsPromises from "node:fs/promises";
 import {
   appendFile,
@@ -35,6 +36,10 @@ const probe = vi.hoisted(() => ({
   delayReads: false,
   statFail: new Set<string>(),
   readFail: new Set<string>(),
+  openFailOnce: new Set<string>(),
+  readFailOnce: new Set<string>(),
+  eofOnce: new Set<string>(),
+  maxReadLength: undefined as number | undefined,
   closeFail: new Set<string>(),
   beforeRead: undefined as (() => Promise<void>) | undefined,
 }));
@@ -52,6 +57,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       return actual.stat(...args);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
+      if (probe.openFailOnce.delete(String(args[0]))) throw new Error("open failed");
       const handle = await actual.open(...args);
       const path = String(args[0]);
       probe.live += 1;
@@ -63,6 +69,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         if (probe.delayReads) await new Promise((resolve) => setTimeout(resolve, 0));
         probe.reads.push({ path, length: a[2] as number, position: a[3] as number });
         if (probe.readFail.has(path)) throw new Error("read failed");
+        if (probe.readFailOnce.delete(path)) throw new Error("read failed once");
+        if (probe.eofOnce.delete(path)) return { bytesRead: 0, buffer: a[0] };
+        if (probe.maxReadLength !== undefined) {
+          a[2] = Math.min(a[2] as number, probe.maxReadLength);
+        }
         return read(...a);
       };
       handle.close = async () => {
@@ -83,6 +94,10 @@ beforeEach(() => {
   probe.delayReads = false;
   probe.statFail.clear();
   probe.readFail.clear();
+  probe.openFailOnce.clear();
+  probe.readFailOnce.clear();
+  probe.eofOnce.clear();
+  probe.maxReadLength = undefined;
   probe.closeFail.clear();
   probe.beforeRead = undefined;
 });
@@ -1230,9 +1245,13 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     expect(result).toEqual(await coldRead(fixture, "rollout-large.jsonl"));
   });
 
-  it("T2 reads only appended bytes after an append", async () => {
+  it("T2 verifies the raw prefix but parses only appended records", async () => {
     const base = [
+      sessionMeta("append-thread"),
       eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
+      eventLine("2026-05-10T10:00:01.000Z", "token_count", {
+        info: { total_token_usage: { input_tokens: 90, output_tokens: 30, total_tokens: 120 } },
+      }),
       ...Array.from({ length: 30 }, (_, i) => fillerLine(i, 500)),
     ].join("\n");
     const sessionsDir = await makeSessionsDir(`${base}\n`, "rollout-append.jsonl");
@@ -1245,17 +1264,26 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     probe.reads.length = 0;
     await appendFile(filePath, appended);
 
-    const result = await readCodexRolloutState(sessionsDir, reader);
+    const parse = vi.spyOn(JSON, "parse");
+    let result: CodexRolloutReadResult;
+    try {
+      result = await readCodexRolloutState(sessionsDir, reader);
+      expect(parse.mock.calls.filter(([line]) => base.split("\n").includes(line))).toHaveLength(0);
+      expect(parse.mock.calls.filter(([line]) => line === appended.trim())).toHaveLength(1);
+    } finally {
+      parse.mockRestore();
+    }
 
     expect(result.rollout?.state).toBe("waiting");
     const reads = probe.reads.filter((read) => read.path === filePath);
-    expect(Math.min(...reads.map((read) => read.position))).toBeGreaterThanOrEqual(
-      previousSize - PREFIX_VERIFY_BYTES,
-    );
+    expect(reads.map((read) => read.position)).toEqual([0, previousSize]);
     const totalBytes = reads.reduce((sum, read) => sum + read.length, 0);
-    expect(totalBytes).toBeLessThanOrEqual(Buffer.byteLength(appended) + PREFIX_VERIFY_BYTES);
-    expect(totalBytes).toBe(4206);
+    expect(totalBytes).toBe(previousSize + Buffer.byteLength(appended));
     expect(reader.files.get(filePath)?.offset).toBe(previousSize + Buffer.byteLength(appended));
+    expect(result.tokenUsage?.totalTokens).toBe(120);
+    expect(normalizeResult(result)).toEqual(
+      await coldRead(`${base}\n${appended}`, "rollout-append.jsonl"),
+    );
   });
 
   it("T4 holds back a partial trailing line until it completes", async () => {
@@ -1291,11 +1319,15 @@ describe("readCodexRolloutState incremental chunked reads", () => {
       const tail = raw.subarray(Math.max(0, entry.offset - PREFIX_VERIFY_BYTES), entry.offset);
       expect(entry.tail).toEqual(tail);
       expect(entry.tailHash).toBe(hashHistoryTail(tail));
+      expect(entry.prefixHash).toBe(
+        createHash("sha256").update(raw.subarray(0, entry.offset)).digest("hex"),
+      );
     };
     await checkTail();
     const original = reader.files.get(filePath);
     const originalTail = Buffer.from(original?.tail ?? []);
     const originalHash = original?.tailHash;
+    const originalPrefixHash = original?.prefixHash;
     for (const append of [
       ` \t${JSON.stringify({ type: "unknown", text: "é🙂" })}\r\n`,
       `${JSON.stringify({ type: "unknown", text: "é🙂".repeat(900) })}\n`,
@@ -1308,9 +1340,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
       content += append;
       await appendFile(filePath, append);
       await checkTail();
-      expect(Math.min(...probe.reads.map((read) => read.position))).toBeGreaterThanOrEqual(
-        Math.max(0, (previousEntry?.offset ?? 0) - PREFIX_VERIFY_BYTES),
-      );
+      expect(Math.min(...probe.reads.map((read) => read.position))).toBe(0);
       if (append === '{"partial":') {
         expect(reader.files.get(filePath)?.offset).toBe(previousEntry?.offset);
         expect(reader.files.get(filePath)?.tail).toEqual(previousEntry?.tail);
@@ -1319,6 +1349,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     }
     expect(original?.tail).toEqual(originalTail);
     expect(original?.tailHash).toBe(originalHash);
+    expect(original?.prefixHash).toBe(originalPrefixHash);
     const beforeRewrite = reader.files.get(filePath);
     content = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n${JSON.stringify({ text: "x".repeat(7000) })}\n`;
     await writeFile(filePath, content);
@@ -1392,6 +1423,151 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     },
   );
 
+  it.each([9213, SCAN_CHUNK_BYTES + 9213])(
+    "refolds a prefix rewrite with growth from %i bytes",
+    async (size) => {
+      const stateLine = (type: string, pad: string): string =>
+        `${JSON.stringify({ timestamp: "2026-10-17T10:00:00.000Z", type: "event_msg", payload: { type, pad } })}\n`;
+      const inert = (length: number): string => {
+        const empty = `${JSON.stringify({ type: "inert", pad: "" })}\n`;
+        return `${JSON.stringify({ type: "inert", pad: "x".repeat(length - Buffer.byteLength(empty)) })}\n`;
+      };
+      const started = stateLine("task_started", "x");
+      const completed = stateLine("task_complete", "");
+      expect(Buffer.byteLength(completed)).toBe(Buffer.byteLength(started));
+      const suffix = inert(size - Buffer.byteLength(started));
+      const original = started + suffix;
+      const rewritten = completed + suffix + inert(83);
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+      const entry = reader.files.get(filePath);
+      if (!entry) throw new Error("expected cache entry");
+      const before = await stat(filePath);
+      expect(before.size).toBe(size);
+      expect(entry.offset).toBe(before.size);
+      expect(
+        hashHistoryTail(Buffer.from(rewritten).subarray(entry.offset - 4096, entry.offset)),
+      ).toBe(entry.tailHash);
+      await writeFile(filePath, rewritten);
+      await utimes(filePath, new Date(before.atimeMs), new Date(before.mtimeMs + 2000));
+      const after = await stat(filePath);
+      expect(after.size).toBe(size + 83);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeMs).not.toBe(before.mtimeMs);
+      const warm = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const repeat = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      const cold = normalizeResult(await readCodexRolloutState(sessionsDir));
+      expect(cold.rollout?.state).toBe("waiting");
+      expect(cold.rollout?.reason).toBe("task_complete");
+      expect(warm).toEqual(cold);
+      expect(repeat).toEqual(cold);
+      expect(Math.max(...probe.reads.map((read) => read.length))).toBeLessThanOrEqual(
+        SCAN_CHUNK_BYTES,
+      );
+    },
+  );
+
+  it("scans growth from an unconsumed prefix without a verification read", async () => {
+    const completed = eventLine("2026-05-10T10:00:00.000Z", "task_complete", {});
+    const original = completed.slice(0, -1);
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    expect(reader.files.get(filePath)?.offset).toBe(0);
+    await appendFile(filePath, "}\n");
+    probe.reads.length = 0;
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("waiting");
+    expect(probe.reads).toEqual([
+      { path: filePath, position: 0, length: Buffer.byteLength(completed) + 1 },
+    ]);
+    expect(probe.live).toBe(0);
+  });
+
+  it("verifies growth in bounded chunks through positive short reads", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n${fillerLine(0, SCAN_CHUNK_BYTES + 5000)}\n`;
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    await appendFile(filePath, appended);
+    probe.reads.length = 0;
+    probe.maxReadLength = 250_000;
+    const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+    expect(result.rollout?.state).toBe("waiting");
+    expect(probe.reads.length).toBeGreaterThan(5);
+    expect(Math.max(...probe.reads.map((read) => read.length))).toBeLessThanOrEqual(
+      SCAN_CHUNK_BYTES,
+    );
+    expect(probe.reads.map((read) => read.position)).toEqual([
+      0,
+      250_000,
+      500_000,
+      750_000,
+      1_000_000,
+      Buffer.byteLength(original),
+    ]);
+    expect(reader.files.get(filePath)?.prefixHash).toBe(
+      createHash("sha256")
+        .update(original + appended)
+        .digest("hex"),
+    );
+    expect(probe.live).toBe(0);
+    probe.maxReadLength = undefined;
+    expect(result).toEqual(await coldRead(original + appended, "rollout-test.jsonl"));
+  });
+
+  it.each(["open", "read", "eof"] as const)(
+    "cold-folds growth after a prefix verification %s fault",
+    async (fault) => {
+      const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+      const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+      const sessionsDir = await makeSessionsDir(original);
+      const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+      const reader: CodexRolloutReaderState = { files: new Map() };
+      await readCodexRolloutState(sessionsDir, reader);
+      const oldEntry = reader.files.get(filePath);
+      await appendFile(filePath, appended);
+      if (fault === "open") probe.openFailOnce.add(filePath);
+      if (fault === "read") probe.readFailOnce.add(filePath);
+      if (fault === "eof") probe.eofOnce.add(filePath);
+      const result = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+      expect(result.rollout?.state).toBe("waiting");
+      expect(reader.files.get(filePath)).not.toBe(oldEntry);
+      expect(reader.files.get(filePath)?.prefixHash).toBe(
+        createHash("sha256")
+          .update(original + appended)
+          .digest("hex"),
+      );
+      expect(probe.live).toBe(0);
+      expect(result).toEqual(await coldRead(original + appended, "rollout-test.jsonl"));
+    },
+  );
+
+  it("releases queued growth reads after prefix verification close rejection", async () => {
+    const original = `${eventLine("2026-05-10T10:00:00.000Z", "task_started", {})}\n`;
+    const appended = `${eventLine("2026-05-10T10:01:00.000Z", "task_complete", {})}\n`;
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    await readCodexRolloutState(sessionsDir, reader);
+    const oldEntry = reader.files.get(filePath);
+    await appendFile(filePath, appended);
+    probe.closeFail.add(filePath);
+    const first = readCodexRolloutState(sessionsDir, reader);
+    const second = readCodexRolloutState(sessionsDir, reader);
+    await expect(first).rejects.toThrow("close failed");
+    expect(oldEntry?.offset).toBe(Buffer.byteLength(original));
+    expect((await second).rollout?.state).toBe("waiting");
+    expect(probe.live).toBe(0);
+    expect(normalizeResult(await readCodexRolloutState(sessionsDir, reader))).toEqual(
+      await coldRead(original + appended, "rollout-test.jsonl"),
+    );
+  });
+
   it("T6 drops a call state once its output arrives in an append", async () => {
     const prefix = [
       eventLine("2026-05-10T10:00:00.000Z", "task_started", { turn_id: "t1" }),
@@ -1457,7 +1633,7 @@ describe("readCodexRolloutState incremental chunked reads", () => {
     expect(
       results.every((result) => result.rollout?.state === (warm ? "waiting" : "working")),
     ).toBe(true);
-    // Cold: scan. Append: old hash + appended scan.
+    // Cold: scan. Append: raw prefix verification + appended scan.
     expect(probe.reads.filter((read) => read.path === filePath)).toHaveLength(warm ? 2 : 1);
     expect(probe.live).toBe(0);
   });

@@ -1,8 +1,10 @@
+import { createHash, type Hash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import {
   cp,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rm,
@@ -18,7 +20,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, TranscriptEntry, SidecarMcpBinding } from "../types.js";
 import { createConcurrencyGate } from "../concurrency-gate.js";
-import { readJsonlTailHash, scanJsonlLines } from "../jsonl-scan.js";
+import { SCAN_CHUNK_BYTES, scanJsonlLines } from "../jsonl-scan.js";
 import { hashHistoryTail, PREFIX_VERIFY_BYTES } from "../agent-history-delta.js";
 import { detectCodexRateLimit, type RateLimitDetection } from "../rate-limit-detect.js";
 import { agentExecutableCommand } from "./executable.js";
@@ -934,6 +936,7 @@ interface CodexRolloutFold {
 interface CodexRolloutFileEntry extends CodexRolloutFileFingerprint {
   // Bytes folded so far; can trail `size` when the file ends mid-line.
   offset: number;
+  prefixHash: string;
   // Hash of the PREFIX_VERIFY_BYTES before `offset`, to detect an in-place rewrite.
   tailHash: string;
   tail: Buffer;
@@ -1368,7 +1371,42 @@ function finalizeCodexRolloutFold(
   };
 }
 
-// One gate slot covers the tail-hash check and the scan, so concurrent opens
+// Verify raw history without parsing it again; include the old tail in this pass.
+async function readCodexRolloutPrefix(
+  filePath: string,
+  endOffset: number,
+): Promise<{ hash: Hash; tailHash: string } | null> {
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    const hash = createHash("sha256");
+    let tail: Buffer = Buffer.alloc(0);
+    if (endOffset > 0) {
+      fd = await open(filePath, "r");
+      let position = 0;
+      while (position < endOffset) {
+        const length = Math.min(SCAN_CHUNK_BYTES, endOffset - position);
+        const buffer = Buffer.alloc(length);
+        const { bytesRead } = await fd.read(buffer, 0, length, position);
+        if (bytesRead === 0) return null;
+        const bytes = buffer.subarray(0, bytesRead);
+        hash.update(bytes);
+        tail = Buffer.from(
+          Buffer.concat([tail, bytes.subarray(-PREFIX_VERIFY_BYTES)]).subarray(
+            -PREFIX_VERIFY_BYTES,
+          ),
+        );
+        position += bytesRead;
+      }
+    }
+    return { hash, tailHash: hashHistoryTail(tail) };
+  } catch {
+    return null;
+  } finally {
+    await fd?.close();
+  }
+}
+
+// One gate slot covers prefix verification and the scan, so concurrent opens
 // never exceed CODEX_ROLLOUT_READ_MAX_CONCURRENCY. Null: read failed, entry dropped.
 async function readCodexRolloutFile(
   filePath: string,
@@ -1379,17 +1417,25 @@ async function readCodexRolloutFile(
     let fold = newCodexRolloutFold();
     let offset = 0;
     let previousTail: Buffer = Buffer.alloc(0);
+    let prefixHasher = createHash("sha256");
     if (
       fingerprint &&
       cached &&
       cached.ino === fingerprint.ino &&
       fingerprint.size > cached.size &&
-      fingerprint.size >= cached.offset &&
-      cached.tailHash === (await readJsonlTailHash(filePath, cached.offset))
+      fingerprint.size >= cached.offset
     ) {
-      fold = cloneCodexRolloutFold(cached.fold);
-      offset = cached.offset;
-      previousTail = cached.tail;
+      const verified = await readCodexRolloutPrefix(filePath, cached.offset);
+      if (
+        verified &&
+        verified.tailHash === cached.tailHash &&
+        verified.hash.copy().digest("hex") === cached.prefixHash
+      ) {
+        fold = cloneCodexRolloutFold(cached.fold);
+        offset = cached.offset;
+        previousTail = cached.tail;
+        prefixHasher = verified.hash;
+      }
     }
     const scan = await scanJsonlLines(
       filePath,
@@ -1405,6 +1451,7 @@ async function readCodexRolloutFile(
         return true;
       },
       fingerprint?.size,
+      (bytes) => prefixHasher.update(bytes),
     );
     if (!scan) return null;
     const result = finalizeCodexRolloutFold(fold, filePath);
@@ -1420,7 +1467,15 @@ async function readCodexRolloutFile(
     const tailHash = hashHistoryTail(tail);
     return {
       candidate,
-      entry: { ...fingerprint, offset: endOffset, tailHash, tail, fold, candidate },
+      entry: {
+        ...fingerprint,
+        offset: endOffset,
+        prefixHash: prefixHasher.digest("hex"),
+        tailHash,
+        tail,
+        fold,
+        candidate,
+      },
     };
   });
 }

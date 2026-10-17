@@ -8,6 +8,7 @@ import { SCAN_CHUNK_BYTES, readJsonlTailHash, scanJsonlLines } from "../../src/j
 
 const readLengths: number[] = [];
 const readBuffers: Buffer[] = [];
+let liveHandles = 0;
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FsPromises>();
@@ -15,6 +16,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
+      liveHandles += 1;
+      const close = handle.close.bind(handle);
+      handle.close = async () => {
+        await close();
+        liveHandles -= 1;
+      };
       const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<unknown>;
       (handle as unknown as { read: unknown }).read = (...a: unknown[]) => {
         readLengths.push(a[2] as number);
@@ -31,6 +38,7 @@ let dir = "";
 beforeEach(async () => {
   readLengths.length = 0;
   readBuffers.length = 0;
+  liveHandles = 0;
   dir = await mkdtemp(join(tmpdir(), "jsonl-scan-"));
 });
 
@@ -65,6 +73,7 @@ describe("scanJsonlLines", () => {
     { body: ' \t\r\n{"a":"é🙂"}\r\n \t', offset: 0, accept: true },
     { body: '{"skip":1}\n \t{"a":"é🙂"} \r', offset: 11, accept: true },
     { body: '{"a":1}\n{"partial"', offset: 0, accept: false },
+    { body: ' \t{malformed}\r\n{"a":1}\n', offset: 0, accept: true },
     { body: '{"a":1}\n{"b":2}\n', offset: 0, size: 8, accept: true },
     { body: " \t\r", offset: 0, accept: true },
     { body: `{"long":"${"é🙂".repeat(SCAN_CHUNK_BYTES / 2)}"}\n`, offset: 0, accept: true },
@@ -73,6 +82,7 @@ describe("scanJsonlLines", () => {
     const raw = Buffer.from(body);
     await writeFile(path, raw);
     const flags: boolean[] = [];
+    const observed: Buffer[] = [];
     const scan = await scanJsonlLines(
       path,
       offset,
@@ -81,10 +91,14 @@ describe("scanJsonlLines", () => {
         return accept;
       },
       size,
+      (bytes) => observed.push(Buffer.from(bytes)),
     );
     expect(scan).not.toBeNull();
     if (!scan) throw new Error("expected scan");
     const end = offset + scan.consumedBytes;
+    expect(Buffer.concat(observed)).toEqual(raw.subarray(offset, end));
+    expect(observed.length).toBeLessThanOrEqual(readLengths.length + 1);
+    if (scan.consumedBytes === 0) expect(observed).toHaveLength(0);
     const expected = raw.subarray(Math.max(offset, end - PREFIX_VERIFY_BYTES), end);
     expect(scan.tail).toEqual(expected);
     expect(scan.tail.length).toBe(Math.min(PREFIX_VERIFY_BYTES, scan.consumedBytes));
@@ -111,6 +125,44 @@ describe("scanJsonlLines", () => {
         throw new Error("callback failed");
       }),
     ).toBeNull();
+    expect(liveHandles).toBe(0);
+  });
+
+  it("observes consumed raw bytes once per chunk, not per line", async () => {
+    const path = join(dir, "observer.jsonl");
+    const raw = Buffer.from('{"a":1}\n'.repeat(200_000));
+    await writeFile(path, raw);
+    const observed: Buffer[] = [];
+    const result = await scanJsonlLines(
+      path,
+      0,
+      () => true,
+      raw.length,
+      (bytes) => {
+        observed.push(Buffer.from(bytes));
+      },
+    );
+    expect(result?.consumedBytes).toBe(raw.length);
+    expect(Buffer.concat(observed)).toEqual(raw);
+    expect(observed).toHaveLength(Math.ceil(raw.length / SCAN_CHUNK_BYTES));
+    expect(readLengths.reduce((sum, length) => sum + length, 0)).toBe(raw.length);
+  });
+
+  it("returns null and closes when the consumed observer throws", async () => {
+    const path = join(dir, "observer-error.jsonl");
+    await writeFile(path, '{"a":1}\n');
+    expect(
+      await scanJsonlLines(
+        path,
+        0,
+        () => true,
+        undefined,
+        () => {
+          throw new Error("observer failed");
+        },
+      ),
+    ).toBeNull();
+    expect(liveHandles).toBe(0);
   });
 
   it("yields every line once across a multi-chunk file in bounded reads", async () => {

@@ -13,13 +13,15 @@ export const SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
  * is consumed only when `onLine(line, false)` returns true; a rejected one is
  * excluded and re-read once its completing bytes arrive. The return value is
  * ignored for terminated lines. `tail` copies the last PREFIX_VERIFY_BYTES of
- * bytes consumed in this scan. Returns null on any fs error.
+ * bytes consumed in this scan. `onConsumed` observes those raw bytes synchronously
+ * per consumed chunk, including whitespace and terminators. Returns null on fs errors.
  */
 export async function scanJsonlLines(
   filePath: string,
   offset: number,
   onLine: (line: string, terminated: boolean) => boolean,
   size?: number,
+  onConsumed?: (bytes: Buffer) => void,
 ): Promise<{ consumedBytes: number; tail: Buffer } | null> {
   let fd: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -29,6 +31,7 @@ export async function scanJsonlLines(
     let pending = Buffer.alloc(0);
     let tail: Buffer = Buffer.alloc(0);
     const retainTail = (bytes: Buffer): void => {
+      onConsumed?.(bytes);
       tail = Buffer.from(
         Buffer.concat([tail, bytes.subarray(-PREFIX_VERIFY_BYTES)]).subarray(-PREFIX_VERIFY_BYTES),
       );
