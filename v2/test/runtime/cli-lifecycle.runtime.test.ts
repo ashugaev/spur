@@ -610,7 +610,7 @@ async function runRestoreScenario(args: {
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for a "stopped" state that can never arrive.
+    // below times out waiting for an "error" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -622,8 +622,10 @@ async function runRestoreScenario(args: {
 
   // A manual pause kills the tmux session outright (runtimeAlive false, status
   // "stopped"). An agent process exiting on its own leaves the tmux pane/session
-  // alive with no matching agent process. Both become stopped; process loss
-  // carries runtime_lost while the pane remains available for native resume.
+  // alive with no matching agent process. That unexpected exit becomes errored;
+  // runtime_lost is reserved for an unavailable terminal.
+  const expectedState = stopMode === "pause" ? "stopped" : "error";
+  const expectedStatus = stopMode === "pause" ? "stopped" : "errored";
   const exited = await pollUntil(
     async () =>
       JSON.parse(
@@ -632,16 +634,15 @@ async function runRestoreScenario(args: {
     {
       timeoutMs: 45_000,
       accept: (value) =>
-        value[0]?.state === "stopped" &&
+        value[0]?.state === expectedState &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === "stopped" &&
-        (stopMode === "pause" || value[0]?.stopReason === "runtime_lost"),
+        value[0]?.status === expectedStatus,
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
   if (stopMode === "exit") {
-    expect(exited[0]?.stopReason).toBe("runtime_lost");
-    expect(exited[0]?.error).toBeUndefined();
+    expect(exited[0]?.stopReason).toBeUndefined();
+    expect(exited[0]?.error).toBe("Agent runtime exited unexpectedly.");
   }
 
   if (args.agent) {
@@ -4773,7 +4774,7 @@ projects:
     // early lands inside that still-open window and gets silently
     // concatenated onto the initial prompt instead of matching the
     // `exit-now` case arm, so the fixture never exits and the state poll
-    // below times out waiting for a "stopped" state that can never arrive.
+    // below times out waiting for an "error" state that can never arrive.
     // Wait for the fixture's own "ack: <prompt>" echo, which only prints
     // once its case statement runs on the closed initial message.
     await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -4783,7 +4784,7 @@ projects:
     await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
     // The agent process exits on its own, leaving the tmux pane/session alive
-    // with no matching process. Reconciliation persists stopped/runtime_lost
+    // with no matching process. Reconciliation persists an inferred exit error
     // while preserving the pane for the native-resume attempt.
     const exited = await pollUntil(
       async () =>
@@ -4793,15 +4794,13 @@ projects:
       {
         timeoutMs: 45_000,
         accept: (value) =>
-          value[0]?.state === "stopped" &&
-          value[0]?.status === "stopped" &&
-          value[0]?.stopReason === "runtime_lost" &&
+          value[0]?.state === "error" &&
+          value[0]?.status === "errored" &&
           value[0]?.runtimeAlive === true,
       },
     );
-    expect(exited[0]?.status).toBe("stopped");
-    expect(exited[0]?.stopReason).toBe("runtime_lost");
-    expect(exited[0]?.error).toBeUndefined();
+    expect(exited[0]?.stopReason).toBeUndefined();
+    expect(exited[0]?.error).toBe("Agent runtime exited unexpectedly.");
 
     await rm(join(context.rootDir, ".claude"), { recursive: true, force: true });
 
