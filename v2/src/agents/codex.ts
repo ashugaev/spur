@@ -1383,6 +1383,7 @@ async function readCodexRolloutFile(
       fingerprint &&
       cached &&
       cached.ino === fingerprint.ino &&
+      fingerprint.size > cached.size &&
       fingerprint.size >= cached.offset &&
       cached.tailHash === (await readJsonlTailHash(filePath, cached.offset))
     ) {

@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -1348,6 +1349,44 @@ describe("readCodexRolloutState incremental chunked reads", () => {
 
     expect(result).toEqual(await coldRead(`${rewritten}\n`, "rollout-rewrite.jsonl"));
     expect(result.rollout?.state).toBe("waiting");
+  });
+
+  it.each([false, true])("T5 refolds a same-size prefix rewrite with partial=%s", async (partial) => {
+    const pending = partial ? '{"pending":' : "";
+    const suffix = `\n${fillerLine(0, 9000)}\n${pending}`;
+    const original =
+      eventLine("2026-05-10T10:00:00.000Z", "task_started", {}).padEnd(160) + suffix;
+    const rewritten =
+      eventLine("2026-05-10T10:00:00.000Z", "task_complete", {}).padEnd(160) + suffix;
+    const sessionsDir = await makeSessionsDir(original);
+    const filePath = rolloutPath(sessionsDir, "rollout-test.jsonl");
+    const reader: CodexRolloutReaderState = { files: new Map() };
+    expect((await readCodexRolloutState(sessionsDir, reader)).rollout?.state).toBe("working");
+    const entry = reader.files.get(filePath);
+    if (!entry) throw new Error("expected cache entry");
+    const before = await stat(filePath);
+    expect(entry.offset).toBe(before.size - Buffer.byteLength(pending));
+    expect(Buffer.byteLength(rewritten)).toBe(before.size);
+    const unchangedTail = Buffer.from(rewritten).subarray(
+      entry.offset - PREFIX_VERIFY_BYTES,
+      entry.offset,
+    );
+    expect(hashHistoryTail(unchangedTail)).toBe(entry.tailHash);
+
+    await writeFile(filePath, rewritten);
+    await utimes(filePath, new Date(before.atimeMs), new Date(before.mtimeMs + 2000));
+    const after = await stat(filePath);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).not.toBe(before.mtimeMs);
+
+    const warm = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+    const repeat = normalizeResult(await readCodexRolloutState(sessionsDir, reader));
+    const cold = normalizeResult(await readCodexRolloutState(sessionsDir));
+    expect(cold.rollout?.state).toBe("waiting");
+    expect(warm).toEqual(cold);
+    expect(repeat).toEqual(cold);
+    expect(reader.files.get(filePath)).not.toBe(entry);
   });
 
   it("T6 drops a call state once its output arrives in an append", async () => {
