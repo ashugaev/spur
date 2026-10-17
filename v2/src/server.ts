@@ -1740,10 +1740,10 @@ export async function startServer(
         const fromValue = url.searchParams.get("from");
         const from =
           fromValue && /^\d+$/.test(fromValue) ? Number.parseInt(fromValue, 10) : undefined;
-        const conversation = await service.getConversation(
-          conversationSessionId,
-          from !== undefined ? { from } : {},
-        );
+        const conversation = await service.getConversation(conversationSessionId, {
+          ...(from !== undefined ? { from } : {}),
+          ...(view === "messages" ? { preserveEnd: true } : {}),
+        });
         sendJson(
           response,
           200,
