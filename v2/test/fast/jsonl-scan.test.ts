@@ -96,7 +96,7 @@ describe("scanJsonlLines", () => {
     expect(scan).not.toBeNull();
     if (!scan) throw new Error("expected scan");
     const end = offset + scan.consumedBytes;
-    expect(Buffer.concat(observed)).toEqual(raw.subarray(offset, end));
+    expect(Buffer.concat(observed).equals(raw.subarray(offset, end))).toBe(true);
     expect(observed.length).toBeLessThanOrEqual(readLengths.length + 1);
     if (scan.consumedBytes === 0) expect(observed).toHaveLength(0);
     const expected = raw.subarray(Math.max(offset, end - PREFIX_VERIFY_BYTES), end);
@@ -143,7 +143,7 @@ describe("scanJsonlLines", () => {
       },
     );
     expect(result?.consumedBytes).toBe(raw.length);
-    expect(Buffer.concat(observed)).toEqual(raw);
+    expect(Buffer.concat(observed).equals(raw)).toBe(true);
     expect(observed).toHaveLength(Math.ceil(raw.length / SCAN_CHUNK_BYTES));
     expect(readLengths.reduce((sum, length) => sum + length, 0)).toBe(raw.length);
   });
