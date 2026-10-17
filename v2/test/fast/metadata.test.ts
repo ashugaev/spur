@@ -15,6 +15,10 @@ import {
   listGitHubPollDisabledSourceIds,
   markGitHubPollDisabledChecked,
   readCommentSeenRegistry,
+  readIgnoredGitHubFeedback,
+  recordIgnoredGitHubFeedback,
+  listIgnoredGitHubFeedbackSessions,
+  deleteIgnoredGitHubFeedback,
   readGitHubPollDisabled,
   recordGitHubPollDisabledSession,
   writeGitHubPollDisabled,
@@ -27,6 +31,9 @@ import {
   readTelegramChoices,
   readTelegramReplyTarget,
   readWorkItemLifecycles,
+  readPendingSpawnWork,
+  writePendingSpawnWork,
+  deletePendingSpawnWork,
   readSession,
   readWorkItemRegistry,
   recordCommentSeen,
@@ -46,6 +53,7 @@ import {
 import { appendEventLog } from "../../src/event-log.js";
 import type {
   PersistedPendingBatch,
+  PersistedSpawnWork,
   SessionRecord,
   SubmitAckBaseline,
   TelegramChoice,
@@ -53,6 +61,53 @@ import type {
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
+
+it("round-trips pending spawn ownership and rejects stale checkpoints and malformed births", async () => {
+  const dataDir = await newDataDir();
+  const work: PersistedSpawnWork = {
+    workId: "work",
+    revision: 0,
+    projectId: "project",
+    triggerId: "trigger",
+    sourceId: "source",
+    eventName: "cron:tick",
+    occurrenceId: "event",
+    routeFingerprint: "route",
+    eventData: {},
+    createdAt: new Date().toISOString(),
+    nextBlockIndex: 0,
+    failures: [],
+    admissionDenials: 1,
+    notBeforeAt: 10,
+    blocks: [{ birthKey: "work:0", state: "pending" }],
+  };
+  expect(writePendingSpawnWork(dataDir, work)).toBe(true);
+  expect(readPendingSpawnWork(dataDir).get("work")).toEqual(work);
+  expect(writePendingSpawnWork(dataDir, { ...work, revision: 1 }, 0)).toBe(true);
+  expect(writePendingSpawnWork(dataDir, work, 0)).toBe(false);
+  expect(deletePendingSpawnWork(dataDir, "work", 0)).toBe(false);
+  expect(deletePendingSpawnWork(dataDir, "work", 1)).toBe(true);
+  writeFileSync(
+    join(dataDir, "pending-spawn-work.json"),
+    JSON.stringify([{ ...work, blocks: [{ birthKey: "foreign", state: "pending" }] }]),
+  );
+  expect(readPendingSpawnWork(dataDir).size).toBe(0);
+  recordWorkItemLifecycle(dataDir, "project", "source", {
+    externalId: "item",
+    url: "https://example.com/item",
+    number: 1,
+    title: "task",
+    repo: "repo",
+    autoComplete: false,
+    createdAt: work.createdAt,
+    state: "pending",
+    spawnWorkId: "work",
+  });
+  expect(readWorkItemLifecycles(dataDir, "project", "source").get("item")).toMatchObject({
+    state: "pending",
+    spawnWorkId: "work",
+  });
+});
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -143,6 +198,37 @@ describe("comment-seen registry", () => {
     expect(ids.size).toBe(2);
     expect(ids.has("101")).toBe(true);
     expect(ids.has("102")).toBe(true);
+  });
+});
+
+describe("ignored GitHub feedback", () => {
+  it("persists per session and PR, then removes orphaned state without a snapshot", async () => {
+    const dataDir = await newDataDir();
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:1"]);
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42, ["comment:2"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)]).toEqual(["comment:1"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "b", 42)]).toEqual(["comment:2"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43)]).toEqual([]);
+    recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43, ["comment:3"]);
+    expect([...readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 43)]).toEqual(["comment:3"]);
+    expect(listIgnoredGitHubFeedbackSessions(dataDir, "api", "watch").sort()).toEqual(["a", "b"]);
+    deleteIgnoredGitHubFeedback(dataDir, "api", "watch", "a");
+    expect(listIgnoredGitHubFeedbackSessions(dataDir, "api", "watch")).toEqual(["b"]);
+  });
+
+  it("fails closed on malformed present metadata without rewriting bytes", async () => {
+    const dataDir = await newDataDir();
+    const dir = join(dataDir, "source-state", "github-ignored-feedback", "api", "watch");
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, "a.json");
+    for (const body of ["{bad", '{"prNumber":0,"ids":[]}', '{"prNumber":42,"ids":[3]}']) {
+      await writeFile(path, body, "utf8");
+      expect(() => readIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42)).toThrow();
+      expect(() =>
+        recordIgnoredGitHubFeedback(dataDir, "api", "watch", "a", 42, ["comment:3"]),
+      ).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(body);
+    }
   });
 });
 
