@@ -11549,9 +11549,10 @@ export class SessionService {
       }
     }
     operation?.assertActive();
-    delete updated.stopReason;
-    delete updated.staleSidecars;
-    return updated;
+    // `updated` can be readSession's shared cached record: copy, never delete
+    // in place.
+    const { stopReason: _clearedStale, staleSidecars: _replayed, ...awake } = updated;
+    return awake;
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
