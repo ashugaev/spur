@@ -15230,18 +15230,7 @@ export class SessionService {
     const runtime = await this.readRuntimeSnapshot(hint);
     parentOperation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
-      await this.captureAgentSessionId(
-        hint,
-        0,
-        parentOperation,
-        () =>
-          this.lifecycle.snapshot(sessionId).revision === preparationRevision &&
-          (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)),
-        (prepared) => {
-          if (wakeClaim) wakeClaim.session = prepared;
-          options?.observePreparedSession?.(prepared);
-        },
-      );
+      await this.capturePreparedAgentSessionId(hint, preparationRevision, options);
       return;
     }
     const observation = options?.preparedObservation;
@@ -18589,6 +18578,41 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private async capturePreparedAgentSessionId(
+    session: SessionRecord,
+    revision: number,
+    options?: SessionPreparationOptions & { wakeClaim?: ScheduledWakeClaim },
+    advanceWakeClaim = true,
+  ): Promise<SessionRecord> {
+    const wakeClaim = options?.wakeClaim;
+    const observation = options?.preparedObservation;
+    let persisted: SessionRecord | undefined;
+    const captured = await this.captureAgentSessionId(
+      session,
+      0,
+      options?.operation,
+      () =>
+        this.lifecycle.snapshot(session.id).revision === revision &&
+        (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)) &&
+        (!observation || this.preparedSessionObservationCurrent(observation)),
+      (prepared) => {
+        persisted = prepared;
+        if (advanceWakeClaim && wakeClaim) wakeClaim.session = prepared;
+        options?.observePreparedSession?.(prepared);
+      },
+    );
+    if (
+      wakeClaim?.manual &&
+      (!this.scheduledWakeClaimCurrent(wakeClaim) ||
+        !sameSessionRuntimeOwner(captured, wakeClaim.session) ||
+        captured.agentLaunchId !== wakeClaim.session.agentLaunchId)
+    )
+      throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    if (observation && !this.preparedSessionObservationCurrent(observation))
+      throw new RestoreOperationError();
+    return persisted ?? captured;
+  }
+
   private async captureAgentSessionId(
     session: SessionRecord,
     timeoutMs: number,
@@ -18839,21 +18863,8 @@ export class SessionService {
     const runtime = await this.readRuntimeSnapshot(session);
     assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
-      const wakeClaim = options?.wakeClaim;
       return {
-        session: await this.captureAgentSessionId(
-          session,
-          0,
-          operation,
-          () =>
-            this.lifecycle.snapshot(session.id).revision === probeRevision &&
-            (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)),
-          wakeClaim
-            ? (prepared) => {
-                wakeClaim.session = prepared;
-              }
-            : undefined,
-        ),
+        session: await this.capturePreparedAgentSessionId(session, probeRevision, options),
         recoveryMessage: null,
       };
     }
@@ -19048,15 +19059,11 @@ export class SessionService {
       ...(operation ? { operation } : {}),
     });
     assertActive();
-    const preparedObservation = options?.preparedObservation;
-    const sessionWithAgentId = await this.captureAgentSessionId(
+    const sessionWithAgentId = await this.capturePreparedAgentSessionId(
       session,
-      0,
-      operation,
-      preparedObservation
-        ? () => this.preparedSessionObservationCurrent(preparedObservation)
-        : undefined,
-      options?.observePreparedSession,
+      this.lifecycle.snapshot(session.id).revision,
+      options,
+      options?.wakeClaim?.manual === true,
     );
     assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
