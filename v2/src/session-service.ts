@@ -11562,10 +11562,12 @@ export class SessionService {
       if (!readSession(this.config.dataDir, session.id)) continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         if (
-          !hasRetainedSessionError(reconciled.session) &&
+          !hasRetainedSessionError(current) &&
+          !current.serverErrorAt &&
           !reconciled.runtime.probeUnresponsive &&
           !reconciled.runtime.diagnostic &&
           !workspace.diagnostic &&
+          workspace.exists &&
           (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
         ) {
           const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
@@ -11573,7 +11575,11 @@ export class SessionService {
           if (persisted.status === "missing") continue;
         }
         drifted += 1;
-        if (reconciled.session.status === "stopped") {
+        if (
+          reconciled.session.status === "stopped" ||
+          (reconciled.session.errorSource === "inferred_runtime_exit" &&
+            !reconciled.session.serverErrorAt)
+        ) {
           driftedSessions.push({ id: session.id, project: session.project });
         }
       } else {
@@ -22484,10 +22490,7 @@ export class SessionService {
     }
 
     const terminalUnavailable =
-      !workspaceGone &&
-      (!confirmedRuntime.runtimeAlive ||
-        !confirmedRuntime.paneUsable ||
-        !confirmedRuntime.processAlive);
+      !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
     // Runtime absence does not prove sidecar absence. Keep ownership evidence
     // for the existing sidecar reaper; reconciliation performs no teardown.
@@ -22503,8 +22506,14 @@ export class SessionService {
       updated = {
         ...latest,
         status: "errored",
-        error: workspaceGone ? "Agent worktree is missing." : INFERRED_RUNTIME_EXIT_ERROR,
-        errorSource: workspaceGone ? "other" : "inferred_runtime_exit",
+        ...(workspaceGone
+          ? { error: "Agent worktree is missing.", errorSource: "other" as const }
+          : hasSessionErrorEvidence(latest)
+            ? {}
+            : {
+                error: INFERRED_RUNTIME_EXIT_ERROR,
+                errorSource: "inferred_runtime_exit" as const,
+              }),
         updatedAt,
       };
     }
@@ -22981,6 +22990,34 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // Final accounting uses the incoming record: reconciliation may just have
+    // added an inferred exit error to a previously clean running generation.
+    if (
+      !runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      !hasRetainedSessionError(session) &&
+      !session.serverErrorAt
+    ) {
+      if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      } else if (
+        session.agent === "cursor" &&
+        session.agentSessionId &&
+        runtime.paneUsable &&
+        runtime.processAlive
+      ) {
+        const usage = await readCursorTokenUsage(
+          cursorConfigDirForSession(this.config.dataDir, session.id),
+          session.agentSessionId,
+        ).catch(() => undefined);
+        if (usage) {
+          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+        }
+      }
+    }
     if (
       runtime.probeUnresponsive ||
       workspace.diagnostic ||
@@ -22989,19 +23026,6 @@ export class SessionService {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
     } else {
-      if (session.agent === "cursor" && session.agentSessionId) {
-        const usage = await readCursorTokenUsage(
-          cursorConfigDirForSession(this.config.dataDir, session.id),
-          session.agentSessionId,
-        ).catch(() => undefined);
-        if (usage) {
-          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
-        }
-      } else if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
-        const usage = await this.readFinalTokenUsage(session, runtime);
-        tokenUsage = usage.tokenUsage;
-        tokenUsages = usage.tokenUsages;
-      }
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
       } else if (!runtime.paneUsable || !runtime.processAlive) {
