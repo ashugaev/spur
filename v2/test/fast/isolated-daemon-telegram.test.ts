@@ -146,7 +146,7 @@ it.each(["restart", "blocked"] as const)(
     const ownerPath = join(path, "owner.mjs");
     writeFileSync(
       ownerPath,
-      `import {readFile} from 'node:fs/promises';import {existsSync} from 'node:fs';import {serveIsolatedDaemon} from ${JSON.stringify(resolve("dist/isolated-daemon-owner.js"))};globalThis.fetch=async()=>{const info=JSON.parse(await readFile(${JSON.stringify(infoPath)},'utf8'));if(existsSync(${JSON.stringify(terminalMarker)}))info.lifecycleInstanceId='unconfirmed';return Response.json(info);};try{await serveIsolatedDaemon(${JSON.stringify({ configPath, cliPath: childPath, runtimePath: join(path, "runtime.env"), projectConfigPath: join(path, "project.yaml"), sourceWorktree: path })});}catch{process.exitCode=1;}`,
+      `import {readFile} from 'node:fs/promises';import {existsSync} from 'node:fs';import {serveIsolatedDaemon} from ${JSON.stringify(resolve("dist/isolated-daemon-owner.js"))};globalThis.fetch=async()=>{const info=JSON.parse(await readFile(${JSON.stringify(infoPath)},'utf8'));if(existsSync(${JSON.stringify(terminalMarker)}))info.lifecycleInstanceId='unconfirmed';return Response.json(info);};try{await serveIsolatedDaemon(${JSON.stringify({ configPath, cliPath: childPath, runtimePath: join(path, "runtime.env"), projectConfigPath: join(path, "project.yaml"), sourceWorktree: path })});}catch(error){console.error(error);process.exitCode=1;}`,
     );
     const lock = join(path, "bot.lock");
     const writer = join(path, "writer.cjs");
@@ -163,11 +163,30 @@ it.each(["restart", "blocked"] as const)(
       ["-c", script, "fixture", process.execPath, writer, path, ownerPath],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
+    let stderr = "";
+    let spawnError: Error | undefined;
+    owner.stderr.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-65_536);
+    });
+    owner.stdout.resume();
+    owner.once("error", (error) => {
+      spawnError = error;
+    });
+    const startupDiagnostic = () =>
+      `Owner startup: exit=${owner.exitCode}, signal=${owner.signalCode}, spawn=${spawnError?.message ?? "none"}\n${stderr}`;
     const exited = once(owner, "exit");
     try {
-      await expect
-        .poll(() => JSON.parse(readFileSync(join(path, "owner.json"), "utf8")).daemon?.pid)
-        .toBeGreaterThan(0);
+      try {
+        await expect
+          .poll(() => {
+            if (spawnError || owner.exitCode !== null || owner.signalCode !== null)
+              throw new Error(startupDiagnostic());
+            return JSON.parse(readFileSync(join(path, "owner.json"), "utf8")).daemon?.pid;
+          })
+          .toBeGreaterThan(0);
+      } catch (error) {
+        throw new Error(startupDiagnostic(), { cause: error });
+      }
       const before = JSON.parse(readFileSync(join(path, "owner.json"), "utf8")) as {
         owner: { pid: number };
         daemon: { pid: number };
