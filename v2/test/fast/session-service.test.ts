@@ -48568,11 +48568,11 @@ describe("SessionService", () => {
     describe("manual interval zero-input claim:", () => {
       const pastDue = "2026-03-18T09:00:00.000Z";
 
-      async function wakeFixture() {
+      async function wakeFixture(workspaceId: string | null = "wake-workspace") {
         const sessions = seedShepherdSession({
           agentSessionId: "native-original",
           agentLaunchId: "launch-original",
-          workspaceId: "wake-workspace",
+          ...(workspaceId === null ? {} : { workspaceId }),
           submitUnconfirmedAt: "2026-03-18T10:04:00.000Z",
           queuedMessageTyped: {
             message: "earlier typed input",
@@ -48596,6 +48596,61 @@ describe("SessionService", () => {
         return { sessions, service, lifecycle, ...module };
       }
 
+      it("does not recreate a session deleted after actual typed refusal", async () => {
+        const { sessions, service, LaunchPromptPendingError } = await wakeFixture();
+        const originalSend = service.send.bind(service);
+        let failure: unknown;
+        let writesAtDeletion = 0;
+        vi.spyOn(service, "send").mockImplementation(async (...args) => {
+          try {
+            return await originalSend(...args);
+          } catch (error) {
+            expect(error).toBeInstanceOf(LaunchPromptPendingError);
+            failure = error;
+            sessions.delete("shp-1");
+            writesAtDeletion = writeSessionMock.mock.calls.length;
+            throw error;
+          }
+        });
+        const result = await service
+          .dispatchWake("shp-1", { target: "interval", dispatch: true })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(LaunchPromptPendingError);
+        expect(result).toBe(failure);
+        expect(sessions.has("shp-1")).toBe(false);
+        expect(writeSessionMock).toHaveBeenCalledTimes(writesAtDeletion);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      });
+
+      it.each([null, "shp-1"])(
+        "restores an unchanged refusal with workspace %s and rejects a later lifecycle revision",
+        async (workspaceId) => {
+          const { sessions, service, lifecycle, LaunchPromptPendingError } =
+            await wakeFixture(workspaceId);
+          const failure = new LaunchPromptPendingError("prior acknowledgement pending", pastDue);
+          const send = vi.spyOn(service, "send").mockRejectedValue(failure);
+          await expect(
+            service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+          ).rejects.toBe(failure);
+          expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe(pastDue);
+          send.mockImplementationOnce(async () => {
+            const owner = lifecycle.begin("restore", ["shp-1"]);
+            lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+            throw failure;
+          });
+          await expect(
+            service.dispatchWake("shp-1", { target: "interval", dispatch: true }),
+          ).rejects.toBe(failure);
+          expect(sessions.get("shp-1")?.intervalWake?.nextDueAt).toBe("2026-03-18T10:10:00.000Z");
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        },
+      );
+
       it("preserves supported identical cancel-rearm after actual typed refusal", async () => {
         const { sessions, service, lifecycle, LaunchPromptPendingError } = await wakeFixture();
         const originalSend = service.send.bind(service);
@@ -48612,7 +48667,8 @@ describe("SessionService", () => {
             failure = error;
             expect(error).toBeInstanceOf(LaunchPromptPendingError);
             const claimed = sessions.get("shp-1");
-            if (!claimed?.intervalWake) throw new Error("missing claimed fixture", { cause: error });
+            if (!claimed?.intervalWake)
+              throw new Error("missing claimed fixture", { cause: error });
             const snapshots = [lifecycle.snapshot("shp-1"), lifecycle.snapshot("wake-workspace")];
             await service.cancelWake("shp-1");
             await service.scheduleWake("shp-1", {
