@@ -1,5 +1,13 @@
 import { spawn, execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -124,9 +132,9 @@ it("selects off before the first writer and rejects empty or invalid selectors w
   expect(readFileSync(lock, "utf8")).toBe("");
 });
 
-it.each(["restart", "blocked"] as const)(
+it.for(["restart", "blocked"] as const)(
   "retains the TEST descriptor through %s until the tracked child and owner exit",
-  async (mode) => {
+  async (mode, { signal }) => {
     const path = mkdtempSync(join(tmpdir(), "spur-test-owner-lease-"));
     paths.push(path);
     chmodSync(path, 0o700);
@@ -146,7 +154,7 @@ it.each(["restart", "blocked"] as const)(
     const ownerPath = join(path, "owner.mjs");
     writeFileSync(
       ownerPath,
-      `import {readFile} from 'node:fs/promises';import {existsSync} from 'node:fs';import {serveIsolatedDaemon} from ${JSON.stringify(resolve("dist/isolated-daemon-owner.js"))};globalThis.fetch=async()=>{const info=JSON.parse(await readFile(${JSON.stringify(infoPath)},'utf8'));if(existsSync(${JSON.stringify(terminalMarker)}))info.lifecycleInstanceId='unconfirmed';return Response.json(info);};try{await serveIsolatedDaemon(${JSON.stringify({ configPath, cliPath: childPath, runtimePath: join(path, "runtime.env"), projectConfigPath: join(path, "project.yaml"), sourceWorktree: path })});}catch(error){console.error(error);process.exitCode=1;}`,
+      `import {readFile} from 'node:fs/promises';import {existsSync} from 'node:fs';import {serveIsolatedDaemon} from ${JSON.stringify(resolve("dist/isolated-daemon-owner.js"))};globalThis.fetch=async()=>{const info=JSON.parse(await readFile(${JSON.stringify(infoPath)},'utf8'));if(existsSync(${JSON.stringify(terminalMarker)}))info.lifecycleInstanceId='unconfirmed';return Response.json(info);};try{console.log('OWNER_GATE_ENTERED');await new Promise(resolve=>{process.stdin.once('data',resolve);process.stdin.once('end',resolve);process.stdin.resume();});process.stdin.pause();await serveIsolatedDaemon(${JSON.stringify({ configPath, cliPath: childPath, runtimePath: join(path, "runtime.env"), projectConfigPath: join(path, "project.yaml"), sourceWorktree: path })});}catch(error){console.error(error);process.exitCode=1;}`,
     );
     const lock = join(path, "bot.lock");
     const writer = join(path, "writer.cjs");
@@ -161,32 +169,136 @@ it.each(["restart", "blocked"] as const)(
     const owner = spawn(
       "bash",
       ["-c", script, "fixture", process.execPath, writer, path, ownerPath],
-      { stdio: ["ignore", "pipe", "pipe"] },
+      { stdio: ["pipe", "pipe", "pipe"] },
     );
     let stderr = "";
     let spawnError: Error | undefined;
     owner.stderr.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-65_536);
     });
-    owner.stdout.resume();
-    owner.once("error", (error) => {
-      spawnError = error;
-    });
+    let phase = "record absent";
     const startupDiagnostic = () =>
-      `Owner startup: exit=${owner.exitCode}, signal=${owner.signalCode}, spawn=${spawnError?.message ?? "none"}\n${stderr}`;
+      `Owner startup: phase=${phase}, exit=${owner.exitCode}, signal=${owner.signalCode}, spawn=${spawnError?.message ?? "none"}\n${stderr}`;
     const exited = once(owner, "exit");
-    try {
-      try {
-        await expect
-          .poll(() => {
-            if (spawnError || owner.exitCode !== null || owner.signalCode !== null)
-              throw new Error(startupDiagnostic());
-            return JSON.parse(readFileSync(join(path, "owner.json"), "utf8")).daemon?.pid;
-          })
-          .toBeGreaterThan(0);
-      } catch (error) {
-        throw new Error(startupDiagnostic(), { cause: error });
+    void exited.catch(() => {});
+    let resolveGate!: () => void;
+    let rejectGate!: (error: Error) => void;
+    let resolvePublication!: () => void;
+    let rejectPublication!: (error: Error) => void;
+    let gateSettled = false;
+    let publicationSettled = false;
+    const gateEntered = new Promise<void>((resolve, reject) => {
+      resolveGate = resolve;
+      rejectGate = reject;
+    });
+    const published = new Promise<void>((resolve, reject) => {
+      resolvePublication = resolve;
+      rejectPublication = reject;
+    });
+    void gateEntered.catch(() => {});
+    void published.catch(() => {});
+    let watcher: ReturnType<typeof watch> | undefined;
+    const detach = () => {
+      watcher?.close();
+      owner.stdout.off("data", onStdout);
+      owner.off("error", onError);
+      owner.off("exit", onExit);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const fail = (cause: unknown) => {
+      const error = new Error(startupDiagnostic(), { cause });
+      if (!gateSettled) {
+        gateSettled = true;
+        rejectGate(error);
       }
+      if (!publicationSettled) {
+        publicationSettled = true;
+        rejectPublication(error);
+      }
+      detach();
+    };
+    function onError(error: Error) {
+      spawnError = error;
+      fail(error);
+    }
+    function onExit() {
+      fail(new Error("Owner exited before ready publication"));
+    }
+    function onAbort() {
+      fail(signal.reason);
+    }
+    let stdout = "";
+    function onStdout(chunk: Buffer) {
+      stdout = (stdout + chunk.toString()).slice(-64);
+      if (!gateSettled && stdout.includes("OWNER_GATE_ENTERED\n")) {
+        gateSettled = true;
+        resolveGate();
+        if (publicationSettled) detach();
+      }
+    }
+    const object = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === "object";
+    const readPublication = () => {
+      if (publicationSettled) return;
+      try {
+        const record: unknown = JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
+        if (!object(record) || !object(record["owner"]) || record["owner"]["pid"] !== owner.pid)
+          throw new Error("Unexpected owner publication");
+        const daemon = record["daemon"];
+        if (daemon === null) {
+          phase = "daemon null";
+          return;
+        }
+        if (
+          !object(daemon) ||
+          typeof daemon["pid"] !== "number" ||
+          !Number.isSafeInteger(daemon["pid"]) ||
+          daemon["pid"] <= 0 ||
+          typeof daemon["starttime"] !== "number" ||
+          !Number.isSafeInteger(daemon["starttime"]) ||
+          daemon["starttime"] < 0 ||
+          typeof daemon["lifecycleInstanceId"] !== "string" ||
+          !daemon["lifecycleInstanceId"].trim()
+        )
+          throw new Error("Invalid daemon publication");
+        phase = "record ready";
+        publicationSettled = true;
+        resolvePublication();
+        if (gateSettled) detach();
+      } catch (error) {
+        if (object(error) && error["code"] === "ENOENT") {
+          phase = "record absent";
+          return;
+        }
+        fail(error);
+      }
+    };
+    const releaseGate = () => {
+      if (!owner.stdin.destroyed && !owner.stdin.writableEnded) owner.stdin.end("release\n");
+    };
+    const dispose = () => {
+      if (!gateSettled || !publicationSettled) fail(new Error("Startup wait disposed"));
+      detach();
+      releaseGate();
+    };
+    owner.on("error", onError);
+    owner.once("exit", onExit);
+    owner.stdin.on("error", onError);
+    owner.stdout.on("data", onStdout);
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      watcher = watch(path, (_event, filename) => {
+        if (filename === null || filename.toString() === "owner.json") readPublication();
+      });
+      watcher.on("error", onError);
+      if (signal.aborted) onAbort();
+      else if (spawnError || owner.exitCode !== null || owner.signalCode !== null) onExit();
+      else readPublication();
+      await gateEntered;
+      expect(existsSync(join(path, "owner.json"))).toBe(false);
+      expect(publicationSettled).toBe(false);
+      releaseGate();
+      await published;
       const before = JSON.parse(readFileSync(join(path, "owner.json"), "utf8")) as {
         owner: { pid: number };
         daemon: { pid: number };
@@ -218,11 +330,13 @@ it.each(["restart", "blocked"] as const)(
       expect(owner.exitCode).toBe(0);
       execFileSync("flock", ["-n", lock, "true"]);
     } finally {
+      dispose();
       writeFileSync(releasePath, "exit owned fixture");
       if (owner.exitCode === null && owner.signalCode === null) {
         owner.kill("SIGTERM");
         await exited;
       }
+      owner.stdin.off("error", onError);
     }
   },
 );
