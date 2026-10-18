@@ -54,6 +54,26 @@ async function fixture() {
 }
 
 describe("ToDo actor identity", () => {
+  it("accepts MCP as a human operator and rejects MCP session impersonation", async () => {
+    const lookup = vi.fn();
+    await expect(
+      resolveTodoMutationActor({
+        origin: "mcp",
+        callerHeader: undefined,
+        targetSessionId: "target",
+        lookup,
+      }),
+    ).resolves.toEqual({ kind: "human", origin: "mcp" });
+    await expect(
+      resolveTodoMutationActor({
+        origin: "mcp",
+        callerHeader: "target",
+        targetSessionId: "target",
+        lookup,
+      }),
+    ).rejects.toThrow("Caller session requires CLI origin");
+    expect(lookup).not.toHaveBeenCalled();
+  });
   it("projects fresh stored identity without returning the session record", async () => {
     const { server, dataDir, session } = await fixture();
     expect(server.getSessionIdentity(session.id)).toEqual({ id: session.id, agent: "codex" });

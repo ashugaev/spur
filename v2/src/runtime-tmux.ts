@@ -624,16 +624,23 @@ function isSystemdRunUnavailable(error: unknown): boolean {
 async function runTmuxNewSession(
   args: string[],
   operation?: RestoreOperationContext,
+  beforeLaunch?: () => void,
 ): Promise<void> {
   const run = (file: string, commandArgs: string[]): Promise<unknown> =>
     operation ? runRestoreCommand(file, commandArgs, operation) : execFileAsync(file, commandArgs);
   const mode = systemdScopeMode();
   if (mode === "direct") {
+    operation?.assertActive();
+    beforeLaunch?.();
     await run("tmux", args);
     return;
   }
+  const scopedArgs = ["--user", "--scope", "--quiet", "--collect", "tmux", ...args];
+  operation?.assertActive();
+  beforeLaunch?.();
   try {
-    await run("systemd-run", ["--user", "--scope", "--quiet", "--collect", "tmux", ...args]);
+    await run("systemd-run", scopedArgs);
+    return;
   } catch (error) {
     operation?.assertActive();
     if (mode === "auto" && isSystemdRunUnavailable(error)) {
@@ -647,11 +654,13 @@ async function runTmuxNewSession(
             "KillMode=process.\n",
         );
       }
-      await run("tmux", args);
-      return;
+    } else {
+      throw error;
     }
-    throw error;
   }
+  operation?.assertActive();
+  beforeLaunch?.();
+  await run("tmux", args);
 }
 
 // Claude Code identity markers. The spur daemon (or whatever shell spawned
@@ -895,18 +904,25 @@ const PS_SNAPSHOT_CACHE_KEY = "ps";
 // a worse outcome than a missed reap — so this is sized well above any
 // observed process table, not just the current one.
 const PS_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+const PS_COMMAND = "ps";
+const PS_ARGUMENTS = ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"];
+const MALFORMED_PROCESS_TABLE = "malformed process table output";
+
+export function isHistoricalPsProbeDiagnostic(diagnostic: string): boolean {
+  return (
+    diagnostic === probeDiagnostic(PS_COMMAND, MALFORMED_PROCESS_TABLE) ||
+    diagnostic ===
+      probeDiagnostic(PS_COMMAND, `Command failed: ${PS_COMMAND} ${PS_ARGUMENTS.join(" ")}\n`)
+  );
+}
 
 function getPsSnapshot(): Promise<PsSnapshot> {
   return memoizedProbe(psSnapshotCache, PS_SNAPSHOT_CACHE_KEY, async () => {
     try {
-      const { stdout: psOut } = await execFileAsync(
-        "ps",
-        ["-eo", "pid,ppid,pgid,tpgid,tty,rss,args"],
-        {
-          signal: AbortSignal.timeout(5_000),
-          maxBuffer: PS_MAX_BUFFER_BYTES,
-        },
-      );
+      const { stdout: psOut } = await execFileAsync(PS_COMMAND, PS_ARGUMENTS, {
+        signal: AbortSignal.timeout(5_000),
+        maxBuffer: PS_MAX_BUFFER_BYTES,
+      });
       const lines = psOut.split("\n");
       const rows = lines
         .map((line, index) => {
@@ -923,7 +939,7 @@ function getPsSnapshot(): Promise<PsSnapshot> {
               .map((col) => (/^-?\d+$/.test(col) ? "N" : "T"))
               .join(" ");
             throw new Error(
-              `malformed process table output (line ${index + 1}/${lines.length}, ${cols.length} columns, shape ${shape}, ${psOut.length} bytes, ${psOut.endsWith("\n") ? "trailing newline" : "no trailing newline"})`,
+              `${MALFORMED_PROCESS_TABLE} (line ${index + 1}/${lines.length}, ${cols.length} columns, shape ${shape}, ${psOut.length} bytes, ${psOut.endsWith("\n") ? "trailing newline" : "no trailing newline"})`,
             );
           }
           const pid = Number.parseInt(cols[0] ?? "", 10);
@@ -946,14 +962,14 @@ function getPsSnapshot(): Promise<PsSnapshot> {
         .filter((row): row is PsRow => row !== null);
       if (rows.length === 0) {
         // `ps -e` always lists at least itself: zero rows is a cut or empty read.
-        throw new Error(`malformed process table output (no data rows, ${psOut.length} bytes)`);
+        throw new Error(`${MALFORMED_PROCESS_TABLE} (no data rows, ${psOut.length} bytes)`);
       }
       return { rows, unresponsive: false };
     } catch (error) {
       return {
         rows: [],
         unresponsive: isProbeTimeoutKill(error),
-        diagnostic: probeDiagnostic("ps", error),
+        diagnostic: probeDiagnostic(PS_COMMAND, error),
       };
     }
   });
@@ -1196,6 +1212,7 @@ export async function createTmuxSession(input: {
   launchScriptDir: string;
   env?: Record<string, string>;
   operation?: RestoreOperationContext;
+  beforeLaunch?: () => void;
 }): Promise<void> {
   input.operation?.assertActive();
   const paneEnv = buildPaneEnv(input.env);
@@ -1218,9 +1235,14 @@ export async function createTmuxSession(input: {
         buildAgentPaneShellCommand(scriptPath, envFile),
       ],
       input.operation,
+      input.beforeLaunch,
     );
   } catch (error) {
-    rmSync(envFile, { force: true });
+    try {
+      rmSync(envFile, { force: true });
+    } catch {
+      // Preserve the launch/authorization failure when local cleanup also fails.
+    }
     throw error;
   }
   invalidateFleetProbeCaches();

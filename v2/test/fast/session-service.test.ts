@@ -1,4 +1,5 @@
 import type * as cryptoModule from "node:crypto";
+import type * as childProcessModule from "node:child_process";
 import type * as fsPromisesModule from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
@@ -19,6 +20,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type {
   capturePaneAgentProcesses,
   AgentProcessRef,
@@ -174,7 +176,7 @@ const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
 const captureTmuxPaneMock = vi.fn((): Promise<string | null> => Promise.resolve(""));
 const captureTmuxPaneOrEmptyMock = vi.fn(() => Promise.resolve(""));
-const createTmuxSessionMock = vi.fn();
+const createTmuxSessionMock = vi.fn<typeof runtimeTmuxModule.createTmuxSession>();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
 const sweepLeakedPlaywrightMock = vi.fn();
@@ -824,6 +826,7 @@ vi.mock("../../src/runtime-tmux.js", async (importOriginal) => {
   return {
     PromptReadyTimeoutError: actual.PromptReadyTimeoutError,
     TmuxProbeUnknownError: actual.TmuxProbeUnknownError,
+    isHistoricalPsProbeDiagnostic: actual.isHistoricalPsProbeDiagnostic,
     captureTmuxPane: captureTmuxPaneMock,
     captureTmuxPaneOrEmpty: captureTmuxPaneOrEmptyMock,
     createTmuxSession: createTmuxSessionMock,
@@ -1133,7 +1136,8 @@ function createSessionStore(...initial: SessionRecord[]) {
   // every call (clone() always allocates a new object), which contradicts
   // the real listSessions() and would make the tick's record-change
   // detection untestable. readSessionMock/writeSessionMock stay a raw clone
-  // per call, mirroring production where only listSessions is stat-gated.
+  // per call: production readSession shares the same cache, but no caller
+  // relies on its identity.
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
@@ -1362,7 +1366,8 @@ function agentLaunchCommand(agent: StaleMatrixAgent): string {
 
 function mockExitedThenRestoredProcess() {
   let restoredTmuxCreated = false;
-  createTmuxSessionMock.mockImplementation(async () => {
+  createTmuxSessionMock.mockImplementation(async (input) => {
+    input.beforeLaunch?.();
     restoredTmuxCreated = true;
   });
   isProcessRunningInTmuxMock.mockImplementation(async () => restoredTmuxCreated);
@@ -1398,6 +1403,11 @@ type SessionServiceInternals = {
     messageText: string,
     windowMs: number,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
+  settleSubmitHold(
+    session: SessionRecord,
+    state: SessionState,
+    agentActivityAt: Date | null,
+  ): Promise<SessionRecord>;
   paneGenerationMatches(session: SessionRecord, expected: unknown): Promise<boolean>;
   sendAgentMessage(
     session: {
@@ -2344,7 +2354,9 @@ describe("SessionService", () => {
     readServiceInstanceMock.mockReset().mockReturnValue(undefined);
     writeServiceInstanceMock.mockReset();
     resetServiceStore();
-    createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
+    createTmuxSessionMock.mockReset().mockImplementation(async (input) => {
+      input.beforeLaunch?.();
+    });
     resolveCursorLaunchModelMock
       .mockReset()
       .mockImplementation(async (model: string | undefined) => model);
@@ -3276,8 +3288,10 @@ describe("SessionService", () => {
     const outcome = first.catch((error: unknown) => error);
     let pid = 0;
     try {
-      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
-      pid = Number(readFileSync(pidFile, "utf8"));
+      await vi.waitFor(() => {
+        pid = Number(readFileSync(pidFile, "utf8"));
+        expect(pid).toBeGreaterThan(0);
+      });
       const canceledAt = Date.now();
       controller.abort();
       expect(await outcome).toMatchObject({ statusCode: 499 });
@@ -12412,6 +12426,415 @@ describe("SessionService", () => {
     },
   );
 
+  it.each(["flush", "send now"] as const)(
+    "delivers Codex %s with a retained error without an idle interrupt (issue #1209)",
+    async (entryPoint) => {
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          agentSessionId: "retained-native-thread",
+          error: "Agent runtime exited unexpectedly.",
+          errorSource: "other",
+          queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+        }),
+      );
+      readAgentHookStateMock.mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      });
+      sendInterruptKeysToTmuxMock.mockImplementation(async () => {
+        isProcessRunningInTmuxMock.mockResolvedValue(false);
+        return true;
+      });
+      const service = await createDisposedSessionService();
+
+      const result =
+        entryPoint === "flush"
+          ? service.flushQueuedMessage("api-1", "flush me")
+          : service.send("api-1", { message: "flush me", queue: false, interrupt: true });
+
+      await expect(result).resolves.toMatchObject({ id: "api-1" });
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+        agent: "codex",
+        interrupt: false,
+      });
+      expect(sessions.get("api-1")).toMatchObject({
+        agentSessionId: "retained-native-thread",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "other",
+        queuedMessages: {
+          messages: entryPoint === "flush" ? ["held"] : ["held", "flush me"],
+          awaitingPrompt: true,
+        },
+      });
+    },
+  );
+
+  it.each([
+    "waiting",
+    "classification failed",
+    "restore warmup",
+    "hook busy",
+    "rollout busy",
+    "input required",
+    "MCP menu",
+  ] as const)(
+    "flushes a queued Codex message with safe interruption for the %s classification (issue #1209)",
+    async (scenario) => {
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+        }),
+      );
+      if (scenario === "classification failed") {
+        readCodexRolloutStateMock.mockRejectedValue(new Error("structured state unavailable"));
+      } else if (scenario === "hook busy") {
+        readAgentHookStateMock.mockReturnValue({
+          state: "working",
+          updatedAt: "2026-03-18T10:04:59.000Z",
+          hookEvent: "PreToolUse",
+        });
+      } else if (scenario === "rollout busy" || scenario === "input required") {
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: {
+            state: scenario === "rollout busy" ? "working" : "needs_input",
+            reason: scenario === "rollout busy" ? "task_started" : "input_required",
+            timestamp: "2026-03-18T10:04:59.000Z",
+            timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+            filePath: "/tmp/codex/rollout.jsonl",
+          },
+          rateLimit: null,
+        });
+      } else if (scenario === "MCP menu") {
+        captureTmuxPaneMock.mockResolvedValue(
+          'Allow the playwright MCP server to run tool "browser_navigate"?\n' +
+            "› 1. Allow\n2. Allow for this session\n3. Always allow\n4. Cancel\nenter to submit | esc to cancel",
+        );
+      }
+      const service = await createDisposedSessionService();
+      if (scenario === "restore warmup") {
+        sessionServiceInternals(service).restoreWarmupUntil.set("api-1", Date.now() + 30_000);
+      }
+
+      const flush = service.flushQueuedMessage("api-1", "flush me");
+      if (scenario === "classification failed") {
+        await expect(flush).rejects.toThrow("Cannot safely determine Codex input state");
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["held", "flush me"]);
+        return;
+      }
+      await flush;
+
+      const interrupts = scenario !== "waiting" && scenario !== "restore warmup";
+      if (interrupts) {
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
+        expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
+      } else {
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      }
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+        agent: "codex",
+        ...(interrupts ? {} : { interrupt: false }),
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["held"]);
+    },
+  );
+
+  describe.each(["flush", "send now"] as const)(
+    "Codex %s behind a retained error (issue #1209)",
+    (entryPoint) => {
+      it.each(["input_required", "request_user_input", "MCP menu", "working"] as const)(
+        "cancels native %s before delivering a new message",
+        async (nativeState) => {
+          const sessions = createSessionStore(
+            runningSession({
+              agent: "codex",
+              launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+              agentSessionId: "retained-native-thread",
+              error: "Agent runtime exited unexpectedly.",
+              errorSource: "other",
+              queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+            }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          if (nativeState === "MCP menu") {
+            captureTmuxPaneMock.mockResolvedValue(
+              'Allow the playwright MCP server to run tool "browser_navigate"?\n' +
+                "› 1. Allow\n2. Allow for this session\n3. Always allow\n4. Cancel\nenter to submit | esc to cancel",
+            );
+          } else {
+            readCodexRolloutStateMock.mockResolvedValue({
+              rollout: {
+                state: nativeState === "working" ? "working" : "needs_input",
+                reason: nativeState === "working" ? "task_started" : nativeState,
+                timestamp: "2026-03-18T10:04:59.000Z",
+                timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+                filePath: "/tmp/codex/rollout.jsonl",
+              },
+              rateLimit: null,
+            });
+          }
+          const service = await createDisposedSessionService();
+
+          if (entryPoint === "flush") {
+            await service.flushQueuedMessage("api-1", "flush me");
+          } else {
+            await service.send("api-1", { message: "flush me", queue: false, interrupt: true });
+          }
+
+          expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledWith("api-1", "codex");
+          expect(sendInterruptKeysToTmuxMock).toHaveBeenCalledBefore(sendMessageToTmuxMock);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "flush me", {
+            agent: "codex",
+          });
+          expect(sessions.get("api-1")).toMatchObject({
+            agentSessionId: "retained-native-thread",
+            error: "Agent runtime exited unexpectedly.",
+            errorSource: "other",
+            queuedMessages: {
+              messages: entryPoint === "flush" ? ["held"] : ["held", "flush me"],
+            },
+          });
+        },
+      );
+
+      it.each([
+        "no native evidence",
+        "failed pane",
+        "busy failed pane",
+        "runtime unknown",
+        "rate limited",
+      ] as const)(
+        "holds before any interrupt or paste when masked native evidence is %s",
+        async (scenario) => {
+          const sessions = createSessionStore(
+            runningSession({
+              agent: "codex",
+              launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+              agentSessionId: "retained-native-thread",
+              error: "Agent runtime exited unexpectedly.",
+              errorSource: "other",
+              queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+            }),
+          );
+          listSessionsMock.mockReturnValue([]);
+          if (scenario !== "no native evidence") {
+            readAgentHookStateMock.mockReturnValue({
+              state: scenario === "busy failed pane" ? "working" : "waiting",
+              updatedAt: "2026-03-18T10:04:59.000Z",
+              hookEvent: "PreToolUse",
+            });
+          }
+          if (scenario === "failed pane" || scenario === "busy failed pane") {
+            captureTmuxPaneMock.mockResolvedValue(null);
+          } else if (scenario === "rate limited") {
+            readCodexRolloutStateMock.mockResolvedValue({
+              rollout: null,
+              rateLimit: { limited: true, reason: "codex out of credits" },
+            });
+          }
+          const service = await createDisposedSessionService();
+          if (scenario === "runtime unknown") {
+            const runtime = {
+              runtimeAlive: true,
+              paneUsable: true,
+              processAlive: true,
+              tmuxActivityAt: null,
+              probeUnresponsive: false,
+            };
+            vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot")
+              .mockResolvedValueOnce(runtime)
+              .mockResolvedValueOnce({
+                ...runtime,
+                processAlive: false,
+                probeUnresponsive: true,
+              });
+          }
+          const result =
+            entryPoint === "flush"
+              ? service.flushQueuedMessage("api-1", "flush me")
+              : service.send("api-1", { message: "flush me", queue: false, interrupt: true });
+
+          await expect(result).rejects.toThrow(
+            scenario === "rate limited"
+              ? "is rate limited"
+              : "Cannot safely determine Codex input state",
+          );
+
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get("api-1")).toMatchObject({
+            error: "Agent runtime exited unexpectedly.",
+            errorSource: "other",
+            queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+          });
+          expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+          expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+        },
+      );
+    },
+  );
+
+  it.each(["native reader throws", "hard pane limit"] as const)(
+    "holds retained-error Codex after reaching %s (issue #1209)",
+    async (scenario) => {
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          agentSessionId: "retained-native-thread",
+          error: "Agent runtime exited unexpectedly.",
+          errorSource: "other",
+          queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+        }),
+      );
+      listSessionsMock.mockReturnValue([]);
+      readAgentHookStateMock.mockReturnValue({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "PreToolUse",
+      });
+      if (scenario === "native reader throws") {
+        readCodexRolloutStateMock.mockRejectedValue(new Error("native state read failed"));
+      } else {
+        captureTmuxPaneMock.mockResolvedValue("■ Your workspace is out of credits");
+      }
+      const service = await createDisposedSessionService();
+      const before = sessions.get("api-1");
+      const result =
+        scenario === "native reader throws"
+          ? service.send("api-1", { message: "flush me", queue: false, interrupt: true })
+          : service.flushQueuedMessage("api-1", "flush me");
+
+      await expect(result).rejects.toThrow(
+        scenario === "native reader throws" ? "native state read failed" : "is rate limited",
+      );
+
+      expect(readCodexRolloutStateMock).toHaveBeenCalledExactlyOnceWith(
+        expect.any(String),
+        expect.any(Object),
+        "retained-native-thread",
+      );
+      if (scenario === "native reader throws") {
+        expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+      } else {
+        expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+      }
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")).toEqual(before);
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+    },
+  );
+
+  it("refuses every key after the Codex pane changes during a retained-input read (issue #1209)", async () => {
+    const sessions = createSessionStore(
+      runningSession({
+        agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        agentSessionId: "retained-native-thread",
+        error: "Agent runtime exited unexpectedly.",
+        errorSource: "other",
+        queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+      }),
+    );
+    listSessionsMock.mockReturnValue([]);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "needs_input",
+        reason: "request_user_input",
+        timestamp: "2026-03-18T10:04:59.000Z",
+        timestampMs: Date.parse("2026-03-18T10:04:59.000Z"),
+        filePath: "/tmp/codex/rollout.jsonl",
+      },
+      rateLimit: null,
+    });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+    const service = await createDisposedSessionService({ realPaneGeneration: true });
+    let releasePane!: () => void;
+    const paneGate = new Promise<void>((resolve) => {
+      releasePane = resolve;
+    });
+    let paneHeld = false;
+    captureTmuxPaneMock.mockImplementationOnce(async () => {
+      paneHeld = true;
+      await paneGate;
+      return "";
+    });
+    const before = sessions.get("api-1");
+    const flush = service.flushQueuedMessage("api-1", "flush me").then(
+      (view) => ({ view }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.waitFor(() => expect(paneHeld).toBe(true));
+    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 200, { fresh: true });
+    lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.ppid });
+    releasePane();
+
+    await expect(flush).resolves.toMatchObject({
+      error: expect.objectContaining({ message: "Session api-1 changed before message delivery" }),
+    });
+    expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")).toEqual(before);
+    expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+    expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+    expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+  });
+
+  it.each(["dead process", "replacement pane"] as const)(
+    "retains the Codex flush queue without typing into a %s (issue #1209)",
+    async (scenario) => {
+      const sessions = createSessionStore(
+        runningSession({
+          agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          error: "Agent runtime exited unexpectedly.",
+          errorSource: "other",
+          queuedMessages: { messages: ["held", "flush me"], awaitingPrompt: true },
+        }),
+      );
+      readAgentHookStateMock.mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService({ realPaneGeneration: true });
+      createAgentSubmitAckBindingMock.mockImplementationOnce(async () => {
+        if (scenario === "dead process") {
+          isProcessRunningInTmuxMock.mockResolvedValue(false);
+        } else {
+          lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.ppid });
+        }
+        return null;
+      });
+
+      await expect(service.flushQueuedMessage("api-1", "flush me")).rejects.toThrow(
+        scenario === "dead process"
+          ? "is not running; message not sent"
+          : "changed before message delivery",
+      );
+
+      expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["held", "flush me"]);
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).sessionLifecycleLocks.size).toBe(0);
+    },
+  );
+
   it("delivers a direct send immediately without queueing", async () => {
     mockClaudeJsonlState("working");
     const sessions = createSessionStore();
@@ -13940,7 +14363,12 @@ describe("SessionService", () => {
       });
       sessions.set(record.id, record);
       getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
-      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, "diagnostic-ack.jsonl"),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
       probeTmuxProcessMatchMock.mockImplementation(async () =>
         sendMessageToTmuxMock.mock.calls.length > 0
           ? {
@@ -13956,7 +14384,17 @@ describe("SessionService", () => {
         lastScannedFile: null,
       });
       await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
-      expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["first queued"]);
+      expect(sessions.get(record.id)?.queuedMessages).toEqual({
+        messages: [],
+        awaitingPrompt: true,
+      });
+      expect(sessions.get(record.id)?.queuedMessageTyped).toMatchObject({
+        message: "first queued",
+        ackBaseline: baseline,
+      });
+      expect(sessions.get(record.id)?.submitUnconfirmedAt).toBe(
+        sessions.get(record.id)?.queuedMessageTyped?.typedAt,
+      );
       expect(sessions.get(record.id)?.error).toContain("ack process probe denied");
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       expect(createTmuxSessionMock).not.toHaveBeenCalled();
@@ -13971,6 +14409,1054 @@ describe("SessionService", () => {
       ).toHaveLength(0);
     },
   );
+
+  it.each([false, true])(
+    "retains the current ACK diagnostic after its own historical heal with unresponsive %s",
+    async (unresponsive) => {
+      mockClaudeJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      const sessions = createSessionStore();
+      const record = runningSession({
+        agentSessionId: "pinned-native",
+        error: "Session status detection failed: ps failed: malformed process table output",
+        errorSource: "other",
+        queuedMessages: { messages: ["first queued", "later queued"], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      const internals = sessionServiceInternals(service);
+      let releaseRun: () => void = () => {};
+      // A production drain already owns this registration. Keep the heal from
+      // starting a second attempt that could hide this attempt's stale catch.
+      internals.deliveryRuns.set(
+        record.id,
+        new Promise<void>((resolve) => {
+          releaseRun = resolve;
+        }),
+      );
+      getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, `healed-diagnostic-ack-${unresponsive}.jsonl`),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+      });
+      probeTmuxProcessMatchMock.mockImplementation(async () =>
+        sendMessageToTmuxMock.mock.calls.length > 0
+          ? {
+              alive: false,
+              matchedByName: false,
+              unresponsive,
+              diagnostic: "ack process probe denied after historical heal",
+            }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+      vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: null,
+      });
+      try {
+        await internals.tryDeliverQueuedMessage(record.id);
+        const after = sessions.get(record.id);
+        expect(after?.error).toBe(
+          "Session status detection failed: ack process probe denied after historical heal",
+        );
+        expect(after?.errorSource).toBe("runtime_probe");
+        expect(after?.agentSessionId).toBe(record.agentSessionId);
+        expect(after?.queuedMessages).toEqual({
+          messages: ["later queued"],
+          awaitingPrompt: true,
+        });
+        expect(after?.queuedMessageTyped).toMatchObject({
+          message: "first queued",
+          ackBaseline: baseline,
+        });
+        expect(after?.submitUnconfirmedAt).toBe(after?.queuedMessageTyped?.typedAt);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "session.message.delivery_recovered" ||
+              entry.event === "session.message.sent",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        service.dispose();
+        releaseRun();
+      }
+    },
+  );
+
+  describe("cold wake launch input boundary", () => {
+    type LaunchInput = Parameters<typeof runtimeTmuxModule.createTmuxSession>[0];
+    type Claim = { session: SessionRecord; stage: "unattempted" | "input-started" | "accepted" };
+    type Internals = SessionServiceInternals & {
+      prepareSessionTools(id: string, agent: AgentName, project: string): string;
+      scheduledWakeClaims: Map<string, Claim>;
+      lifecycle: SessionLifecycleRegister;
+      launchResourcesMayRemain(record: SessionRecord): Promise<boolean>;
+      agentLaunchResourcesMayRemain(record: SessionRecord): Promise<boolean>;
+      scheduleWakeLocked(id: string, request: ScheduleSessionWakeRequest): Promise<SessionView>;
+    };
+    const wake = { dueAt: "2026-03-18T09:00:00.000Z", message: "cold boundary wake" };
+    afterEach(() => {
+      vi.doUnmock("node:child_process");
+      vi.unstubAllEnvs();
+    });
+    async function setup(agent: AgentName = "claude", missingId = false) {
+      const transport =
+        vi.fn<(file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>>();
+      vi.doMock("node:child_process", async (importOriginal) => ({
+        ...(await importOriginal<typeof childProcessModule>()),
+        execFile: Object.assign(vi.fn(), { [promisify.custom]: transport }),
+      }));
+      const record = runningSession({
+        agent,
+        launchCommand: `${agent} original`,
+        ...(missingId ? {} : { agentSessionId: "session-uuid" }),
+        agentLaunchId: "cold-boundary-original",
+        scheduledWake: wake,
+        queuedMessages: { messages: ["existing queued tail"], awaitingPrompt: false },
+      });
+      const sessions = createSessionStore();
+      let alive = false;
+      workspaceExistsMock.mockReturnValue(true);
+      probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+      transport.mockImplementation(async () => {
+        alive = true;
+        return { stdout: "", stderr: "" };
+      });
+      tmuxSessionExistsMock.mockImplementation(async () => alive);
+      isProcessRunningInTmuxMock.mockImplementation(async () => alive);
+      probeTmuxProcessMatchMock.mockImplementation(async () => ({
+        alive,
+        matchedByName: alive,
+        unresponsive: false,
+      }));
+      buildAgentLaunchPlanMock.mockImplementation((name: AgentName, initialMessage: string) => ({
+        agent: name,
+        launchCommand: `${name} fresh`,
+        initialMessage: name === "opencode" ? "" : initialMessage,
+        initialMessageDeliveredOnLaunch: name === "opencode",
+        readyMarkers: [],
+      }));
+      if (agent === "opencode") {
+        buildAgentResumePlanMock.mockReturnValue(null);
+        findAgentSessionIdMock.mockResolvedValue(null);
+      }
+      if (missingId) findAgentSessionIdMock.mockResolvedValue("session-uuid");
+      mockClaudeJsonlState("waiting");
+      mockCursorJsonlState("waiting");
+      const service = await createDisposedSessionService();
+      sessions.set(record.id, record);
+      const internals = sessionServiceInternals(service) as Internals;
+      const dir = join(TEST_ARTIFACTS_ROOT, `cold-boundary-${agent}`);
+      mkdirSync(dirname(dir), { recursive: true });
+      vi.spyOn(internals, "prepareSessionTools").mockReturnValue(dir);
+      internals.deliveryRuns.set(record.id, Promise.resolve());
+      const runtime = await vi.importActual<typeof runtimeTmuxModule>("../../src/runtime-tmux.js");
+      createTmuxSessionMock.mockImplementation((input: LaunchInput) =>
+        runtime.createTmuxSession(input),
+      );
+      const count = (event: string) =>
+        logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === event).length;
+      const dispatch = () =>
+        service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+      return { record, sessions, service, internals, dir, transport, runtime, count, dispatch };
+    }
+
+    describe("cold manual native-id discovery", () => {
+      it.each(
+        (["queued-live", "ready-live", "cold"] as const).flatMap((caller) =>
+          (caller === "cold"
+            ? (["current", "revoked"] as const)
+            : (["current", "revoked", "write-failure"] as const)
+          ).map((owner) => ({ caller, owner })),
+        ),
+      )(
+        "composes prepared observation for $caller with $owner ownership",
+        async ({ caller, owner }) => {
+          const { record, sessions, service, internals, transport, count } = await setup(
+            "claude",
+            true,
+          );
+          type Preparation = {
+            preparedObservation: { session: SessionRecord; revision: number };
+            observePreparedSession(record: SessionRecord): void;
+          };
+          const preparedInternals = internals as Internals & {
+            ensureReadyForQueuedSend(
+              id: string,
+              lifecycle: undefined,
+              options: Preparation,
+            ): Promise<void>;
+            ensureSessionReadyForSend(
+              record: SessionRecord,
+              options: Preparation,
+            ): Promise<unknown>;
+          };
+          if (caller !== "cold") {
+            tmuxSessionExistsMock.mockResolvedValue(true);
+            isProcessRunningInTmuxMock.mockResolvedValue(true);
+            probeTmuxProcessMatchMock.mockResolvedValue({
+              alive: true,
+              matchedByName: true,
+              unresponsive: false,
+            });
+          }
+          const observation = {
+            session: record,
+            revision: internals.lifecycle.snapshot(record.id).revision,
+          };
+          const observed = vi.fn((next: SessionRecord) => {
+            expect(sessions.get(record.id)?.agentSessionId).toBe(next.agentSessionId);
+            observation.session = next;
+          });
+          const options = { preparedObservation: observation, observePreparedSession: observed };
+          let enter: () => void = () => {};
+          let release: () => void = () => {};
+          const entered = new Promise<void>((resolve) => {
+            enter = resolve;
+          });
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          findAgentSessionIdMock.mockImplementation(async () => {
+            enter();
+            await gate;
+            return "session-uuid";
+          });
+          const attempt = (
+            caller === "queued-live"
+              ? preparedInternals.ensureReadyForQueuedSend(record.id, undefined, options)
+              : preparedInternals.ensureSessionReadyForSend(record, options)
+          ).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          try {
+            await entered;
+            const replacement =
+              owner === "revoked"
+                ? {
+                    ...record,
+                    agentLaunchId: "foreign-launch",
+                    slots: { title: "foreign", links: [] },
+                  }
+                : record;
+            if (owner === "revoked") sessions.set(record.id, replacement);
+            if (owner === "write-failure") {
+              const write = writeSessionMock.getMockImplementation();
+              writeSessionMock.mockImplementation((dataDir: string, next: SessionRecord) => {
+                if (next.agentSessionId === "session-uuid")
+                  throw new Error("prepared ID write failed");
+                return write?.(dataDir, next);
+              });
+            }
+            release();
+            const error = await attempt;
+            if (owner === "current") {
+              expect(error).toBeNull();
+              expect(
+                observed.mock.calls.filter(([next]) => next.agentLaunchId === record.agentLaunchId),
+              ).toHaveLength(1);
+              expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+              expect(count("session.agent_session_id.discovered")).toBe(1);
+              expect(transport).toHaveBeenCalledTimes(caller === "cold" ? 1 : 0);
+            } else {
+              expect(observed).not.toHaveBeenCalled();
+              expect(count("session.agent_session_id.discovered")).toBe(0);
+              expect(transport).not.toHaveBeenCalled();
+              expect(sessions.get(record.id)).toEqual(replacement);
+            }
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          } finally {
+            release();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it.each([
+        "same-id-writer",
+        "native",
+        "launch",
+        "lifecycle",
+        "terminal",
+        "replacement-wake",
+        "replacement-failure",
+        "write-failure",
+        "backoff",
+      ] as const)("keeps actual discovery authorization across %s", async (change) => {
+        const { record, sessions, service, internals, dir, transport, count, dispatch } =
+          await setup("claude", true);
+        let enter: () => void = () => {};
+        let release: () => void = () => {};
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        findAgentSessionIdMock.mockImplementation(async () => {
+          enter();
+          await gate;
+          return "session-uuid";
+        });
+        const attempt = dispatch().then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        );
+        try {
+          await entered;
+          const current = sessions.get(record.id);
+          if (!current) throw new Error("Missing discovery owner");
+          const claim = internals.scheduledWakeClaims.get(record.id);
+          if (!claim) throw new Error("Missing actual discovery claim");
+          const replacementWake = { dueAt: "2026-03-19T09:00:00.000Z", message: "new occurrence" };
+          const replacement: SessionRecord = {
+            ...current,
+            slots: { title: "external metadata", links: [] },
+            queuedMessages: { messages: ["foreign tail"], awaitingPrompt: true },
+            ...(change === "same-id-writer" ? { agentSessionId: "session-uuid" } : {}),
+            ...(change === "native" ? { agentSessionId: "foreign-native" } : {}),
+            ...(change === "launch" ? { agentLaunchId: "foreign-launch" } : {}),
+            ...(change === "terminal" ? { status: "completed" as const } : {}),
+            ...(change === "replacement-wake" || change === "replacement-failure"
+              ? { scheduledWake: replacementWake }
+              : {}),
+          };
+          sessions.set(record.id, replacement);
+          if (change === "lifecycle") {
+            const owner = internals.lifecycle.begin("complete", [record.id]);
+            internals.lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+          }
+          if (change === "write-failure") {
+            const write = writeSessionMock.getMockImplementation();
+            writeSessionMock.mockImplementation((dataDir: string, next: SessionRecord) => {
+              if (next.agentSessionId === "session-uuid") throw new Error("owned ID write failed");
+              return write?.(dataDir, next);
+            });
+          }
+          if (change === "backoff")
+            internals.agentSessionIdPersistBackoffUntil.set(record.id, Date.now() + 60_000);
+          if (change === "replacement-failure")
+            mkdirSync(join(dir, "agent-launch.sh"), { recursive: true });
+          release();
+          const result = await attempt;
+          const accepted = change === "replacement-wake";
+          const persisted = accepted || change === "replacement-failure";
+          expect(count("session.agent_session_id.discovered")).toBe(persisted ? 1 : 0);
+          expect(count("session.wake.sent")).toBe(accepted ? 1 : 0);
+          expect(transport).toHaveBeenCalledTimes(accepted ? 1 : 0);
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter((call) => call[1] === wake.message),
+          ).toHaveLength(accepted ? 1 : 0);
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          const latest = sessions.get(record.id);
+          expect(latest?.slots).toEqual(replacement.slots);
+          expect(latest?.queuedMessages).toEqual(replacement.queuedMessages);
+          if (accepted) expect(result.error).toBeNull();
+          else expect(result.error).toBeTruthy();
+          if (change === "replacement-wake" || change === "replacement-failure") {
+            expect(latest?.scheduledWake).toEqual(replacementWake);
+            expect(latest?.agentSessionId).toBe("session-uuid");
+          } else if (change === "write-failure" || change === "backoff") {
+            expect(latest?.scheduledWake).toEqual(wake);
+            expect(latest?.agentSessionId).toBeUndefined();
+            expect(claim.session.agentSessionId).toBeUndefined();
+          } else {
+            expect(latest).toEqual(replacement);
+          }
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+        } finally {
+          release();
+          await attempt;
+          service.dispose();
+        }
+      });
+
+      it.each(["success", "EISDIR"] as const)(
+        "persists its own missing ID before %s and accepts the same occurrence once",
+        async (mode) => {
+          const { record, sessions, service, internals, dir, transport, count, dispatch } =
+            await setup("claude", true);
+          const target = join(dir, "agent-launch.sh");
+          if (mode === "EISDIR") mkdirSync(target, { recursive: true });
+          findAgentSessionIdMock.mockImplementation(async () => {
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Missing discovery owner");
+            sessions.set(record.id, {
+              ...current,
+              slots: { title: "concurrent metadata", links: [] },
+              queuedMessages: {
+                messages: ["existing queued tail", "arrived"],
+                awaitingPrompt: false,
+              },
+            });
+            return "session-uuid";
+          });
+          try {
+            if (mode === "EISDIR") {
+              await expect(dispatch()).rejects.toMatchObject({ code: "EISDIR" });
+              expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+              expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+              expect(transport).not.toHaveBeenCalled();
+              expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+              expect(count("session.wake.sent")).toBe(0);
+              expect(internals.scheduledWakeClaims.size).toBe(0);
+              rmSync(target, { recursive: true });
+            }
+            await dispatch();
+            expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+            expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            expect(sessions.get(record.id)?.slots?.title).toBe("concurrent metadata");
+            expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([
+              "existing queued tail",
+              "arrived",
+            ]);
+            expect(transport).toHaveBeenCalledTimes(1);
+            expect(
+              sendMessageToTmuxMock.mock.calls.filter((call) => call[1] === wake.message),
+            ).toHaveLength(1);
+            expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+            expect(count("session.agent_session_id.discovered")).toBe(1);
+            expect(count("session.wake.sent")).toBe(1);
+            expect(internals.scheduledWakeClaims.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+    });
+
+    it.each(["claude", "codex", "cursor", "opencode"] as const)(
+      "restores an actual prelaunch EEXIST occurrence then retries once for %s",
+      async (agent) => {
+        const fixture = await setup(agent);
+        const { record, sessions, service, internals, dir, transport, count, dispatch } = fixture;
+        writeFileSync(dir, "owned file blocks original launch-script mkdir");
+        try {
+          await expect(dispatch()).rejects.toMatchObject({ code: "EEXIST" });
+          expect(transport).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+          expect(sessions.get(record.id)?.queuedMessages).toEqual(record.queuedMessages);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+          expect(count("session.wake.sent")).toBe(0);
+          rmSync(dir);
+          await dispatch();
+          expect(transport).toHaveBeenCalledTimes(1);
+          expect(
+            sendMessageToTmuxMock.mock.calls.filter((call) => call[1] === wake.message),
+          ).toHaveLength(1);
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(sessions.get(record.id)?.queuedMessages).toEqual(record.queuedMessages);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(count("session.wake.sent")).toBe(1);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it("does not rearm an attempted launch with an unknown outcome", async () => {
+      const { record, sessions, service, internals, transport, count, dispatch } = await setup();
+      buildAgentResumePlanMock.mockReturnValue(null);
+      const unknown = new Error("opaque launch result unavailable");
+      transport.mockRejectedValue(unknown);
+      try {
+        await expect(dispatch()).rejects.toBe(unknown);
+        expect(transport).toHaveBeenCalledTimes(1);
+        expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessages).toEqual(record.queuedMessages);
+        expect(internals.scheduledWakeClaims.size).toBe(0);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(count("session.wake.sent")).toBe(0);
+      } finally {
+        service.dispose();
+      }
+    });
+
+    it.each(["native", "launch", "lifecycle", "terminal"] as const)(
+      "refuses the first dispatch after an actual env-preparation %s replacement",
+      async (change) => {
+        const { record, sessions, service, internals, runtime, transport, count, dispatch } =
+          await setup();
+        let replacement: SessionRecord | undefined;
+        let probes = 0;
+        let kills = 0;
+        let hookCalls = 0;
+        const resources = vi.spyOn(internals, "launchResourcesMayRemain");
+        const agentResources = vi.spyOn(internals, "agentLaunchResourcesMayRemain");
+        createTmuxSessionMock.mockImplementation((input) =>
+          runtime.createTmuxSession({
+            ...input,
+            env: {
+              ...input.env,
+              get PREPARATION_BOUNDARY() {
+                const current = sessions.get(record.id);
+                if (!current) throw new Error("Missing preparation owner");
+                replacement = {
+                  ...current,
+                  ...(change === "native" ? { agentSessionId: "new-native" } : {}),
+                  ...(change === "launch" ? { agentLaunchId: "new-launch" } : {}),
+                  ...(change === "terminal" ? { status: "completed" as const } : {}),
+                  queuedMessages: { messages: ["new owner tail"], awaitingPrompt: true },
+                };
+                sessions.set(record.id, replacement);
+                if (change === "lifecycle") {
+                  const owner = internals.lifecycle.begin("complete", [record.id]);
+                  internals.lifecycle.settle(
+                    owner,
+                    true,
+                    () => "succeeded",
+                    () => true,
+                  );
+                }
+                probes = probeTmuxProcessMatchMock.mock.calls.length;
+                kills = killTmuxSessionMock.mock.calls.length;
+                writeSessionMock.mockClear();
+                return "prepared";
+              },
+            },
+            beforeLaunch: () => {
+              hookCalls += 1;
+              input.beforeLaunch?.();
+            },
+          }),
+        );
+        try {
+          await expect(dispatch()).rejects.toMatchObject({ statusCode: 409 });
+          expect(hookCalls).toBe(1);
+          expect(transport).not.toHaveBeenCalled();
+          expect(resources).not.toHaveBeenCalled();
+          expect(agentResources).not.toHaveBeenCalled();
+          expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(probes);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(kills);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(sessions.get(record.id)).toEqual(replacement);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(count("session.wake.sent")).toBe(0);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each(["claude", "opencode"] as const)(
+      "never resets an attempted %s resume when fallback preparation fails",
+      async (agent) => {
+        const { record, sessions, service, dir, transport, count, dispatch } = await setup(agent);
+        buildAgentResumePlanMock.mockReturnValue({
+          launchCommand: `${agent} resume`,
+          readyMarkers: [],
+        });
+        transport.mockImplementation(async () => {
+          rmSync(dir, { recursive: true, force: true });
+          writeFileSync(dir, "owned file blocks fallback preparation");
+          throw new Error("resume command outcome unavailable");
+        });
+        try {
+          await expect(dispatch()).rejects.toMatchObject({ code: "EEXIST" });
+          expect(transport).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(sessions.get(record.id)?.queuedMessages).toEqual(record.queuedMessages);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(count("session.wake.sent")).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      },
+    );
+
+    it.each([
+      "current",
+      "native",
+      "launch",
+      "lifecycle",
+      "pending",
+      "terminal",
+      "same-values",
+      "message",
+    ] as const)(
+      "rechecks the actual manual claim across deferred systemd fallback: %s",
+      async (change) => {
+        vi.stubEnv("SPUR_TMUX_SYSTEMD_SCOPE", "auto");
+        const { record, sessions, service, internals, runtime, transport, count, dispatch } =
+          await setup();
+        let enter: () => void = () => {};
+        let release: () => void = () => {};
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const hookStages: string[] = [];
+        let observedClaim: Claim | undefined;
+        createTmuxSessionMock.mockImplementation((input: LaunchInput) => {
+          expect(input.operation).toBeUndefined();
+          return runtime.createTmuxSession({
+            ...input,
+            beforeLaunch: () => {
+              observedClaim ??= internals.scheduledWakeClaims.get(record.id);
+              if (!observedClaim) throw new Error("Missing actual manual claim");
+              hookStages.push(observedClaim.stage);
+              input.beforeLaunch?.();
+            },
+          });
+        });
+        const ordinaryDispatch = transport.getMockImplementation();
+        transport.mockImplementation(async (file, args) => {
+          if (file === "systemd-run") {
+            enter();
+            await gate;
+            throw Object.assign(new Error("spawn systemd-run ENOENT"), { code: "ENOENT" });
+          }
+          if (!ordinaryDispatch) throw new Error("Missing fixture transport");
+          return ordinaryDispatch(file, args);
+        });
+        const attempt = dispatch().then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({ value: null, error }),
+        );
+        let lifecycleOwner: ReturnType<SessionLifecycleRegister["begin"]> | undefined;
+        try {
+          await entered;
+          expect(hookStages).toEqual(["unattempted"]);
+          const preceding = sessions.get(record.id);
+          if (!preceding) throw new Error("Missing in-flight manual record");
+          let replacement: SessionRecord = {
+            ...preceding,
+            ...(change === "native" ? { agentSessionId: "foreign-native" } : {}),
+            ...(change === "launch" ? { agentLaunchId: "foreign-launch" } : {}),
+            ...(change === "terminal" ? { status: "completed" as const } : {}),
+          };
+          sessions.set(record.id, replacement);
+          if (change === "same-values" || change === "message") {
+            // Run the real mutation body at the external-writer boundary; the
+            // public wrapper serializes behind this owned readiness lock.
+            const previousNow = Date.now();
+            vi.setSystemTime(Date.parse(wake.dueAt) - 1_000);
+            try {
+              await internals.scheduleWakeLocked(record.id, {
+                at: wake.dueAt,
+                message: change === "same-values" ? wake.message : "new occurrence message",
+              });
+            } finally {
+              vi.setSystemTime(previousNow);
+            }
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Rearm removed its session");
+            replacement = structuredClone(current);
+          }
+          if (change === "lifecycle" || change === "pending") {
+            lifecycleOwner = internals.lifecycle.begin("complete", [record.id]);
+            if (change === "lifecycle")
+              internals.lifecycle.settle(
+                lifecycleOwner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+          }
+          expect(observedClaim?.stage).toBe("input-started");
+          const probes = probeTmuxProcessMatchMock.mock.calls.length;
+          const kills = killTmuxSessionMock.mock.calls.length;
+          const resources = vi.spyOn(internals, "launchResourcesMayRemain");
+          const agentResources = vi.spyOn(internals, "agentLaunchResourcesMayRemain");
+          writeSessionMock.mockClear();
+          release();
+          const result = await attempt;
+          expect(hookStages).toEqual(["unattempted", "input-started"]);
+          expect(transport.mock.calls.map((call) => call[0])).toEqual(
+            change === "current" ? ["systemd-run", "tmux"] : ["systemd-run"],
+          );
+          if (change === "current") {
+            expect(result.error).toBeNull();
+            expect(count("session.wake.sent")).toBe(1);
+            expect(
+              sendMessageToTmuxMock.mock.calls.filter((call) => call[1] === wake.message),
+            ).toHaveLength(1);
+          } else {
+            expect(result.error).toMatchObject({
+              statusCode: 409,
+              message: `Wake target "scheduled" changed for ${record.id}`,
+            });
+            expect(resources).not.toHaveBeenCalled();
+            expect(agentResources).not.toHaveBeenCalled();
+            expect(probeTmuxProcessMatchMock).toHaveBeenCalledTimes(probes);
+            expect(killTmuxSessionMock).toHaveBeenCalledTimes(kills);
+            expect(writeSessionMock).not.toHaveBeenCalled();
+            expect(sessions.get(record.id)).toEqual(replacement);
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect(count("session.wake.sent")).toBe(0);
+          }
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+        } finally {
+          release();
+          await attempt;
+          if (change === "pending" && lifecycleOwner)
+            internals.lifecycle.settle(
+              lifecycleOwner,
+              false,
+              () => "failed",
+              () => true,
+            );
+          service.dispose();
+        }
+      },
+    );
+  });
+
+  describe("cold queued delivery observation", () => {
+    const diagnostic = "ps failed during cold recovery acknowledgement";
+    type Observation = { session: SessionRecord; revision: number };
+    type ColdInternals = SessionServiceInternals & {
+      lifecycle: SessionLifecycleRegister;
+      writeRecoverySession(
+        record: SessionRecord,
+        claim?: unknown,
+        options?: {
+          preparedObservation: Observation;
+          observePreparedSession(record: SessionRecord): void;
+          operation?: { assertActive(): void };
+        },
+      ): SessionRecord;
+      claimScheduledWake(record: SessionRecord, manual: boolean): Promise<unknown>;
+    };
+    function gate() {
+      let resolve: () => void = () => {};
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    async function setup(unresponsive = false) {
+      mockClaudeJsonlState("waiting");
+      const record = runningSession({
+        agentSessionId: "session-uuid",
+        agentLaunchId: "original-cold-launch",
+        prompt: "original cold recovery task",
+        queuedMessages: { messages: ["cold head", "cold later"], awaitingPrompt: false },
+      });
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service) as ColdInternals;
+      const active = gate();
+      internals.deliveryRuns.set(record.id, active.promise);
+      let alive = false;
+      let fault = false;
+      tmuxSessionExistsMock.mockImplementation(async () => alive);
+      isProcessRunningInTmuxMock.mockImplementation(async () => alive);
+      probeTmuxProcessMatchMock.mockImplementation(async () =>
+        fault
+          ? { alive: false, matchedByName: false, unresponsive, diagnostic }
+          : { alive, matchedByName: alive, unresponsive: false },
+      );
+      createTmuxSessionMock.mockImplementation(async () => {
+        alive = true;
+      });
+      const baseline = {
+        agent: "claude" as const,
+        file: join(TEST_ARTIFACTS_ROOT, "cold-ack-baseline.jsonl"),
+        size: 0,
+      };
+      createAgentSubmitAckBindingMock.mockResolvedValue({ baseline, scan: vi.fn() });
+      vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+        found: false,
+        lastScannedFile: null,
+      });
+      return {
+        record,
+        sessions,
+        service,
+        internals,
+        baseline,
+        markAlive: () => {
+          alive = true;
+        },
+        failProbe: () => {
+          fault = true;
+        },
+        close: () => {
+          service.dispose();
+          active.resolve();
+        },
+      };
+    }
+
+    it.each([false, true])(
+      "retains resumed queued ACK diagnostics with unresponsive %s",
+      async (unresponsive) => {
+        const { record, sessions, internals, baseline, markAlive, failProbe, close } =
+          await setup(unresponsive);
+        const wake = { dueAt: "2026-03-19T10:00:00.000Z", message: "concurrent wake" };
+        createTmuxSessionMock.mockImplementation(async () => {
+          const current = sessions.get(record.id) as SessionRecord;
+          sessions.set(record.id, {
+            ...current,
+            queuedMessages: {
+              messages: ["cold head", "cold later", "concurrent tail"],
+              awaitingPrompt: false,
+            },
+            scheduledWake: wake,
+            slots: { title: "concurrent cold metadata", links: [] },
+          });
+          markAlive();
+        });
+        let killsAtPaste = 0;
+        sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+          expect(message).toBe("cold head");
+          expect(sessions.get(record.id)?.agentLaunchId).not.toBe(record.agentLaunchId);
+          killsAtPaste = killTmuxSessionMock.mock.calls.length;
+          failProbe();
+        });
+        try {
+          await internals.tryDeliverQueuedMessage(record.id);
+          const after = sessions.get(record.id);
+          expect(after?.error).toBe(`Session status detection failed: ${diagnostic}`);
+          expect(after?.errorSource).toBe("runtime_probe");
+          expect(after?.agentSessionId).toBe(record.agentSessionId);
+          expect(after?.agentLaunchId).not.toBe(record.agentLaunchId);
+          expect(after?.queuedMessages).toEqual({
+            messages: ["cold later", "concurrent tail"],
+            awaitingPrompt: true,
+          });
+          expect(after?.queuedMessageTyped).toMatchObject({
+            message: "cold head",
+            ackBaseline: baseline,
+          });
+          expect(after?.submitUnconfirmedAt).toBe(after?.queuedMessageTyped?.typedAt);
+          expect(after?.scheduledWake).toEqual(wake);
+          expect(after?.slots?.title).toBe("concurrent cold metadata");
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(buildAgentResumePlanMock).toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(killTmuxSessionMock).toHaveBeenCalledTimes(killsAtPaste);
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) =>
+                entry.event === "session.message.sent" ||
+                entry.event === "session.message.delivery_recovered",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          close();
+        }
+      },
+    );
+
+    it("observes the fresh owner before recovery-context ACK failure", async () => {
+      const { record, sessions, internals, failProbe, close } = await setup();
+      buildAgentResumePlanMock.mockReturnValue(null);
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        expect(message).toContain(record.prompt);
+        expect(sessions.get(record.id)?.agentLaunchId).not.toBe(record.agentLaunchId);
+        failProbe();
+      });
+      try {
+        await internals.tryDeliverQueuedMessage(record.id);
+        const after = sessions.get(record.id);
+        expect(after?.error).toBe(`Session status detection failed: ${diagnostic}`);
+        expect(after?.errorSource).toBe("runtime_probe");
+        expect(after?.queuedMessages?.messages).toEqual(["cold head", "cold later"]);
+        expect(after?.queuedMessageTyped).toBeUndefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+        expect(
+          logSpurEventMock.mock.calls.filter(
+            ([, entry]) =>
+              entry.event === "session.message.sent" ||
+              entry.event === "session.message.delivery_recovered",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        close();
+      }
+    });
+
+    it.each(
+      (["before", "after"] as const).flatMap((boundary) =>
+        (["native", "launch", "lifecycle"] as const).map((guard) => ({ boundary, guard })),
+      ),
+    )(
+      "rejects $guard replacement $boundary the actual cold producer",
+      async ({ boundary, guard }) => {
+        const { record, sessions, internals, markAlive, close } = await setup();
+        const entered = gate();
+        const release = gate();
+        createTmuxSessionMock.mockImplementation(async () => {
+          if (boundary === "before") {
+            entered.resolve();
+            await release.promise;
+          }
+          markAlive();
+        });
+        waitForTmuxReadyMock.mockImplementation(async () => {
+          if (boundary === "after") {
+            entered.resolve();
+            await release.promise;
+          }
+        });
+        const attempt = internals.tryDeliverQueuedMessage(record.id);
+        try {
+          await entered.promise;
+          const preceding = sessions.get(record.id) as SessionRecord;
+          if (boundary === "after") expect(preceding.agentLaunchId).not.toBe(record.agentLaunchId);
+          const replacement: SessionRecord = {
+            ...preceding,
+            ...(guard === "native" ? { agentSessionId: "foreign-cold-native" } : {}),
+            ...(guard === "launch" ? { agentLaunchId: "foreign-cold-launch" } : {}),
+            queuedMessages: { messages: ["replacement queue"], awaitingPrompt: true },
+            scheduledWake: { dueAt: "2026-03-19T10:00:00.000Z", message: "replacement wake" },
+          };
+          if (guard === "lifecycle") {
+            const owner = internals.lifecycle.begin("complete", [record.id]);
+            internals.lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+          }
+          // Boundary fixture: public mutations serialize behind this active readiness lock.
+          sessions.set(record.id, replacement);
+          writeSessionMock.mockClear();
+          release.resolve();
+          await attempt;
+          expect(sessions.get(record.id)).toEqual(replacement);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) => entry.event === "session.message.sent",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          release.resolve();
+          await attempt;
+          close();
+        }
+      },
+    );
+
+    it.each(["native", "launch", "status", "error", "lifecycle", "operation"] as const)(
+      "refuses the actual observed recovery write before mutating a %s replacement",
+      async (guard) => {
+        const { record, sessions, internals, close } = await setup();
+        const observation: Observation = {
+          session: record,
+          revision: internals.lifecycle.snapshot(record.id).revision,
+        };
+        const observePreparedSession = vi.fn((prepared: SessionRecord) => {
+          observation.session = prepared;
+        });
+        const { createRestoreOperation } = await import("../../src/session-lifecycle.js");
+        const controller = new AbortController();
+        const operation = createRestoreOperation(controller.signal);
+        const replacement: SessionRecord = {
+          ...record,
+          ...(guard === "native" ? { agentSessionId: "foreign-native" } : {}),
+          ...(guard === "launch" ? { agentLaunchId: "foreign-launch" } : {}),
+          ...(guard === "status" ? { status: "stopped", stopReason: "manual_pause" } : {}),
+          ...(guard === "error" ? { error: "Foreign provider failure", errorSource: "other" } : {}),
+          queuedMessages: { messages: ["replacement queue"], awaitingPrompt: true },
+        };
+        sessions.set(record.id, replacement);
+        if (guard === "lifecycle") {
+          const owner = internals.lifecycle.begin("complete", [record.id]);
+          internals.lifecycle.settle(
+            owner,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+        }
+        if (guard === "operation") controller.abort();
+        writeSessionMock.mockClear();
+        try {
+          expect(() =>
+            internals.writeRecoverySession(
+              { ...record, agentLaunchId: "candidate-owned-launch" },
+              undefined,
+              { preparedObservation: observation, observePreparedSession, operation },
+            ),
+          ).toThrow();
+          expect(sessions.get(record.id)).toEqual(replacement);
+          expect(observation.session).toBe(record);
+          expect(observePreparedSession).not.toHaveBeenCalled();
+          expect(writeSessionMock).not.toHaveBeenCalled();
+        } finally {
+          operation.dispose();
+          close();
+        }
+      },
+    );
+
+    it("does not observe a cold write after its scheduled-wake claim is revoked", async () => {
+      const { record, sessions, service, internals, close } = await setup();
+      const armed = {
+        ...record,
+        scheduledWake: { dueAt: "2026-03-18T09:00:00.000Z", message: "original wake" },
+      };
+      sessions.set(record.id, armed);
+      const claim = await internals.claimScheduledWake(armed, true);
+      expect(claim).toBeTruthy();
+      const preceding = sessions.get(record.id) as SessionRecord;
+      const observation: Observation = {
+        session: preceding,
+        revision: internals.lifecycle.snapshot(record.id).revision,
+      };
+      const observePreparedSession = vi.fn((prepared: SessionRecord) => {
+        observation.session = prepared;
+      });
+      await service.scheduleWake(record.id, { delayMs: 60_000, message: "new wake" });
+      const replacement = sessions.get(record.id);
+      writeSessionMock.mockClear();
+      try {
+        expect(() =>
+          internals.writeRecoverySession(
+            { ...preceding, agentLaunchId: "unauthorized-launch" },
+            claim,
+            { preparedObservation: observation, observePreparedSession },
+          ),
+        ).toThrow();
+        expect(sessions.get(record.id)).toEqual(replacement);
+        expect(observePreparedSession).not.toHaveBeenCalled();
+        expect(writeSessionMock).not.toHaveBeenCalled();
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        close();
+      }
+    });
+  });
 
   it("deliver keeps the queued message and never recovers when the submit ack liveness probe was unresponsive", async () => {
     mockClaudeJsonlState("waiting");
@@ -22798,6 +24284,10 @@ describe("SessionService", () => {
       // same tick's updateMemoryHold has released the hold.
       await advanceSeconds(11);
 
+      // Native-id discovery and stopped-to-running reconciliation invalidate
+      // the old occurrence attempt; the next poll claims the current owner.
+      await advanceSeconds(2);
+
       expect(sessions.get("api-1")?.scheduledWake).toBeUndefined();
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
       expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -23531,7 +25021,7 @@ describe("SessionService", () => {
 
   it("persists every Codex generation discovered between sweeps", async () => {
     const session = runningSession({ agent: "codex", agentSessionId: "root-thread" });
-    readSessionMock.mockReturnValue(session);
+    createSessionStore(session);
     const sample = (generationId: string, totalTokens: number) => ({
       provider: "codex",
       generationId,
@@ -25993,6 +27483,151 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it.each(
+    (["classification", "boot", "budget", "park", "reporting"] as const).flatMap((boundary) =>
+      (boundary === "classification" || boundary === "boot"
+        ? (["reject", "unknown"] as const)
+        : boundary === "reporting"
+          ? (["reject"] as const)
+          : (["unknown"] as const)
+      ).flatMap((outcome) =>
+        (["current", "lifecycle", "native", "launch", "terminal"] as const).map((guard) => ({
+          boundary,
+          outcome,
+          guard,
+        })),
+      ),
+    ),
+  )(
+    "fences deferred $boundary probe retention: $outcome $guard",
+    async ({ boundary, outcome, guard }) => {
+      loadConfigMock.mockReturnValue({ ...baseConfig(), staleAfterMinutes: 60 });
+      mockClaudeJsonlState("waiting", { lastMtimeMs: Date.parse("2026-03-18T09:00:00.000Z") });
+      timerPromisesSleepMock.mockResolvedValue(undefined);
+      const record = runningSession({
+        agentSessionId: "observed-native",
+        agentLaunchId: "observed-launch",
+      });
+      const sessions = createSessionStore(record);
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service) as SessionServiceInternals & {
+        lifecycle: SessionLifecycleRegister;
+        parkStaleSession(view: Pick<SessionView, "id">): Promise<void>;
+        readReportingPaneState(
+          tmuxSession: string,
+          session: SessionRecord,
+          readExists: () => Promise<boolean>,
+        ): Promise<unknown>;
+      };
+      let entered: () => void = () => {};
+      const probing = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release: () => void = () => {};
+      const deferred = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const diagnostic = "ps failed: delayed retry diagnostic";
+      const probe = vi
+        .spyOn(internals, "readRuntimeSnapshot")
+        .mockImplementation(async (_session, options) => {
+          if (!options?.fresh)
+            return {
+              runtimeAlive: true,
+              paneUsable: true,
+              processAlive: boundary !== "classification" && boundary !== "boot",
+              probeUnresponsive: false,
+            };
+          entered();
+          await deferred;
+          if (outcome === "reject") throw new Error(diagnostic);
+          return {
+            runtimeAlive: false,
+            paneUsable: false,
+            processAlive: false,
+            probeUnresponsive: true,
+            diagnostic,
+          };
+        });
+      const { TmuxProbeUnknownError } = await import("../../src/runtime-tmux.js");
+      const attempt =
+        boundary === "classification"
+          ? internals.classifySessionRecord(record)
+          : boundary === "boot"
+            ? service.reconcileStoppedSessions()
+            : boundary === "budget"
+              ? internals.stopForTokenBudget(record)
+              : boundary === "park"
+                ? internals.parkStaleSession(record)
+                : internals.readReportingPaneState(record.tmuxSession, record, async () => {
+                    entered();
+                    await deferred;
+                    throw new TmuxProbeUnknownError(diagnostic);
+                  });
+      try {
+        await probing;
+        if (boundary === "classification" || boundary === "boot") {
+          expect(probe).toHaveBeenNthCalledWith(2, record, { fresh: true });
+        }
+        if (guard === "lifecycle") {
+          const owner = internals.lifecycle.begin("complete", [record.id]);
+          internals.lifecycle.settle(
+            owner,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+          expect(internals.lifecycle.snapshot(record.id).revision).toBe(2);
+        }
+        const replacement: SessionRecord = {
+          ...record,
+          ...(guard === "native"
+            ? { agentSessionId: "replacement-native" }
+            : guard === "launch"
+              ? { agentLaunchId: "replacement-launch" }
+              : guard === "terminal"
+                ? { status: "completed" }
+                : {}),
+          // Keep updatedAt identical: only lifecycle revision detects the ABA.
+          queuedMessages: { messages: ["newer first", "newer second"], awaitingPrompt: true },
+          scheduledWake: { dueAt: "2026-03-18T11:00:00.000Z", message: "newer wake" },
+        };
+        sessions.set(record.id, replacement);
+        writeSessionMock.mockClear();
+        logSpurEventMock.mockClear();
+        release();
+        await attempt;
+        const after = sessions.get(record.id);
+        expect(after?.queuedMessages).toEqual(replacement.queuedMessages);
+        expect(after?.scheduledWake).toEqual(replacement.scheduledWake);
+        if (guard === "current") {
+          expect(after?.error).toBe(
+            `Session status detection failed: ${boundary === "reporting" ? `Resource readout ${record.tmuxSession}: ` : ""}${diagnostic}`,
+          );
+          expect(after?.errorSource).toBe(boundary === "reporting" ? "other" : "runtime_probe");
+          expect(writeSessionMock).toHaveBeenCalledTimes(1);
+        } else {
+          expect(after).toEqual(replacement);
+          expect(writeSessionMock).not.toHaveBeenCalled();
+          expect(
+            logSpurEventMock.mock.calls.filter(
+              ([, entry]) =>
+                entry.event === "session.runtime.probe_unresponsive" && entry.level === "error",
+            ),
+          ).toHaveLength(0);
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(internals.sessionLifecycleLocks.size).toBe(0);
+        expect(internals.paneWriteLocks.size).toBe(0);
+      } finally {
+        release();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
+
   it("heals a rejected fresh runtime confirmation after a live probe", async () => {
     const record = runningSession();
     const sessions = createSessionStore(record);
@@ -27071,15 +28706,756 @@ describe("SessionService", () => {
     }
   });
 
-  it.each([
-    { status: "running" as const, errorSource: "runtime_probe" as const },
-    { status: "errored" as const, errorSource: "other" as const },
-  ])("drains queued delivery after $status ps recovery", async (patch) => {
+  it.each(
+    (["direct", "queued", "flush"] as const).flatMap((origin) =>
+      (["late-ack", "no-ack", "new-launch", "completed", "lifecycle"] as const).map((ack) => ({
+        origin,
+        ack,
+      })),
+    ),
+  )("retains $origin post-paste baseline: $ack", async ({ origin, ack }) => {
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const text = `post-paste ${origin} ${ack}`;
+    const record = runningSession({
+      agentLaunchId: "late-probe-generation",
+      agentSessionId: "session-uuid",
+      ...(origin !== "direct"
+        ? { queuedMessages: { messages: [text, "later after probe"], awaitingPrompt: false } }
+        : {}),
+    });
+    sessions.set(record.id, record);
+    mockClaudeJsonlState("waiting");
+    const file = join(TEST_ARTIFACTS_ROOT, `late-probe-${origin}-${ack}.jsonl`);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+    );
+    const originalBaseline = { agent: "claude" as const, file, size: statSync(file).size };
+    const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+    const scans: boolean[] = [];
+    const binding = (baseline: typeof originalBaseline) => ({
+      baseline,
+      async scan(message: string) {
+        const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+        scans.push(found);
+        return { found, lastScannedFile: file };
+      },
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async () =>
+      binding({ agent: "claude", file, size: statSync(file).size }),
+    );
+    resumeAgentSubmitAckBindingMock.mockImplementation(
+      async (_agent: string, _context: unknown, baseline: typeof originalBaseline) =>
+        binding(baseline),
+    );
+    sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+      if (message !== text)
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: message } }) + "\n",
+        );
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+      async (current, message) => current.scan(message),
+    );
+    let releaseProbe: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    let enteredProbe: () => void = () => {};
+    const probing = new Promise<void>((resolve) => {
+      enteredProbe = resolve;
+    });
+    let failed = false;
+    probeTmuxProcessMatchMock.mockImplementation(
+      async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+        if (options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0 && !failed) {
+          failed = true;
+          enteredProbe();
+          await gate;
+          return {
+            alive: false,
+            matchedByName: false,
+            unresponsive: false,
+            diagnostic: "ps failed: malformed process table output after paste",
+          };
+        }
+        return { alive: true, matchedByName: true, unresponsive: false };
+      },
+    );
+    const attempt = (
+      origin === "direct"
+        ? service.send(record.id, { message: text, queue: false, interrupt: false })
+        : origin === "flush"
+          ? service.flushQueuedMessage(record.id, text)
+          : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
+    ).catch((error: unknown) => error);
+    try {
+      await probing;
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      expect(scans).toEqual([false]);
+      if (origin === "queued") {
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([
+          "later after probe",
+        ]);
+      }
+      if (ack === "new-launch" || ack === "completed" || ack === "lifecycle") {
+        if (ack === "lifecycle") {
+          const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister })
+            .lifecycle;
+          const receipt = lifecycle.begin("complete", [record.id]);
+          lifecycle.settle(
+            receipt,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+        }
+        sessions.set(record.id, {
+          ...record,
+          ...(ack === "new-launch"
+            ? { agentLaunchId: "replacement-generation" }
+            : ack === "completed"
+              ? { status: "completed" }
+              : {}),
+          queuedMessages: { messages: ["replacement-head"], awaitingPrompt: false },
+        });
+      }
+      releaseProbe();
+      await attempt;
+      if (ack === "late-ack") {
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+        );
+        vi.setSystemTime(Date.now() + 20_000);
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 5_000 });
+        await service.get(record.id);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(
+          () => {
+            vi.setSystemTime(Date.now() + 60_000);
+            expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+            if (origin !== "direct") {
+              expect(
+                logSpurEventMock.mock.calls.filter(
+                  ([dataDir, event]) =>
+                    dataDir === TEST_DATA_DIR &&
+                    event.event === "session.message.sent" &&
+                    event.sessionId === record.id &&
+                    event.projectId === record.project &&
+                    event.details?.agentSessionId === record.agentSessionId &&
+                    event.details?.interrupt === false &&
+                    event.details?.messageLength === "later after probe".length,
+                ),
+              ).toHaveLength(1);
+            }
+          },
+          { timeout: 3_000 },
+        );
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(origin === "direct" ? 1 : 2);
+        if (origin !== "direct")
+          expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+            text,
+            "later after probe",
+          ]);
+        expect(scans).toContain(true);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+      } else if (ack === "no-ack") {
+        mockClaudeJsonlState("waiting");
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeDefined();
+        vi.setSystemTime(Date.now() + 60_000);
+        mockClaudeJsonlState("working");
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeDefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(scans).not.toContain(true);
+      } else {
+        await service.get(record.id);
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["replacement-head"]);
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      }
+      expect(sessions.get(record.id)?.agentLaunchId).toBe(
+        ack === "new-launch" ? "replacement-generation" : record.agentLaunchId,
+      );
+      expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    } finally {
+      releaseProbe();
+      await attempt;
+      service.dispose();
+    }
+  });
+
+  it.each(["queued", "flush"] as const)(
+    "late ACK commit preserves later typed ownership: %s",
+    async (origin) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const text = `held head ${origin}`;
+      const later = "later after probe";
+      const record = runningSession({
+        agentLaunchId: "late-ack-ownership-generation",
+        agentSessionId: "session-uuid",
+        queuedMessages: { messages: [text, later], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      const file = join(TEST_ARTIFACTS_ROOT, `late-ack-ownership-${origin}.jsonl`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+      );
+      const originalBaseline = { agent: "claude" as const, file, size: statSync(file).size };
+      const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+      const scans: { message: string; found: boolean }[] = [];
+      let releaseLater: () => void = () => {};
+      const laterGate = new Promise<void>((resolve) => {
+        releaseLater = resolve;
+      });
+      let laterEntered = false;
+      let laterBaseline: typeof originalBaseline | undefined;
+      const binding = (baseline: typeof originalBaseline) => ({
+        baseline,
+        async scan(message: string) {
+          const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+          scans.push({ message, found });
+          const result = { found, lastScannedFile: file };
+          if (message === later && found) {
+            laterEntered = true;
+            await laterGate;
+          }
+          return result;
+        },
+      });
+      createAgentSubmitAckBindingMock.mockImplementation(async () => {
+        const baseline = { agent: "claude" as const, file, size: statSync(file).size };
+        if (sendMessageToTmuxMock.mock.calls.length === 1) laterBaseline = baseline;
+        return binding(baseline);
+      });
+      resumeAgentSubmitAckBindingMock.mockImplementation(
+        async (_agent: string, _context: unknown, baseline: typeof originalBaseline) =>
+          binding(baseline),
+      );
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        if (message === later)
+          appendFileSync(
+            file,
+            JSON.stringify({ type: "user", message: { role: "user", content: message } }) + "\n",
+          );
+      });
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async (current, message) =>
+        current.scan(message),
+      );
+      let failed = false;
+      probeTmuxProcessMatchMock.mockImplementation(
+        async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+          if (options?.fresh && sendMessageToTmuxMock.mock.calls.length > 0 && !failed) {
+            failed = true;
+            return {
+              alive: false,
+              matchedByName: false,
+              unresponsive: false,
+              diagnostic: "ps failed: malformed process table output after paste",
+            };
+          }
+          return { alive: true, matchedByName: true, unresponsive: false };
+        },
+      );
+      const sentEvents = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([dataDir, event]) =>
+            dataDir === TEST_DATA_DIR &&
+            event.event === "session.message.sent" &&
+            event.sessionId === record.id &&
+            event.projectId === record.project &&
+            event.details?.agentSessionId === record.agentSessionId &&
+            event.details?.interrupt === false &&
+            event.details?.messageLength === later.length,
+        );
+      const confirmations = () =>
+        logSpurEventMock.mock.calls.filter(
+          ([dataDir, event]) =>
+            dataDir === TEST_DATA_DIR &&
+            event.event === "session.submit.confirmed" &&
+            event.sessionId === record.id &&
+            event.details?.evidence === "ack",
+        );
+      const attempt = (
+        origin === "flush"
+          ? service.flushQueuedMessage(record.id, text)
+          : internals.tryDeliverQueuedMessage(record.id)
+      ).catch((error: unknown) => error);
+      try {
+        await attempt;
+        const held = structuredClone(sessions.get(record.id));
+        expect(held?.submitUnconfirmedAt).toBeDefined();
+        expect(held?.queuedMessageTyped?.message).toBe(text);
+        expect(held?.queuedMessageTyped?.ackBaseline).toEqual(originalBaseline);
+        expect(scans).toEqual([{ message: text, found: false }]);
+        if (!held?.submitUnconfirmedAt) throw new Error("Missing actual head submit hold");
+        const settle = internals.settleSubmitHold.bind(internals);
+        let confirmedHead: { state: SessionState; activity: Date | null } | undefined;
+        vi.spyOn(internals, "settleSubmitHold").mockImplementation(
+          async (current, state, activity) => {
+            const before = confirmations().length;
+            const result = await settle(current, state, activity);
+            if (
+              current.submitUnconfirmedAt === held.submitUnconfirmedAt &&
+              current.queuedMessageTyped?.typedAt === held.queuedMessageTyped?.typedAt &&
+              confirmations().length === before + 1
+            )
+              confirmedHead = { state, activity };
+            return result;
+          },
+        );
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+        );
+        vi.setSystemTime(Date.now() + 20_000);
+        mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 5_000 });
+        await service.get(record.id);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => expect(laterEntered).toBe(true), { timeout: 3_000 });
+        const pending = structuredClone(sessions.get(record.id));
+        expect(pending?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(pending?.submitUnconfirmedAt).toBeUndefined();
+        expect(laterBaseline).toBeDefined();
+        expect(pending?.queuedMessageTyped).toEqual({
+          message: later,
+          typedAt: expect.any(String),
+          ackBaseline: laterBaseline,
+        });
+        expect(pending?.agentSessionId).toBe(record.agentSessionId);
+        expect(pending?.agentLaunchId).toBe(record.agentLaunchId);
+        expect(scans).toContainEqual({ message: later, found: true });
+        expect(sentEvents()).toHaveLength(0);
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text, later]);
+        expect(confirmations()).toHaveLength(1);
+        expect(confirmedHead?.activity).toBeInstanceOf(Date);
+        if (!confirmedHead) throw new Error("Missing normal head confirmation arguments");
+        const headScans = scans.filter((scan) => scan.message === text && scan.found).length;
+        await settle(held, confirmedHead.state, confirmedHead.activity);
+        expect(scans.filter((scan) => scan.message === text && scan.found)).toHaveLength(
+          headScans + 1,
+        );
+        expect(sessions.get(record.id)).toEqual(pending);
+        expect(confirmations()).toHaveLength(1);
+        expect(sentEvents()).toHaveLength(0);
+        releaseLater();
+        await vi.waitFor(() => expect(sentEvents()).toHaveLength(1), { timeout: 3_000 });
+        expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        expect(sessions.get(record.id)?.submitUnconfirmedAt).toBeUndefined();
+        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([text, later]);
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        releaseLater();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(
+    (["direct", "queued"] as const).flatMap((origin) =>
+      (
+        [
+          "none",
+          "other",
+          "provider",
+          "server-error",
+          "launch",
+          "native",
+          "lifecycle",
+          "completed",
+          "working",
+          "needs_input",
+          "rate_limited",
+          "composer",
+          "stale-write",
+        ] as const
+      ).map((guard) => ({ origin, guard })),
+    ),
+  )(
+    "rearms queued delivery after a held $origin pre-paste runtime diagnostic with guard=$guard",
+    async ({ origin, guard }) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const text = `probe recovery ${origin}`;
+      const record = runningSession({
+        agentLaunchId: "probe-generation",
+        agentSessionId: "session-uuid",
+        queuedMessages: { messages: [text], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      const file = join(TEST_ARTIFACTS_ROOT, `probe-recovery-${origin}.jsonl`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify({ type: "user", message: { role: "user", content: text } }) + "\n",
+      );
+      const { scanClaudeJsonlForMessage } = await import("../../src/agents/claude-submit-ack.js");
+      const acknowledgements: boolean[] = [];
+      createAgentSubmitAckBindingMock.mockImplementation(async () => {
+        const baseline = { agent: "claude" as const, file, size: statSync(file).size };
+        expect(await scanClaudeJsonlForMessage(baseline, text, record.worktreePath)).toBe(false);
+        return {
+          baseline,
+          async scan(message: string) {
+            const found = await scanClaudeJsonlForMessage(baseline, message, record.worktreePath);
+            acknowledgements.push(found);
+            return { found, lastScannedFile: file };
+          },
+        };
+      });
+      sendMessageToTmuxMock.mockImplementation(async (_id: string, message: string) => {
+        appendFileSync(
+          file,
+          JSON.stringify({ type: "user", message: { role: "user", content: message } }) + "\n",
+        );
+      });
+      let releaseProbe: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
+      let enteredProbe: () => void = () => {};
+      const probing = new Promise<void>((resolve) => {
+        enteredProbe = resolve;
+      });
+      let failed = false;
+      probeTmuxProcessMatchMock.mockImplementation(
+        async (_id: string, _matchers: string[], options?: { fresh?: boolean }) => {
+          if (options?.fresh && !failed) {
+            failed = true;
+            enteredProbe();
+            await gate;
+            return {
+              alive: false,
+              matchedByName: false,
+              unresponsive: false,
+              diagnostic: "ps failed: malformed process table output",
+            };
+          }
+          return { alive: true, matchedByName: true, unresponsive: false };
+        },
+      );
+      const attempt = (
+        origin === "direct"
+          ? service.send(record.id, { message: "direct probe", queue: false, interrupt: false })
+          : sessionServiceInternals(service).tryDeliverQueuedMessage(record.id)
+      ).catch((error: unknown) => error);
+      try {
+        await probing;
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        if (guard === "lifecycle") {
+          const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister })
+            .lifecycle;
+          const receipt = lifecycle.begin("complete", [record.id]);
+          lifecycle.settle(
+            receipt,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+        } else if (guard === "completed") {
+          sessions.set(record.id, { ...record, status: "completed" });
+        } else if (guard === "launch" || guard === "native") {
+          sessions.set(record.id, {
+            ...record,
+            ...(guard === "launch"
+              ? { agentLaunchId: "replacement-generation" }
+              : { agentSessionId: "replacement-native" }),
+          });
+        } else if (guard === "other" || guard === "provider") {
+          sessions.set(record.id, {
+            ...record,
+            error:
+              guard === "other"
+                ? "Session status detection failed: unrelated diagnostic"
+                : "Provider request refused",
+            errorSource: "other",
+          });
+        } else if (guard === "server-error") {
+          sessions.set(record.id, { ...record, serverErrorAt: "2026-03-18T10:04:00.000Z" });
+        }
+        releaseProbe();
+        await attempt;
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+        if (
+          guard !== "other" &&
+          guard !== "provider" &&
+          guard !== "launch" &&
+          guard !== "native" &&
+          guard !== "lifecycle" &&
+          guard !== "completed"
+        ) {
+          expect(sessions.get(record.id)?.error).toContain("malformed process table output");
+        }
+        if (
+          guard === "launch" ||
+          guard === "native" ||
+          guard === "lifecycle" ||
+          guard === "completed"
+        ) {
+          expect(sessions.get(record.id)?.error).toBeUndefined();
+          expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+          return;
+        }
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(acknowledgements).toEqual([]);
+
+        if (guard === "working" || guard === "needs_input" || guard === "rate_limited") {
+          mockClaudeJsonlState(guard);
+        } else if (guard === "composer") {
+          const current = sessions.get(record.id);
+          if (!current) throw new Error("Probe removed session");
+          sessions.set(record.id, {
+            ...current,
+            submitUnconfirmedAt: "2026-03-18T10:06:00.000Z",
+            queuedMessages: { messages: [text], awaitingPrompt: true },
+          });
+        } else if (guard === "stale-write") {
+          mockClaudeJsonlState("waiting", { lastMtimeMs: Date.now() - 1_000 });
+          const { paneWriteFenceAt } = service as unknown as {
+            paneWriteFenceAt: Map<string, number>;
+          };
+          paneWriteFenceAt.set(record.id, Date.now());
+        }
+        if (guard !== "none") {
+          const view = await service.get(record.id);
+          if (guard === "composer") {
+            expect(view.submitUnconfirmedAt).toBe("2026-03-18T10:06:00.000Z");
+          } else {
+            await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+          }
+          expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([text]);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(acknowledgements).toEqual([]);
+          if (["other", "provider"].includes(guard)) {
+            expect(sessions.get(record.id)?.errorSource).toBe("other");
+            expect(view.state).toBe("error");
+          }
+          return;
+        }
+        expect((await service.get(record.id)).state).toBe("waiting");
+        await vi.waitFor(() => {
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          expect(sessions.get(record.id)?.queuedMessageTyped).toBeUndefined();
+        });
+        expect(sendMessageToTmuxMock).toHaveBeenCalledExactlyOnceWith(
+          record.tmuxSession,
+          text,
+          expect.anything(),
+        );
+        expect(acknowledgements).toEqual([true]);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.agentLaunchId).toBe(record.agentLaunchId);
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+        await service.get(record.id);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+      } finally {
+        releaseProbe();
+        await attempt;
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(["direct", "queued"] as const)(
+    "keeps a typed workspace diagnostic from %s delivery outside runtime healing",
+    async (origin) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({
+        agentSessionId: "session-uuid",
+        agentLaunchId: "workspace-generation",
+        queuedMessages: { messages: ["keep workspace head"], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      probeTmuxProcessMatchMock.mockResolvedValue({
+        alive: false,
+        matchedByName: false,
+        unresponsive: false,
+      });
+      probeWorkspaceMock.mockReturnValue({
+        exists: false,
+        missing: false,
+        diagnostic: "workspace stat failed: permission denied",
+      });
+      try {
+        if (origin === "direct") {
+          await expect(
+            service.send(record.id, { message: "direct workspace", queue: false }),
+          ).rejects.toMatchObject({ name: "TmuxProbeUnknownError" });
+        } else {
+          await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+        }
+        expect(sessions.get(record.id)?.errorSource).toBe("other");
+        probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        expect((await service.get(record.id)).state).toBe("error");
+        await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+        expect(sessions.get(record.id)?.errorSource).toBe("other");
+        expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual(["keep workspace head"]);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each(
+    [
+      "ps failed: malformed process table output",
+      "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+      "ps failed: malformed process table output (no data rows, 0 bytes)",
+    ].flatMap((diagnostic) =>
+      (["direct", "queued"] as const).map((boundary) => ({ diagnostic, boundary })),
+    ),
+  )(
+    "recovers typed ps failure from $boundary send across service reconstruction: $diagnostic",
+    async ({ boundary, diagnostic }) => {
+      const sessions = createSessionStore();
+      let service = await createDisposedSessionService();
+      const record = runningSession({
+        agent: "codex",
+        agentLaunchId: "probe-restart-generation",
+        agentSessionId: "session-uuid",
+        launchCommand: agentLaunchCommand("codex"),
+        queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
+      });
+      sessions.set(record.id, record);
+      mockAgentWaitingState("codex");
+      probeTmuxProcessMatchMock.mockImplementation(async (_name, _matchers, options) =>
+        options?.fresh
+          ? { alive: false, matchedByName: false, unresponsive: false, diagnostic }
+          : { alive: true, matchedByName: true, unresponsive: false },
+      );
+      try {
+        if (boundary === "direct") {
+          await expect(
+            service.send(record.id, {
+              message: "blocked by probe",
+              queue: false,
+              interrupt: false,
+            }),
+          ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
+        } else {
+          await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+        }
+        expect(sessions.get(record.id)).toMatchObject({
+          status: "running",
+          error: `Session status detection failed: ${diagnostic}`,
+          errorSource: "runtime_probe",
+          queuedMessages: record.queuedMessages,
+        });
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: false,
+          matchedByName: false,
+          unresponsive: false,
+          diagnostic,
+        });
+        expect((await service.get(record.id)).state).toBe("error");
+        expect(sessions.get(record.id)?.error).toContain(diagnostic);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        service.dispose();
+        service = await createDisposedSessionService();
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        expect((await service.get(record.id)).state).toBe("waiting");
+        await vi.waitFor(() => {
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+        });
+        expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+          record.tmuxSession,
+          "resume after probe",
+          expect.anything(),
+        );
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+        await service.get(record.id);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(removeWorktreeMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it("retains a new workspace failure over historical ps provenance after probes recover", async () => {
+    const record = runningSession({
+      agentLaunchId: "historical-workspace-generation",
+      agentSessionId: "session-uuid",
+      error: "Session status detection failed: ps failed: malformed process table output",
+      errorSource: "other",
+      queuedMessages: { messages: ["keep queued"], awaitingPrompt: false },
+    });
+    const sessions = createSessionStore(record);
+    const service = await createDisposedSessionService();
+    try {
+      mockClaudeJsonlState("waiting");
+      probeWorkspaceMock.mockReturnValue({
+        exists: false,
+        missing: false,
+        diagnostic: "workspace stat failed: permission denied",
+      });
+      expect((await service.get(record.id)).state).toBe("error");
+      const retained = "Session status detection failed: workspace stat failed: permission denied";
+      expect(sessions.get(record.id)).toMatchObject({
+        error: retained,
+        errorSource: "other",
+        queuedMessages: record.queuedMessages,
+      });
+      probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
+      expect((await service.get(record.id)).state).toBe("error");
+      expect(sessions.get(record.id)?.error).toBe(retained);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("automatically drains queued delivery after already-running runtime probe heals", async () => {
     const sessions = createSessionStore();
     const service = await createDisposedSessionService();
     const record = runningSession({
       error: "Session status detection failed: ps failed: controlled",
-      ...patch,
+      errorSource: "runtime_probe",
       queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
     });
     sessions.set(record.id, record);
@@ -27087,20 +29463,6 @@ describe("SessionService", () => {
     isProcessRunningInTmuxMock.mockResolvedValue(true);
     mockClaudeJsonlState("waiting");
     try {
-      probeTmuxProcessMatchMock.mockResolvedValue({
-        alive: false,
-        matchedByName: false,
-        unresponsive: false,
-        diagnostic: "ps failed: controlled",
-      });
-      expect((await service.get(record.id)).state).toBe("error");
-      expect(sessions.get(record.id)?.status).toBe(patch.status);
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-      probeTmuxProcessMatchMock.mockResolvedValue({
-        alive: true,
-        matchedByName: true,
-        unresponsive: false,
-      });
       expect((await service.get(record.id)).status).toBe("running");
       await vi.waitFor(() => {
         expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
@@ -27110,121 +29472,86 @@ describe("SessionService", () => {
       expect(sessions.get(record.id)?.errorSource).toBeUndefined();
       await service.get(record.id);
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(createTmuxSessionMock).not.toHaveBeenCalled();
     } finally {
       service.dispose();
     }
   });
 
-  it.each([
-    { boundary: "direct", diagnostic: "ps failed: malformed process table output" },
-    { boundary: "queued", diagnostic: "ps failed: malformed process table output" },
-    {
-      boundary: "direct",
-      diagnostic: "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
-    },
-    {
-      boundary: "queued",
-      diagnostic: "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
-    },
-  ])("heals ps failure from $boundary send: $diagnostic", async (sample) => {
-    const { boundary, diagnostic } = sample;
-    const sessions = createSessionStore();
-    let service = await createDisposedSessionService();
-    const record = runningSession({
-      agent: "codex",
-      launchCommand: agentLaunchCommand("codex"),
-      queuedMessages: { messages: ["resume after probe"], awaitingPrompt: false },
-    });
-    sessions.set(record.id, record);
-    mockAgentWaitingState("codex");
-    probeTmuxProcessMatchMock.mockImplementation(async (_name, _matchers, options) =>
-      options?.fresh
-        ? { alive: false, matchedByName: false, unresponsive: false, diagnostic }
-        : { alive: true, matchedByName: true, unresponsive: false },
-    );
-    try {
-      if (boundary === "direct") {
-        await expect(
-          service.send(record.id, { message: "blocked by probe", queue: false }),
-        ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
-      } else {
-        await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
-      }
-      expect(sessions.get(record.id)).toMatchObject({
-        status: "running",
+  it.each(
+    [
+      "ps failed: malformed process table output",
+      "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n",
+    ].flatMap((diagnostic) =>
+      (["running", "errored"] as const).flatMap((status) =>
+        [false, true].map((awaitingPrompt) => ({ diagnostic, status, awaitingPrompt })),
+      ),
+    ),
+  )(
+    "heals historical other and drains two FIFO once: $status $awaitingPrompt $diagnostic",
+    async ({ diagnostic, status, awaitingPrompt }) => {
+      const sessions = createSessionStore();
+      const service = await createDisposedSessionService();
+      const record = runningSession({
+        status,
+        agentLaunchId: "historical-generation",
+        agentSessionId: "session-uuid",
         error: `Session status detection failed: ${diagnostic}`,
         errorSource: "other",
-        queuedMessages: record.queuedMessages,
+        queuedMessages: { messages: ["historical first", "historical second"], awaitingPrompt },
       });
-      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      sessions.set(record.id, record);
+      mockClaudeJsonlState("waiting");
+      try {
+        await service.get(record.id);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(
+          () => {
+            vi.setSystemTime(Date.now() + 60_000);
+            expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+          },
+          { timeout: 3_000 },
+        );
+        expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toEqual([
+          "historical first",
+          "historical second",
+        ]);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        await service.get(record.id);
+        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        expect(killTmuxSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
 
-      probeTmuxProcessMatchMock.mockResolvedValue({
-        alive: false,
-        matchedByName: false,
-        unresponsive: false,
-        diagnostic,
-      });
+  it.each([
+    "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args",
+    "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n\n",
+    "ps failed: malformed process table output extra",
+    "ps failed: permission denied",
+    "Resource readout ps failed: malformed process table output",
+  ])("retains unqualified historical other: %s", async (diagnostic) => {
+    const sessions = createSessionStore();
+    const service = await createDisposedSessionService();
+    const record = runningSession({
+      error: `Session status detection failed: ${diagnostic}`,
+      errorSource: "other",
+      queuedMessages: { messages: ["held"], awaitingPrompt: false },
+    });
+    sessions.set(record.id, record);
+    mockClaudeJsonlState("waiting");
+    try {
       expect((await service.get(record.id)).state).toBe("error");
-      expect(sessions.get(record.id)?.error).toContain(diagnostic);
+      await sessionServiceInternals(service).tryDeliverQueuedMessage(record.id);
+      expect(sessions.get(record.id)?.error).toBe(record.error);
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-
-      service.dispose();
-      service = await createDisposedSessionService();
-      probeTmuxProcessMatchMock.mockResolvedValue({
-        alive: true,
-        matchedByName: true,
-        unresponsive: false,
-      });
-      expect((await service.get(record.id)).state).toBe("waiting");
-      await vi.waitFor(() => {
-        expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-        expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
-      });
-      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-        record.tmuxSession,
-        "resume after probe",
-        expect.anything(),
-      );
-      expect(sessions.get(record.id)?.error).toBeUndefined();
-      expect(sessions.get(record.id)?.errorSource).toBeUndefined();
-      await service.get(record.id);
-      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
-      expect(killTmuxSessionMock).not.toHaveBeenCalled();
-      expect(createTmuxSessionMock).not.toHaveBeenCalled();
-      expect(removeWorktreeMock).not.toHaveBeenCalled();
     } finally {
       service.dispose();
     }
-  });
-
-  it("retains a new workspace failure over historical ps provenance after probes recover", async () => {
-    const record = runningSession({
-      error: "Session status detection failed: ps failed: malformed process table output",
-      errorSource: "other",
-      queuedMessages: { messages: ["keep queued"], awaitingPrompt: false },
-    });
-    const sessions = createSessionStore(record);
-    const service = await createDisposedSessionService();
-    probeWorkspaceMock.mockReturnValue({
-      exists: false,
-      missing: false,
-      diagnostic: "workspace stat failed: permission denied",
-    });
-    expect((await service.get(record.id)).state).toBe("error");
-    const retained = "Session status detection failed: workspace stat failed: permission denied";
-    expect(sessions.get(record.id)).toMatchObject({
-      error: retained,
-      errorSource: "other",
-      queuedMessages: record.queuedMessages,
-    });
-    probeWorkspaceMock.mockReturnValue({ exists: true, missing: false });
-    expect((await service.get(record.id)).state).toBe("error");
-    expect(sessions.get(record.id)?.error).toBe(retained);
-    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-    expect(killTmuxSessionMock).not.toHaveBeenCalled();
-    expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("does not arm queued delivery for a promoted unrelated error", async () => {
@@ -27313,6 +29640,45 @@ describe("SessionService", () => {
     expect(sessions.get(record.id)).toEqual(replacement);
     expect(writeSessionMock).not.toHaveBeenCalled();
   });
+
+  it.each(["running", "errored"] as const)(
+    "does not heal %s after lifecycle replacement during the probe",
+    async (status) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        status,
+        error: "Session status detection failed: ps failed: malformed process table output",
+        errorSource: "other",
+      });
+      sessions.set(record.id, record);
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockImplementationOnce(
+        async () => {
+          const owner = lifecycle.begin("complete", [record.id]);
+          lifecycle.settle(
+            owner,
+            true,
+            () => "succeeded",
+            () => true,
+          );
+          return {
+            runtimeAlive: true,
+            paneUsable: true,
+            processAlive: true,
+            probeUnresponsive: false,
+          };
+        },
+      );
+      try {
+        await sessionServiceInternals(service).classifySessionRecord(record);
+        expect(sessions.get(record.id)).toEqual(record);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
 
   it.each([undefined, "inferred_runtime_exit"] as const)(
     "heals an already-running inferred exit without relaunch (source=%s)",
@@ -27409,22 +29775,8 @@ describe("SessionService", () => {
   it.each([
     { error: "Agent runtime exited unexpectedly.", errorSource: "other" as const },
     {
-      error: "Session status detection failed: tmux list-panes failed: classifier",
+      error: "Session status detection failed: ps failed: classifier",
       errorSource: "other" as const,
-    },
-    {
-      error: "Session status detection failed: classifier unavailable",
-      errorSource: "other" as const,
-    },
-    {
-      error: "Session status detection failed: Resource readout api-1__dev: ps failed: denied",
-      errorSource: "other" as const,
-    },
-    { error: "Session status detection failed: workspace failed", errorSource: "other" as const },
-    {
-      error: "Session status detection failed: ps failed: malformed process table output",
-      errorSource: "other" as const,
-      serverErrorAt: "2026-03-18T10:01:00.000Z",
     },
     { error: "Session status detection failed: workspace failed" },
     { error: "Provider request failed" },
@@ -28464,7 +30816,7 @@ describe("SessionService", () => {
 
     const listed = await service.list();
 
-    expect(listSessionsMock).toHaveBeenCalledTimes(3);
+    expect(listSessionsMock).toHaveBeenCalledTimes(2);
     expect(listed).toHaveLength(1_000);
     expect(listed.map((session) => session.id)).toEqual(expectedIds);
     expect(listed.find((session) => session.id === "api-1")?.deskGroupMembers).toEqual([
@@ -31109,6 +33461,7 @@ describe("SessionService", () => {
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
       launchScriptDir: "/tmp/spur-tools/api-1",
+      beforeLaunch: expect.any(Function),
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -47788,12 +50141,19 @@ describe("SessionService", () => {
       lifecycle: SessionLifecycleRegister;
       assembleDashboard(record: SessionRecord): Promise<{
         view: Omit<DashboardSessionView, "lifecycle">;
-        source: SessionRecord;
+        source: SessionRecord | null;
       }>;
-      enrichWithClassified(record: SessionRecord): Promise<{
+      enrichWithClassified(
+        record: SessionRecord,
+        claudeAccounts?: unknown,
+        listing?: SessionRecord[],
+      ): Promise<{
         view: Omit<SessionListItemView, "lifecycle">;
-        source: SessionRecord;
+        source: SessionRecord | null;
       }>;
+      withReportingError(record: SessionRecord): SessionRecord;
+      guardSidecarViews(id: string, sidecars: unknown): void;
+      runDashboardCacheTick(): Promise<void>;
     };
 
     it.each(["complete", "restore", "reopen"] as const)(
@@ -48085,40 +50445,830 @@ describe("SessionService", () => {
       },
     );
 
-    it("returns retryable 503 after one rebuild instead of decorating a second changed source", async () => {
-      const records = seed();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const internals = service as unknown as LifecycleInternals;
-      const owner = internals.lifecycle.begin("complete", ["api-1"], "coherent");
-      internals.lifecycle.settle(
-        owner,
-        true,
-        () => "succeeded",
-        () => true,
-      );
-      const original = internals.enrichWithClassified.bind(internals);
-      let changes = 0;
-      const rebuild = vi
-        .spyOn(internals, "enrichWithClassified")
-        .mockImplementation(async (record) => {
-          const row = await original(record);
-          if (record.id === "api-1") {
-            const current = records.get(record.id);
-            if (!current) throw new Error("Missing fixture");
-            records.set(record.id, { ...current, prompt: `changed ${++changes}` });
+    describe("bounded snapshot rebuild passes", () => {
+      const startedAt = "2026-03-18T10:00:00.000Z";
+      let operations = 0;
+
+      function plainSeed() {
+        const records = seed();
+        for (const [id, record] of records) records.set(id, { ...record, workspaceId: id });
+        return records;
+      }
+
+      function rewrite(
+        records: Map<string, SessionRecord>,
+        id: string,
+        patch: Partial<SessionRecord>,
+      ) {
+        const current = records.get(id);
+        if (!current) throw new Error(`Missing fixture ${id}`);
+        records.set(id, { ...current, ...patch });
+      }
+
+      async function setup() {
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", startedAt, {
+          deferBackgroundLoops: true,
+        });
+        return { service, internals: service as unknown as LifecycleInternals };
+      }
+
+      function settleOp(internals: LifecycleInternals, id: string) {
+        const owner = internals.lifecycle.begin("complete", [id], `settled-${++operations}`);
+        internals.lifecycle.settle(
+          owner,
+          true,
+          () => "succeeded",
+          () => true,
+        );
+      }
+
+      function watchBuilds(
+        internals: LifecycleInternals,
+        hook: (id: string, build: number) => void = () => undefined,
+      ) {
+        const original = internals.enrichWithClassified.bind(internals);
+        const counts = new Map<string, number>();
+        const state = { depth: 0 };
+        // The post-finalize sidecar guard reads each returned row once; it is not
+        // part of the finalize pass, so it counts as builder-side IO here.
+        const guard = internals.guardSidecarViews.bind(internals);
+        vi.spyOn(internals, "guardSidecarViews").mockImplementation((id, sidecars) => {
+          state.depth += 1;
+          try {
+            guard(id, sidecars);
+          } finally {
+            state.depth -= 1;
           }
+        });
+        const spy = vi
+          .spyOn(internals, "enrichWithClassified")
+          .mockImplementation(async (record, accounts, listing) => {
+            state.depth += 1;
+            let row;
+            try {
+              row = await original(record, accounts, listing);
+            } finally {
+              state.depth -= 1;
+            }
+            const build = (counts.get(record.id) ?? 0) + 1;
+            counts.set(record.id, build);
+            hook(record.id, build);
+            return row;
+          });
+        return {
+          spy,
+          state,
+          builds: (id: string) => spy.mock.calls.filter(([record]) => record.id === id).length,
+        };
+      }
+
+      function watchDashboardBuilds(
+        internals: LifecycleInternals,
+        hook: (id: string, build: number) => void = () => undefined,
+      ) {
+        const original = internals.assembleDashboard.bind(internals);
+        const counts = new Map<string, number>();
+        const spy = vi.spyOn(internals, "assembleDashboard").mockImplementation(async (record) => {
+          const row = await original(record);
+          const build = (counts.get(record.id) ?? 0) + 1;
+          counts.set(record.id, build);
+          hook(record.id, build);
           return row;
         });
-      try {
-        await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
-          statusCode: 503,
-          payload: { code: "session_lifecycle_snapshot_changed" },
-        });
-        expect(rebuild.mock.calls.filter(([record]) => record.id === "api-1")).toHaveLength(2);
-      } finally {
-        service.dispose();
+        return {
+          spy,
+          builds: (id: string) => spy.mock.calls.filter(([record]) => record.id === id).length,
+        };
       }
+
+      const snapshotChanged = {
+        statusCode: 503,
+        payload: { code: "session_lifecycle_snapshot_changed" },
+      };
+
+      it("builds static rows once and reads the store once per pass", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const full = watchBuilds(internals);
+          listSessionsMock.mockClear();
+          const first = await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(2);
+          const second = await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(4);
+          expect(second).toEqual(first);
+          expect(full.builds("api-1")).toBe(2);
+          expect(full.builds("api-2")).toBe(2);
+
+          await internals.runDashboardCacheTick();
+          const dashboard = watchDashboardBuilds(internals);
+          listSessionsMock.mockClear();
+          const dashFirst = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(3);
+          const dashSecond = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(6);
+          expect(dashFirst.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(dashSecond).toEqual(dashFirst);
+          expect(dashboard.spy).not.toHaveBeenCalled();
+          expect(records.size).toBe(2);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each(["list", "get"] as const)(
+        "returns retryable 503 after bounded rebuilds when %s sees churn on every build",
+        async (route) => {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            let changes = 0;
+            const watch = watchBuilds(internals, (id) => {
+              if (id === "api-1") rewrite(records, id, { branch: `changed ${++changes}` });
+            });
+            listSessionsMock.mockClear();
+            const call =
+              route === "list" ? service.list({ includeCompleted: true }) : service.get("api-1");
+            await expect(call).rejects.toMatchObject(snapshotChanged);
+            expect(watch.builds("api-1")).toBe(4);
+            if (route === "list") expect(listSessionsMock).toHaveBeenCalledTimes(5);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each([
+        { churnBuilds: 3, builds: 4 },
+        { churnBuilds: 2, builds: 3 },
+      ])(
+        "returns the latest row when churn stops after $churnBuilds builds",
+        async ({ churnBuilds, builds }) => {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            const revision = internals.lifecycle.snapshot("api-1").revision;
+            const watch = watchBuilds(internals, (id, build) => {
+              if (id === "api-1" && build <= churnBuilds)
+                rewrite(records, id, { branch: `changed ${build}` });
+            });
+            const rows = await service.list({ includeCompleted: true });
+            const row = rows.find((candidate) => candidate.id === "api-1");
+            expect(watch.builds("api-1")).toBe(builds);
+            expect(row?.branch).toBe(`changed ${churnBuilds}`);
+            expect(row?.lifecycle.revision).toBe(revision);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it("does not rebuild revision-0 rows that churn", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let churn = 0;
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-2") rewrite(records, id, { branch: `churn ${++churn}` });
+          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id)).toEqual(["api-1", "api-2"]);
+          expect(watch.builds("api-2")).toBe(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("returns 503 after bounded rebuilds when the lifecycle revision moves every pass", async () => {
+        plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals, (id) => {
+            if (id === "api-1") settleOp(internals, id);
+          });
+          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject(
+            snapshotChanged,
+          );
+          expect(watch.builds("api-1")).toBe(4);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("drops rows deleted while rebuilding instead of refusing", async () => {
+        for (const victim of ["api-2", "api-1"]) {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1") return;
+              if (build === 1) rewrite(records, id, { branch: "rewritten" });
+              if (build === 2) records.delete(victim);
+            });
+            const rows = await service.list({ includeCompleted: true });
+            expect(rows.map((row) => row.id)).toEqual(victim === "api-2" ? ["api-1"] : ["api-2"]);
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it("excludes a created idle session but picks up a created pending one", async () => {
+        for (const pending of [false, true]) {
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1") return;
+              if (build === 1) rewrite(records, id, { branch: "rewritten" });
+              if (build !== 2) return;
+              const base = records.get("api-1");
+              if (!base) throw new Error("Missing fixture");
+              records.set("api-3", {
+                ...base,
+                id: "api-3",
+                workspaceId: "api-3",
+                branch: "api-3",
+                tmuxSession: "api-3",
+                status: pending ? "completed" : "running",
+              });
+              if (pending) internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+            });
+            const rows = await service.list({ includeCompleted: true });
+            const ids = rows.map((row) => row.id).sort();
+            if (!pending) expect(ids).toEqual(["api-1", "api-2"]);
+            else {
+              expect(ids).toEqual(["api-1", "api-2", "api-3"]);
+              expect(rows.find((row) => row.id === "api-3")?.lifecycle.operation?.phase).toBe(
+                "pending",
+              );
+            }
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it("does not pick up a created session whose pending operation is a complete", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            if (build === 1) rewrite(records, id, { branch: "rewritten" });
+            if (build !== 2) return;
+            const base = records.get("api-1");
+            if (!base) throw new Error("Missing fixture");
+            records.set("api-3", {
+              ...base,
+              id: "api-3",
+              workspaceId: "api-3",
+              branch: "api-3",
+              tmuxSession: "api-3",
+              status: "running",
+            });
+            internals.lifecycle.begin("complete", ["api-3"], "pending-complete");
+          });
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.map((row) => row.id).sort()).toEqual(["api-1", "api-2"]);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("refuses naming the picked-up session when a pickup and a stale row remain at the last pass", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            rewrite(records, id, { branch: `changed ${build}` });
+            if (build !== 4) return;
+            const base = records.get("api-1");
+            if (!base) throw new Error("Missing fixture");
+            records.set("api-3", {
+              ...base,
+              id: "api-3",
+              workspaceId: "api-3",
+              branch: "api-3",
+              tmuxSession: "api-3",
+              status: "completed",
+            });
+            internals.lifecycle.begin("reopen", ["api-3"], "pending-reopen");
+          });
+          await expect(service.list({ includeCompleted: true })).rejects.toMatchObject({
+            ...snapshotChanged,
+            payload: {
+              code: "session_lifecycle_snapshot_changed",
+              lifecycle: { operation: { operationId: "pending-reopen", phase: "pending" } },
+            },
+          });
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("rebuilds desk rows when workspace slots or membership move mid-pass", async () => {
+        const { writeWorkspaceState } = await loadWorkspaceStoreModule();
+        for (const scenario of ["slots", "membership"] as const) {
+          const records = seed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            settleOp(internals, "api-2");
+            watchBuilds(internals, (id, build) => {
+              if (id !== "api-1" || build !== 1) return;
+              if (scenario === "slots")
+                writeWorkspaceState(TEST_DATA_DIR, "api-1", {
+                  slots: { title: "moved", links: [] },
+                });
+              else rewrite(records, "api-2", { workspaceId: "api-2" });
+            });
+            const rows = await service.list({ includeCompleted: true });
+            if (scenario === "slots")
+              for (const row of rows) expect(row.slots?.title).toBe("moved");
+            else expect(rows.find((row) => row.id === "api-2")?.workspaceId).toBe("api-2");
+          } finally {
+            service.dispose();
+          }
+        }
+      });
+
+      it.each([2, 8])("reads the store O(1) per pass for %i settled rows", async (count) => {
+        const records = plainSeed();
+        const base = records.get("api-1");
+        if (!base) throw new Error("Missing fixture");
+        for (let index = 3; index <= count; index += 1)
+          records.set(`api-${index}`, {
+            ...base,
+            id: `api-${index}`,
+            workspaceId: `api-${index}`,
+            branch: `api-${index}`,
+            tmuxSession: `api-${index}`,
+          });
+        const { service, internals } = await setup();
+        try {
+          for (const id of records.keys()) settleOp(internals, id);
+          const watch = watchBuilds(internals, (id, build) => {
+            if (build === 1) rewrite(records, id, { branch: `${id} rewritten` });
+          });
+          const readSession = readSessionMock.getMockImplementation();
+          if (!readSession) throw new Error("Missing store mock");
+          let outside = 0;
+          readSessionMock.mockImplementation((...args: Parameters<typeof readSession>) => {
+            if (watch.state.depth === 0) outside += 1;
+            return readSession(...args);
+          });
+          listSessionsMock.mockClear();
+          outside = 0;
+          await service.list({ includeCompleted: true });
+          expect(listSessionsMock).toHaveBeenCalledTimes(3);
+          expect(watch.spy).toHaveBeenCalledTimes(2 * count);
+          expect(outside).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("reads the store once per pass in single-session mode", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          let changes = 0;
+          let churning = false;
+          const watch = watchBuilds(internals, (id) => {
+            if (churning) rewrite(records, id, { branch: `changed ${++changes}` });
+          });
+          const readSession = readSessionMock.getMockImplementation();
+          if (!readSession) throw new Error("Missing store mock");
+          let outside = 0;
+          readSessionMock.mockImplementation((...args: Parameters<typeof readSession>) => {
+            if (watch.state.depth === 0) outside += 1;
+            return readSession(...args);
+          });
+          await service.get("api-1");
+          expect(outside).toBe(2);
+          watch.spy.mockClear();
+          outside = 0;
+          churning = true;
+          await expect(service.get("api-1")).rejects.toMatchObject(snapshotChanged);
+          expect(watch.builds("api-1")).toBe(4);
+          expect(outside).toBe(5);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each([
+        { label: "plain samples", extraKey: false },
+        { label: "samples carrying a key the store drops", extraKey: true },
+      ])("does not treat its own token write as churn for $label", async ({ extraKey }) => {
+        const records = plainSeed();
+        rewrite(records, "api-1", {
+          agent: "codex",
+          agentSessionId: "root-thread",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        });
+        if (extraKey)
+          writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+            const usage = session.tokenUsage;
+            const stored = usage
+              ? {
+                  ...session,
+                  tokenUsage: {
+                    ...usage,
+                    generations: Object.fromEntries(
+                      Object.entries(usage.generations).map(([key, generation]) => [
+                        key,
+                        {
+                          inputTokens: generation.inputTokens,
+                          outputTokens: generation.outputTokens,
+                          totalTokens: generation.totalTokens,
+                        },
+                      ]),
+                    ),
+                  },
+                }
+              : session;
+            records.set(session.id, normalizeSessionPrBinding(clone(stored)));
+          });
+        let total = 100;
+        readCodexRolloutStateMock.mockImplementation(async () => {
+          total += 10;
+          const sample = {
+            provider: "codex",
+            generationId: "codex:root-thread",
+            inputTokens: total - 10,
+            outputTokens: 10,
+            totalTokens: total,
+            ...(extraKey ? { model: "x" } : {}),
+          };
+          return { rollout: null, rateLimit: null, tokenUsage: sample, tokenUsages: [sample] };
+        });
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals);
+          writeSessionMock.mockClear();
+          const rows = await service.list({ includeCompleted: true });
+          expect(rows.some((row) => row.id === "api-1")).toBe(true);
+          expect(watch.builds("api-1")).toBe(1);
+          expect(
+            writeSessionMock.mock.calls.filter(([, session]) => session.id === "api-1").length,
+          ).toBeGreaterThanOrEqual(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("shows the stored normalized token usage on a revision-0 row", async () => {
+        const records = plainSeed();
+        rewrite(records, "api-1", {
+          agent: "codex",
+          agentSessionId: "root-thread",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        });
+        writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+          const usage = session.tokenUsage;
+          records.set(
+            session.id,
+            normalizeSessionPrBinding(
+              clone(
+                usage
+                  ? { ...session, tokenUsage: { ...usage, totalTokens: usage.totalTokens + 1000 } }
+                  : session,
+              ),
+            ),
+          );
+        });
+        readCodexRolloutStateMock.mockImplementation(async () => {
+          const sample = {
+            provider: "codex",
+            generationId: "codex:root-thread",
+            inputTokens: 90,
+            outputTokens: 10,
+            totalTokens: 100,
+          };
+          return { rollout: null, rateLimit: null, tokenUsage: sample, tokenUsages: [sample] };
+        });
+        const { service } = await setup();
+        try {
+          const rows = await service.list({ includeCompleted: true });
+          const stored = records.get("api-1")?.tokenUsage?.totalTokens;
+          expect(stored).toBe(1100);
+          expect(rows.find((row) => row.id === "api-1")?.tokenUsageView).toMatchObject({
+            status: "available",
+            totalTokens: stored,
+          });
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("captures the lifecycle receipt before the store read", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const watch = watchBuilds(internals, (id, build) => {
+            if (id !== "api-1") return;
+            if (build === 1) {
+              rewrite(records, id, { branch: "rewritten" });
+              const read = listSessionsMock.getMockImplementation();
+              if (!read) throw new Error("Missing store mock");
+              listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                const listing = read(...args);
+                rewrite(records, "api-1", { branch: "restored" });
+                const owner = internals.lifecycle.begin("restore", ["api-1"], "restore-op");
+                internals.lifecycle.settle(
+                  owner,
+                  true,
+                  () => "succeeded",
+                  () => true,
+                );
+                return listing;
+              });
+            }
+          });
+          const rows = await service.list({ includeCompleted: true });
+          const row = rows.find((candidate) => candidate.id === "api-1");
+          expect(watch.builds("api-1")).toBe(3);
+          expect(
+            watch.spy.mock.calls.filter(([record]) => record.id === "api-1").at(-1)?.[0],
+          ).toMatchObject({
+            branch: "restored",
+          });
+          expect(row?.branch).toBe("restored");
+          expect(row?.lifecycle.revision).toBe(internals.lifecycle.snapshot("api-1").revision);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("reads a cache-miss dashboard record after the earlier builds", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          settleOp(internals, "api-2");
+          const watch = watchDashboardBuilds(internals, (id) => {
+            if (id !== "api-1") return;
+            rewrite(records, "api-2", { branch: "restored" });
+            settleOp(internals, "api-2");
+          });
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          const row = rows.find((candidate) => candidate.id === "api-2");
+          const calls = watch.spy.mock.calls.filter(([record]) => record.id === "api-2");
+          expect(calls).toHaveLength(1);
+          expect(calls[0]?.[0].branch).toBe("restored");
+          expect(row?.branch).toBe("restored");
+          expect(row?.lifecycle.revision).toBe(internals.lifecycle.snapshot("api-2").revision);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      describe("deadline and abort", () => {
+        it("refuses after the budget once a rebuild pass ran, never before the first", async () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          try {
+            for (const churnAlways of [true, false]) {
+              const records = plainSeed();
+              const { service, internals } = await setup();
+              try {
+                settleOp(internals, "api-1");
+                const watch = watchBuilds(internals, (id, build) => {
+                  if (id !== "api-1") return;
+                  if (build === 1 || churnAlways)
+                    rewrite(records, id, { branch: `changed ${build}` });
+                  if (build === 2) vi.setSystemTime(Date.now() + 60_000);
+                });
+                const listed = service.list({ includeCompleted: true });
+                if (churnAlways) await expect(listed).rejects.toMatchObject(snapshotChanged);
+                else await expect(listed).resolves.toHaveLength(2);
+                expect(watch.builds("api-1")).toBe(2);
+              } finally {
+                service.dispose();
+              }
+            }
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it("does not refuse at the first pass when the budget lapses during the pass-0 read", async () => {
+          vi.useFakeTimers({ toFake: ["Date"] });
+          const records = plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            let callsWhenClockJumped = 0;
+            const watch = watchBuilds(internals, (id, build) => {
+              if (id !== "api-1" || build !== 1) return;
+              rewrite(records, id, { branch: "changed 1" });
+              const read = listSessionsMock.getMockImplementation();
+              if (!read) throw new Error("Missing store mock");
+              listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                callsWhenClockJumped = listSessionsMock.mock.calls.length;
+                vi.setSystemTime(Date.now() + 60_000);
+                return read(...args);
+              });
+            });
+            listSessionsMock.mockClear();
+            await expect(service.list({ includeCompleted: true })).resolves.toHaveLength(2);
+            expect(callsWhenClockJumped).toBe(2);
+            expect(watch.builds("api-1")).toBe(2);
+          } finally {
+            service.dispose();
+            vi.useRealTimers();
+          }
+        });
+
+        it.each(["during rebuild", "during the next read"] as const)(
+          "stops starting passes after an abort %s",
+          async (when) => {
+            const records = plainSeed();
+            const { service, internals } = await setup();
+            try {
+              settleOp(internals, "api-1");
+              const controller = new AbortController();
+              const watch = watchBuilds(internals, (id, build) => {
+                if (id !== "api-1") return;
+                rewrite(records, id, { branch: `changed ${build}` });
+                if (build !== 2) return;
+                if (when === "during rebuild") {
+                  controller.abort();
+                  return;
+                }
+                const read = listSessionsMock.getMockImplementation();
+                if (!read) throw new Error("Missing store mock");
+                listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                  controller.abort();
+                  return read(...args);
+                });
+              });
+              listSessionsMock.mockClear();
+              await expect(
+                service.list({ includeCompleted: true, signal: controller.signal }),
+              ).rejects.toMatchObject({ name: "AbortError" });
+              expect(watch.builds("api-1")).toBe(2);
+              expect(listSessionsMock).toHaveBeenCalledTimes(when === "during rebuild" ? 2 : 3);
+            } finally {
+              service.dispose();
+            }
+          },
+        );
+      });
+
+      describe("dashboard abort", () => {
+        it("rejects a pre-aborted dashboard list before any pass read", async () => {
+          plainSeed();
+          const { service, internals } = await setup();
+          try {
+            settleOp(internals, "api-1");
+            const controller = new AbortController();
+            controller.abort();
+            listSessionsMock.mockClear();
+            await expect(
+              service.list({
+                view: "dashboard",
+                includeCompleted: true,
+                signal: controller.signal,
+              }),
+            ).rejects.toMatchObject({ name: "AbortError" });
+            expect(listSessionsMock).toHaveBeenCalledTimes(2);
+          } finally {
+            service.dispose();
+          }
+        });
+
+        it.each(["during rebuild", "during the next read"] as const)(
+          "stops starting dashboard passes after an abort %s",
+          async (when) => {
+            const records = plainSeed();
+            const { service, internals } = await setup();
+            try {
+              settleOp(internals, "api-1");
+              const controller = new AbortController();
+              const watch = watchDashboardBuilds(internals, (id, build) => {
+                if (id !== "api-1") return;
+                rewrite(records, id, { branch: `changed ${build}` });
+                if (build !== 2) return;
+                if (when === "during rebuild") {
+                  controller.abort();
+                  return;
+                }
+                const read = listSessionsMock.getMockImplementation();
+                if (!read) throw new Error("Missing store mock");
+                listSessionsMock.mockImplementationOnce((...args: Parameters<typeof read>) => {
+                  controller.abort();
+                  return read(...args);
+                });
+              });
+              listSessionsMock.mockClear();
+              await expect(
+                service.list({
+                  view: "dashboard",
+                  includeCompleted: true,
+                  signal: controller.signal,
+                }),
+              ).rejects.toMatchObject({ name: "AbortError" });
+              expect(watch.builds("api-1")).toBe(2);
+              expect(listSessionsMock).toHaveBeenCalledTimes(when === "during rebuild" ? 3 : 4);
+            } finally {
+              service.dispose();
+            }
+          },
+        );
+      });
+
+      it("rebuilds a row whose build re-read saw an intermediate version", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          const watch = watchBuilds(internals);
+          const rows = await service.list({ includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(2);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("rebuilds a dashboard cache-miss row whose build re-read saw an intermediate version", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          const watch = watchDashboardBuilds(internals);
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(2);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it("compares dashboard-cached sources by identity", async () => {
+        const records = plainSeed();
+        const { service, internals } = await setup();
+        try {
+          settleOp(internals, "api-1");
+          const original = records.get("api-1");
+          if (!original) throw new Error("Missing fixture");
+          const reread = internals.withReportingError.bind(internals);
+          let calls = 0;
+          vi.spyOn(internals, "withReportingError").mockImplementation((record) => {
+            if (record.id !== "api-1" || (calls += 1) !== 1) return reread(record);
+            records.set("api-1", { ...original, branch: "B" });
+            listSessionsMock(TEST_DATA_DIR);
+            const result = reread(record);
+            records.set("api-1", original);
+            return result;
+          });
+          await internals.runDashboardCacheTick();
+          const watch = watchDashboardBuilds(internals);
+          const rows = await service.list({ view: "dashboard", includeCompleted: true });
+          expect(watch.builds("api-1")).toBe(1);
+          expect(rows.find((row) => row.id === "api-1")?.branch).toBe(original.branch);
+        } finally {
+          service.dispose();
+        }
+      });
     });
 
     it("settles execution once and preserves its receipt when a newer owner interrupts response delivery", async () => {
@@ -50757,6 +53907,7 @@ describe("SessionService", () => {
         it(`releases lifecycle ownership during automatic ${target} acknowledgement`, async () => {
           const pastDue = "2026-03-18T09:00:00.000Z";
           const sessions = seedShepherdSession({
+            agentSessionId: "session-uuid",
             ...(target === "scheduled"
               ? { scheduledWake: { dueAt: pastDue, message: "Automatic scheduled" } }
               : {}),
@@ -50817,6 +53968,749 @@ describe("SessionService", () => {
       }
     });
 
+    describe("one-shot occurrence ownership", () => {
+      const wake = { dueAt: "2026-03-18T09:00:00.000Z", message: "one-shot A" };
+      async function rearm(
+        service: Awaited<ReturnType<typeof createDisposedSessionService>>,
+        id: string,
+        message: string,
+      ) {
+        const now = Date.now();
+        vi.setSystemTime(Date.parse(wake.dueAt) - 1_000);
+        try {
+          await service.scheduleWake(id, { at: wake.dueAt, message });
+        } finally {
+          vi.setSystemTime(now);
+        }
+      }
+      function gate() {
+        let resolve: () => void = () => {};
+        const promise = new Promise<void>((done) => {
+          resolve = done;
+        });
+        return { promise, resolve };
+      }
+      async function setup(overrides: Partial<SessionRecord> = {}) {
+        const sessions = createSessionStore();
+        const record = runningSession({
+          agentSessionId: "session-uuid",
+          agentLaunchId: "wake-generation",
+          scheduledWake: wake,
+          ...overrides,
+        });
+        sessions.set(record.id, record);
+        mockClaudeJsonlState("waiting");
+        const service = await createDisposedSessionService();
+        const internals = sessionServiceInternals(service) as SessionServiceInternals & {
+          processScheduledWakes(): Promise<void>;
+          ensureReadyForQueuedSend(id: string): Promise<void>;
+          enrich(record: SessionRecord): Promise<SessionView>;
+          lifecycle: SessionLifecycleRegister;
+          scheduledWakeClaims: Map<string, unknown>;
+        };
+        const count = (event: string) =>
+          logSpurEventMock.mock.calls.filter(([, entry]) => entry.event === event).length;
+        return { sessions, record, service, internals, count };
+      }
+
+      it("retains an automatic wake across repeated probe failures and service recreation, then consumes once", async () => {
+        const { sessions, record, service, internals, count } = await setup();
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: false,
+          matchedByName: false,
+          unresponsive: false,
+          diagnostic: "ps failed: malformed process table output",
+        });
+        await internals.processScheduledWakes();
+        await internals.processScheduledWakes();
+        expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+        expect(sessions.get(record.id)?.queuedMessages).toBeUndefined();
+        expect(count("session.wake.failed")).toBe(1);
+        expect(count("session.wake.sent")).toBe(0);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+        service.dispose();
+        probeTmuxProcessMatchMock.mockResolvedValue({
+          alive: true,
+          matchedByName: true,
+          unresponsive: false,
+        });
+        const recreated = await createDisposedSessionService();
+        try {
+          await (sessionServiceInternals(recreated) as typeof internals).processScheduledWakes();
+          await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(count("session.wake.sent")).toBe(1);
+          await (sessionServiceInternals(recreated) as typeof internals).processScheduledWakes();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        } finally {
+          recreated.dispose();
+        }
+      });
+
+      it.each(["duplicate", "spawning"] as const)(
+        "consumes automatic %s admission in its queue write",
+        async (mode) => {
+          const { sessions, record, service, internals, count } = await setup(
+            mode === "spawning"
+              ? { status: "spawning" }
+              : {
+                  submitUnconfirmedAt: "2026-03-18T10:05:00.000Z",
+                  queuedMessages: { messages: [wake.message], awaitingPrompt: true },
+                },
+          );
+          // Keep the unrelated submit hold unresolved so this checks durable admission, not its runner.
+          try {
+            await internals.processScheduledWakes();
+            expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([wake.message]);
+            expect(count("session.wake.sent")).toBe(1);
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["current", "same-values", "message-update", "newer-consumed"] as const)(
+        "authorizes real wake readiness after a deferred dead probe: %s",
+        async (change) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const entered = gate();
+          const release = gate();
+          let created = false;
+          createTmuxSessionMock.mockImplementation(async (input) => {
+            input.beforeLaunch?.();
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          isProcessRunningInTmuxMock.mockImplementation(async () => created);
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: created,
+            matchedByName: created,
+            unresponsive: false,
+          }));
+          const runtime = vi.spyOn(internals, "readRuntimeSnapshot");
+          const ready = vi.spyOn(
+            service as unknown as {
+              ensureSessionReadyForSend(session: SessionRecord): Promise<unknown>;
+            },
+            "ensureSessionReadyForSend",
+          );
+          runtime.mockImplementationOnce(async () => {
+            entered.resolve();
+            await release.promise;
+            return {
+              runtimeAlive: false,
+              paneUsable: false,
+              processAlive: false,
+              probeUnresponsive: false,
+            };
+          });
+          const attempt = internals.processScheduledWakes();
+          try {
+            await entered.promise;
+            if (change === "same-values") await rearm(service, record.id, wake.message);
+            else if (change === "message-update")
+              await service.updateWakeMessage(record.id, {
+                target: "scheduled",
+                message: "replacement B",
+              });
+            else if (change === "newer-consumed") {
+              await rearm(service, record.id, "replacement B");
+              created = true;
+              await service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+              created = false;
+              sendMessageToTmuxMock.mockClear();
+              ready.mockClear();
+            }
+            const replacement = sessions.get(record.id)?.scheduledWake;
+            const sentBefore = count("session.wake.sent");
+            release.resolve();
+            await attempt;
+            if (change === "current") {
+              expect(
+                logSpurEventMock.mock.calls.filter(
+                  ([, entry]) => entry.event === "session.wake.failed",
+                ),
+              ).toEqual([]);
+              await vi.waitFor(() =>
+                expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+                  record.tmuxSession,
+                  wake.message,
+                  expect.anything(),
+                ),
+              );
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+              expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+              expect(count("session.wake.sent")).toBe(1);
+            } else {
+              expect(ready).not.toHaveBeenCalled();
+              expect(createTmuxSessionMock).not.toHaveBeenCalled();
+              expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+              expect(sessions.get(record.id)?.scheduledWake).toEqual(replacement);
+              expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+              expect(count("session.wake.sent")).toBe(sentBefore);
+            }
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["current", "same-id-writer", "native", "launch", "lifecycle", "terminal"] as const)(
+        "authorizes manual first-native-id preparation only for its own current write: %s",
+        async (change) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const { agentSessionId: _unknownNative, ...legacy } = record;
+          sessions.set(record.id, legacy);
+          const entered = gate();
+          const release = gate();
+          findAgentSessionIdMock.mockImplementation(async () => {
+            entered.resolve();
+            await release.promise;
+            return "session-uuid";
+          });
+          vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+            found: true,
+            lastScannedFile: null,
+          });
+          const attempt = service
+            .dispatchWake(record.id, { target: "scheduled", dispatch: true })
+            .then(
+              (value) => ({ value, error: null }),
+              (error: unknown) => ({ value: null, error }),
+            );
+          try {
+            await entered.promise;
+            const current = sessions.get(record.id) as SessionRecord;
+            if (change === "lifecycle") {
+              const owner = internals.lifecycle.begin("complete", [record.id]);
+              internals.lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+            } else {
+              sessions.set(record.id, {
+                ...current,
+                slots: { title: "concurrent metadata", links: [] },
+                ...(change === "same-id-writer"
+                  ? { agentSessionId: "session-uuid" }
+                  : change === "native"
+                    ? { agentSessionId: "foreign-native" }
+                    : change === "launch"
+                      ? { agentLaunchId: "foreign-launch" }
+                      : change === "terminal"
+                        ? { status: "completed" as const }
+                        : {}),
+              });
+            }
+            release.resolve();
+            const result = await attempt;
+            if (change === "current") {
+              expect(result.error).toBeNull();
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+              expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+              expect(sessions.get(record.id)?.slots?.title).toBe("concurrent metadata");
+              expect(count("session.wake.sent")).toBe(1);
+            } else {
+              expect(result.error).toBeTruthy();
+              expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+              expect(count("session.wake.sent")).toBe(0);
+              expect(count("session.agent_session_id.discovered")).toBe(0);
+            }
+            expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it("retains an automatic occurrence across native-id discovery and accepts its current owner on the next poll", async () => {
+        const { sessions, record, service, internals, count } = await setup();
+        const { agentSessionId: _unknownNative, ...legacy } = record;
+        sessions.set(record.id, legacy);
+        let created = false;
+        createTmuxSessionMock.mockImplementation(async (input) => {
+          input.beforeLaunch?.();
+          created = true;
+        });
+        tmuxSessionExistsMock.mockImplementation(async () => created);
+        isProcessRunningInTmuxMock.mockImplementation(async () => created);
+        probeTmuxProcessMatchMock.mockImplementation(async () => ({
+          alive: created,
+          matchedByName: created,
+          unresponsive: false,
+        }));
+        try {
+          await internals.processScheduledWakes();
+          expect(sessions.get(record.id)?.agentSessionId).toBe("session-uuid");
+          expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(count("session.wake.sent")).toBe(0);
+          expect(count("session.wake.failed")).toBe(0);
+          await internals.processScheduledWakes();
+          await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+          expect(count("session.wake.sent")).toBe(1);
+          expect(count("session.wake.failed")).toBe(0);
+          await internals.processScheduledWakes();
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+        } finally {
+          service.dispose();
+        }
+      });
+
+      it.each(
+        (["activation-plan", "binding", "input", "ack", "resend", "generation"] as const).flatMap(
+          (boundary) =>
+            (boundary === "binding" || boundary === "ack"
+              ? (["current", "lifecycle", "native", "replacement"] as const)
+              : (["current", "lifecycle", "native"] as const)
+            ).map((guard) => ({ boundary, guard })),
+        ),
+      )(
+        "authorizes real wake recovery across $boundary await: $guard",
+        async ({ boundary, guard }) => {
+          const { sessions, record, service, internals, count } = await setup();
+          const entered = gate();
+          const release = gate();
+          let created = false;
+          let gated = false;
+          let ackScans = 0;
+          const waitAtBoundary = async () => {
+            if (gated) return;
+            gated = true;
+            entered.resolve();
+            await release.promise;
+          };
+          buildAgentResumePlanMock.mockReturnValue(null);
+          createTmuxSessionMock.mockImplementation(async (input) => {
+            input.beforeLaunch?.();
+            created = true;
+          });
+          tmuxSessionExistsMock.mockImplementation(async () => created);
+          isProcessRunningInTmuxMock.mockImplementation(async () => created);
+          probeTmuxProcessMatchMock.mockImplementation(async () => ({
+            alive: created,
+            matchedByName: created,
+            unresponsive: false,
+          }));
+          if (boundary === "activation-plan")
+            setupAgentHooksMock.mockImplementationOnce(async () => {
+              await waitAtBoundary();
+              return {};
+            });
+          createAgentSubmitAckBindingMock.mockImplementation(async () => {
+            if (boundary === "binding") await waitAtBoundary();
+            return { scan: vi.fn() };
+          });
+          vi.spyOn(internals, "waitForSubmitAck").mockImplementation(async () => {
+            ackScans += 1;
+            if (boundary === "ack") await waitAtBoundary();
+            return {
+              found:
+                boundary === "generation" ? ackScans > 3 : boundary !== "resend" || ackScans > 1,
+              lastScannedFile: null,
+            };
+          });
+          vi.spyOn(internals, "paneGenerationMatches").mockImplementation(async () => {
+            if (
+              (boundary === "input" && sendMessageToTmuxMock.mock.calls.length === 0) ||
+              (boundary === "resend" && sendMessageToTmuxMock.mock.calls.length === 1) ||
+              (boundary === "generation" && sendSubmitKeyToTmuxMock.mock.calls.length === 2)
+            )
+              await waitAtBoundary();
+            return true;
+          });
+          const attempt = internals.processScheduledWakes();
+          try {
+            await entered.promise;
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Recovery removed its session");
+            let replacement: SessionRecord = {
+              ...current,
+              ...(guard === "native" ? { agentSessionId: "external-native-owner" } : {}),
+              queuedMessages: { messages: ["newer queued text"], awaitingPrompt: true },
+            };
+            if (guard === "lifecycle") {
+              const owner = internals.lifecycle.begin("complete", [record.id]);
+              internals.lifecycle.settle(
+                owner,
+                true,
+                () => "succeeded",
+                () => true,
+              );
+            }
+            if (guard === "replacement") {
+              await service.updateWakeMessage(record.id, {
+                target: "scheduled",
+                message: "newer recovery wake",
+              });
+              const newer = sessions.get(record.id);
+              if (!newer) throw new Error("Replacement removed its session");
+              replacement = {
+                ...newer,
+                queuedMessages: { messages: ["newer queued text"], awaitingPrompt: true },
+              };
+            }
+            if (guard !== "current") sessions.set(record.id, replacement);
+            release.resolve();
+            await attempt;
+            if (guard === "current") {
+              await vi.waitFor(() =>
+                expect(sendMessageToTmuxMock.mock.calls.map((call) => call[1])).toContain(
+                  wake.message,
+                ),
+              );
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+              expect(count("session.wake.sent")).toBe(1);
+              expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            } else {
+              expect(createTmuxSessionMock).toHaveBeenCalledTimes(
+                boundary === "activation-plan" ? 0 : 1,
+              );
+              expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(
+                boundary === "ack" || boundary === "resend" || boundary === "generation" ? 1 : 0,
+              );
+              expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(
+                boundary === "generation" ? 2 : 0,
+              );
+              expect(sessions.get(record.id)).toEqual(replacement);
+              expect(count("session.wake.sent")).toBe(0);
+            }
+            expect(internals.scheduledWakeClaims.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+          } finally {
+            release.resolve();
+            await attempt;
+            service.dispose();
+          }
+        },
+      );
+
+      it.each([
+        "same-values",
+        "message-update",
+        "newer-consumed",
+        "owner",
+        "launch",
+        "lifecycle",
+        "terminal",
+      ] as const)("rejects stale automatic admission after %s", async (change) => {
+        const { sessions, record, service, internals, count } = await setup();
+        const entered = gate();
+        const release = gate();
+        vi.spyOn(internals, "ensureReadyForQueuedSend").mockImplementationOnce(async () => {
+          entered.resolve();
+          await release.promise;
+        });
+        const attempt = internals.processScheduledWakes();
+        try {
+          await entered.promise;
+          expect(sessions.get(record.id)?.scheduledWake).toEqual(wake);
+          if (change === "same-values" || change === "newer-consumed") {
+            await rearm(service, record.id, wake.message);
+            if (change === "newer-consumed")
+              await service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+          } else if (change === "message-update") {
+            await service.updateWakeMessage(record.id, {
+              target: "scheduled",
+              message: "one-shot B",
+            });
+          } else if (change === "lifecycle") {
+            const owner = internals.lifecycle.begin("complete", [record.id]);
+            internals.lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+          } else {
+            sessions.set(record.id, {
+              ...record,
+              ...(change === "owner"
+                ? { agentSessionId: "replacement-native" }
+                : change === "launch"
+                  ? { agentLaunchId: "replacement-launch" }
+                  : { status: "completed" }),
+            });
+          }
+          release.resolve();
+          await attempt;
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(change === "newer-consumed" ? 1 : 0);
+          expect(count("session.wake.sent")).toBe(change === "newer-consumed" ? 1 : 0);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+        } finally {
+          release.resolve();
+          await attempt;
+          service.dispose();
+        }
+      });
+
+      it.each([
+        "manual",
+        "automatic",
+        "same-values",
+        "message-update",
+        "owner",
+        "launch",
+        "lifecycle",
+        "terminal",
+      ] as const)("does not restore old manual occurrence after %s replacement", async (change) => {
+        const { sessions, record, service, internals, count } = await setup();
+        const entered = gate();
+        const release = gate();
+        vi.spyOn(internals, "deliverPrepared").mockImplementationOnce(async () => {
+          entered.resolve();
+          await release.promise;
+          throw new Error("pre-input failure");
+        });
+        const attempt = service
+          .dispatchWake(record.id, { target: "scheduled", dispatch: true })
+          .catch((error: unknown) => error);
+        try {
+          await entered.promise;
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          if (
+            change === "manual" ||
+            change === "automatic" ||
+            change === "same-values" ||
+            change === "message-update"
+          ) {
+            await rearm(service, record.id, change === "same-values" ? wake.message : "one-shot B");
+            if (change === "message-update")
+              await service.updateWakeMessage(record.id, {
+                target: "scheduled",
+                message: "updated B",
+              });
+            if (change === "automatic") await internals.processScheduledWakes();
+            else await service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+          } else if (change === "lifecycle") {
+            const owner = internals.lifecycle.begin("complete", [record.id]);
+            internals.lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+          } else {
+            const current = sessions.get(record.id);
+            if (!current) throw new Error("Manual wake removed its session");
+            sessions.set(record.id, {
+              ...current,
+              ...(change === "owner"
+                ? { agentSessionId: "replacement-native" }
+                : change === "launch"
+                  ? { agentLaunchId: "replacement-launch" }
+                  : { status: "completed" }),
+            });
+          }
+          release.resolve();
+          expect(await attempt).toBeInstanceOf(Error);
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          const replacementSent = ["manual", "automatic", "same-values", "message-update"].includes(
+            change,
+          );
+          if (replacementSent)
+            await vi.waitFor(() => expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1));
+          else expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(count("session.wake.sent")).toBe(replacementSent ? 1 : 0);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+        } finally {
+          release.resolve();
+          await attempt;
+          service.dispose();
+        }
+      });
+
+      it("lets a manual claim consume an in-flight automatic occurrence once", async () => {
+        const { sessions, record, service, internals, count } = await setup();
+        const entered = gate();
+        const release = gate();
+        vi.spyOn(internals, "ensureReadyForQueuedSend").mockImplementationOnce(async () => {
+          entered.resolve();
+          await release.promise;
+        });
+        const automatic = internals.processScheduledWakes();
+        try {
+          await entered.promise;
+          await service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+          release.resolve();
+          await automatic;
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(sessions.get(record.id)?.queuedMessages?.messages ?? []).toEqual([]);
+          expect(count("session.wake.sent")).toBe(1);
+        } finally {
+          release.resolve();
+          await automatic;
+          service.dispose();
+        }
+      });
+
+      it("keeps a manual claim exclusive while the automatic poll runs", async () => {
+        const { record, service, internals, count } = await setup();
+        const entered = gate();
+        const release = gate();
+        const deliver = internals.deliverPrepared.bind(internals);
+        vi.spyOn(internals, "deliverPrepared").mockImplementationOnce(async (...args) => {
+          entered.resolve();
+          await release.promise;
+          return deliver(...args);
+        });
+        const manual = service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+        try {
+          await entered.promise;
+          await internals.processScheduledWakes();
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          release.resolve();
+          await manual;
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(count("session.wake.sent")).toBe(1);
+          expect(count("session.message.queued")).toBe(0);
+        } finally {
+          release.resolve();
+          await manual;
+          service.dispose();
+        }
+      });
+
+      it("does not report a lost manual claim as sent when delivery returns the latest record", async () => {
+        const { record, service, internals, count } = await setup();
+        const entered = gate();
+        const release = gate();
+        const paneOwner = internals.withPaneWriteLock(record.tmuxSession, async () => {
+          entered.resolve();
+          await release.promise;
+        });
+        await entered.promise;
+        const old = service
+          .dispatchWake(record.id, { target: "scheduled", dispatch: true })
+          .catch((error: unknown) => error);
+        let replacement: Promise<SessionView> | undefined;
+        try {
+          await vi.waitFor(() => expect(internals.scheduledWakeClaims.size).toBe(1));
+          await rearm(service, record.id, wake.message);
+          replacement = service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+          await vi.waitFor(() => expect(internals.scheduledWakeClaims.size).toBe(1));
+          release.resolve();
+          await paneOwner;
+          expect(await old).toBeInstanceOf(Error);
+          await replacement;
+          expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+          expect(count("session.wake.sent")).toBe(1);
+          expect(internals.scheduledWakeClaims.size).toBe(0);
+          expect(internals.paneWriteLocks.size).toBe(0);
+          expect(internals.sessionLifecycleLocks.size).toBe(0);
+        } finally {
+          release.resolve();
+          await paneOwner;
+          await old;
+          await replacement;
+          service.dispose();
+        }
+      });
+
+      it.each([false, true])(
+        "never restores a manual wake after durable queue-ahead ownership (enrich failure=%s)",
+        async (failEnrich) => {
+          const { sessions, record, service, internals, count } = await setup({
+            agent: "cursor",
+            launchCommand: "cursor-agent",
+          });
+          mockCursorJsonlState("working");
+          if (failEnrich)
+            vi.spyOn(internals, "enrich").mockRejectedValueOnce(
+              new Error("queue-ahead enrich failed"),
+            );
+          try {
+            const manual = service.dispatchWake(record.id, { target: "scheduled", dispatch: true });
+            if (failEnrich) await expect(manual).rejects.toThrow("queue-ahead enrich failed");
+            else await manual;
+            expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+            expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([wake.message]);
+            expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+            expect(count("session.wake.sent")).toBe(failEnrich ? 0 : 1);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it.each(["probe", "partial-input", "post-paste-probe", "enrich"] as const)(
+        "manual %s failure restores only before input invocation",
+        async (boundary) => {
+          const { sessions, record, service, internals, count } = await setup();
+          if (boundary === "probe" || boundary === "post-paste-probe") {
+            probeTmuxProcessMatchMock.mockImplementation(async () =>
+              boundary === "probe" || sendMessageToTmuxMock.mock.calls.length > 0
+                ? {
+                    alive: false,
+                    matchedByName: false,
+                    unresponsive: false,
+                    diagnostic: "ps failed: malformed process table output",
+                  }
+                : { alive: true, matchedByName: true, unresponsive: false },
+            );
+            if (boundary === "post-paste-probe") {
+              createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+              vi.spyOn(internals, "waitForSubmitAck").mockResolvedValue({
+                found: false,
+                lastScannedFile: null,
+              });
+            }
+          } else if (boundary === "partial-input")
+            sendMessageToTmuxMock.mockRejectedValueOnce(new Error("partial pane write"));
+          else vi.spyOn(internals, "enrich").mockRejectedValueOnce(new Error("enrichment failed"));
+          try {
+            await expect(
+              service.dispatchWake(record.id, { target: "scheduled", dispatch: true }),
+            ).rejects.toThrow();
+            expect(sessions.get(record.id)?.scheduledWake).toEqual(
+              boundary === "probe" ? wake : undefined,
+            );
+            expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(boundary === "probe" ? 0 : 1);
+            expect(count("session.wake.sent")).toBe(0);
+            expect(internals.scheduledWakeClaims.size).toBe(0);
+            expect(internals.sessionLifecycleLocks.size).toBe(0);
+            expect(internals.paneWriteLocks.size).toBe(0);
+          } finally {
+            service.dispose();
+          }
+        },
+      );
+
+      it("keeps automatic enqueue consumed and reports acceptance when enrichment fails", async () => {
+        const { sessions, record, service, internals, count } = await setup({ status: "spawning" });
+        vi.spyOn(internals, "enrich").mockRejectedValueOnce(new Error("enrichment failed"));
+        try {
+          await internals.processScheduledWakes();
+          await internals.processScheduledWakes();
+          expect(sessions.get(record.id)?.scheduledWake).toBeUndefined();
+          expect(sessions.get(record.id)?.queuedMessages?.messages).toEqual([wake.message]);
+          expect(count("session.wake.sent")).toBe(1);
+          expect(count("session.wake.failed")).toBe(0);
+        } finally {
+          service.dispose();
+        }
+      });
+    });
+
     it("dispatchWake rejects a non-deliverable interval wake with WakeDispatchConflictError", async () => {
       seedShepherdSession({
         status: "killed",
@@ -50862,7 +54756,10 @@ describe("SessionService", () => {
       const sessions = seedShepherdSession({ scheduledWake });
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const sendSpy = vi.spyOn(SessionService.prototype, "send");
+      const sendSpy = vi.spyOn(
+        service as unknown as { sendWithAttempt(): Promise<never> },
+        "sendWithAttempt",
+      );
       sendSpy.mockRejectedValueOnce(new Error("send failed"));
 
       await expect(
@@ -57592,6 +61489,42 @@ describe("SessionService", () => {
         expect(persisted).not.toHaveProperty("staleSidecars");
       });
 
+      it("replays stale sidecars without mutating a readSession record in place", async () => {
+        // Production readSession returns metadata.ts' shared cached record;
+        // freezing every read makes any in-place delete throw.
+        armParkableApiProject();
+        mockClaudeJsonlState("waiting");
+        const sessions = createSessionStore();
+        sessions.set("api-1", {
+          ...staleParkableSession(),
+          status: "stopped",
+          stopReason: "stale_timeout",
+          staleSidecars: ["proxy"],
+        });
+        const readClone = readSessionMock.getMockImplementation();
+        readSessionMock.mockImplementation((dataDir: string, sessionId: string) => {
+          const record = readClone?.(dataDir, sessionId) ?? null;
+          return record ? Object.freeze(record) : null;
+        });
+        const service = await createDisposedSessionService();
+        let relaunched = false;
+        tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+        isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+        createTmuxSessionMock.mockImplementation(async () => {
+          relaunched = true;
+        });
+
+        const result = await service.send("api-1", { message: "hi" });
+
+        expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({ sidecarName: "proxy" }),
+        );
+        expect(result.status).toBe("running");
+        const persisted = sessions.get("api-1");
+        expect(persisted).not.toHaveProperty("stopReason");
+        expect(persisted).not.toHaveProperty("staleSidecars");
+      });
+
       it("waits for a park in flight instead of relaunching over it, then recovers off the post-park record (deliver)", async () => {
         armParkableApiProject();
         mockClaudeJsonlState("waiting");
@@ -58356,6 +62289,10 @@ describe("SessionService", () => {
         for (let i = 0; i < 20; i += 1) {
           await Promise.resolve();
         }
+
+        // Discovery/reconciliation keeps the occurrence durable until a poll
+        // observes the resulting runtime owner.
+        await advanceSeconds(2);
 
         expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
           "api-1",
@@ -60287,6 +64224,7 @@ describe("SessionService", () => {
               status: "stopped",
               stopReason: "stale_timeout",
               tmuxSession: id,
+              agentSessionId: `native-${id}`,
               scheduledWake: { dueAt: "2026-03-18T10:00:00.000Z", message: `wake ${id}` },
             }),
           );

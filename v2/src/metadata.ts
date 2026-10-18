@@ -330,16 +330,18 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
-// listSessions() re-reads and re-parses every session file every call — on a
-// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
-// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// Uncached, listSessions() and readSession() re-parse session files on every
+// call — on a fleet-sized data dir (thousands of files, single digit MB of
+// JSON) that is every 2s dashboard-cache tick, and readSession runs inside
+// per-session loops, so O(N²) parses per tick. Since
 // writeJsonFile always renames a freshly created inode (never edits in
 // place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
 // last read" fingerprint — cheaper and safer than an mtime-only key, which
 // can't distinguish two writes landing in the same millisecond. The cache is
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
-// calls (see the "no in-place mutation of a listed record" contract).
+// calls and between listSessions() and readSession(): never mutate a
+// returned record in place.
 interface FileFingerprint {
   ino: number;
   mtimeMs: number;
@@ -1282,20 +1284,85 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
+
+// Keyed on the absolute subdirectory path under dataDir/sessions. That dir
+// holds a handful of project dirs next to one log-shard dir per session
+// (sessions/<id>/), hundreds on a live fleet, none holding *.json. Caches the
+// *.json FILE NAMES only: content still goes through readSessionFileCached's
+// per-file fingerprint.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only when the directory mtime was older than this at
+// the moment before its readdir: a mutation landing after the readdir but
+// inside the same timestamp tick as the pre-readdir stat is never cached.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Sound because the
+// directory mtime advances on every entry create, rename and unlink; ino also
+// changes on rm -r + mkdir unless the inode is reused, and then the fresh
+// mtime catches it.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Vanished between the root readdir and this stat: surface the same
+    // readdir error as an uncached listing.
+    sessionDirListingCache.delete(dir);
+    return readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  // Eligibility is decided BEFORE the readdir: a snapshot young when taken
+  // stays uncached however long this reader stalls before storing it.
+  const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
+  const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
+  // readdir is stored under the older mtime, so the next stat misses once.
+  if (cacheable) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
       const session = tryReadSessionFile(filePath);
@@ -1306,6 +1373,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -1313,7 +1381,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
-  return path ? readSessionFile(path) : null;
+  return path ? readSessionFileCached(path) : null;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its

@@ -788,8 +788,25 @@ type Workflow = {
       needs?: string | string[];
       if?: string;
       uses?: string;
+      "timeout-minutes"?: number;
+      env?: { SPUR_BUILD_RESTART?: string; SPUR_TEST_DEPLOY_EXPORT_DIR?: string };
       with?: { stage?: Stage };
-      steps?: { run?: string; with?: { script?: string } }[];
+      steps?: {
+        id?: string;
+        uses?: string;
+        run?: string;
+        env?: { SPUR_TEST_DEPLOY_EXPORT_DIR?: string };
+        with?: {
+          script?: string;
+          ref?: string;
+          "persist-credentials"?: boolean;
+          name?: string;
+          path?: string;
+          "if-no-files-found"?: string;
+          "compression-level"?: number;
+          "retention-days"?: number;
+        };
+      }[];
     }
   >;
 };
@@ -823,7 +840,7 @@ test.each([
   const definition = await workflow("ci.yml");
   expect(present(definition.on.pull_request).branches.includes(base)).toBe(admitted);
 });
-test("all seven real jobs depend on hosted admission, preserve serial required stages and readonly caller permissions", async () => {
+test("required jobs depend on hosted admission, preserve serial stages and readonly caller permissions", async () => {
   const expected = {
     "ci.yml": ["quality", "playwright", "runtime-integration", "real-agent-smoke"],
     "security.yml": ["gitleaks", "npm-audit"],
@@ -832,8 +849,12 @@ test("all seven real jobs depend on hosted admission, preserve serial required s
   for (const [file, ids] of Object.entries(expected)) {
     const definition = await workflow(file);
     expect(
-      Object.values(definition.jobs).filter((job) => job["runs-on"] === "self-hosted"),
-    ).toHaveLength(ids.length);
+      new Set(
+        Object.entries(definition.jobs)
+          .filter(([, job]) => job["runs-on"] === "self-hosted")
+          .map(([id]) => id),
+      ),
+    ).toEqual(new Set([...ids, ...(file === "ci.yml" ? ["install-candidate"] : [])]));
     expect(definition.permissions).toEqual({
       contents: "read",
       "pull-requests": "read",
@@ -860,6 +881,50 @@ test("all seven real jobs depend on hosted admission, preserve serial required s
   }
   for (const name of ["release.yml", "review-approval.yml"])
     expect(JSON.stringify(await workflow(name))).not.toContain("ci-ready-admission");
+});
+
+test("PR install artifact follows Quality admission and binds the canonical export to exact head", async () => {
+  const definition = await workflow("ci.yml");
+  const job = present(definition.jobs["install-candidate"]);
+  expect(job.if).toBe("github.event_name == 'pull_request'");
+  expect(job.needs).toBe("quality");
+  expect(present(definition.jobs.quality).needs).toBe("quality-admission");
+  expect(job["runs-on"]).toBe("self-hosted");
+  expect(job["timeout-minutes"]).toBe(20);
+  expect(job.env).toEqual({ SPUR_BUILD_RESTART: "0" });
+  const steps = present(job.steps);
+  expect(steps[0]).toEqual({
+    uses: "actions/checkout@v5",
+    with: { ref: "${{ github.event.pull_request.head.sha }}", "persist-credentials": false },
+  });
+  expect(steps.filter((step) => step.run).map((step) => step.run)).toEqual([
+    "pnpm install --frozen-lockfile",
+    'bash scripts/test-deploy.sh\nprintf \'directory=%s\\n\' "$SPUR_TEST_DEPLOY_EXPORT_DIR" >> "$GITHUB_OUTPUT"\n',
+  ]);
+  expect(steps.find((step) => step.id === "candidate")?.env).toEqual({
+    SPUR_TEST_DEPLOY_EXPORT_DIR:
+      "${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}",
+  });
+  expect(steps.at(-1)).toEqual({
+    uses: "actions/upload-artifact@v4",
+    with: {
+      name: "spur-install-candidate-${{ github.event.pull_request.head.sha }}",
+      path: "${{ steps.candidate.outputs.directory }}/manifest.json\n${{ steps.candidate.outputs.directory }}/*.tgz\n",
+      "if-no-files-found": "error",
+      "compression-level": 0,
+      "retention-days": 3,
+    },
+  });
+});
+
+test("install candidate job env rejects runner-only expression contexts", async () => {
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+  const allowed = ["github", "needs", "strategy", "matrix", "vars", "secrets", "inputs"];
+  const job = present((await workflow("ci.yml")).jobs["install-candidate"]);
+  for (const value of Object.values(job.env ?? {})) {
+    for (const [, context] of value?.matchAll(/\$\{\{\s*(\w+)\./g) ?? [])
+      expect(allowed).toContain(context);
+  }
 });
 
 async function wrapper(
