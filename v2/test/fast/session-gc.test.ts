@@ -199,26 +199,6 @@ describe("planSessionGc", () => {
     expect(result.groups[0]?.blockReasons).toEqual(["path_outside_worktree_dir"]);
   });
 
-  it("marks restore-loss only for stopped members", () => {
-    const result = plan([
-      session({
-        id: "api-1",
-        workspaceId: "api-1",
-        status: "stopped",
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-      session({
-        id: "api-2",
-        workspaceId: "api-1",
-        status: "completed",
-        worktreePath: `${WORKTREE_DIR}/api/api-1`,
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-    ]);
-
-    expect(result.groups[0]?.restoreLossSessionIds).toEqual(["api-1"]);
-  });
-
   it("filters by project when projectFilter is set", () => {
     const result = plan(
       [
@@ -237,7 +217,7 @@ describe("planSessionGc", () => {
     expect(result.groups.map((group) => group.project)).toEqual(["api"]);
   });
 
-  it("sorts groups oldest-first and applies the limit", () => {
+  it("sorts groups oldest-first and leaves limiting to the executor", () => {
     const result = plan(
       [
         session({ id: "api-1", workspaceId: "api-1", updatedAt: "2026-06-01T00:00:00.000Z" }),
@@ -246,8 +226,139 @@ describe("planSessionGc", () => {
       { limit: 1 },
     );
 
-    expect(result.groups).toHaveLength(1);
-    expect(result.groups[0]?.sessionIds).toEqual(["api-2"]);
+    expect(result.groups.map((group) => group.sessionIds[0])).toEqual(["api-2", "api-1"]);
+    expect(result.limit).toBe(1);
+  });
+});
+
+describe("planSessionGc partial groups", () => {
+  const OLD = "2026-01-01T00:00:00.000Z";
+  const shared = (overrides: Partial<SessionRecord> & { id: string }): SessionRecord =>
+    session({ worktree: false, worktreePath: "/repo/api", updatedAt: OLD, ...overrides });
+
+  function archivedOf(sessions: SessionRecord[], options?: Parameters<typeof plan>[1]) {
+    const group = plan(sessions, options).groups[0];
+    if (!group) throw new Error("no group");
+    return group;
+  }
+
+  it("archives eligible worktree:false siblings of a running member and keeps the anchor it references", () => {
+    const group = archivedOf([
+      shared({ id: "A" }),
+      shared({ id: "B", workspaceId: "A" }),
+      shared({ id: "C", workspaceId: "A", status: "running" }),
+      shared({ id: "D" }),
+    ]);
+
+    expect(group.sessionIds.sort()).toEqual(["A", "B", "C", "D"]);
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds.sort()).toEqual(["B", "D"]);
+    expect(group.blockReasons).toEqual(["not_eligible_status"]);
+    const kept = group.members.filter((member) => !group.archiveSessionIds.includes(member.id));
+    for (const member of kept) {
+      expect(group.archiveSessionIds).not.toContain(member.workspaceId ?? member.id);
+    }
+  });
+
+  it("keeps retained-error and too-recent members and the anchors they reference", () => {
+    const group = archivedOf([
+      shared({ id: "A" }),
+      shared({ id: "B", workspaceId: "A", status: "errored", error: "boom" }),
+      shared({ id: "C", updatedAt: "2026-07-25T00:00:00.000Z" }),
+      shared({ id: "D" }),
+      shared({ id: "E" }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds.sort()).toEqual(["D", "E"]);
+    expect(group.blockReasons).toEqual(
+      expect.arrayContaining(["retained_error", "not_eligible_status", "too_recent"]),
+    );
+  });
+
+  it("never reclaims an owned worktree group with a running member and keeps a path keeper", () => {
+    const path = `${WORKTREE_DIR}/api/desk`;
+    const own = (overrides: Partial<SessionRecord> & { id: string }) =>
+      session({ worktreePath: path, workspaceId: "desk", updatedAt: OLD, ...overrides });
+    const group = archivedOf([
+      own({ id: "desk" }),
+      own({ id: "x1", updatedAt: "2026-01-02T00:00:00.000Z" }),
+      own({ id: "x2", updatedAt: "2026-01-03T00:00:00.000Z" }),
+      own({ id: "x3", status: "running" }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds.sort()).toEqual(["x1", "x2"]);
+    expect(group.archiveSessionIds).not.toContain("desk");
+    expect(group.ownedWorktreePaths).toEqual([path]);
+  });
+
+  it("keeps one record of an existing owned path outside the worktree dir when no retained member holds it", () => {
+    const own = (overrides: Partial<SessionRecord> & { id: string }) =>
+      session({ workspaceId: "o0", worktreePath: "/elsewhere/o", updatedAt: OLD, ...overrides });
+    const group = archivedOf([
+      own({ id: "o0", worktreePath: "/elsewhere/r" }),
+      own({ id: "o1" }),
+      own({ id: "o2", updatedAt: "2026-01-02T00:00:00.000Z" }),
+      own({ id: "r", worktreePath: "/elsewhere/r", status: "running" }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds).toEqual(["o1"]);
+  });
+
+  it("keeps a stale-parked member and archives the old completed sibling", () => {
+    const group = archivedOf([
+      shared({ id: "P", status: "stopped", stopReason: "stale_timeout" }),
+      shared({ id: "Q" }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds).toEqual(["Q"]);
+    expect(group.blockReasons).toEqual(["live_session"]);
+  });
+
+  it("archives every member of a fully eligible group exactly as before", () => {
+    const group = archivedOf([shared({ id: "A" }), shared({ id: "B", workspaceId: "A" })]);
+
+    expect(group.action).toBe("archive");
+    expect(group.archiveSessionIds.sort()).toEqual(["A", "B"]);
+    expect(group.blockReasons).toEqual([]);
+  });
+
+  it("keeps one record of an existing owned worktree in a mixed archive group", () => {
+    const path = `${WORKTREE_DIR}/api/mixed`;
+    const group = archivedOf([
+      // The alias is newer, yet only the worktree:true record may be kept.
+      session({
+        id: "m1",
+        worktree: false,
+        worktreePath: path,
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      }),
+      session({ id: "m2", worktree: true, worktreePath: path, updatedAt: OLD }),
+    ]);
+
+    expect(group.action).toBe("partial");
+    expect(group.archiveSessionIds).toEqual(["m1"]);
+    expect(group.blockReasons).toEqual(["owned_worktree"]);
+  });
+
+  it("ages a partial group by its archived subset so it sorts ahead of a younger blocked group", () => {
+    const result = plan([
+      shared({ id: "A", updatedAt: "2026-03-01T00:00:00.000Z" }),
+      shared({ id: "R", status: "running", updatedAt: "2026-07-31T00:00:00.000Z" }),
+      session({
+        id: "Y",
+        workspaceId: "Y",
+        status: "running",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    ]);
+
+    expect(result.groups[0]?.action).toBe("partial");
+    expect(result.groups[0]?.sessionIds).toContain("A");
+    expect(result.groups[0]?.ageDays).toBeGreaterThan(100);
   });
 });
 

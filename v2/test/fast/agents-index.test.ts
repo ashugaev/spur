@@ -758,6 +758,92 @@ describe("agentSubmitAckPacing", () => {
   });
 });
 
+describe("Codex historical submit-ack scope", () => {
+  const baseline = { agent: "codex" as const, offsets: { "/sessions/original.jsonl": 90 } };
+  const context = {
+    worktreePath: "/worktree",
+    codexSessionsDir: "/sessions",
+    agentSessionId: "native",
+  };
+
+  it.each([false, true])(
+    "keeps default and1190-shaped resumes on the legacy matcher, launch=%s",
+    async (freshLaunch) => {
+      scanCodexRolloutForMessageMock.mockResolvedValue({ found: true, lastScannedFile: null });
+      const binding = await resumeAgentSubmitAckBinding(
+        "codex",
+        { ...context, freshLaunch },
+        baseline,
+      );
+      await binding?.scan(" text ");
+      expect(scanCodexRolloutForMessageMock).toHaveBeenCalledExactlyOnceWith(
+        context.codexSessionsDir,
+        " text ",
+        new Map(Object.entries(baseline.offsets)),
+      );
+      expect(captureCodexRolloutBaselineMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("opts in only with an original persisted Codex baseline and pinned native UUID", async () => {
+    scanCodexRolloutForMessageMock.mockResolvedValue({ found: true, lastScannedFile: null });
+    const binding = await resumeAgentSubmitAckBinding(
+      "codex",
+      {
+        ...context,
+        codexAckScope: "current-native-baseline",
+      },
+      baseline,
+    );
+    expect(binding?.baseline).toEqual(baseline);
+    await binding?.scan(" text ");
+    expect(scanCodexRolloutForMessageMock).toHaveBeenCalledExactlyOnceWith(
+      context.codexSessionsDir,
+      " text ",
+      new Map(Object.entries(baseline.offsets)),
+      { nativeSessionId: context.agentSessionId, worktreePath: context.worktreePath },
+    );
+    expect(captureCodexRolloutBaselineMock).not.toHaveBeenCalled();
+  });
+
+  it("never captures a replacement baseline or falls back when strict provenance is absent", async () => {
+    const strictContext = { ...context, codexAckScope: "current-native-baseline" as const };
+    expect(await createAgentSubmitAckBinding("codex", strictContext)).toBeNull();
+    expect(
+      await resumeAgentSubmitAckBinding(
+        "codex",
+        { ...strictContext, agentSessionId: "" },
+        baseline,
+      ),
+    ).toBeNull();
+    expect(
+      await resumeAgentSubmitAckBinding("codex", strictContext, {
+        agent: "claude",
+        file: "/other",
+        size: 0,
+      }),
+    ).toBeNull();
+    expect(captureCodexRolloutBaselineMock).not.toHaveBeenCalled();
+    expect(scanCodexRolloutForMessageMock).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "preserves the default fresh-launch baseline capture, launch=%s",
+    async (freshLaunch) => {
+      const offsets = new Map([["/sessions/new.jsonl", 0]]);
+      captureCodexRolloutBaselineMock.mockResolvedValue(offsets);
+      const binding = await createAgentSubmitAckBinding("codex", { ...context, freshLaunch });
+      await binding?.scan("hello");
+      expect(captureCodexRolloutBaselineMock).toHaveBeenCalledExactlyOnceWith("/sessions");
+      expect(scanCodexRolloutForMessageMock).toHaveBeenCalledExactlyOnceWith(
+        "/sessions",
+        "hello",
+        offsets,
+      );
+    },
+  );
+});
+
 describe("cursor submit-ack resume", () => {
   it("Q3/Q3b: restored cursor binding reuses identity, fresh paste differs, slash stays unchanged", async () => {
     const ctx = {

@@ -30,6 +30,22 @@ function baseView(overrides: Partial<SpurSessionView> = {}): SpurSessionView {
 }
 
 describe("isRestorable", () => {
+  it.each([
+    { status: "errored", state: "error", expected: true },
+    { status: "running", state: "error", expected: false },
+    { status: "running", state: "waiting", expected: false },
+  ] as const)("handles a live pane with $status/$state", ({ status, state, expected }) => {
+    expect(isRestorable(toDashboardSession(baseView({ status, state, runtimeAlive: true })))).toBe(
+      expected,
+    );
+  });
+
+  it("keeps pending restore and missing-workspace gates for an exited agent", () => {
+    const session = toDashboardSession(baseView({ status: "errored", state: "error" }));
+    expect(isRestorable({ ...session, lifecyclePending: "restore" })).toBe(false);
+    expect(isRestorable({ ...session, workspaceExists: false })).toBe(false);
+  });
+
   it("is false when the workspace no longer exists", () => {
     const session = toDashboardSession(
       baseView({

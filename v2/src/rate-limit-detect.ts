@@ -138,6 +138,9 @@ export function detectCodexRateLimit(rateLimits: unknown): RateLimitDetection | 
   ) {
     return { limited: true, reason: "codex out of credits" };
   }
+  if (isRecord(credits) && credits["has_credits"] === true) {
+    return NOT_LIMITED;
+  }
   if (usedPercentExhausted(rateLimits["primary"])) {
     return { limited: true, reason: "codex 5h window exhausted" };
   }
