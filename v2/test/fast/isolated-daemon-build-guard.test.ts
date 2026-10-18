@@ -358,7 +358,9 @@ describe("spur-isolated-daemon build guard", () => {
       join(worktree.pathDir, "mktemp"),
       `#!/bin/bash\nallocated="$(/usr/bin/mktemp "$@")"\nprintf '%s\\n' "$allocated" > "$SPUR_TEST_REPO/allocated-path"\nprintf '%s\\n' "$allocated"\n`,
     );
-    await expect(runIsolatedDaemon(worktree, { SPUR_TEST_PREFLIGHT_FAIL: "1" })).rejects.toMatchObject({
+    await expect(
+      runIsolatedDaemon(worktree, { SPUR_TEST_PREFLIGHT_FAIL: "1" }),
+    ).rejects.toMatchObject({
       code: 86,
       stderr: "",
     });
