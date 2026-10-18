@@ -2623,9 +2623,8 @@ describe("runtime-tmux", () => {
             // literal no-controlling-terminal marker (-1), not merely
             // absent.
             "100 1 100 -1 pts/1 4200 -zsh",
-            // This child's pgid column is unparseable; getPsSnapshot
-            // normalizes it to -1 too. Without the `fgPgid <= 0` guard,
-            // -1 === -1 would read this row alive.
+            // Reject this child's unparseable pgid instead of normalizing
+            // it to -1 and matching the pane's foreground group.
             "101 100 abc 100 pts/1 2048 codex-wrapper-child",
           ].join("\n"),
           stderr: "",
@@ -2634,22 +2633,28 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux, isHistoricalPsProbeDiagnostic } =
+    const { isProcessRunningInTmux, isHistoricalPsProbeDiagnostic, probeTmuxProcessMatch } =
       await import("../../src/runtime-tmux.js");
+    const diagnostic =
+      "ps failed: malformed process table output (line 2/2, 7 columns, shape N N T N T N, 75 bytes, no trailing newline)";
 
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
     // (no `/` or whitespace boundary after "codex").
-    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toThrow(
-      "malformed process table output",
-    );
+    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toMatchObject({
+      name: "TmuxProbeUnknownError",
+      message: diagnostic,
+    });
     await expect(
       isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
-    ).rejects.toThrow("malformed process table output");
-    await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((error: unknown) => {
-      expect(error).toBeInstanceOf(Error);
-      expect(isHistoricalPsProbeDiagnostic((error as Error).message)).toBe(true);
+    ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+      diagnostic,
     });
+    expect(isHistoricalPsProbeDiagnostic(diagnostic)).toBe(false);
   });
 
   it("qualifies only the two complete historical ps diagnostics", async () => {
