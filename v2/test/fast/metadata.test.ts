@@ -1838,66 +1838,70 @@ describe("session metadata PR migration", () => {
     expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ mode: "council" }));
   });
 
-  it("preserves wake state when writing, reading, and listing session records", async () => {
-    const dataDir = await newDataDir();
-    const session: SessionRecord = {
-      id: "api-1",
-      project: "api",
-      agent: "claude",
-      prompt: "ship it",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "claude",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-      scheduledWake: {
-        dueAt: "2026-03-18T10:06:00.000Z",
-        message: "Check once",
-      },
-      intervalWake: {
-        nextDueAt: "2026-03-18T10:06:00.000Z",
-        intervalMs: 300_000,
-        message: "Check CI",
-        stopCondition: "CI is green",
-      },
-      dailyWake: {
-        dailyAt: ["09:30", "17:45"],
-        nextDueAt: "2026-03-19T09:30:00.000Z",
-        message: "Check daily state",
-        stopCondition: "Daily checks done",
-      },
-    };
+  it.each([undefined, "manual-claim-roundtrip"])(
+    "preserves wake state with claim %s when writing, reading, and listing session records",
+    async (dispatchClaimId) => {
+      const dataDir = await newDataDir();
+      const session: SessionRecord = {
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        scheduledWake: {
+          dueAt: "2026-03-18T10:06:00.000Z",
+          message: "Check once",
+        },
+        intervalWake: {
+          nextDueAt: "2026-03-18T10:06:00.000Z",
+          intervalMs: 300_000,
+          message: "Check CI",
+          stopCondition: "CI is green",
+          ...(dispatchClaimId === undefined ? {} : { dispatchClaimId }),
+        },
+        dailyWake: {
+          dailyAt: ["09:30", "17:45"],
+          nextDueAt: "2026-03-19T09:30:00.000Z",
+          message: "Check daily state",
+          stopCondition: "Daily checks done",
+        },
+      };
 
-    writeSession(dataDir, session);
+      writeSession(dataDir, session);
 
-    const rawSession = JSON.parse(
-      readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
-    );
-    expect(rawSession).toEqual(
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    );
-    expect(readSession(dataDir, "api-1")).toEqual(
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    );
-    expect(listSessions(dataDir)).toEqual([
-      expect.objectContaining({
-        scheduledWake: session.scheduledWake,
-        intervalWake: session.intervalWake,
-        dailyWake: session.dailyWake,
-      }),
-    ]);
-  });
+      const rawSession = JSON.parse(
+        readFileSync(join(dataDir, "sessions", "api", "api-1.json"), "utf-8"),
+      );
+      expect(rawSession).toEqual(
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      );
+      expect(readSession(dataDir, "api-1")).toEqual(
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      );
+      expect(listSessions(dataDir)).toEqual([
+        expect.objectContaining({
+          scheduledWake: session.scheduledWake,
+          intervalWake: session.intervalWake,
+          dailyWake: session.dailyWake,
+        }),
+      ]);
+    },
+  );
 
   it("preserves claudeAccountId when writing, reading, and listing session records", async () => {
     const dataDir = await newDataDir();
