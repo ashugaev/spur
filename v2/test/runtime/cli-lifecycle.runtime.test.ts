@@ -5,6 +5,7 @@ import { platform } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { toCursorProjectPath } from "../../src/cursor-jsonl-state.js";
+import { cursorDeliveryInput, isCursorDeliveryId } from "../../src/agents/cursor-submit-ack.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import { readSession, writeSession } from "../../src/metadata.js";
 import { listProcesses, readProcessEnvValue } from "../../src/process-tree.js";
@@ -1916,8 +1917,12 @@ projects:
         const submittedText = records
           .find((record) => record.role === "user")
           ?.message?.content?.find((block) => block.type === "text")?.text;
-        expect(submittedText?.split("\n\nSession metadata:\n")[0]).toBe(
-          "runtime preflight prompt for cursor",
+        expect(submittedText).toBeDefined();
+        const deliveredPrompt = submittedText?.split("\n\nSession metadata:\n")[0];
+        const deliveryId = deliveredPrompt?.match(/^\[Spur delivery: ([^\]]+)\]\n\n/)?.[1];
+        if (!isCursorDeliveryId(deliveryId)) throw new Error("Missing valid Cursor delivery ID");
+        expect(deliveredPrompt).toBe(
+          cursorDeliveryInput(deliveryId, "runtime preflight prompt for cursor"),
         );
       }
     },
