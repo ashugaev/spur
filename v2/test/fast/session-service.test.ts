@@ -8,9 +8,12 @@ import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -66452,75 +66455,83 @@ describe("SessionService", () => {
       if (!cached) throw new Error("Missing cached metadata hold");
       const before = structuredClone(cached);
       const path = join(dataDir, "sessions", cached.project, `${cached.id}.json`);
-      const inode = statSync(path).ino;
-      const entered = deferred<undefined>();
-      const release = deferred<undefined>();
-      probeTmuxProcessMatchMock.mockImplementation(async () => {
-        if (phase === "runtime") {
-          entered.resolve(undefined);
-          await release.promise;
-        }
-        return {
-          alive: false,
-          matchedByName: false,
-          unresponsive: false,
-          diagnostic: "ps failed: metadata boundary",
-        };
-      });
-      resumeAgentSubmitAckBindingMock.mockImplementation(
-        async (...args: Parameters<typeof fixture.realAgents.resumeAgentSubmitAckBinding>) => {
-          const binding = await fixture.realAgents.resumeAgentSubmitAckBinding(...args);
-          return binding
-            ? {
-                ...binding,
-                scan: async (text: string) => {
-                  if (phase === "scan") {
-                    entered.resolve(undefined);
-                    await release.promise;
-                  }
-                  return binding.scan(text);
-                },
-              }
-            : null;
-        },
-      );
-      const observing = sessionServiceInternals(fixture.service).classifySessionRecord(cached);
+      const metadataFd = openSync(path, "r");
       try {
-        await entered.promise;
-        const replacement =
-          owner === "replacement" ? { ...before, agentLaunchId: "replacement-launch" } : before;
-        if (owner === "replacement") {
-          actual.writeSession(dataDir, replacement);
-          expect(statSync(path).ino).not.toBe(inode);
-          expect(actual.readSession(dataDir, original.id)).not.toBe(cached);
-          expect(actual.listSessions(dataDir)[0]).toBe(actual.readSession(dataDir, original.id));
+        const inode = fstatSync(metadataFd).ino;
+        const entered = deferred<undefined>();
+        const release = deferred<undefined>();
+        probeTmuxProcessMatchMock.mockImplementation(async () => {
+          if (phase === "runtime") {
+            entered.resolve(undefined);
+            await release.promise;
+          }
+          return {
+            alive: false,
+            matchedByName: false,
+            unresponsive: false,
+            diagnostic: "ps failed: metadata boundary",
+          };
+        });
+        resumeAgentSubmitAckBindingMock.mockImplementation(
+          async (...args: Parameters<typeof fixture.realAgents.resumeAgentSubmitAckBinding>) => {
+            const binding = await fixture.realAgents.resumeAgentSubmitAckBinding(...args);
+            return binding
+              ? {
+                  ...binding,
+                  scan: async (text: string) => {
+                    if (phase === "scan") {
+                      entered.resolve(undefined);
+                      await release.promise;
+                    }
+                    return binding.scan(text);
+                  },
+                }
+              : null;
+          },
+        );
+        const observing = sessionServiceInternals(fixture.service).classifySessionRecord(cached);
+        try {
+          await entered.promise;
+          const replacement =
+            owner === "replacement" ? { ...before, agentLaunchId: "replacement-launch" } : before;
+          if (owner === "replacement") {
+            actual.writeSession(dataDir, replacement);
+            expect(statSync(path).ino).not.toBe(inode);
+            expect(actual.readSession(dataDir, original.id)).not.toBe(cached);
+            expect(actual.listSessions(dataDir)[0]).toBe(actual.readSession(dataDir, original.id));
+          }
+          release.resolve(undefined);
+          await observing;
+          const latest = actual.readSession(dataDir, original.id);
+          expect(cached).toEqual(before);
+          expect(latest?.agentLaunchId).toBe(replacement.agentLaunchId);
+          expect(latest?.queuedMessages).toEqual(before.queuedMessages);
+          expect(latest?.scheduledWake).toEqual(before.scheduledWake);
+          if (owner === "replacement") {
+            expect(latest?.queuedMessageTyped).toEqual(before.queuedMessageTyped);
+            expect(latest?.submitUnconfirmedAt).toBe(before.submitUnconfirmedAt);
+          } else {
+            expect(latest?.queuedMessageTyped).toBeUndefined();
+            expect(latest?.submitUnconfirmedAt).toBeUndefined();
+            if (!latest) throw new Error("Missing confirmed metadata record");
+            await sessionServiceInternals(fixture.service).classifySessionRecord(latest);
+          }
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(owner === "current" ? 1 : 0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(eventsNamed("session.submit.released")).toHaveLength(0);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          release.resolve(undefined);
+          await observing;
         }
-        release.resolve(undefined);
-        await observing;
-        const latest = actual.readSession(dataDir, original.id);
-        expect(cached).toEqual(before);
-        expect(latest?.agentLaunchId).toBe(replacement.agentLaunchId);
-        expect(latest?.queuedMessages).toEqual(before.queuedMessages);
-        expect(latest?.scheduledWake).toEqual(before.scheduledWake);
-        if (owner === "replacement") {
-          expect(latest?.queuedMessageTyped).toEqual(before.queuedMessageTyped);
-          expect(latest?.submitUnconfirmedAt).toBe(before.submitUnconfirmedAt);
-        } else {
-          expect(latest?.queuedMessageTyped).toBeUndefined();
-          expect(latest?.submitUnconfirmedAt).toBeUndefined();
-          if (!latest) throw new Error("Missing confirmed metadata record");
-          await sessionServiceInternals(fixture.service).classifySessionRecord(latest);
-        }
-        expect(eventsNamed("session.submit.confirmed")).toHaveLength(owner === "current" ? 1 : 0);
-        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
-        expect(eventsNamed("session.submit.released")).toHaveLength(0);
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
-        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       } finally {
-        release.resolve(undefined);
-        await observing;
-        fixture.close();
+        try {
+          closeSync(metadataFd);
+        } finally {
+          fixture.close();
+        }
       }
     });
 
