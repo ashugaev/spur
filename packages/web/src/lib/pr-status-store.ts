@@ -121,6 +121,14 @@ export function readCachedPrStatus(key: string): PrStatusResponse | null {
   return cached.response;
 }
 
+/** Cache-only inspection: never schedules a provider fetch or extends freshness. */
+export function inspectCachedPrStatus(key: string): PrStatusResponse | null {
+  const cached = readCachedPrStatus(key);
+  if (cached) return cached;
+  const last = lastGoodCache.get(key);
+  return last ? { ...freshFromEntry(last), stale: true } : null;
+}
+
 export function cachePrStatusResponse(
   key: string,
   response: PrStatusResponse,

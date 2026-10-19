@@ -41,6 +41,9 @@ Check installation, linger and logs in [npm install](install-from-npm.md) or [so
 - `send_message`: full daemon send request.
 - `wait_session`: wait for a new answer, question or terminal state, using the `after` cursor from spawn/send.
 - `mcp_status`: MCP and daemon identity/readiness.
+- `restart_daemon`, `get_daemon_restart`: durable backend restart admission and reconciliation.
+- `read_daemon_logs`: bounded live daemon event journal.
+- `get_session_pr_status`: existing extracted status for an attached PR, cache only.
 
 The catalog covers every daemon route: session lifecycle, queues, questions, logs, artifacts, services, subscriptions, source replies, ToDo, memory, projects, models, accounts, sidecars, shepherd and deployments.
 No project filter or read-only mode: connected callers can change/delete projects and sessions, run commands, switch versions and invoke every daemon operation.
@@ -52,6 +55,43 @@ Conversation reads include raw tool/output/reasoning entries by default.
 For that projection, pass `nextFrom` as `from`; hidden entries still advance the cursor.
 Use artifact/log operation references to retrieve files and runtime output.
 Terminal WebSocket streams belong to the web service, outside the daemon API.
+
+## Restart backend daemon
+
+Call `restart_daemon` with a caller-generated UUID `operationId`; retain it before sending.
+The action is `daemon.restart`; agent/session runtimes are not restarted.
+The receipt records `acceptedAt`, previous PID/generation and executor PID in the selected instance's private data directory.
+`accepted` confirms durable admission; `completed` confirms a different ready daemon generation observed after dispatch, not causation or agent readiness.
+`unknown` preserves uncertain effects, executor loss or a 90-second recovery deadline.
+Call `get_daemon_restart` with the original ID after disconnect/reconnect; receipts survive MCP/daemon restarts.
+Repeating the same ID returns its receipt without another effect; unresolved admission blocks a different ID.
+An absent receipt returns `receipt: null`, `status: "unknown"`; never replace an uncertain ID.
+The existing daemon lifecycle honors external service recovery and guarded autostart; no install/update/deploy occurs.
+A crashed admission lock fails closed; inspect the original receipt and daemon state before operator repair of `mcp-operator-actions/admission.lock`.
+
+## Read daemon logs
+
+`read_daemon_logs` reads `daemon.*` and `http.*` events without a `sessionId` from the fixed live daemon journal.
+Session, service and sidecar output remains under `get_session_logs`; stdout/journald and compressed archives are excluded.
+`limit` defaults to 50, maximum 100; `maxBytes` bounds scanned bytes, defaults to 16384, range 1024–16384.
+Pass `nextCursor` as `cursor`; `eof` describes the observed file end, and the cursor also supports later appends.
+Incomplete final lines wait for append; oversized records are skipped with `truncatedRecords`, malformed records with `invalidRecords`.
+`rotated` covers replacement/truncation; omit the cursor for an explicit fresh read of the live journal.
+`unavailable` distinguishes missing/inaccessible journals; caller paths are never accepted.
+Reads remain available during backend outage through the selected instance's local journal.
+Retained event text follows existing operator-log access and auto-ping-handle redaction; no claim of general secret removal.
+
+## Read attached PR status
+
+`get_session_pr_status(sessionId)` uses the canonical session PR binding or attached review link and the selected web instance's existing extraction/cache.
+`source`, `provider`, `observedAt`, `info.fetchedAt`, `ageMs`, `stale` and `refreshed: false` identify provenance and freshness.
+`info` retains PR state, CI rollup, review decision, mergeability/conflict and total/unresolved review-thread counts behind the UI icons.
+`indicator` shares the UI's dot selection: successful CI displays approved/changes-requested review; other combinations display CI state.
+`ready` uses existing UI semantics: mergeable, zero unresolved threads, and no changes-requested review; historical readiness grants no merge authority.
+`missing` means no attached PR; `unknown` means no extracted PR state; `unavailable` means the selected web cache could not be read.
+`info.error` preserves cached extraction errors; stale last-good state remains visible with its original timestamp.
+The web API's `cacheOnly=1` branch requires matching instance identity and never contacts a provider or extends cache freshness.
+GitHub and GitLab use their existing cache paths; GitLab's cache remains process-local.
 
 ## Read large results and stage requests
 
