@@ -72,6 +72,34 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it.each([
+    [4310, 5555, 4311],
+    [4311, 5555, 4312],
+    [4310, 4311, 4312],
+    [4311, 4312, 4313],
+  ])("derives MCP port excluding daemon %i and UI %i", async (daemon, ui, expected) => {
+    const path = await writeNamedConfig(
+      "config.yaml",
+      `server:\n  port: ${daemon}\nui:\n  port: ${ui}\n`,
+    );
+    expect(loadConfig(path).mcp.port).toBe(expected);
+  });
+  it("loads instance MCP port and rejects collisions or invalid ports", async () => {
+    const configPath = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    expect(loadConfig(configPath).mcp.port).toBe(4321);
+    for (const port of [0, 65536, 1.5, 4310, 5555]) {
+      await writeFile(configPath, `mcp:\n  port: ${port}\n`);
+      expect(() => loadConfig(configPath)).toThrow("mcp.port");
+    }
+  });
+
+  it("inherits instance MCP port instead of project override", async () => {
+    const instance = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    const project = await writeConfig(
+      "mcp:\n  port: 9\nprojects:\n  test:\n    path: $REPO_PATH\n",
+    );
+    expect(loadProjectConfig(project, loadConfig(instance)).mcp.port).toBe(4321);
+  });
   it("normalizes webhook sources and resolves their secret", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2590,6 +2618,29 @@ projects:
         autoComplete: true,
       },
     });
+  });
+
+  it("accepts a GitHub session marker and rejects unusable templates", async () => {
+    const source = (value: string) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        selfMarker: ${value}
+`;
+    const configured = loadConfig(
+      await writeConfig(source('"[AI-generated, session: {session}]"')),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      selfMarker: "[AI-generated, session: {session}]",
+    });
+    for (const value of ['"static"', '""', "42"]) {
+      const path = await writeConfig(source(value));
+      expect(() => loadConfig(path)).toThrow();
+    }
   });
 
   it("parses the github emitExisting flag", async () => {

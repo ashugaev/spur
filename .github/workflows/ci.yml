@@ -6,16 +6,29 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feature/release-continuation]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
 jobs:
+  quality-admission:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: quality
+
   quality:
     name: Quality
     runs-on: self-hosted
+    needs: quality-admission
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.quality-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -34,10 +47,54 @@ jobs:
       - run: bash v2/test/npm-init.test.sh
       - run: bash v2/test/install-and-restart.test.sh
 
+  install-candidate:
+    name: Install Candidate
+    if: github.event_name == 'pull_request'
+    needs: quality
+    runs-on: self-hosted
+    timeout-minutes: 20
+    env:
+      SPUR_BUILD_RESTART: "0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - id: candidate
+        env:
+          SPUR_TEST_DEPLOY_EXPORT_DIR: ${{ runner.temp }}/spur-install-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          bash scripts/test-deploy.sh
+          printf 'directory=%s\n' "$SPUR_TEST_DEPLOY_EXPORT_DIR" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spur-install-candidate-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ steps.candidate.outputs.directory }}/manifest.json
+            ${{ steps.candidate.outputs.directory }}/*.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  playwright-admission:
+    needs: quality
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: playwright
+
   playwright:
     name: Playwright E2E
     runs-on: self-hosted
-    needs: quality
+    needs: [quality, playwright-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.playwright-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -54,10 +111,18 @@ jobs:
       # block starts `next start` against an isolated, unbound daemon target.
       - run: pnpm --dir packages/web exec playwright test
 
+  runtime-integration-admission:
+    needs: quality
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: runtime-integration
+
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
-    needs: quality
+    needs: [quality, runtime-integration-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.runtime-integration-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -72,10 +137,18 @@ jobs:
       - run: pnpm --dir v2 build
       - run: pnpm --dir v2 exec vitest run --config vitest.runtime.config.ts --reporter=verbose
 
+  real-agent-smoke-admission:
+    needs: quality
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ci-ready-admission.yml
+    with:
+      stage: real-agent-smoke
+
   real-agent-smoke:
     name: Real-Agent Smoke
     runs-on: self-hosted
-    needs: quality
+    needs: [quality, real-agent-smoke-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.real-agent-smoke-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
