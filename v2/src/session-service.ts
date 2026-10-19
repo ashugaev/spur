@@ -590,6 +590,7 @@ import {
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
@@ -2201,6 +2202,30 @@ function telegramAgentInstructions(
   ].join("\n");
 }
 
+/**
+ * GitHub post-signing block for the launch prompt. Present for every session of
+ * a project with a `signPosts` github source: each github source polls every
+ * session of its project, so the marker (equal across the project's marker
+ * sources, enforced at config load) marks any session's posts as its own.
+ */
+function githubPostInstructions(
+  project: ProjectConfig | undefined,
+  sessionId: string,
+): string | undefined {
+  if (!project) return undefined;
+  for (const source of Object.values(project.sources)) {
+    if (source.type !== "github" || source.signPosts !== true) continue;
+    const marker = renderSelfMarker(source.selfMarker, sessionId);
+    return [
+      "GitHub posts: this GitHub login is shared with the operator and other agents.",
+      `- End every PR or issue comment, inline review comment, review thread reply, review body and PR description you post with \`${marker}\` as its own last line, exactly once. Never inside a \`>\` quote.`,
+      "- Spur treats a post carrying that line as this session's own and skips it; an unsigned post can come back to you as someone else's feedback.",
+      "- Commit messages and PR titles stay unsigned.",
+    ].join("\n");
+  }
+  return undefined;
+}
+
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
@@ -2208,6 +2233,7 @@ function buildInitialMessage(
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
   telegramInstructions?: string,
+  githubInstructions?: string,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -2224,6 +2250,9 @@ function buildInitialMessage(
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
+  }
+  if (githubInstructions) {
+    base = `${base}\n\n${githubInstructions}`;
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
@@ -12731,6 +12760,7 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
             telegramAgentInstructions(project, options?.telegramOrigin !== undefined),
+            githubPostInstructions(project, sessionId),
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...placeholder,
@@ -13997,6 +14027,7 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
         telegramAgentInstructions(project, false),
+        githubPostInstructions(project, sessionId),
       );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
@@ -19185,6 +19216,7 @@ export class SessionService {
         project,
         readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
       ),
+      githubPostInstructions(project, session.id),
     );
     const planOptions = {
       ...withAgentModeOptions(
@@ -20189,6 +20221,7 @@ export class SessionService {
             restoreProject,
             readTelegramReplyTarget(this.config.dataDir, current.id)?.lastInboundAt !== undefined,
           ),
+          githubPostInstructions(restoreProject, current.id),
         );
         // The fallback relaunched the agent instead of resuming it, so this is a
         // launch send with no transcript behind it, same as a spawn's. Binding

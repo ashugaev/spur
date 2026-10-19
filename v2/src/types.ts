@@ -295,18 +295,22 @@ export interface GitHubAdaptivePollConfig {
   activeGraceMs: number;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
-  selfMarker?: string;
-  adaptivePoll?: GitHubAdaptivePollConfig;
-  // Caps how many sessions one review poll batches into a single GraphQL call.
-  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
-  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
-  maxReviewBatchTargets?: number;
-  // How often a durably poll-disabled session (bound PR permanently not found) gets
-  // one bounded recheck request. Default 86400000 (24h, see
-  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
-  pollDisabledRecheckMs?: number;
-};
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> &
+  (
+    | { selfMarker?: string; signPosts?: never }
+    // signPosts: the launch prompt tells the agent to sign its posts with selfMarker.
+    | { selfMarker: string; signPosts: true }
+  ) & {
+    adaptivePoll?: GitHubAdaptivePollConfig;
+    // Caps how many sessions one review poll batches into a single GraphQL call.
+    // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+    // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+    maxReviewBatchTargets?: number;
+    // How often a durably poll-disabled session (bound PR permanently not found) gets
+    // one bounded recheck request. Default 86400000 (24h, see
+    // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+    pollDisabledRecheckMs?: number;
+  };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
