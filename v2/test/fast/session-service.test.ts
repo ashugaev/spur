@@ -1,6 +1,7 @@
 import type * as cryptoModule from "node:crypto";
 import type * as childProcessModule from "node:child_process";
 import type * as fsPromisesModule from "node:fs/promises";
+import type * as fsModule from "node:fs";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
@@ -65931,6 +65932,104 @@ describe("SessionService", () => {
         },
       };
     }
+
+    it.each(["metadata", "suffix"] as const)(
+      "retains Codex hold after mid-read EBADF and classifies again: %s",
+      async (stage) => {
+        const timers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        const realPromises = await vi.importActual<typeof fsPromisesModule>("node:fs/promises");
+        const previousPromises = { ...(await import("node:fs/promises")) };
+        const realFs = await vi.importActual<typeof fsModule>("node:fs");
+        const previousFs = { ...(await import("node:fs")) };
+        let armed = false;
+        let injected = false;
+        let target = "";
+        let borrowedStreams = 0;
+        vi.doMock("node:fs", () => ({
+          ...realFs,
+          createReadStream: (...args: Parameters<typeof realFs.createReadStream>) => {
+            const options = args[1];
+            if (
+              armed &&
+              args[0] === target &&
+              typeof options === "object" &&
+              typeof options.fd === "number" &&
+              ++borrowedStreams === (stage === "metadata" ? 1 : 2)
+            ) {
+              injected = true;
+              // Exercise the old borrowed-fd path too: its owner can close before stream I/O.
+              realFs.closeSync(options.fd);
+            }
+            return realFs.createReadStream(...args);
+          },
+        }));
+        vi.doMock("node:fs/promises", () => ({
+          ...realPromises,
+          open: async (...args: Parameters<typeof realPromises.open>) => {
+            const handle = await realPromises.open(...args);
+            if (armed && args[0] === target) {
+              const read = handle.read;
+              let reads = 0;
+              vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
+                reads += 1;
+                // The first two reads check newline boundaries; then metadata and suffix.
+                if (!injected && reads === (stage === "metadata" ? 3 : 4)) {
+                  injected = true;
+                  await handle.close();
+                }
+                return Reflect.apply(read, handle, readArgs);
+              });
+            }
+            return handle;
+          },
+        }));
+        vi.resetModules();
+        let fixture: Awaited<ReturnType<typeof historicalAckFixture>> | undefined;
+        try {
+          fixture = await historicalAckFixture(`ebadf-${stage}`);
+          target = fixture.file;
+          const before = structuredClone(fixture.sessions.get("api-1"));
+          const scans: Array<{ found: boolean; qualifiedNoMatch?: boolean }> = [];
+          const realAgents = fixture.realAgents;
+          resumeAgentSubmitAckBindingMock.mockImplementation(
+            async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+              const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+              if (!binding) return binding;
+              return {
+                ...binding,
+                async scan(message: string) {
+                  const result = await binding.scan(message);
+                  scans.push(result);
+                  return result;
+                },
+              };
+            },
+          );
+          armed = true;
+          await fixture.service.get("api-1");
+          await timers.setImmediate();
+          expect(injected).toBe(true);
+          expect(scans).toEqual([expect.objectContaining({ found: false })]);
+          expect(scans[0]?.qualifiedNoMatch).not.toBe(true);
+          const held = fixture.sessions.get("api-1");
+          expect(held?.submitUnconfirmedAt).toBe(before?.submitUnconfirmedAt);
+          expect(held?.queuedMessageTyped).toEqual(before?.queuedMessageTyped);
+          expect(held?.queuedMessages).toEqual(before?.queuedMessages);
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(eventsNamed("session.submit.released")).toHaveLength(0);
+          armed = false;
+          await fixture.service.get("api-1");
+          await timers.setImmediate();
+          expect(fixture.sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+        } finally {
+          fixture?.close();
+          vi.doMock("node:fs/promises", () => previousPromises);
+          vi.doMock("node:fs", () => previousFs);
+        }
+      },
+    );
 
     it.each(["no-activity", "historical-other"] as const)(
       "qualifies a healthy held Codex receipt before activity fallback: %s",
