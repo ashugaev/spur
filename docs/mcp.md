@@ -76,6 +76,8 @@ The host retains at most 32 handles within a 1 GiB spool budget; expiration/quot
 Follow the official guide for tunnel installation, permissions, workspace association and runtime-key setup.
 Point an HTTP tunnel profile at the installed `/mcp` endpoint.
 Keep credentials outside Spur config, command arguments, transcripts and chat.
+MCP authentication and tunnel authentication are separate: selecting no MCP authentication still requires a tunnel runtime API key.
+Use [organization-level tunnel permissions](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access), not project membership alone.
 
 To supervise an existing profile, create a private environment file:
 
@@ -90,9 +92,13 @@ An absent file leaves generic MCP healthy without OpenAI credentials; a configur
 `spur mcp-tunnel` runs the configured profile against the loopback endpoint.
 The [official guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#set-up-tunnel-client) owns profile setup and tunnel-client options.
 
-In ChatGPT, add a private MCP connection through the associated tunnel; enable it for [Dot](https://learn.chatgpt.com/docs/dots) where workspace permissions permit.
+In ChatGPT Plugins, select Add custom MCP server → Connection: Tunnel → Create as a plugin; [official connection steps](https://developers.openai.com/plugins/deploy/connect-chatgpt#add-the-mcp-server).
+Associate the tunnel with the target ChatGPT workspace; enable the plugin for [Dot](https://learn.chatgpt.com/docs/dots) where workspace permissions permit.
 Verify each product separately: initialize, list projects, submit a task, read the answer, send a followup, and read its answer.
 Local MCP and service recovery tests do not prove OpenAI account access or a product connection.
+`tunnel-client doctor` and `/readyz` do not prove successful control-plane polling; inspect the `control-plane` component at `/health?details=true`.
+For polling `401`/`403`, verify the runtime key's tunnel access and organization/workspace associations; [official client troubleshooting](https://github.com/openai/tunnel-client/blob/master/docs/troubleshooting.md#authorization-failures-identify-the-failing-surface-first).
+Secure MCP Tunnel supports private connections; [public plugin submission](https://developers.openai.com/plugins/deploy/submission) requires a stable public HTTPS MCP endpoint.
 
 ## Recover uncertain calls
 

@@ -1,6 +1,7 @@
 import type * as cryptoModule from "node:crypto";
 import type * as childProcessModule from "node:child_process";
 import type * as fsPromisesModule from "node:fs/promises";
+import type * as fsModule from "node:fs";
 import { randomUUID } from "node:crypto";
 import type * as timersPromisesModule from "node:timers/promises";
 import { spawn as spawnChildProcess } from "node:child_process";
@@ -97,6 +98,13 @@ const TELEGRAM_PROMPT = [
   "- Format with Markdown (**bold**, `code`, ``` blocks, [text](url)), never HTML tags: they show literally.",
   '- When the user asks to be notified or sent something in Telegram, send it with `"$SPUR_SESSION_TOOL_DIR/spur" source reply`.',
 ].join("\n");
+const githubPostsPrompt = (marker: string) =>
+  [
+    "GitHub posts: this GitHub login is shared with the operator and other agents.",
+    `- End every PR or issue comment, inline review comment, review thread reply, review body and PR description you post with \`${marker}\` as its own last line, exactly once. Never inside a \`>\` quote.`,
+    "- Spur treats a post carrying that line as this session's own and skips it; an unsigned post can come back to you as someone else's feedback.",
+    "- Commit messages and PR titles stay unsigned.",
+  ].join("\n");
 type IsHostPortFree = (port: number) => Promise<boolean>;
 type ClearPortListener = (port: number) => Promise<void>;
 type HasEstablishedConnections = (port: number) => Promise<"established" | "none" | "unknown">;
@@ -6348,6 +6356,12 @@ describe("SessionService", () => {
     return config;
   }
 
+  function configWithGitHub(sources: Record<string, unknown>) {
+    const config = baseConfig();
+    config.projects.api.sources = sources as typeof config.projects.api.sources;
+    return config;
+  }
+
   it.each([false, true])("distinguishes Telegram launch origin: %s", async (hasInbound) => {
     mockClaudeJsonlState("waiting");
     loadConfigMock.mockReturnValue(
@@ -6513,6 +6527,181 @@ describe("SessionService", () => {
     const withoutTrigger = new WithoutTrigger("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     await withoutTrigger.spawn({ project: "api", prompt: "hello" });
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("Telegram:");
+  });
+
+  describe("GitHub posts block", () => {
+    const marker = "[AI-generated, session: {session}]";
+    const signingSources = {
+      review: { type: "github", runOnStart: false, intervalMs: 60_000, selfMarker: marker },
+    };
+
+    it("renders the block for the spawned session id", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        configWithGitHub({ review: { ...signingSources.review, signPosts: true } }),
+      );
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn({ project: "api", prompt: "hello" });
+
+      expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+        `slot-instructions\nhello\n\n${TODO_PROMPT}\n\n${githubPostsPrompt("[AI-generated, session: api-1]")}`,
+      );
+    });
+
+    it("places the block after Telegram and before Sidecars", async () => {
+      mockClaudeJsonlState("waiting");
+      const config = configWithGitHub({
+        chat: {
+          type: "telegram",
+          runOnStart: false,
+          token: "token-123",
+          allowedUsers: [123],
+          chatId: 4242,
+        },
+        review: { ...signingSources.review, signPosts: true },
+      });
+      loadConfigMock.mockReturnValue({
+        ...config,
+        projects: {
+          api: {
+            ...config.projects.api,
+            triggers: {
+              tg: { source: "chat", event: "telegram:message", send: { interrupt: false } },
+            },
+            sidecars: { dev: { command: "pnpm dev", autoStart: false } },
+          },
+        },
+      });
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.spawn(
+        { project: "api", prompt: "hello" },
+        { telegramOrigin: { projectId: "api", sourceId: "chat", chatId: 4242 } },
+      );
+
+      const sent = sendMessageToTmuxMock.mock.calls[0]?.[1];
+      expect(sent).toEqual(expect.any(String));
+      const prompt = String(sent);
+      expect(prompt.indexOf("Spur ToDo:")).toBeGreaterThanOrEqual(0);
+      expect(prompt.indexOf("Spur ToDo:")).toBeLessThan(prompt.indexOf("Telegram:"));
+      expect(prompt.indexOf("Telegram:")).toBeLessThan(prompt.indexOf("GitHub posts:"));
+      expect(prompt.indexOf("GitHub posts:")).toBeLessThan(prompt.indexOf("Sidecars:"));
+      expect(prompt.split("GitHub posts:")).toHaveLength(2);
+    });
+
+    it("omits the block without signPosts", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(configWithGitHub(signingSources));
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await service.spawn({ project: "api", prompt: "hello" });
+      expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toBe(
+        `slot-instructions\nhello\n\n${TODO_PROMPT}`,
+      );
+
+      buildAgentLaunchPlanMock.mockClear();
+      loadConfigMock.mockReturnValue(configWithGitHub({}));
+      const { SessionService: WithoutGitHub } = await loadSessionServiceModule();
+      const withoutGitHub = new WithoutGitHub("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      await withoutGitHub.spawn({ project: "api", prompt: "hello" });
+      expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).not.toContain("GitHub posts:");
+    });
+
+    it("carries the block into a background spawn", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        configWithGitHub({ review: { ...signingSources.review, signPosts: true } }),
+      );
+      const service = await createDisposedSessionService();
+      await service.spawnInBackground({ project: "api", prompt: "hello" });
+      await vi.waitFor(() => expect(buildAgentLaunchPlanMock).toHaveBeenCalled());
+      expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+        githubPostsPrompt("[AI-generated, session: api-1]"),
+      );
+    });
+
+    it("carries the block into a restore prompt", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue(
+        configWithGitHub({ review: { ...signingSources.review, signPosts: true } }),
+      );
+      findAgentSessionIdMock.mockResolvedValue("session-uuid");
+      createSessionStore(
+        sessionRecord({
+          id: "api-1",
+          prompt: "hello",
+          status: "stopped",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        }),
+      );
+      let restoredTmuxCreated = false;
+      createTmuxSessionMock.mockImplementation(async () => {
+        restoredTmuxCreated = true;
+      });
+      getTmuxSessionPresenceMock.mockImplementation(async () => ({
+        present: restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      getTmuxPanePresenceMock.mockImplementation(async () => ({
+        dead: !restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      probeTmuxProcessMatchMock.mockImplementation(async () => ({
+        alive: restoredTmuxCreated,
+        matchedByName: restoredTmuxCreated,
+        unresponsive: false,
+      }));
+      const service = await createDisposedSessionService();
+      await service.restore("api-1");
+      expect(sendMessageToTmuxMock.mock.calls.at(-1)?.[1]).toContain(
+        githubPostsPrompt("[AI-generated, session: api-1]"),
+      );
+    });
+
+    it("carries the block into a recovery prompt", async () => {
+      loadConfigMock.mockReturnValue(
+        configWithGitHub({ review: { ...signingSources.review, signPosts: true } }),
+      );
+      const sessions = createSessionStore();
+      sessions.set(
+        "api-1",
+        runningSession({
+          agentSessionId: "session-uuid",
+          status: "stopped",
+          stopReason: "stale_timeout",
+          prompt: "original recovery task",
+        }),
+      );
+      await useRealTodoLedger();
+      listSessionsMock.mockReturnValue([]);
+      let relaunched = false;
+      tmuxSessionExistsMock.mockImplementation(async () => relaunched);
+      isProcessRunningInTmuxMock.mockImplementation(async () => relaunched);
+      createTmuxSessionMock
+        .mockRejectedValueOnce(new Error("resume failed"))
+        .mockImplementation(async () => {
+          relaunched = true;
+        });
+      createAgentSubmitAckBindingMock.mockResolvedValue({ scan: vi.fn() });
+      lookupTmuxPanePidMock.mockResolvedValue({ status: "ok", panePid: process.pid });
+      const service = await createDisposedSessionService();
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+        found: true,
+        lastScannedFile: null,
+      });
+
+      await service.send("api-1", { message: "trigger after recovery", queue: false });
+
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining(githubPostsPrompt("[AI-generated, session: api-1]")),
+        expect.anything(),
+      );
+    });
   });
 
   it("emits the project default mode line in the launch prompt", async () => {
@@ -65858,6 +66047,102 @@ describe("SessionService", () => {
         },
       };
     }
+
+    it.each(["metadata", "suffix"] as const)(
+      "retains Codex hold after mid-read EBADF and classifies again: %s",
+      async (stage) => {
+        const timers = await vi.importActual<typeof timersPromisesModule>("node:timers/promises");
+        const realPromises = await vi.importActual<typeof fsPromisesModule>("node:fs/promises");
+        const previousPromises = { ...(await import("node:fs/promises")) };
+        const realFs = await vi.importActual<typeof fsModule>("node:fs");
+        const previousFs = { ...(await import("node:fs")) };
+        let armed = false;
+        let injected = false;
+        let target = "";
+        let borrowedStreams = 0;
+        vi.doMock("node:fs", () => ({
+          ...realFs,
+          createReadStream: (...args: Parameters<typeof realFs.createReadStream>) => {
+            const options = args[1];
+            if (
+              armed && args[0] === target && typeof options === "object" &&
+              typeof options.fd === "number" &&
+              ++borrowedStreams === (stage === "metadata" ? 1 : 2)
+            ) {
+              injected = true;
+              // Exercise the old borrowed-fd path too: its owner can close before stream I/O.
+              realFs.closeSync(options.fd);
+            }
+            return realFs.createReadStream(...args);
+          },
+        }));
+        vi.doMock("node:fs/promises", () => ({
+          ...realPromises,
+          open: async (...args: Parameters<typeof realPromises.open>) => {
+            const handle = await realPromises.open(...args);
+            if (armed && args[0] === target) {
+              const read = handle.read;
+              let reads = 0;
+              vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
+                reads += 1;
+                // The first two reads check newline boundaries; then metadata and suffix.
+                if (!injected && reads === (stage === "metadata" ? 3 : 4)) {
+                  injected = true;
+                  await handle.close();
+                }
+                return Reflect.apply(read, handle, readArgs);
+              });
+            }
+            return handle;
+          },
+        }));
+        vi.resetModules();
+        let fixture: Awaited<ReturnType<typeof historicalAckFixture>> | undefined;
+        try {
+          fixture = await historicalAckFixture(`ebadf-${stage}`);
+          target = fixture.file;
+          const before = structuredClone(fixture.sessions.get("api-1"));
+          const scans: Array<{ found: boolean; qualifiedNoMatch?: boolean }> = [];
+          const realAgents = fixture.realAgents;
+          resumeAgentSubmitAckBindingMock.mockImplementation(
+            async (...args: Parameters<typeof realAgents.resumeAgentSubmitAckBinding>) => {
+              const binding = await realAgents.resumeAgentSubmitAckBinding(...args);
+              if (!binding) return binding;
+              return {
+                ...binding,
+                async scan(message: string) {
+                  const result = await binding.scan(message);
+                  scans.push(result);
+                  return result;
+                },
+              };
+            },
+          );
+          armed = true;
+          await fixture.service.get("api-1");
+          await timers.setImmediate();
+          expect(injected).toBe(true);
+          expect(scans).toEqual([expect.objectContaining({ found: false })]);
+          expect(scans[0]?.qualifiedNoMatch).not.toBe(true);
+          const held = fixture.sessions.get("api-1");
+          expect(held?.submitUnconfirmedAt).toBe(before?.submitUnconfirmedAt);
+          expect(held?.queuedMessageTyped).toEqual(before?.queuedMessageTyped);
+          expect(held?.queuedMessages).toEqual(before?.queuedMessages);
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(eventsNamed("session.submit.released")).toHaveLength(0);
+          armed = false;
+          await fixture.service.get("api-1");
+          await timers.setImmediate();
+          expect(fixture.sessions.get("api-1")?.submitUnconfirmedAt).toBeUndefined();
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(1);
+        } finally {
+          fixture?.close();
+          vi.doMock("node:fs/promises", () => previousPromises);
+          vi.doMock("node:fs", () => previousFs);
+        }
+      },
+    );
 
     it.each(["no-activity", "historical-other"] as const)(
       "qualifies a healthy held Codex receipt before activity fallback: %s",
