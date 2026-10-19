@@ -4224,6 +4224,189 @@ describe("SessionDetail logs", () => {
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
 
+  const mockLogResponses = (responses: Array<Response | Promise<Response>>) => {
+    let logRequest = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ messages: [] })), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/logs") {
+        const response = responses[logRequest++];
+        if (!response) throw new Error("Unexpected logs request");
+        return await response;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  };
+
+  it("shows a 404 log error instead of an empty success", async () => {
+    mockLogResponses([
+      new Response(JSON.stringify({ error: "No retained pane for runtime svc-1" }), {
+        status: 404,
+      }),
+    ]);
+
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Logs unavailable · HTTP 404",
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "No retained pane for runtime svc-1",
+    );
+    expect(screen.queryByText("No Spur log entries yet.")).not.toBeInTheDocument();
+  });
+
+  it("shows the proxied 502 capture message", async () => {
+    mockLogResponses([
+      new Response(JSON.stringify({ error: "Failed to capture retained pane for service svc-1" }), {
+        status: 502,
+      }),
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+    const alert = await within(screen.getByRole("dialog", { name: "Logs api-a1" })).findByRole(
+      "alert",
+    );
+    expect(alert).toHaveTextContent("Logs unavailable · HTTP 502");
+    expect(alert).toHaveTextContent("Failed to capture retained pane for service svc-1");
+  });
+
+  it("clears prior rows when a reopened logs request fails", async () => {
+    mockLogResponses([
+      new Response(
+        JSON.stringify([
+          {
+            timestamp: "2026-10-16T00:00:00.000Z",
+            event: "service.output",
+            level: "info",
+            message: "OLD_LOG_ROW",
+          },
+        ]),
+        { status: 200 },
+      ),
+      new Response(JSON.stringify({ error: "No retained pane for runtime svc-1" }), {
+        status: 404,
+      }),
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    const open = await screen.findByRole("button", { name: /^logs$/i });
+    fireEvent.click(open);
+    expect(await screen.findByText("OLD_LOG_ROW")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
+    fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "No retained pane for runtime svc-1",
+    );
+    expect(within(dialog).queryByText("OLD_LOG_ROW")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("No Spur log entries yet.")).not.toBeInTheDocument();
+  });
+
+  it("disables Retry until a 200 empty result replaces the error", async () => {
+    let finishRetry!: (response: Response) => void;
+    const retryResponse = new Promise<Response>((resolve) => {
+      finishRetry = resolve;
+    });
+    mockLogResponses([
+      new Response(JSON.stringify({ error: "No retained pane for runtime svc-1" }), {
+        status: 404,
+      }),
+      retryResponse,
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^logs$/i }));
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: /^retry$/i }));
+    expect(within(dialog).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    expect(within(dialog).getByRole("alert")).toBeInTheDocument();
+    await act(async () => finishRetry(new Response(JSON.stringify([]), { status: 200 })));
+    expect(await within(dialog).findByText("No Spur log entries yet.")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores a late response from an earlier open", async () => {
+    let finishFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    mockLogResponses([
+      firstResponse,
+      new Response(JSON.stringify({ error: "No retained pane for runtime svc-1" }), {
+        status: 404,
+      }),
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    const open = await screen.findByRole("button", { name: /^logs$/i });
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
+    fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "No retained pane for runtime svc-1",
+    );
+    await act(async () =>
+      finishFirst(
+        new Response(
+          JSON.stringify([
+            {
+              timestamp: "2026-10-16T00:00:00.000Z",
+              event: "service.output",
+              level: "info",
+              message: "LATE_ROW",
+            },
+          ]),
+          { status: 200 },
+        ),
+      ),
+    );
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("HTTP 404");
+    expect(within(dialog).queryByText("LATE_ROW")).not.toBeInTheDocument();
+  });
+
+  it("ignores a late 404 after a newer successful open", async () => {
+    let finishFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    mockLogResponses([
+      firstResponse,
+      new Response(
+        JSON.stringify([
+          {
+            timestamp: "2026-10-16T00:00:00.000Z",
+            event: "service.output",
+            level: "info",
+            message: "NEW_ROW",
+          },
+        ]),
+        { status: 200 },
+      ),
+    ]);
+    render(<SessionDetail sessionId="api-a1" />);
+    const open = await screen.findByRole("button", { name: /^logs$/i });
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "Close logs" }));
+    fireEvent.click(open);
+    const dialog = screen.getByRole("dialog", { name: "Logs api-a1" });
+    expect(await within(dialog).findByText("NEW_ROW")).toBeInTheDocument();
+    await act(async () =>
+      finishFirst(new Response(JSON.stringify({ error: "STALE_ERROR" }), { status: 404 })),
+    );
+    expect(within(dialog).getByText("NEW_ROW")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("STALE_ERROR")).not.toBeInTheDocument();
+  });
+
   it("hides automatic history snapshot links in the default agent view", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

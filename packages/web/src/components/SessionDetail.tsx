@@ -1651,6 +1651,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [logsError, setLogsError] = useState<{ status: 404 | 502; message: string } | null>(null);
+  const [logsRetrying, setLogsRetrying] = useState(false);
+  const logsRequestId = useRef(0);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
@@ -2516,19 +2519,36 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const openLogs = async () => {
+  const openLogs = async (retry = false) => {
+    const requestId = ++logsRequestId.current;
     setLogsOpen(true);
+    if (retry) {
+      setLogsRetrying(true);
+    } else {
+      setLogEntries([]);
+      setLogsError(null);
+    }
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/logs`, {
         cache: "no-store",
       });
+      if (res.status === 404 || res.status === 502) {
+        const message = await readApiErrorMessage(res, "Failed to load logs");
+        if (requestId !== logsRequestId.current) return;
+        setLogEntries([]);
+        setLogsError({ status: res.status, message });
+        return;
+      }
       if (!res.ok) return;
       const data: unknown = await res.json();
-      if (Array.isArray(data)) {
+      if (requestId === logsRequestId.current && Array.isArray(data)) {
         setLogEntries(data as LogEntry[]);
+        setLogsError(null);
       }
     } catch {
       // Non-critical.
+    } finally {
+      if (requestId === logsRequestId.current) setLogsRetrying(false);
     }
   };
 
@@ -3972,14 +3992,57 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
                 <button
                   type="button"
-                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                  onClick={() => setLogsOpen(false)}
+                  aria-label="Close logs"
+                  className="border border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none"
+                  onClick={() => {
+                    logsRequestId.current += 1;
+                    setLogsRetrying(false);
+                    setLogsOpen(false);
+                  }}
                 >
                   ✕
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto px-4 py-4">
-                {logEntries.length === 0 ? (
+                {logsError ? (
+                  <div
+                    role="alert"
+                    className={`flex h-full min-w-0 flex-col items-center justify-center gap-3 border px-4 text-center ${
+                      logsError.status === 404
+                        ? "border-[var(--color-chip-warn-border)] bg-[var(--color-bg-surface)]"
+                        : "border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)]"
+                    }`}
+                  >
+                    <div
+                      className={`flex items-center gap-2 font-bold uppercase tracking-[0.1em] ${
+                        logsError.status === 404
+                          ? "text-[var(--color-chip-warn-text)]"
+                          : "text-[var(--color-chip-error-text)]"
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`h-2 w-2 shrink-0 ${
+                          logsError.status === 404
+                            ? "bg-[var(--color-status-attention)]"
+                            : "bg-[var(--color-status-error)]"
+                        }`}
+                      />
+                      Logs unavailable · HTTP {logsError.status}
+                    </div>
+                    <div className="max-w-full break-words text-[var(--color-text-primary)]">
+                      {logsError.message}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={logsRetrying}
+                      className="border border-[var(--color-border-strong)] px-2 py-1.5 font-bold uppercase text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)] focus-visible:border-[var(--color-accent)] focus-visible:outline-none disabled:cursor-not-allowed disabled:text-[var(--color-text-tertiary)]"
+                      onClick={() => void openLogs(true)}
+                    >
+                      {logsRetrying ? "Retrying…" : "Retry"}
+                    </button>
+                  </div>
+                ) : logEntries.length === 0 ? (
                   <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-center text-[var(--color-text-tertiary)]">
                     No Spur log entries yet.
                   </div>
