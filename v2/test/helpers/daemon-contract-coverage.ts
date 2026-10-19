@@ -73,7 +73,7 @@ export function inventoryDaemonRoutes(source: string): string[] {
   walk(handler, (node) => {
     if (!ts.isIfStatement(node)) return;
     let method: string | undefined;
-    let literalPath: string | undefined;
+    const literalPaths = new Set<string>();
     const references = new Set<string>();
     walk(node.expression, (part) => {
       if (ts.isIdentifier(part) && declarations.has(part.text)) references.add(part.text);
@@ -84,7 +84,7 @@ export function inventoryDaemonRoutes(source: string): string[] {
         return;
       if (ts.isIdentifier(part.left) && ts.isStringLiteral(part.right)) {
         if (part.left.text === "method") method = part.right.text;
-        if (part.left.text === "path") literalPath = part.right.text;
+        if (part.left.text === "path") literalPaths.add(part.right.text);
       }
     });
     if (!method) {
@@ -100,9 +100,9 @@ export function inventoryDaemonRoutes(source: string): string[] {
     }
     if (!["GET", "POST", "PATCH", "DELETE"].includes(method))
       throw new Error(`Unknown HTTP method: ${method}`);
-    if (literalPath) {
+    if (literalPaths.size) {
       if (references.size) throw new Error("Mixed literal/regex route requires contract review");
-      routes.push(`${method} ${literalPath}`);
+      for (const path of literalPaths) routes.push(`${method} ${path}`);
     } else {
       if (references.size !== 1)
         throw new Error(`Unknown dispatch predicate: ${node.expression.getText(file)}`);

@@ -782,6 +782,22 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
   if (selfMarker !== undefined && !selfMarker.includes("{session}")) {
     throw new Error(`${label}.selfMarker must contain {session}`);
   }
+  const signPosts =
+    provider === "github" ? asOptionalBoolean(raw["signPosts"], `${label}.signPosts`) : undefined;
+  if (signPosts === true) {
+    if (selfMarker === undefined) {
+      throw new Error(`${label}.signPosts requires ${label}.selfMarker`);
+    }
+    if (/[\r\n]/.test(selfMarker)) {
+      throw new Error(`${label}.selfMarker must be one line when signPosts is set`);
+    }
+    if (selfMarker.startsWith(">")) {
+      throw new Error(`${label}.selfMarker must not start with ">" when signPosts is set`);
+    }
+    if (selfMarker.includes("`")) {
+      throw new Error(`${label}.selfMarker must not contain a backtick when signPosts is set`);
+    }
+  }
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -793,6 +809,7 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
     ...(pollDisabledRecheckMs !== undefined ? { pollDisabledRecheckMs } : {}),
     ...(selfMarker !== undefined ? { selfMarker } : {}),
+    ...(signPosts === true ? { signPosts } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -1824,6 +1841,22 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
     sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv);
+  }
+  // Every github source polls every session of the project and filters with its own
+  // selfMarker, so a signing source's marker must be the one all marker sources match.
+  for (const [signerId, signer] of Object.entries(sources)) {
+    if (signer.type !== "github" || signer.signPosts !== true) continue;
+    for (const [otherId, other] of Object.entries(sources)) {
+      if (
+        other.type === "github" &&
+        other.selfMarker !== undefined &&
+        other.selfMarker !== signer.selfMarker
+      ) {
+        throw new Error(
+          `projects.${projectId}.sources.${otherId}.selfMarker must match projects.${projectId}.sources.${signerId}.selfMarker because ${signerId} sets signPosts`,
+        );
+      }
+    }
   }
   const backlogRaw = raw["backlog"] ? asObject(raw["backlog"], `${label}.backlog`) : {};
   const backlog: Record<string, BacklogConfig> = {};

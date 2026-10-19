@@ -48,8 +48,14 @@ describe("native same-run strict CI aggregate", () => {
     expect(gate.steps).toHaveLength(1);
     expect(Object.keys(step)).toEqual(["name", "env", "run"]);
     expect(step.env).toEqual({ REQUIRED_RESULTS: "$" + "{{ toJSON(needs) }}" });
-    expect(workflow.permissions).toEqual({ contents: "read" });
-    expect(workflow.on.pull_request).toEqual({ branches: ["main"] });
+    expect(workflow.permissions).toEqual({
+      contents: "read",
+      "pull-requests": "read",
+      actions: "read",
+    });
+    expect(workflow.on.pull_request).toEqual({
+      branches: ["main", "feature/release-continuation"],
+    });
     expect(
       Object.values(workflow.jobs).filter((job) => job.name === "Spur Strict CI"),
     ).toHaveLength(1);

@@ -31,10 +31,12 @@ import { listSessions, writeSession } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
-const dirReads: {
-  byPath: Map<string, number>;
-  afterRead: ((path: string) => void) | null;
-} = { byPath: new Map(), afterRead: null };
+const dirReads = vi.hoisted(
+  (): {
+    byPath: Map<string, number>;
+    afterRead: ((path: string) => void) | null;
+  } => ({ byPath: new Map(), afterRead: null }),
+);
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();

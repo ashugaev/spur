@@ -480,6 +480,7 @@ vi.mock("../../src/agents/index.js", async (importOriginal) => ({
 }));
 
 vi.mock("../../src/config.js", () => ({
+  carryProjectConfigSource: <T>(_source: unknown, target: T): T => target,
   buildSidecarLinkUrl: (template: string, reservedPort: number) =>
     template.includes("{port}")
       ? template.replaceAll("{port}", String(reservedPort))

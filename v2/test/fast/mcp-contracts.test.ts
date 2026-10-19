@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "7e8baa0798e7b355f4262400a726a033861187b352115231e7a8f82beb2afae9",
-  "types.ts": "63cfaedf4fc40424a0edbdb5e704a9b94c4bf7621dfa3107deaf17f071650173",
-  "session-service.ts": "803aa525df56fed84b83d1d9da03435996d787bdf1ab9fc3b9defefc206ad925",
+  "server.ts": "ae8d43bbd8ae9ae9a952b219a36e8269bc70c7abf465f79734cba512d456e02d",
+  "types.ts": "da62fd8e5e830f9881f78c4b4c4bd7c38c714d567e9f2f07bcba6e93754dbf80",
+  "session-service.ts": "bf6a8eee5cc69f514c21340a8998e4ab79b9092aae577a19a8823dbc3e925685",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -43,8 +43,14 @@ describe("daemon MCP operation contracts", () => {
       (entry) =>
         `${entry.method} ${entry.path.replace(/\{([^}]+)\}/g, (_match, name: string) => (entry.catchAllPathParams?.includes(name) ? "{*}" : "{}"))}`,
     ).sort();
-    expect(routes).toHaveLength(79);
-    expect(contracts).toEqual(routes);
+    // Launch-scoped bearer ingress is deliberately absent from generic MCP.
+    const privateIngress = [
+      "POST /release-continuation/affirmations",
+      "POST /release-continuation/transitions",
+    ];
+    expect(routes).toHaveLength(81);
+    expect(routes.filter((route) => privateIngress.includes(route))).toEqual(privateIngress);
+    expect(contracts).toEqual(routes.filter((route) => !privateIngress.includes(route)));
     expect(new Set(DAEMON_OPERATIONS.map((entry) => entry.operationId)).size).toBe(79);
     expect(getDaemonOperation("spawn_session")?.path).toBe("/sessions");
     expect(getDaemonOperation("spawn_background_session")?.path).toBe("/sessions/background");
@@ -253,8 +259,29 @@ describe("catalog examples at the real daemon router", () => {
         ...(requestBody !== undefined ? { body: JSON.stringify(requestBody) } : {}),
       });
     };
-    return { server, request };
+    return { server, request, origin: `http://127.0.0.1:${port}` };
   }
+
+  it.each(["affirmations", "transitions"])(
+    "keeps private continuation %s behind launch bearer authorization",
+    async (kind) => {
+      const { server, origin } = await fixture();
+      try {
+        const response = await fetch(`${origin}/release-continuation/${kind}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-spur-origin": "mcp" },
+          body: "{}",
+        });
+        expect(response.status).toBe(401);
+        expect(await response.text()).toContain("continuation-launch-missing");
+        expect(
+          DAEMON_OPERATIONS.some((entry) => entry.path === `/release-continuation/${kind}`),
+        ).toBe(false);
+      } finally {
+        await server.stop();
+      }
+    },
+  );
 
   it("executes every ToDo variant and session/shared-memory writes through MCP operator rights", async () => {
     const { server, request } = await fixture();
