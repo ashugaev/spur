@@ -50,7 +50,7 @@ interface Request extends Attempt {
   assessment: InterfaceAssessment;
   body: string;
   verdict: "APPROVED" | "CHANGES_REQUESTED";
-  coverage: { challenger: string; output: string; omissionsClosed: boolean };
+  coverage: { challenger: string; output: string; omissionsClosed: boolean } | null;
   rows: Row[];
 }
 export function parseAttempt(value: unknown): Attempt {
@@ -107,8 +107,7 @@ export function parseConfig(value: unknown): Config {
   return config;
 }
 export function parseRequest(value: unknown): Request {
-  const data = object(value),
-    coverage = object(data.coverage);
+  const data = object(value);
   const attempt = parseAttempt(value);
   if (data.verdict !== "APPROVED" && data.verdict !== "CHANGES_REQUESTED")
     throw new ReviewAppError("invalid-verdict");
@@ -119,10 +118,14 @@ export function parseRequest(value: unknown): Request {
       throw new ReviewAppError("missing-evidence");
     return { status: row.status, evidence: string(row.evidence) };
   });
-  const session = attempt.session,
-    challenger = identifier(coverage.challenger);
-  if (challenger === session || coverage.omissionsClosed !== true)
-    throw new ReviewAppError("coverage-incomplete");
+  let coverage: Request["coverage"] = null;
+  if (data.coverage !== undefined && data.coverage !== null) {
+    const legacy = object(data.coverage);
+    const challenger = identifier(legacy.challenger);
+    if (challenger === attempt.session || legacy.omissionsClosed !== true)
+      throw new ReviewAppError("coverage-incomplete");
+    coverage = { challenger, output: string(legacy.output), omissionsClosed: true };
+  }
   if (data.verdict === "APPROVED" && rows.some((row) => row.status !== "passed"))
     throw new ReviewAppError("failed-scenarios");
   return {
@@ -130,7 +133,7 @@ export function parseRequest(value: unknown): Request {
     assessment: parseAssessment(data.assessment),
     body: string(data.body),
     verdict: data.verdict,
-    coverage: { challenger, output: string(coverage.output), omissionsClosed: true },
+    coverage,
     rows,
   };
 }
@@ -282,7 +285,65 @@ async function transitionReview(
       if (
         prior.repository !== request.repo ||
         prior.PR !== request.pr ||
-        prior.lane !== request.lane
+        prior.lane !== request.lane ||
+        !Array.isArray(prior.supersededAttempts) ||
+        !prior.supersededAttempts.every(
+          (value) => typeof value === "string" && /^[a-zA-Z0-9_.-]+$/.test(value),
+        ) ||
+        new Set(prior.supersededAttempts).size !== prior.supersededAttempts.length ||
+        prior.supersededAttempts.includes(prior.attempt) ||
+        typeof prior.attempt !== "string" ||
+        !/^[a-zA-Z0-9_.-]+$/.test(prior.attempt) ||
+        typeof prior.session !== "string" ||
+        !/^[a-zA-Z0-9_.-]+$/.test(prior.session) ||
+        typeof prior.H !== "string" ||
+        !/^[a-f0-9]{40}$/.test(prior.H) ||
+        typeof prior.B !== "string" ||
+        !/^[a-f0-9]{40}$/.test(prior.B) ||
+        typeof prior.contractDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(prior.contractDigest) ||
+        typeof prior.reviewBlocked !== "boolean" ||
+        typeof prior.mutationStarted !== "boolean" ||
+        typeof prior.reason !== "string" ||
+        !Array.isArray(prior.evidence) ||
+        !prior.evidence.every((value) => {
+          const row = object(value);
+          return (
+            (row.status === "passed" || row.status === "failed") &&
+            typeof row.evidence === "string" &&
+            row.evidence.length > 0
+          );
+        }) ||
+        (prior.coverage !== null &&
+          (() => {
+            if (typeof prior.coverage !== "object" || Array.isArray(prior.coverage)) return true;
+            const coverage = object(prior.coverage);
+            return (
+              typeof coverage.challenger !== "string" ||
+              !/^[a-zA-Z0-9_.-]+$/.test(coverage.challenger) ||
+              coverage.challenger === prior.session ||
+              typeof coverage.output !== "string" ||
+              !coverage.output ||
+              coverage.omissionsClosed !== true
+            );
+          })()) ||
+        (prior.reviewId !== null &&
+          (!Number.isSafeInteger(prior.reviewId) || Number(prior.reviewId) <= 0)) ||
+        !Number.isSafeInteger(prior.appId) ||
+        Number(prior.appId) <= 0 ||
+        (prior.mutationStarted && prior.inputDigest === null) ||
+        (prior.reviewId !== null && !prior.mutationStarted) ||
+        (prior.reviewBlocked && prior.status !== "BLOCKED") ||
+        (prior.status === "APPROVED" &&
+          prior.evidence.some((value) => object(value).status !== "passed")) ||
+        (["APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status)) &&
+          (prior.inputDigest === null ||
+            prior.reviewId === null ||
+            prior.localVerdict !== prior.status ||
+            prior.evidence.length === 0)) ||
+        (prior.inputDigest !== null &&
+          (typeof prior.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(prior.inputDigest))) ||
+        !["PENDING", "BLOCKED", "APPROVED", "CHANGES_REQUESTED"].includes(String(prior.status))
       )
         throw new ReviewAppError("receipt-state-invalid");
       receipt.supersededAttempts = prior.supersededAttempts;

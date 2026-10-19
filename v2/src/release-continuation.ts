@@ -340,6 +340,7 @@ function validatesReceipt(
     .sort((a, b) => integer(b.id) - integer(a.id))[0];
   const state = latest ? readStateBody(string(latest.body)) : null;
   return (
+    receipt.coverage !== null &&
     state?.session === receipt.session &&
     state.attempt === receipt.attempt &&
     state.evidenceDigest === digest({ rows: receipt.evidence, coverage: receipt.coverage }) &&

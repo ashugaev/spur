@@ -11,6 +11,9 @@ import {
 } from "./send-batches.js";
 import {
   deletePendingSendBatch,
+  readPendingSpawnWork,
+  writePendingSpawnWork,
+  deletePendingSpawnWork,
   deletePendingSendBatchConditional,
   readPendingSendBatch,
   deleteWorkItemLifecycle,
@@ -34,6 +37,7 @@ import {
   type TriggerSpawnBlockConfig,
   type SpawnTriggerConfig,
   type WorkItemEventData,
+  type PersistedSpawnWork,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import { captureConfiguredCaller } from "./release-caller.js";
@@ -221,11 +225,13 @@ async function shouldClaimWorkItemSpawn(
   sourceId: string,
   workItemData: WorkItemEventData,
   autoComplete: boolean,
+  spawnWorkId?: string,
 ): Promise<WorkItemSuppressed | null> {
   const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
     workItemData.externalId,
   );
   if (existing?.state === "pending") {
+    if (spawnWorkId !== undefined && existing.spawnWorkId === spawnWorkId) return null;
     return { reason: "work_item_pending" };
   }
   if (existing?.state === "completed") {
@@ -266,6 +272,7 @@ async function shouldClaimWorkItemSpawn(
   recordWorkItemLifecycle(dataDir, projectId, sourceId, {
     ...createWorkItemLifecycleBase(workItemData, autoComplete),
     state: "pending",
+    ...(spawnWorkId !== undefined ? { spawnWorkId } : {}),
   });
   return null;
 }
@@ -284,8 +291,10 @@ async function runSpawnTrigger(
   deskGroup: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
-  config?: AppConfig,
+  queue: { work: PersistedSpawnWork; current(): boolean; save(): boolean },
+  config: AppConfig,
 ): Promise<void> {
+  const { work } = queue;
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
     level: "info",
     projectId,
@@ -311,7 +320,14 @@ async function runSpawnTrigger(
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
-    if (workItemData) {
+    if (workItemData && work.nextBlockIndex > 0) {
+      const claim = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
+        workItemData.externalId,
+      );
+      if (claim?.state === "pending" && claim.spawnWorkId !== work.workId)
+        throw new Error("Work item claimed by another spawn intention");
+    }
+    if (workItemData && work.nextBlockIndex === 0) {
       const suppressed = await shouldClaimWorkItemSpawn(
         dataDir,
         service,
@@ -320,6 +336,7 @@ async function runSpawnTrigger(
         sourceId,
         workItemData,
         autoComplete === true,
+        work.workId,
       );
       if (suppressed) {
         logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
@@ -343,12 +360,25 @@ async function runSpawnTrigger(
             `[trigger:${projectId}/${triggerId}] suppressed work item ${workItemData.externalId}: ${suppressed.error}`,
           );
         }
+        work.nextBlockIndex = work.blocks.length;
+        for (const block of work.blocks)
+          if (block.state === "pending")
+            Object.assign(block, { state: "failed", error: suppressed.reason });
+        queue.save();
         return;
       }
     }
 
-    let anchorSessionId: string | undefined;
+    let anchorSessionId = work.anchorSessionId;
     for (const [blockIndex, block] of blocks.entries()) {
+      if (blockIndex < work.nextBlockIndex) continue;
+      if (!queue.current()) return;
+      if (anchorSessionId !== undefined) {
+        const anchor = await service.get(anchorSessionId);
+        if (!queue.current()) return;
+        if (anchor.status !== "running" || !anchor.workspaceExists)
+          throw new Error(`Desk anchor unavailable: ${anchorSessionId}`);
+      }
       const isAnchorBlock = deskGroup === true && anchorSessionId === undefined;
       if (isAnchorBlock && blockIndex > 0) {
         logger.warn(
@@ -378,24 +408,39 @@ async function runSpawnTrigger(
             ? { reuseWorkspaceSessionId: anchorSessionId }
             : {}),
         };
-        const configuredCaller =
-          workItemData && config
-            ? await captureConfiguredCaller(config, {
-                projectId,
-                sourceId,
-                triggerId,
-                blockIndex,
-                repository: workItemData.repo,
-                pr: workItemData.number,
-                prompt: renderedPrompt,
-              })
-            : null;
-        const session = configuredCaller
-          ? await service.spawn(spawnRequest, { configuredCaller })
-          : await service.spawn(spawnRequest);
+        const configuredCaller = workItemData
+          ? await captureConfiguredCaller(config, {
+              projectId,
+              sourceId,
+              triggerId,
+              blockIndex,
+              repository: workItemData.repo,
+              pr: workItemData.number,
+              prompt: renderedPrompt,
+            })
+          : null;
+        if (!queue.current()) return;
+        const birthKey = `${work.workId}:${blockIndex}`;
+        let session: SessionView;
+        try {
+          session = await service.spawn(spawnRequest, {
+            triggerBirthKey: birthKey,
+            ...(configuredCaller ? { configuredCaller } : {}),
+          });
+        } catch (error) {
+          const birth = service.getTriggerBirth(projectId, birthKey, spawnRequest);
+          if (!birth) throw error;
+          session = await service.get(birth.id);
+        }
+        if (!queue.current()) return;
+        work.blocks[blockIndex] = { birthKey, state: "succeeded", sessionId: session.id };
+        work.nextBlockIndex = blockIndex + 1;
+        work.lastSessionId = session.id;
         if (isAnchorBlock) {
           anchorSessionId = session.id;
+          work.anchorSessionId = session.id;
         }
+        if (!queue.save()) return;
         if (workItemData) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
             ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
@@ -418,9 +463,28 @@ async function runSpawnTrigger(
             ...(isAnchorBlock ? { deskGroup: true } : {}),
           },
         });
+        if (work.admissionDenials > 0) return;
       } catch (error) {
+        if (!queue.current()) return;
+        if (error instanceof SessionAdmissionDeniedError) {
+          work.admissionDenials = Math.min(work.admissionDenials + 1, DELIVERY_MAX_ATTEMPTS - 1);
+          work.notBeforeAt =
+            Date.now() +
+            DELIVERY_RETRY_BASE_MS *
+              2 ** Math.min(work.admissionDenials - 1, DELIVERY_MAX_ATTEMPTS - 2);
+          queue.save();
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
-        if (workItemData) {
+        work.blocks[blockIndex] = {
+          birthKey: `${work.workId}:${blockIndex}`,
+          state: "failed",
+          error: message,
+        };
+        work.nextBlockIndex = blockIndex + 1;
+        work.failures.push(message);
+        if (!queue.save()) return;
+        if (workItemData && work.lastSessionId === undefined) {
           recordWorkItemLifecycle(dataDir, projectId, sourceId, {
             ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
             state: "failed",
@@ -446,8 +510,25 @@ async function runSpawnTrigger(
       }
     }
   } catch (error) {
+    if (!queue.current()) return;
     const message = error instanceof Error ? error.message : String(error);
-    if (workItemData) {
+    for (let index = work.nextBlockIndex; index < work.blocks.length; index += 1)
+      work.blocks[index] = {
+        birthKey: `${work.workId}:${index}`,
+        state: "failed",
+        error: message,
+      };
+    work.nextBlockIndex = work.blocks.length;
+    work.failures.push(message);
+    if (!queue.save()) return;
+    const claim = workItemData
+      ? readWorkItemLifecycles(dataDir, projectId, sourceId).get(workItemData.externalId)
+      : undefined;
+    if (
+      workItemData &&
+      work.lastSessionId === undefined &&
+      (claim === undefined || (claim.state === "pending" && claim.spawnWorkId === work.workId))
+    ) {
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
         ...createWorkItemLifecycleBase(workItemData, autoComplete === true),
         state: "failed",
@@ -747,6 +828,21 @@ function logTriggerEvent(
   logSpurEvent(dataDir, { event, ...entry });
 }
 
+function spawnRouteFingerprint(
+  config: AppConfig,
+  projectId: string,
+  triggerId: string,
+  trigger: SpawnTriggerConfig,
+): string {
+  return JSON.stringify({
+    projectId,
+    sourceId: trigger.source,
+    sourceType: config.projects[projectId]?.sources[trigger.source]?.type,
+    triggerId,
+    trigger,
+  });
+}
+
 export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): TriggerGroupController {
   const logger = deps.logger ?? DEFAULT_TRIGGER_LOGGER;
   const autoPing = deps.autoPing;
@@ -754,8 +850,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
+  const pendingSpawns = readPendingSpawnWork(deps.config.dataDir);
   const interruptedKeys = new Map<string, number>();
   const serialByKey = new Map<string, Promise<void>>();
+  const tickFlushQueued = new Set<string>();
   const routeLeases = new Map<string, string>();
   const occurrenceReferencesByQueue = new Map<string, Set<string>>();
   const autoCompleteChecks: Array<() => void> = [];
@@ -801,7 +899,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (!options?.keepInterrupted) {
       interruptedKeys.delete(queueKey);
     }
-    if (flushTimer && pendingBatches.size === 0) {
+    if (flushTimer && pendingBatches.size === 0 && pendingSpawns.size === 0) {
       clearInterval(flushTimer);
       flushTimer = null;
     }
@@ -1236,11 +1334,21 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   };
 
   const scheduleFlushLoop = (): void => {
-    if (flushTimer || pendingBatches.size === 0 || stopped) return;
+    if (flushTimer || (pendingBatches.size === 0 && pendingSpawns.size === 0) || stopped) return;
     flushTimer = setInterval(() => {
+      for (const work of pendingSpawns.values())
+        enqueue(spawnQueueKey(work), () => flushSpawn(work));
       for (const [queueKey, batch] of pendingBatches) {
+        // One tick flush per key in flight: the batch stays pending, so a
+        // skipped tick only delays delivery to the next one.
+        if (tickFlushQueued.has(queueKey)) continue;
+        tickFlushQueued.add(queueKey);
         enqueue(queueKey, async () => {
-          await flushPending(queueKey, batch);
+          try {
+            await flushPending(queueKey, batch);
+          } finally {
+            tickFlushQueued.delete(queueKey);
+          }
         });
       }
     }, 5_000);
@@ -1262,6 +1370,103 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     void next.finally(() => {
       inFlight.delete(next);
     });
+  };
+
+  const spawnQueueKey = (work: PersistedSpawnWork): string => {
+    const data = work.eventData;
+    return WORK_ITEM_NEW_EVENT_NAMES.has(work.eventName) && isWorkItemEventData(data)
+      ? `${work.projectId}:${work.triggerId}:${work.sourceId}:work-item:${data.externalId}`
+      : `spawn:${work.workId}`;
+  };
+  const flushSpawn = async (work: PersistedSpawnWork): Promise<void> => {
+    const current = (): boolean =>
+      !stopped &&
+      pendingSpawns.get(work.workId) === work &&
+      readPendingSpawnWork(deps.config.dataDir).get(work.workId)?.revision === work.revision;
+    if (!current() || work.notBeforeAt > Date.now() || memoryHoldEngaged()) return;
+    const trigger = deps.config.projects[work.projectId]?.triggers[work.triggerId];
+    if (
+      !trigger ||
+      isSendTrigger(trigger) ||
+      trigger.source !== work.sourceId ||
+      trigger.event !== work.eventName ||
+      spawnRouteFingerprint(deps.config, work.projectId, work.triggerId, trigger) !==
+        work.routeFingerprint ||
+      trigger.spawn.blocks.length !== work.blocks.length
+    ) {
+      const data = work.eventData;
+      if (isWorkItemEventData(data)) {
+        const claim = readWorkItemLifecycles(
+          deps.config.dataDir,
+          work.projectId,
+          work.sourceId,
+        ).get(data.externalId);
+        if (claim?.state === "pending" && claim.spawnWorkId === work.workId)
+          recordWorkItemLifecycle(deps.config.dataDir, work.projectId, work.sourceId, {
+            ...claim,
+            state: "failed",
+            error: "Spawn route changed or removed",
+          });
+      }
+      deletePendingSpawnWork(deps.config.dataDir, work.workId, work.revision);
+      pendingSpawns.delete(work.workId);
+      return;
+    }
+    const save = (): boolean => {
+      if (!current()) return false;
+      const revision = work.revision;
+      work.revision += 1;
+      return writePendingSpawnWork(deps.config.dataDir, work, revision);
+    };
+    await runSpawnTrigger(
+      deps.config.dataDir,
+      deps.sessionService,
+      work.projectId,
+      work.triggerId,
+      work.sourceId,
+      work.eventName,
+      trigger.spawn.blocks,
+      trigger.spawn.autoComplete,
+      trigger.spawn.restrictWrites,
+      trigger.spawn.allowedTriggers,
+      trigger.spawnDeskGroup,
+      work.eventData,
+      logger,
+      { work, current, save },
+      deps.config,
+    );
+    if (current() && work.nextBlockIndex === work.blocks.length) {
+      const data = work.eventData;
+      if (WORK_ITEM_NEW_EVENT_NAMES.has(work.eventName) && isWorkItemEventData(data)) {
+        const claim = readWorkItemLifecycles(
+          deps.config.dataDir,
+          work.projectId,
+          work.sourceId,
+        ).get(data.externalId);
+        const ownsClaim =
+          claim?.state === "pending"
+            ? claim.spawnWorkId === work.workId
+            : claim?.state === "running" &&
+              work.blocks.some(
+                (block) => block.state === "succeeded" && block.sessionId === claim.sessionId,
+              );
+        if (claim && ownsClaim)
+          recordWorkItemLifecycle(
+            deps.config.dataDir,
+            work.projectId,
+            work.sourceId,
+            work.lastSessionId !== undefined
+              ? { ...claim, state: "running", sessionId: work.lastSessionId }
+              : {
+                  ...claim,
+                  state: "failed",
+                  error: work.failures.at(-1) ?? "Spawn intention completed without a session",
+                },
+          );
+      }
+      deletePendingSpawnWork(deps.config.dataDir, work.workId, work.revision);
+      pendingSpawns.delete(work.workId);
+    }
   };
 
   // One timer per new interactive batch: flush as soon as the send window and
@@ -1740,6 +1945,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   }
   autoPing.setConfiguredRouteAuthorities(configuredRouteAuthorities);
   reloadPendingBatches();
+  for (const work of pendingSpawns.values()) enqueue(spawnQueueKey(work), () => flushSpawn(work));
+  scheduleFlushLoop();
 
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
     for (const [triggerId, trigger] of Object.entries(project.triggers)) {
@@ -1788,38 +1995,32 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           return;
         }
 
-        const workItemData =
-          WORK_ITEM_NEW_EVENT_NAMES.has(event.name) && isWorkItemEventData(event.data)
-            ? event.data
-            : null;
-        const runSpawn = async (): Promise<void> => {
-          await runSpawnTrigger(
-            deps.config.dataDir,
-            deps.sessionService,
-            projectId,
-            triggerId,
-            event.sourceId,
-            event.name,
-            trigger.spawn.blocks,
-            trigger.spawn.autoComplete,
-            trigger.spawn.restrictWrites,
-            trigger.spawn.allowedTriggers,
-            trigger.spawnDeskGroup,
-            event.data,
-            logger,
-            deps.config,
-          );
+        const workId = JSON.stringify([projectId, event.sourceId, triggerId, event.occurrenceId]);
+        if (pendingSpawns.has(workId)) return;
+        const work: PersistedSpawnWork = {
+          workId,
+          revision: 0,
+          projectId,
+          triggerId,
+          sourceId: event.sourceId,
+          eventName: event.name,
+          occurrenceId: event.occurrenceId,
+          routeFingerprint: spawnRouteFingerprint(deps.config, projectId, triggerId, trigger),
+          eventData: structuredClone(event.data),
+          createdAt: new Date().toISOString(),
+          nextBlockIndex: 0,
+          failures: [],
+          admissionDenials: 0,
+          notBeforeAt: 0,
+          blocks: trigger.spawn.blocks.map((_, index) => ({
+            birthKey: `${workId}:${index}`,
+            state: "pending",
+          })),
         };
-        if (workItemData) {
-          const queueKey = `${projectId}:${triggerId}:${event.sourceId}:work-item:${workItemData.externalId}`;
-          enqueue(queueKey, runSpawn);
-          return;
-        }
-        const spawnPromise = runSpawn();
-        inFlight.add(spawnPromise);
-        void spawnPromise.finally(() => {
-          inFlight.delete(spawnPromise);
-        });
+        if (!writePendingSpawnWork(deps.config.dataDir, work)) return;
+        pendingSpawns.set(workId, work);
+        enqueue(spawnQueueKey(work), () => flushSpawn(work));
+        scheduleFlushLoop();
       });
 
       unsubscribers.push(unsubscribe);

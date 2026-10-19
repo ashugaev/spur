@@ -132,7 +132,6 @@ export function parseReviewReceipt(value: unknown): ReviewReceipt {
         (result.inputDigest === null ||
           result.reviewId === null ||
           result.localVerdict !== result.status ||
-          result.coverage === null ||
           result.evidence.length === 0))
     )
       throw new Error();

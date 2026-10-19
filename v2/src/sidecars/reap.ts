@@ -12,6 +12,7 @@ import {
   loadInstanceConfigReadOnly,
 } from "../config.js";
 import { findListenerPids } from "../port-probe.js";
+import type { RestoreOperationContext } from "../session-lifecycle.js";
 import {
   isTerminalSessionStatus,
   type SessionRecord,
@@ -426,13 +427,17 @@ export interface SidecarPaneFallback {
 export async function signalSidecarPane(
   sessionName: string,
   fallback?: SidecarPaneFallback,
+  operation?: RestoreOperationContext,
 ): Promise<PendingReap> {
-  const panePid = await getTmuxPanePid(sessionName, { fresh: true });
+  operation?.assertActive();
+  const paneProbe = getTmuxPanePid(sessionName, { fresh: true });
+  const panePid = await (operation ? operation.wait(paneProbe) : paneProbe);
   if (panePid === null) {
     const fallbackOutcome = fallback
-      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath)
+      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath, operation)
       : null;
-    await killTmuxSession(sessionName);
+    operation?.assertActive();
+    await (operation ? killTmuxSession(sessionName, operation) : killTmuxSession(sessionName));
     return {
       sessionName,
       panePid: null,
@@ -442,12 +447,14 @@ export async function signalSidecarPane(
       blindKill: fallbackOutcome === null,
     };
   }
-  const snapshot = await snapshotProcesses();
+  const snapshotProbe = snapshotProcesses();
+  const snapshot = await (operation ? operation.wait(snapshotProbe) : snapshotProbe);
   if (!snapshot.ok || !snapshot.byPid.has(panePid)) {
     const fallbackOutcome = fallback
-      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath)
+      ? await reapRecordedIdentity(fallback.identity, fallback.worktreePath, operation)
       : null;
-    await killTmuxSession(sessionName);
+    operation?.assertActive();
+    await (operation ? killTmuxSession(sessionName, operation) : killTmuxSession(sessionName));
     return {
       sessionName,
       panePid,
@@ -461,8 +468,9 @@ export async function signalSidecarPane(
   const paneIsGroupLeader = paneInfo !== undefined && paneInfo.pgid === panePid;
   const tree = collectTree(panePid, snapshot);
   const ownedGroups = computeOwnedGroups(tree, snapshot, paneIsGroupLeader);
+  operation?.assertActive();
   signalOwnedThenTree(tree, ownedGroups, snapshot, "SIGTERM");
-  await killTmuxSession(sessionName);
+  await (operation ? killTmuxSession(sessionName, operation) : killTmuxSession(sessionName));
   return { sessionName, panePid, tree, ownedGroups, snapshot, blindKill: false };
 }
 
@@ -504,7 +512,9 @@ export const _computeSurvivorCandidatesForTests = computeSurvivorCandidates;
 export async function confirmReaps(
   pendings: readonly PendingReap[],
   graceMs = REAP_GRACE_MS,
+  operation?: RestoreOperationContext,
 ): Promise<ReapOutcome[]> {
+  operation?.assertActive();
   const anyWork = pendings.some((pending) => pending.tree.length > 0);
   if (!anyWork) {
     return pendings.map((pending) => ({
@@ -514,10 +524,13 @@ export async function confirmReaps(
       blindKill: pending.blindKill,
     }));
   }
-  await sleep(graceMs);
-  const snapshot2 = await snapshotProcesses();
+  const grace = sleep(graceMs);
+  await (operation ? operation.wait(grace) : grace);
+  const snapshotProbe = snapshotProcesses();
+  const snapshot2 = await (operation ? operation.wait(snapshotProbe) : snapshotProbe);
   const outcomes: ReapOutcome[] = [];
   for (const pending of pendings) {
+    operation?.assertActive();
     if (pending.tree.length === 0) {
       outcomes.push({
         sessionName: pending.sessionName,
@@ -554,7 +567,8 @@ export async function confirmReaps(
       // whatever was originally tracked.
       probeCandidates = [...pending.tree];
     }
-    const survivors = await confirmGone(probeCandidates);
+    const confirmation = confirmGone(probeCandidates);
+    const survivors = await (operation ? operation.wait(confirmation) : confirmation);
     outcomes.push({
       sessionName: pending.sessionName,
       panePid: pending.panePid,
@@ -569,9 +583,10 @@ export async function confirmReaps(
 export async function reapSidecarPane(
   sessionName: string,
   fallback?: SidecarPaneFallback,
+  operation?: RestoreOperationContext,
 ): Promise<ReapOutcome> {
-  const pending = await signalSidecarPane(sessionName, fallback);
-  const [outcome] = await confirmReaps([pending]);
+  const pending = await signalSidecarPane(sessionName, fallback, operation);
+  const [outcome] = await confirmReaps([pending], REAP_GRACE_MS, operation);
   return (
     outcome ?? {
       sessionName,
@@ -656,8 +671,11 @@ export const _isPathInsideForTests = isPathInside;
 async function reapLeaderlessGroup(
   identity: SidecarProcessIdentity,
   worktreePath: string,
+  operation?: RestoreOperationContext,
 ): Promise<ReapOutcome | null> {
-  const snapshot = await snapshotProcesses();
+  operation?.assertActive();
+  const snapshotProbe = snapshotProcesses();
+  const snapshot = await (operation ? operation.wait(snapshotProbe) : snapshotProbe);
   if (!snapshot.ok) {
     return null;
   }
@@ -668,7 +686,8 @@ async function reapLeaderlessGroup(
   const proven: number[] = [];
   let allContained = true;
   for (const member of members) {
-    const cwd = await readProcessCwd(member.pid);
+    const cwdProbe = readProcessCwd(member.pid);
+    const cwd = await (operation ? operation.wait(cwdProbe) : cwdProbe);
     if (cwd && isPathInside(cwd, worktreePath)) {
       proven.push(member.pid);
     } else {
@@ -679,6 +698,7 @@ async function reapLeaderlessGroup(
     return null;
   }
   const ownedGroups = allContained ? [identity.pgid] : [];
+  operation?.assertActive();
   signalOwnedThenTree(proven, ownedGroups, snapshot, "SIGTERM");
   const pending: PendingReap = {
     sessionName: `sidecar-identity:${identity.pid}`,
@@ -688,7 +708,7 @@ async function reapLeaderlessGroup(
     snapshot,
     blindKill: false,
   };
-  const [outcome] = await confirmReaps([pending]);
+  const [outcome] = await confirmReaps([pending], REAP_GRACE_MS, operation);
   return outcome ?? null;
 }
 
@@ -703,19 +723,23 @@ async function reapLeaderlessGroup(
 export async function reapRecordedIdentity(
   identity: SidecarProcessIdentity,
   worktreePath: string,
+  operation?: RestoreOperationContext,
 ): Promise<ReapOutcome | null> {
-  const probe = await readProcStarttime(identity.pid);
+  operation?.assertActive();
+  const starttimeProbe = readProcStarttime(identity.pid);
+  const probe = await (operation ? operation.wait(starttimeProbe) : starttimeProbe);
   if (probe.kind === "unknown") {
     return null;
   }
   if (probe.kind === "gone") {
-    return reapLeaderlessGroup(identity, worktreePath);
+    return reapLeaderlessGroup(identity, worktreePath, operation);
   }
   if (probe.starttime !== identity.starttime) {
     // pid reused by an unrelated process — never signal it.
     return null;
   }
-  const snapshot = await snapshotProcesses();
+  const snapshotProbe = snapshotProcesses();
+  const snapshot = await (operation ? operation.wait(snapshotProbe) : snapshotProbe);
   if (!snapshot.ok) {
     return null;
   }
@@ -723,6 +747,7 @@ export async function reapRecordedIdentity(
   const groupMembers = (snapshot.byPgid.get(identity.pgid) ?? []).map((info) => info.pid);
   const tree = [...new Set([...treeFromPid, ...groupMembers])];
   const ownedGroups = computeOwnedGroups(tree, snapshot, true);
+  operation?.assertActive();
   signalOwnedThenTree(tree, ownedGroups, snapshot, "SIGTERM");
   const pending: PendingReap = {
     sessionName: `sidecar-identity:${identity.pid}`,
@@ -732,7 +757,7 @@ export async function reapRecordedIdentity(
     snapshot,
     blindKill: false,
   };
-  const [outcome] = await confirmReaps([pending]);
+  const [outcome] = await confirmReaps([pending], REAP_GRACE_MS, operation);
   return outcome ?? null;
 }
 

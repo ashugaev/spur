@@ -1973,28 +1973,34 @@ test.each(["same-voter", "missing-ci", "failed-ci", "skipped-ci", "pending-ci"])
   },
 );
 
-test.each(["PENDING", "BLOCKED", "stale-head", "stale-base", "wrong-session", "missing"])(
-  "caller receipt %s cannot request affirmation",
-  async (mode) => {
-    const f = await setup();
-    const path = join(f.receiptDir, "code.json");
-    if (mode === "missing") await rm(path);
-    else
-      await writeFile(
-        path,
-        JSON.stringify({
-          ...f.receipt,
-          ...(mode === "PENDING" || mode === "BLOCKED" ? { status: mode } : {}),
-          ...(mode === "stale-head" ? { H: "f".repeat(40) } : {}),
-          ...(mode === "stale-base" ? { B: "f".repeat(40) } : {}),
-          ...(mode === "wrong-session" ? { session: "other-session" } : {}),
-        }),
-      );
-    await f.start();
-    await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
-    expect((await f.readState()).reason).not.toBe("lane-affirmation-pending");
-  },
-);
+test.each([
+  "PENDING",
+  "BLOCKED",
+  "stale-head",
+  "stale-base",
+  "wrong-session",
+  "missing",
+  "missing-coverage",
+])("caller receipt %s cannot request affirmation", async (mode) => {
+  const f = await setup();
+  const path = join(f.receiptDir, "code.json");
+  if (mode === "missing") await rm(path);
+  else
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...f.receipt,
+        ...(mode === "PENDING" || mode === "BLOCKED" ? { status: mode } : {}),
+        ...(mode === "stale-head" ? { H: "f".repeat(40) } : {}),
+        ...(mode === "stale-base" ? { B: "f".repeat(40) } : {}),
+        ...(mode === "wrong-session" ? { session: "other-session" } : {}),
+        ...(mode === "missing-coverage" ? { coverage: null } : {}),
+      }),
+    );
+  await f.start();
+  await vi.waitFor(() => expect(f.send).toHaveBeenCalledTimes(1));
+  expect((await f.readState()).reason).not.toBe("lane-affirmation-pending");
+});
 
 test("launch rotation invalidates prior affirmation and no caller header substitutes", async () => {
   const f = await setup(),

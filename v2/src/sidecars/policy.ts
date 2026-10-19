@@ -11,8 +11,10 @@
 //   3  !paneAlive && !hasRecordedIdentity                 -> keep  no_pane_no_identity
 //   4  connections === "established"                      -> keep  connections_established
 //   5  connections === "unknown"                           -> keep  probe_unknown
-//   6  workspaceRetainedError                             -> keep  retained_error
-//      !ownerExists                                       -> reap  owner_missing
+//   6  workspaceRetainedError && workspaceRuntime !== "dead" -> keep retained_error
+//      (a retained error pins the sidecar only while some member runtime is
+//      live or unknown; absent workspaceRuntime reads as unknown)
+//      !ownerExists                                      -> reap  owner_missing
 //   7  !worktreeExists                                    -> reap  worktree_missing
 //   8  !workspaceRunning                                  -> reap  workspace_not_running
 //   9  lastActivityAtMs === null                          -> keep  activity_unknown
@@ -24,6 +26,9 @@
 // Orthogonal to the table above: any candidate NOT in `reap` whose age is
 // past `maxAgeWarnMinutes` is also emitted in `warn` (reason age_cap).
 // `warn` never kills — it is visibility only.
+
+/** Confirmed liveness of every workspace member runtime; "dead" needs all members confirmed not live. */
+export type WorkspaceRuntime = "live" | "dead" | "unknown";
 
 export interface SidecarReapCandidate {
   /** sidecarOwnerIdForName result: the record that owns this pane/identity. */
@@ -39,6 +44,8 @@ export interface SidecarReapCandidate {
   workspaceRunning: boolean;
   /** Any workspace member has retained error evidence or unreadable state. */
   workspaceRetainedError?: boolean;
+  /** Resolved only when workspaceRetainedError reaches step 6; absent = unknown. */
+  workspaceRuntime?: WorkspaceRuntime;
   hasRecordedIdentity: boolean;
   /** Max lastActivityAt over workspace members; null when unknown. */
   lastActivityAtMs: number | null;
@@ -148,7 +155,7 @@ function decide(
   if (candidate.connections === "unknown") {
     return { verdict: "keep", reason: "probe_unknown" };
   }
-  if (candidate.workspaceRetainedError) {
+  if (candidate.workspaceRetainedError && candidate.workspaceRuntime !== "dead") {
     return { verdict: "keep", reason: "retained_error" };
   }
   if (!candidate.ownerExists) {

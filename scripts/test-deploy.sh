@@ -100,3 +100,32 @@ if [[ -n "${SPUR_TEST_DEPLOY_RECEIPT:-}" ]]; then
   node -e 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ installedVersion: process.argv[2], webStatus: 200 }) + "\n", { mode: 0o600 });' "$SPUR_TEST_DEPLOY_RECEIPT" "$INSTALLED_VERSION"
 fi
 printf '%s\n' "$INSTALLED_VERSION"
+
+# Export only after package verification, installation and the web smoke pass.
+if [[ -n "${SPUR_TEST_DEPLOY_EXPORT_DIR:-}" ]]; then
+  mkdir -p "$SPUR_TEST_DEPLOY_EXPORT_DIR"
+  node --input-type=module - "$REPO_ROOT" "$TGZ" "$SPUR_TEST_DEPLOY_EXPORT_DIR" <<'NODE'
+import { createHash } from 'node:crypto';
+import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [root, tarball, output] = process.argv.slice(2);
+const { computeBuildId } = await import(pathToFileURL(`${root}/v2/dist/build-identity.js`).href);
+const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' }).trim();
+if (dirty) throw new Error('candidate export requires a clean committed worktree');
+const bytes = readFileSync(tarball);
+let packageJson;
+try { packageJson = JSON.parse(execFileSync('tar', ['-xOf', tarball, 'package/package.json'], { encoding: 'utf8' })); }
+catch { throw new Error('invalid packed package metadata'); }
+if (packageJson?.name !== '@shugaev/spur' || typeof packageJson.version !== 'string') throw new Error('unexpected packed package');
+const manifest = {
+  sourceSha, runtimeBuildId: computeBuildId(), packageVersion: packageJson.version, tarball: basename(tarball),
+  sha256: createHash('sha256').update(bytes).digest('hex'),
+  integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+};
+copyFileSync(tarball, join(output, basename(tarball)));
+writeFileSync(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+NODE
+fi

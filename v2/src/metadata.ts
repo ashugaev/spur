@@ -18,6 +18,7 @@ import {
   CI_FAILED_MAX_ATTEMPTS,
   type AvailableBacklogItem,
   type PersistedPendingBatch,
+  type PersistedSpawnWork,
   type ReviewProviderId,
   type ReviewSignal,
   type ReviewSnapshot,
@@ -95,6 +96,19 @@ function availableBacklogFilePath(dataDir: string, projectId: string, backlogId:
 
 function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
+function ignoredGitHubFeedbackDir(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-ignored-feedback", projectId, sourceId);
+}
+
+function ignoredGitHubFeedbackFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(ignoredGitHubFeedbackDir(dataDir, projectId, sourceId), `${sessionId}.json`);
 }
 
 function reviewPaginationFilePath(dataDir: string, projectId: string, sourceId: string): string {
@@ -316,16 +330,18 @@ function readSessionFile(path: string): SessionRecord {
   return normalizedSession;
 }
 
-// listSessions() re-reads and re-parses every session file every call — on a
-// fleet-sized data dir (thousands of files, single digit MB of JSON) that is
-// re-parsed on every 2s dashboard-cache tick even when nothing changed. Since
+// Uncached, listSessions() and readSession() re-parse session files on every
+// call — on a fleet-sized data dir (thousands of files, single digit MB of
+// JSON) that is every 2s dashboard-cache tick, and readSession runs inside
+// per-session loops, so O(N²) parses per tick. Since
 // writeJsonFile always renames a freshly created inode (never edits in
 // place), (ino, mtimeMs, size) is an exact "this file's bytes are what we
 // last read" fingerprint — cheaper and safer than an mtime-only key, which
 // can't distinguish two writes landing in the same millisecond. The cache is
 // internal to this module: no export changes, so callers and their tests are
 // unaffected except that unchanged records are now the SAME object across
-// calls (see the "no in-place mutation of a listed record" contract).
+// calls and between listSessions() and readSession(): never mutate a
+// returned record in place.
 interface FileFingerprint {
   ino: number;
   mtimeMs: number;
@@ -633,6 +649,7 @@ function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleR
         result.set(raw.externalId, {
           ...base,
           state,
+          ...(typeof raw.spawnWorkId === "string" ? { spawnWorkId: raw.spawnWorkId } : {}),
         });
         continue;
       }
@@ -1061,8 +1078,26 @@ function normalizePreflightTokenUsage(value: unknown): SessionRecord["preflightT
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   const normalizedSession = normalizeSessionPrBinding(session);
+  // The request is an equality fingerprint, never replayed as executable input.
+  const birthRequest = normalizedSession.triggerBirthRequest;
+  const triggerBirth =
+    typeof normalizedSession.triggerBirthKey === "string" &&
+    normalizedSession.triggerBirthKey.trim().length > 0 &&
+    isRecord(birthRequest) &&
+    birthRequest.project === normalizedSession.project &&
+    (birthRequest.prompt === undefined || typeof birthRequest.prompt === "string")
+      ? { triggerBirthKey: normalizedSession.triggerBirthKey, triggerBirthRequest: birthRequest }
+      : {};
   const stateSubscriptions = normalizeStateSubscriptions(normalizedSession.stateSubscriptions);
   const sidecarProcs = normalizeSidecarProcs(normalizedSession.sidecarProcs);
+  const sidecarLaunches: Record<string, string> = {};
+  if (isRecord(normalizedSession.sidecarLaunches)) {
+    for (const [name, launchId] of Object.entries(normalizedSession.sidecarLaunches)) {
+      if (name.length > 0 && typeof launchId === "string" && launchId.length > 0) {
+        sidecarLaunches[name] = launchId;
+      }
+    }
+  }
   const tokenUsage = normalizeTokenUsage(normalizedSession.tokenUsage);
   const preflightTokenUsage = normalizePreflightTokenUsage(normalizedSession.preflightTokenUsage);
   // Records written before the rename carry the hold as launchUnconfirmedAt;
@@ -1082,6 +1117,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: normalizedSession.id,
     project: normalizedSession.project,
+    ...triggerBirth,
     // Legacy on-disk records only have `deskId` (or neither field); this is
     // where a pre-workspaceId record gets migrated in memory on every read.
     // Delegates to workspaceIdOf so the `deskId ?? id` fallback chain itself
@@ -1150,6 +1186,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
     ...(sidecarProcs ? { sidecarProcs } : {}),
+    ...(Object.keys(sidecarLaunches).length > 0 ? { sidecarLaunches } : {}),
     ...(normalizedSession.staleSidecars ? { staleSidecars: normalizedSession.staleSidecars } : {}),
     ...(normalizedSession.pipeline
       ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
@@ -1247,20 +1284,85 @@ function pruneStaleSessionFileCacheEntries(rootDir: string, visited: Set<string>
   }
 }
 
+interface CachedDirListing extends FileFingerprint {
+  names: readonly string[];
+}
+
+// Keyed on the absolute subdirectory path under dataDir/sessions. That dir
+// holds a handful of project dirs next to one log-shard dir per session
+// (sessions/<id>/), hundreds on a live fleet, none holding *.json. Caches the
+// *.json FILE NAMES only: content still goes through readSessionFileCached's
+// per-file fingerprint.
+const sessionDirListingCache = new Map<string, CachedDirListing>();
+
+// A listing is stored only when the directory mtime was older than this at
+// the moment before its readdir: a mutation landing after the readdir but
+// inside the same timestamp tick as the pre-readdir stat is never cached.
+const DIR_LISTING_MIN_AGE_MS = 1_000;
+
+// Same path-boundary rule as pruneStaleSessionFileCacheEntries, over the
+// directory entries of this listing rather than its files.
+function pruneStaleSessionDirListingEntries(rootDir: string, visitedDirs: Set<string>): void {
+  const rootPrefix = rootDir + sep;
+  for (const cachedDir of sessionDirListingCache.keys()) {
+    if (cachedDir.startsWith(rootPrefix) && !visitedDirs.has(cachedDir)) {
+      sessionDirListingCache.delete(cachedDir);
+    }
+  }
+}
+
+// The *.json entries of one subdirectory of dataDir/sessions, served from
+// cache while the directory's own fingerprint is unchanged. Sound because the
+// directory mtime advances on every entry create, rename and unlink; ino also
+// changes on rm -r + mkdir unless the inode is reused, and then the fresh
+// mtime catches it.
+function listSessionDirJsonNames(dir: string): readonly string[] {
+  const fingerprint = statFingerprint(dir);
+  if (!fingerprint) {
+    // Vanished between the root readdir and this stat: surface the same
+    // readdir error as an uncached listing.
+    sessionDirListingCache.delete(dir);
+    return readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  }
+
+  const cached = sessionDirListingCache.get(dir);
+  if (cached && sameFingerprint(cached, fingerprint)) {
+    return cached.names;
+  }
+
+  // Eligibility is decided BEFORE the readdir: a snapshot young when taken
+  // stays uncached however long this reader stalls before storing it.
+  const cacheable = Date.now() - fingerprint.mtimeMs > DIR_LISTING_MIN_AGE_MS;
+  const names = readdirSync(dir).filter((fileName) => fileName.endsWith(".json"));
+  // Keyed on the PRE-readdir fingerprint: a mutation between the stat and the
+  // readdir is stored under the older mtime, so the next stat misses once.
+  if (cacheable) {
+    sessionDirListingCache.set(dir, {
+      ino: fingerprint.ino,
+      mtimeMs: fingerprint.mtimeMs,
+      size: fingerprint.size,
+      names,
+    });
+  }
+  return names;
+}
+
 export function listSessions(dataDir: string): SessionRecord[] {
   const rootDir = join(dataDir, "sessions");
   if (!existsSync(rootDir)) {
     pruneStaleSessionFileCacheEntries(rootDir, new Set());
+    pruneStaleSessionDirListingEntries(rootDir, new Set());
     return [];
   }
 
   const sessions: SessionRecord[] = [];
   const visited = new Set<string>();
+  const visitedDirs = new Set<string>();
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const projectDir = join(rootDir, entry.name);
-    for (const fileName of readdirSync(projectDir)) {
-      if (!fileName.endsWith(".json")) continue;
+    visitedDirs.add(projectDir);
+    for (const fileName of listSessionDirJsonNames(projectDir)) {
       const filePath = join(projectDir, fileName);
       visited.add(filePath);
       const session = tryReadSessionFile(filePath);
@@ -1271,6 +1373,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
   }
 
   pruneStaleSessionFileCacheEntries(rootDir, visited);
+  pruneStaleSessionDirListingEntries(rootDir, visitedDirs);
 
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return sessions;
@@ -1278,7 +1381,7 @@ export function listSessions(dataDir: string): SessionRecord[] {
 
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
-  return path ? readSessionFile(path) : null;
+  return path ? readSessionFileCached(path) : null;
 }
 
 // Group-atomic archival for session GC: moves every member's record (and its
@@ -1570,6 +1673,71 @@ function readIdRegistry(path: string): Set<string> {
   } catch {
     return new Set();
   }
+}
+
+export function readIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+): Set<string> {
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  if (!existsSync(path)) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`, { cause: error });
+  }
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.prNumber !== "number" ||
+    !Number.isSafeInteger(parsed.prNumber) ||
+    parsed.prNumber <= 0 ||
+    !Array.isArray(parsed.ids) ||
+    !parsed.ids.every((id: unknown) => typeof id === "string")
+  ) {
+    throw new Error(`Invalid ignored GitHub feedback at ${path}`);
+  }
+  return parsed.prNumber === prNumber ? new Set<string>(parsed.ids) : new Set();
+}
+
+export function recordIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  prNumber: number,
+  ids: readonly string[],
+): void {
+  if (ids.length === 0) return;
+  const known = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, sessionId, prNumber);
+  for (const id of ids) known.add(id);
+  const path = ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId);
+  writeJsonFile(path, { prNumber, ids: [...known].sort() });
+}
+
+export function listIgnoredGitHubFeedbackSessions(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): string[] {
+  const dir = ignoredGitHubFeedbackDir(dataDir, projectId, sourceId);
+  return existsSync(dir)
+    ? readdirSync(dir)
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => name.slice(0, -5))
+    : [];
+}
+
+export function deleteIgnoredGitHubFeedback(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(ignoredGitHubFeedbackFilePath(dataDir, projectId, sourceId, sessionId), { force: true });
 }
 
 export function readAvailableBacklogItems(
@@ -1942,6 +2110,114 @@ export function deleteWorkItemLifecycle(
 export function readPendingSendBatches(dataDir: string): Map<string, PersistedPendingBatch> {
   const path = pendingSendBatchesFilePath(dataDir);
   return existsSync(path) ? readPendingSendBatchesFile(path) : new Map();
+}
+
+export function readPendingSpawnWork(dataDir: string): Map<string, PersistedSpawnWork> {
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(join(dataDir, "pending-spawn-work.json"), "utf8"),
+    );
+    if (!Array.isArray(value)) return new Map();
+    const result = new Map<string, PersistedSpawnWork>();
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as Record<string, unknown>;
+      if (
+        ![
+          "workId",
+          "projectId",
+          "triggerId",
+          "sourceId",
+          "eventName",
+          "occurrenceId",
+          "routeFingerprint",
+          "createdAt",
+        ].every((key) => typeof record[key] === "string")
+      )
+        continue;
+      if (
+        ![
+          record.revision,
+          record.nextBlockIndex,
+          record.admissionDenials,
+          record.notBeforeAt,
+        ].every(
+          (number) => typeof number === "number" && Number.isSafeInteger(number) && number >= 0,
+        )
+      )
+        continue;
+      if (
+        (record.anchorSessionId !== undefined && typeof record.anchorSessionId !== "string") ||
+        (record.lastSessionId !== undefined && typeof record.lastSessionId !== "string")
+      )
+        continue;
+      if (
+        !Array.isArray(record.failures) ||
+        !record.failures.every((error) => typeof error === "string") ||
+        !Array.isArray(record.blocks) ||
+        record.blocks.length === 0
+      )
+        continue;
+      if (
+        !record.blocks.every((block: unknown) => {
+          if (!block || typeof block !== "object") return false;
+          const outcome = block as Record<string, unknown>;
+          return (
+            typeof outcome.birthKey === "string" &&
+            (outcome.state === "pending" ||
+              (outcome.state === "succeeded" && typeof outcome.sessionId === "string") ||
+              (outcome.state === "failed" &&
+                typeof outcome.error === "string" &&
+                (outcome.sessionId === undefined || typeof outcome.sessionId === "string")))
+          );
+        })
+      )
+        continue;
+      const work = item as PersistedSpawnWork;
+      if (
+        work.nextBlockIndex > work.blocks.length ||
+        work.blocks.some(
+          (block, index) =>
+            block.birthKey !== `${work.workId}:${index}` ||
+            index < work.nextBlockIndex === (block.state === "pending"),
+        )
+      )
+        continue;
+      const successful = work.blocks.filter((block) => block.state === "succeeded");
+      if (
+        work.lastSessionId !== successful.at(-1)?.sessionId ||
+        (work.anchorSessionId !== undefined &&
+          !successful.some((block) => block.sessionId === work.anchorSessionId))
+      )
+        continue;
+      result.set(work.workId, work);
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+export function writePendingSpawnWork(
+  dataDir: string,
+  work: PersistedSpawnWork,
+  expectedRevision?: number,
+): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  const existing = records.get(work.workId);
+  if (expectedRevision !== undefined && existing?.revision !== expectedRevision) return false;
+  if (expectedRevision === undefined && existing) return false;
+  records.set(work.workId, work);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
+}
+
+export function deletePendingSpawnWork(dataDir: string, workId: string, revision: number): boolean {
+  const records = readPendingSpawnWork(dataDir);
+  if (records.get(workId)?.revision !== revision) return false;
+  records.delete(workId);
+  writePrivateJsonFile(join(dataDir, "pending-spawn-work.json"), [...records.values()]);
+  return true;
 }
 
 /**
