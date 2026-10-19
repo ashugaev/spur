@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createTempDir } from "../helpers/common.js";
@@ -69,6 +69,22 @@ it("fails closed on a crashed admission lock", async () => {
   const control = new McpDaemonControl(data, join(data, "config.yaml"));
   mkdirSync(join(data, "mcp-operator-actions", "admission.lock"));
   expect(() => control.accept(randomUUID(), identity)).toThrow();
+  expect(restartDaemonIfRunning).not.toHaveBeenCalled();
+});
+
+it("preserves invalid receipt errors as the cause without dispatching a restart", async () => {
+  const data = await createTempDir("mcp-invalid-receipt-");
+  const control = new McpDaemonControl(data, join(data, "config.yaml"));
+  const id = randomUUID();
+  writeFileSync(join(data, "mcp-operator-actions", `${id}.json`), "invalid json");
+  for (const resolve of [() => control.get(id), () => control.accept(id, identity)]) {
+    expect(resolve).toThrowError(
+      expect.objectContaining({
+        message: "Operator receipt unavailable or invalid; do not repeat restart",
+        cause: expect.any(SyntaxError),
+      }),
+    );
+  }
   expect(restartDaemonIfRunning).not.toHaveBeenCalled();
 });
 

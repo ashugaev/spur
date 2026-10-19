@@ -59,7 +59,9 @@ export class McpDaemonControl {
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
         return undefined;
-      throw new Error("Operator receipt unavailable or invalid; do not repeat restart");
+      throw new Error("Operator receipt unavailable or invalid; do not repeat restart", {
+        cause: error,
+      });
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
