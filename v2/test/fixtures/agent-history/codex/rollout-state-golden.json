@@ -1,0 +1,188 @@
+{
+  "child-prefix-replay.jsonl": {
+    "rollout": null,
+    "rateLimit": null,
+    "tokenUsage": {
+      "provider": "codex",
+      "generationId": "codex:codex-child-sanitized",
+      "inputTokens": 24,
+      "outputTokens": 6,
+      "totalTokens": 30,
+      "cacheReadInputTokens": 8,
+      "reasoningOutputTokens": 2,
+      "observedAtMs": 1790247605000
+    },
+    "tokenUsages": [
+      {
+        "provider": "codex",
+        "generationId": "codex:codex-child-sanitized",
+        "inputTokens": 24,
+        "outputTokens": 6,
+        "totalTokens": 30,
+        "cacheReadInputTokens": 8,
+        "reasoningOutputTokens": 2,
+        "observedAtMs": 1790247605000
+      }
+    ]
+  },
+  "idle-fixture-session-trailing-tool-output-tail.jsonl": {
+    "rollout": {
+      "state": "waiting",
+      "timestamp": "2026-05-10T09:27:08.500Z",
+      "timestampMs": 1778405228500,
+      "reason": "task_complete",
+      "turnId": "019e112e-6670-7620-9d09-061a78dc96cf",
+      "filePath": "idle-fixture-session-trailing-tool-output-tail.jsonl"
+    },
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    },
+    "model": "gpt-5.5"
+  },
+  "interrupted-spur-00b0-tail.jsonl": {
+    "rollout": {
+      "state": "waiting",
+      "timestamp": "2026-04-26T16:14:44.371Z",
+      "timestampMs": 1777220084371,
+      "reason": "turn_aborted",
+      "turnId": "019dca92-5592-7043-bdca-211e6b7c11e2",
+      "filePath": "interrupted-spur-00b0-tail.jsonl"
+    },
+    "rateLimit": null,
+    "model": "gpt-5.5"
+  },
+  "no-hook-spur1614.jsonl": {
+    "rollout": null,
+    "rateLimit": null
+  },
+  "spur-67c0-history-tail.jsonl": {
+    "rollout": null,
+    "rateLimit": null
+  },
+  "stale-working-spur-1c0e-tail.jsonl": {
+    "rollout": {
+      "state": "waiting",
+      "timestamp": "2026-04-14T19:27:57.488Z",
+      "timestampMs": 1776194877488,
+      "reason": "task_complete",
+      "turnId": "019d8c38-fab8-7803-adfe-a984a5518abc",
+      "filePath": "stale-working-spur-1c0e-tail.jsonl"
+    },
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    }
+  },
+  "token-components.jsonl": {
+    "rollout": null,
+    "rateLimit": null,
+    "tokenUsage": {
+      "provider": "codex",
+      "generationId": "codex:thread-sanitized",
+      "inputTokens": 100,
+      "outputTokens": 50,
+      "totalTokens": 150,
+      "cacheReadInputTokens": 40,
+      "cacheWriteInputTokens": 10,
+      "reasoningOutputTokens": 20,
+      "observedAtMs": 1790244001000
+    },
+    "tokenUsages": [
+      {
+        "provider": "codex",
+        "generationId": "codex:thread-sanitized",
+        "inputTokens": 100,
+        "outputTokens": 50,
+        "totalTokens": 150,
+        "cacheReadInputTokens": 40,
+        "cacheWriteInputTokens": 10,
+        "reasoningOutputTokens": 20,
+        "observedAtMs": 1790244001000
+      }
+    ]
+  },
+  "token-reset-aliases.jsonl": {
+    "rollout": null,
+    "rateLimit": null,
+    "tokenUsage": {
+      "provider": "codex",
+      "generationId": "codex:codex-reset-sanitized",
+      "inputTokens": 148,
+      "outputTokens": 32,
+      "totalTokens": 180,
+      "cacheReadInputTokens": 62,
+      "cacheWriteInputTokens": 18,
+      "reasoningOutputTokens": 13,
+      "observedAtMs": 1790244004000
+    },
+    "tokenUsages": [
+      {
+        "provider": "codex",
+        "generationId": "codex:codex-reset-sanitized",
+        "inputTokens": 148,
+        "outputTokens": 32,
+        "totalTokens": 180,
+        "cacheReadInputTokens": 62,
+        "cacheWriteInputTokens": 18,
+        "reasoningOutputTokens": 13,
+        "observedAtMs": 1790244004000
+      }
+    ]
+  },
+  "waiting-while-working-fixture-session-tail.jsonl": {
+    "rollout": {
+      "state": "waiting",
+      "timestamp": "2026-05-10T09:27:08.196Z",
+      "timestampMs": 1778405228196,
+      "reason": "task_complete",
+      "turnId": "019e1135-e3f6-7380-954c-d2eccfd25b13",
+      "filePath": "waiting-while-working-fixture-session-tail.jsonl"
+    },
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    },
+    "model": "gpt-5.5"
+  },
+  "working-spur-436f.jsonl": {
+    "rollout": {
+      "state": "working",
+      "timestamp": "2026-04-12T08:17:36.827Z",
+      "timestampMs": 1775981856827,
+      "reason": "function_call",
+      "callId": "call_U6AitSv161JlY45MvGNq0gZd",
+      "filePath": "working-spur-436f.jsonl"
+    },
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    }
+  },
+  "working-spur-67c0-rollout-tail.jsonl": {
+    "rollout": {
+      "state": "working",
+      "timestamp": "2026-05-10T09:34:55.113Z",
+      "timestampMs": 1778405695113,
+      "reason": "function_call",
+      "callId": "call_AxYx29SoMiSOMp8I6vveuQvQ",
+      "filePath": "working-spur-67c0-rollout-tail.jsonl"
+    },
+    "rateLimit": {
+      "limited": false,
+      "reason": ""
+    },
+    "model": "gpt-5.5"
+  },
+  "working-unmatched-tool-call-tail.jsonl": {
+    "rollout": {
+      "state": "working",
+      "timestamp": "2026-05-10T10:01:02.000Z",
+      "timestampMs": 1778407262000,
+      "reason": "function_call",
+      "callId": "call_unmatched_1",
+      "filePath": "working-unmatched-tool-call-tail.jsonl"
+    },
+    "rateLimit": null
+  }
+}

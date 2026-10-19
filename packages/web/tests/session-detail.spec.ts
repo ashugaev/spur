@@ -423,7 +423,69 @@ test.describe("S1: Session detail header", () => {
     await expect(page.getByText("Session not found")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByRole("status", { name: "Loading session" })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Unable to load this session." })).toBeVisible();
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
   });
+
+  for (const theme of ["dark", "light"]) {
+    for (const viewport of [
+      { width: 390, height: 844 },
+      { width: 1280, height: 800 },
+    ]) {
+      for (const detail of ["Daemon is starting", `Session not found\n${"detail".repeat(80)}`]) {
+        const state = detail === "Daemon is starting" ? "startup error" : "missing session";
+        test(`${state} card fits and recovers: ${theme} ${viewport.width}`, async ({
+          page,
+        }, testInfo) => {
+          await page.setViewportSize(viewport);
+          await page.addInitScript((selectedTheme) => {
+            window.localStorage.setItem("spur:theme", selectedTheme);
+          }, theme);
+          const session = makeWorkingSession({ id: "detail-error-card" });
+          let recovered = false;
+          await page.route(`**/api/sessions/${session.id}`, (route) =>
+            route.fulfill({
+              status: recovered ? 200 : 503,
+              contentType: "application/json",
+              body: JSON.stringify(recovered ? session : { error: detail }),
+            }),
+          );
+          await mockSessionConversation(page, session.id, "working");
+          await page.goto(`/sessions/${session.id}`);
+          if (theme === "light") {
+            await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+          } else {
+            await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+          }
+          const card = page.getByRole("region", { name: "Unable to load this session." });
+          await expect(card).toBeVisible();
+          expect(await card.locator("p").textContent()).toBe(detail);
+          await expect(page.getByRole("alertdialog")).toHaveCount(0);
+          await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+          const box = await card.boundingBox();
+          expect(box).not.toBeNull();
+          if (!box) throw new Error("Session error card missing bounds");
+          expect(box.x).toBeGreaterThanOrEqual(0);
+          expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+          expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth),
+          ).toBeLessThanOrEqual(viewport.width);
+          const retry = card.getByRole("button", { name: "Retry" });
+          await expect(retry).toBeInViewport();
+          await page.getByRole("link", { name: /back/i }).focus();
+          await page.keyboard.press("Tab");
+          await expect(retry).toBeFocused();
+          await page.screenshot({ path: testInfo.outputPath("session-error-card.png") });
+          recovered = true;
+          await page.keyboard.press("Enter");
+          await expect(card).toHaveCount(0);
+          await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+        });
+      }
+    }
+  }
 
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
@@ -1204,6 +1266,30 @@ test.describe("S2: Actions bar", () => {
     expect(dialogShown).toBe(true);
   });
 
+  test("restores an exited agent from detail while the pane remains alive", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "detail-exited-live-pane",
+      status: "errored",
+      state: "error",
+      runtimeAlive: true,
+      error: "Agent runtime exited unexpectedly.",
+    });
+    await mockSessionDetail(page, session);
+    let calls = 0;
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      calls += 1;
+      const { operationId } = route.request().postDataJSON() as { operationId: string };
+      session.status = "running";
+      session.state = "waiting";
+      session.error = "";
+      session.lifecycle = lifecycleReceipt(operationId, session.id, "restore", "succeeded", 2);
+      await route.fulfill({ json: session });
+    });
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^restore$/i }).click();
+    await expect.poll(() => calls).toBe(1);
+  });
+
   test("restore failure shows a persistent dismissible toast", async ({ page }) => {
     const session = makeStoppedSession({ id: "detail-s2-restore-fail" });
     await mockSessionDetail(page, session);
@@ -1949,6 +2035,134 @@ test.describe("S2: Actions bar", () => {
 
 // S2a: Logs modal
 test.describe("S2a: Logs modal", () => {
+  test("shows a 404 warning with a wrapped message and keyboard controls", async ({
+    page,
+  }, testInfo) => {
+    const session = makeWorkingSession({ id: "detail-s2a-error-404" });
+    const message = `No retained pane for runtime ${"x".repeat(400)}`;
+    await page.setViewportSize({ width: 360, height: 780 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    let releaseLoading!: () => void;
+    const loadingPending = new Promise<void>((resolve) => {
+      releaseLoading = resolve;
+    });
+    await page.route(`**/api/sessions/${session.id}/logs`, async (route) => {
+      await loadingPending;
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: message }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^logs$/i }).click();
+    const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
+    await expect(dialog.getByText("No Spur log entries yet.")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("logs-loading.png") });
+    releaseLoading();
+    const alert = dialog.getByRole("alert");
+    await expect(alert).toContainText("Logs unavailable · HTTP 404");
+    await expect(alert).toContainText(message);
+    await expect(dialog.getByText("No Spur log entries yet.")).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      360,
+    );
+    const widths = await alert.evaluate((element) => ({
+      alert: [element.scrollWidth, element.clientWidth],
+      body: [element.parentElement?.scrollWidth ?? 0, element.parentElement?.clientWidth ?? 0],
+    }));
+    expect(widths.alert[0]).toBeLessThanOrEqual(widths.alert[1]);
+    expect(widths.body[0]).toBeLessThanOrEqual(widths.body[1]);
+    const retry = dialog.getByRole("button", { name: "Retry" });
+    await retry.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(dialog.getByRole("button", { name: "Close logs" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(retry).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath("logs-404-mobile.png") });
+  });
+
+  test("shows a 502 error while Retry is pending, then the empty 200 state", async ({
+    page,
+  }, testInfo) => {
+    const session = makeWorkingSession({ id: "detail-s2a-error-502" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    let releaseRetry!: () => void;
+    const retryPending = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    let request = 0;
+    await page.route(`**/api/sessions/${session.id}/logs`, async (route) => {
+      request += 1;
+      if (request === 1) {
+        await route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Failed to capture retained pane for service api" }),
+        });
+        return;
+      }
+      await retryPending;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^logs$/i }).click();
+    const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
+    await expect(dialog.getByRole("alert")).toContainText("Logs unavailable · HTTP 502");
+    await expect(dialog.getByRole("alert")).toContainText(
+      "Failed to capture retained pane for service api",
+    );
+    await page.screenshot({ path: testInfo.outputPath("logs-502.png") });
+    await dialog.getByRole("button", { name: "Retry" }).click();
+    await expect(dialog.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    await expect(dialog.getByRole("alert")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("logs-retrying.png") });
+    releaseRetry();
+    await expect(dialog.getByText("No Spur log entries yet.")).toBeVisible();
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("logs-empty.png") });
+  });
+
+  test("clears prior rows when reopening Logs returns 404", async ({ page }, testInfo) => {
+    const session = makeWorkingSession({ id: "detail-s2a-reopen-404" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    let request = 0;
+    await page.route(`**/api/sessions/${session.id}/logs`, (route) => {
+      request += 1;
+      void route.fulfill({
+        status: request === 1 ? 200 : 404,
+        contentType: "application/json",
+        body:
+          request === 1
+            ? JSON.stringify([
+                {
+                  timestamp: "2026-10-16T00:00:00.000Z",
+                  event: "service.output",
+                  level: "info",
+                  message: "OLD_LOG_ROW",
+                },
+              ])
+            : JSON.stringify({ error: "No retained pane for runtime api" }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    const open = page.getByRole("button", { name: /^logs$/i });
+    await open.click();
+    const dialog = page.getByRole("dialog", { name: `Logs ${session.id}` });
+    await expect(dialog.getByText("OLD_LOG_ROW")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("logs-rows.png") });
+    await dialog.getByRole("button", { name: "Close logs" }).click();
+    await open.click();
+    await expect(dialog.getByRole("alert")).toContainText("No retained pane for runtime api");
+    await expect(dialog.getByText("OLD_LOG_ROW")).toHaveCount(0);
+  });
+
   test("hides automatic history snapshot download in the default agent view", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s2a-1",
