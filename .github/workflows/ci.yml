@@ -43,6 +43,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+      - name: Telegram call offline boundaries
+        env:
+          VOICE_TEST_VENV: ${{ runner.temp }}/telegram-call-venv
+        run: |
+          python3 -m venv "$VOICE_TEST_VENV"
+          "$VOICE_TEST_VENV/bin/python" -m pip install -r scripts/telegram-call/requirements.txt
+          "$VOICE_TEST_VENV/bin/python" -m unittest discover -s scripts/telegram-call -p 'test_*.py'
       - run: pnpm test:deploy
       - run: bash v2/test/npm-init.test.sh
       - run: bash v2/test/install-and-restart.test.sh
