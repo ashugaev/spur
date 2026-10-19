@@ -76,7 +76,7 @@ The host retains at most 32 handles within a 1 GiB spool budget; expiration/quot
 Connect ChatGPT in three steps:
 
 1. Create a [runtime API key](https://platform.openai.com/settings/organization/api-keys) in the intended Platform organization. Grant the key and its owner Tunnels Read + Use; [organization permissions](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access).
-2. Create a tunnel in [Platform settings](https://platform.openai.com/settings/organization/tunnels), associated with that organization and the target ChatGPT workspace. Configure `tunnel-client` with its complete `tunnel_id` and Spur's loopback `/mcp` endpoint; [client setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#set-up-tunnel-client). Keep the client running.
+2. Have an organization member with Tunnels Read + Manage create a tunnel in [Platform settings](https://platform.openai.com/settings/organization/tunnels), associated with that organization and the target ChatGPT workspace. Configure `tunnel-client` with its complete `tunnel_id` and Spur's loopback `/mcp` endpoint; [client setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#set-up-tunnel-client). Keep the client running.
 3. In ChatGPT Plugins, select Add custom MCP server → Connection: Tunnel, choose the same tunnel, then Create as a plugin; [connection steps](https://developers.openai.com/plugins/deploy/connect-chatgpt#add-the-mcp-server). Install the plugin, select it with `@` in a new chat, and ask it to list Spur projects.
 
 Keep credentials outside Spur config, command arguments, transcripts and chat.
