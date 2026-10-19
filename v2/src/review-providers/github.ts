@@ -1041,6 +1041,11 @@ async function refreshSignals(
   );
 }
 
+/** Renders a source `selfMarker` template for one session; `{session}` is the only placeholder. */
+export function renderSelfMarker(template: string, sessionId: string): string {
+  return template.replaceAll("{session}", sessionId);
+}
+
 function hasUnquotedMarker(body: string, marker: string): boolean {
   let spanStart = 0;
   let lineStart = 0;
@@ -1078,7 +1083,8 @@ function collectSignalsFromNode(
 ): GitHubCollectedSignals {
   const ignored = readIgnoredGitHubFeedback(dataDir, projectId, sourceId, session.id, pr.number);
   const newlyIgnored: string[] = [];
-  const renderedMarker = selfMarker?.replaceAll("{session}", session.id);
+  const renderedMarker =
+    selfMarker !== undefined ? renderSelfMarker(selfMarker, session.id) : undefined;
   const isOwnFeedback = (key: string, body: string, login: string | null | undefined): boolean => {
     if (ignored.has(key)) return true;
     const own =

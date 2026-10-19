@@ -2643,6 +2643,118 @@ projects:
     }
   });
 
+  describe("signPosts", () => {
+    const marker = "[AI-generated, session: {session}]";
+    const otherMarker = "[bot {session}]";
+    const yaml = (value: string) => JSON.stringify(value);
+    const project = (...sources: string[]) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+${sources.join("")}`;
+    const githubSource = (id: string, ...fields: string[]) =>
+      `      ${id}:\n        type: github\n${fields.map((field) => `        ${field}\n`).join("")}`;
+    const shapes: [name: string, template: string, message: string][] = [
+      ["line break", "a\n{session}", "one line"],
+      ["leading >", "> {session}", 'must not start with ">"'],
+      ["leading spaces then >", "  > {session}", 'must not start with ">"'],
+      ["backtick", "`{session}`", "backtick"],
+    ];
+
+    it("loads with a one-line selfMarker", async () => {
+      const config = loadConfig(
+        await writeConfig(
+          project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, "signPosts: true")),
+        ),
+      );
+      expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+        type: "github",
+        selfMarker: marker,
+        signPosts: true,
+      });
+    });
+
+    it("rejects a missing selfMarker", async () => {
+      const path = await writeConfig(project(githubSource("pr-watch", "signPosts: true")));
+      expect(() => loadConfig(path)).toThrow(/signPosts requires/);
+    });
+
+    it("rejects a non-boolean value", async () => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, 'signPosts: "yes"')),
+      );
+      expect(() => loadConfig(path)).toThrow(/signPosts must be a boolean/);
+    });
+
+    it("false stores nothing", async () => {
+      const config = loadConfig(
+        await writeConfig(project(githubSource("pr-watch", "signPosts: false"))),
+      );
+      const parsed = config.projects.backend?.sources["pr-watch"];
+      expect(parsed).toMatchObject({ type: "github" });
+      expect("signPosts" in (parsed ?? {})).toBe(false);
+    });
+
+    it.each(shapes)("rejects selfMarker shape: %s", async (_name, template, message) => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`, "signPosts: true")),
+      );
+      expect(() => loadConfig(path)).toThrow(message);
+    });
+
+    it("leaves unsigned selfMarker shapes valid", async () => {
+      for (const [, template] of shapes) {
+        const config = loadConfig(
+          await writeConfig(project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`))),
+        );
+        expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+          selfMarker: template.trim(),
+        });
+      }
+    });
+
+    it("rejects a different selfMarker", async () => {
+      const cases = [
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`, "signPosts: true"),
+        ),
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`),
+        ),
+      ];
+      for (const content of cases) {
+        const path = await writeConfig(content);
+        expect(() => loadConfig(path)).toThrow(
+          /sources\.second\.selfMarker must match projects\.backend\.sources\.first\.selfMarker because first sets signPosts/,
+        );
+      }
+    });
+
+    it("accepts a shared or absent selfMarker", async () => {
+      const shared = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("second", `selfMarker: ${yaml(marker)}`),
+          ),
+        ),
+      );
+      expect(shared.projects.backend?.sources["second"]).toMatchObject({ selfMarker: marker });
+      const absent = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("third"),
+          ),
+        ),
+      );
+      expect(absent.projects.backend?.sources["third"]).toMatchObject({ type: "github" });
+    });
+  });
+
   it("parses the github emitExisting flag", async () => {
     const configPath = await writeConfig(`
 projects:
