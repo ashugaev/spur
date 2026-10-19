@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
+import { createConcurrencyGate } from "../concurrency-gate.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type { ProviderReasoningEffort, SidecarMcpBinding, TranscriptEntry } from "../types.js";
@@ -171,6 +172,7 @@ export async function assertOpenCodeCompatibility(): Promise<void> {
     ({ stdout } = await execFileAsync(opencodeCommand(), ["--version"], {
       encoding: "utf8",
       timeout: 5_000,
+      killSignal: "SIGKILL",
     }));
   } catch (error) {
     throw new Error(`OpenCode ${MIN_OPENCODE_VERSION}+ is required`, { cause: error });
@@ -524,38 +526,15 @@ export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSampl
 // mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
 // The limit sits at that mean; over it, callers queue rather than fan out.
 export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
-let openCodeExportActive = 0;
-const openCodeExportQueue: Array<() => void> = [];
-
-async function acquireOpenCodeExportSlot(): Promise<void> {
-  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
-    openCodeExportActive += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
-}
-
-function releaseOpenCodeExportSlot(): void {
-  // Hand the slot straight to the next waiter; the count only drops when the
-  // queue is empty, so a burst never opens a gap above the limit.
-  const next = openCodeExportQueue.shift();
-  if (next) next();
-  // Clamped for the test seam only: it zeroes the counter under waiters that
-  // release afterwards. The export path releases exactly once, in `finally`,
-  // so nothing here is guarding against a double release in production.
-  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
-}
+const openCodeExportGate = createConcurrencyGate(OPENCODE_EXPORT_MAX_CONCURRENCY);
 
 export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  await acquireOpenCodeExportSlot();
-  try {
+  return openCodeExportGate.run(async () => {
     const stdout = await readOpenCodeJson(["export", sessionId], {
       timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
     });
     return JSON.parse(stdout) as unknown;
-  } finally {
-    releaseOpenCodeExportSlot();
-  }
+  });
 }
 
 export async function deleteOpenCodeSession(sessionId: string): Promise<void> {
@@ -847,8 +826,7 @@ export function resetOpenCodeExportState(): void {
   // ends shifts the peak concurrency every later test observes, so clear them
   // here as well — resuming queued waiters rather than dropping them, so a
   // caller left mid-acquire cannot hang.
-  for (const resume of openCodeExportQueue.splice(0)) resume();
-  openCodeExportActive = 0;
+  openCodeExportGate.reset();
 }
 
 function shouldServeCachedOpenCodeState(
@@ -872,6 +850,18 @@ function shouldServeCachedOpenCodeState(
   );
 }
 
+// Native opencode.db keeps message identity in the `id` column; `data` omits
+// it. An id embedded in `data` wins.
+function openCodeMessageInfoFromRow(row: Record<string, unknown>, sessionId: string): unknown {
+  const id = row["id"];
+  const data = row["data"];
+  if (typeof id !== "string" || typeof data !== "string") {
+    throw new Error(`Unexpected opencode message row for ${sessionId}`);
+  }
+  const info = JSON.parse(data) as unknown;
+  return isRecord(info) && typeof info["id"] !== "string" ? { ...info, id } : info;
+}
+
 // Same store and fallback contract as readOpenCodeLatestUserMessageFromDatabase.
 // The state depends on the session's last message alone, so one indexed row
 // replaces a whole-transcript export; its `data` is the export's `info`, so the
@@ -885,15 +875,13 @@ export async function readOpenCodeStateFromDatabase(
   try {
     const row = database
       .prepare(
-        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1",
       )
       .get(sessionId);
     if (!row) return parseOpenCodeState({ messages: [] });
-    const data = row["data"];
-    if (typeof data !== "string") {
-      throw new Error(`Unexpected opencode message row for ${sessionId}`);
-    }
-    return parseOpenCodeState({ messages: [{ info: JSON.parse(data) as unknown }] });
+    return parseOpenCodeState({
+      messages: [{ info: openCodeMessageInfoFromRow(row, sessionId) }],
+    });
   } finally {
     database.close();
   }
@@ -907,15 +895,9 @@ async function readOpenCodeStructuredStateFromDatabase(
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const rows = database
-      .prepare("SELECT data FROM message WHERE session_id = ? ORDER BY time_created, id")
+      .prepare("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id")
       .all(sessionId);
-    const messages = rows.map((row) => {
-      const data = row["data"];
-      if (typeof data !== "string") {
-        throw new Error(`Unexpected opencode message row for ${sessionId}`);
-      }
-      return { info: JSON.parse(data) as unknown };
-    });
+    const messages = rows.map((row) => ({ info: openCodeMessageInfoFromRow(row, sessionId) }));
     const value = { id: sessionId, messages };
     const tokenUsage = parseOpenCodeTokenUsage(value);
     return {

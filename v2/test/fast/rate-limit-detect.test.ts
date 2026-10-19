@@ -97,6 +97,54 @@ afterEach(async () => {
 });
 
 describe("detectCodexRateLimit", () => {
+  it.each([
+    { primary: { used_percent: 100, window_minutes: 10080 }, secondary: null },
+    { primary: { used_percent: 100, window_minutes: 300 }, secondary: null },
+    { primary: null, secondary: { used_percent: 100, window_minutes: 10080 } },
+    {
+      primary: { used_percent: 100, window_minutes: 300 },
+      secondary: { used_percent: 100, window_minutes: 10080 },
+    },
+  ])("permits paid-credit continuation despite exhausted windows: %j", (windows) => {
+    expect(detectCodexRateLimit({ ...CODEX_HEALTHY, ...windows })).toEqual({
+      limited: false,
+      reason: "",
+    });
+  });
+
+  it("preserves explicit provider refusal despite available paid credits", () => {
+    expect(
+      detectCodexRateLimit({
+        ...CODEX_HEALTHY,
+        primary: { used_percent: 100, window_minutes: 10080 },
+        rate_limit_reached_type: "workspace_owner_credits_depleted",
+      }),
+    ).toEqual({ limited: true, reason: "codex workspace_owner_credits_depleted" });
+  });
+
+  it.each([false, undefined, null, "true", 1])(
+    "preserves exhausted-window limits without explicit paid credits: %j",
+    (hasCredits) => {
+      expect(
+        detectCodexRateLimit({
+          primary: { used_percent: 100, window_minutes: 10080 },
+          credits: { has_credits: hasCredits },
+          rate_limit_reached_type: null,
+        }),
+      ).toEqual({ limited: true, reason: "codex 5h window exhausted" });
+    },
+  );
+
+  it.each([undefined, null, [], true, "true"])(
+    "preserves exhausted-window limits with malformed or missing credits: %j",
+    (credits) => {
+      expect(detectCodexRateLimit({ primary: { used_percent: 100 }, credits })).toEqual({
+        limited: true,
+        reason: "codex 5h window exhausted",
+      });
+    },
+  );
+
   it("flags out-of-credits via credits.has_credits=false", () => {
     expect(detectCodexRateLimit(CODEX_OUT_OF_CREDITS)).toEqual({
       limited: true,
@@ -733,6 +781,25 @@ describe("scanTmuxRateLimit", () => {
 
   it("ignores a mid-line marker on a \u2717 test-runner line", () => {
     expect(scanTmuxRateLimit("\u2717 flags the real codex out of credits pane")).toBeNull();
+  });
+
+  it("ignores a stale \u25cf usage-limit banner replayed after a claude --resume", () => {
+    // A resumed claude redraws its old history, so an expired limit's banner sits
+    // in the pane with no print time. Admitting \u25cf would pin the session limited.
+    const pane = [
+      "\u25cf Usage limit reached \u00b7 continuing automatically at 11:50am \u00b7 esc or type to cancel",
+      "",
+      "\u25cf Usage limit reset \u00b7 continuing automatically",
+      "",
+      "\u25cf Automatic continue stopped \u00b7 the usage limit now resets more than 24 hours out, so this task",
+      "  will not resume on its own (/rate-limit-options to wait anyway)",
+      "  \u23bf  You've hit your weekly limit \u00b7 resets Sep 23, 8am (UTC)",
+      "",
+      "\u273b Crunched for 0s \u00b7 done Sunday, Sep 20, 11:51 AM",
+      "",
+      "\u276f",
+    ].join("\n");
+    expect(scanTmuxRateLimit(pane)).toBeNull();
   });
 
   it("keeps the marker-anywhere allowance for codex's \u25a0 banner only", () => {

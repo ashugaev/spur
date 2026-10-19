@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type * as timersPromisesModule from "node:timers/promises";
+import type * as fsPromisesModule from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +14,8 @@ import {
   confirmReaps,
   findLeakedSidecarTrees,
   reapRecordedIdentity,
+  readLiveProcessStarttime,
+  readProcessStarttime,
   reapRecordedPortDaemon,
   signalSidecarPane,
   snapshotProcesses,
@@ -31,6 +34,46 @@ import type { SessionRecord } from "../../../src/types.js";
 import { createTempDir } from "../../helpers/common.js";
 
 const execFileAsync = promisify(execFile);
+const procStatFixture = vi.hoisted(() => ({ value: undefined as string | Error | undefined }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof fsPromisesModule>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      if (args[0] === "/proc/999999999/stat" && procStatFixture.value !== undefined)
+        return procStatFixture.value instanceof Error
+          ? Promise.reject(procStatFixture.value)
+          : Promise.resolve(procStatFixture.value);
+      return actual.readFile(...args);
+    },
+  };
+});
+
+describe("shared live process starttime", () => {
+  afterEach(() => {
+    procStatFixture.value = undefined;
+  });
+  it.each(["R", "S", "Z", "X", "x", "?"])(
+    "projects state %s without changing identity semantics",
+    async (state) => {
+      const fields = Array<string>(20).fill("0");
+      fields[0] = state;
+      fields[19] = "12345";
+      procStatFixture.value = `999999999 (comm with spaces) ${fields.join(" ")}`;
+      expect(await readProcessStarttime(999999999)).toBe(12345);
+      expect(await readLiveProcessStarttime(999999999)).toBe(
+        state === "R" || state === "S" ? 12345 : null,
+      );
+    },
+  );
+  it.each(["malformed", "999999999 (comm) R 0", new Error("unreadable")])(
+    "fails closed on malformed or unreadable state",
+    async (value) => {
+      procStatFixture.value = value;
+      expect(await readLiveProcessStarttime(999999999)).toBeNull();
+    },
+  );
+});
 
 // Spy on the module's own sleep so timing assertions can count invocations
 // instead of trusting wall-clock, which a loaded CI host can blow past even

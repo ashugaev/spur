@@ -12,6 +12,7 @@ STACK
   vitest for tests.
 
 REVIEW FOCUS
+  Scope: start on available diff; inspect changed code/direct callers. Never inspect/query/wait for CI. Run only named affected-module test files; GitHub CI owns full suites/build/typecheck/lint/e2e. Require live/browser rows only for actual runtime/UI-flow changes.
   Security: command injection (shell/tmux/git commands), unsanitized user input in API routes, GraphQL injection.
   Shell execution: execFile over exec. Flag exec or string-concatenated shell commands.
   Type safety: flag as unknown as T casts and unguarded JSON.parse.

@@ -69,6 +69,12 @@ vi.mock("@/hooks/useVoiceInput", () => ({
   useVoiceInput: () => mockVoiceState,
 }));
 
+const mockUseScreenWakeLock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/hooks/useScreenWakeLock", () => ({
+  useScreenWakeLock: mockUseScreenWakeLock,
+}));
+
 vi.mock("@/components/VoiceInput", () => ({
   StopSquareIcon: ({ className = "h-4 w-4" }: { className?: string }) => (
     <svg aria-hidden="true" className={className} viewBox="0 0 16 16" />
@@ -157,6 +163,17 @@ describe("DirectTerminal voice confirm", () => {
     mockVoiceState.hasRetainedTake = false;
     mockVoiceState.voiceModalOpen = true;
     MockWebSocket.mockClear();
+    mockUseScreenWakeLock.mockClear();
+  });
+
+  it("keeps the screen awake while the terminal is open", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="wake-session" />);
+    });
+
+    expect(mockUseScreenWakeLock).toHaveBeenCalledWith(true);
   });
 
   it("submits confirmed voice input as bracketed paste plus enter for claude", async () => {

@@ -1,11 +1,16 @@
 import type * as childProcessModule from "node:child_process";
+import type * as fsModule from "node:fs";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
+  existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -14,20 +19,43 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { NPM_PIN_SANITIZE_ENV_KEYS } from "../../src/npm-prefix.js";
 import { CURSOR_RESUME_READY_MARKER } from "../../src/agents/cursor.js";
 import { createTempDir } from "../helpers/common.js";
+import { createRestoreOperation } from "../../src/session-lifecycle.js";
 
 type ExecFileAsync = (
   file: string,
   args: string[],
-  options?: { timeout?: number; maxBuffer?: number },
+  options?: { timeout?: number; maxBuffer?: number; signal?: AbortSignal },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const execFileAsyncMock = vi.fn<ExecFileAsync>();
 // createTmuxSession writes its launch script for real; keep it out of any
 // session dir.
 const LAUNCH_SCRIPT_DIR = mkdtempSync(join(tmpdir(), "spur-launch-script-test-"));
+// The mocked tmux never runs the pane, so the launcher's env file (a copy of
+// the runner's process.env, ambient tokens included) is never consumed. Point
+// TMPDIR at a per-file dir so those files can be swept and removed.
+const TEST_TMP_DIR = mkdtempSync(join(tmpdir(), "spur-runtime-tmux-test-"));
+const PANE_ENV_FILE = /^\.spur-pane-env\.[0-9a-f-]{36}$/;
+
+function paneEnvFiles(dir: string): string[] {
+  return readdirSync(dir).filter((name) => PANE_ENV_FILE.test(name));
+}
+
+// Per-test launch dirs are mkdtemp'd under TEST_TMP_DIR, so sweep one level
+// of subdirs as well.
+function removePaneEnvFiles(): void {
+  const dirs = [LAUNCH_SCRIPT_DIR, TEST_TMP_DIR];
+  for (const entry of readdirSync(TEST_TMP_DIR, { withFileTypes: true })) {
+    if (entry.isDirectory()) dirs.push(join(TEST_TMP_DIR, entry.name));
+  }
+  for (const dir of dirs) {
+    for (const name of paneEnvFiles(dir)) rmSync(join(dir, name), { force: true });
+  }
+}
 const execFileMock: ((...args: unknown[]) => void) & {
   [promisify.custom]: typeof execFileAsyncMock;
 } = Object.assign(vi.fn(), {
@@ -47,6 +75,8 @@ class FakeSpawnChild extends EventEmitter {
       code?: number | null;
       signal?: NodeJS.Signals | null;
       beforeClose?: () => void;
+      closeOnKill?: boolean;
+      ignoreTerm?: boolean;
     } = {},
   ) {
     super();
@@ -62,6 +92,9 @@ class FakeSpawnChild extends EventEmitter {
 
   kill(signal?: NodeJS.Signals | number): boolean {
     this.killedSignals.push(String(signal));
+    if (this.options.closeOnKill && !(this.options.ignoreTerm && signal === "SIGTERM")) {
+      queueMicrotask(() => this.close());
+    }
     return true;
   }
 
@@ -102,14 +135,208 @@ vi.doMock("node:timers/promises", () => ({
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
 
 describe("runtime-tmux", () => {
+  it("does not submit restore input after cancellation during its settle delay", async () => {
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+    const controller = new AbortController();
+    const operation = createRestoreOperation(controller.signal);
+    const children = Array.from({ length: 3 }, () => new FakeSpawnChild({ autoClose: false }));
+    spawnQueue.push(...children);
+    let settle!: () => void;
+    sleepMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    try {
+      const send = sendMessageToTmux("restore-test", "context", { agent: "claude", operation });
+      for (const [index, child] of children.entries()) {
+        await vi.waitFor(() => expect(spawnCalls).toHaveLength(index + 1));
+        child.close();
+      }
+      await vi.waitFor(() => expect(settle).toBeTypeOf("function"));
+      controller.abort();
+      await expect(send).rejects.toThrow("cancelled");
+      settle();
+      await Promise.resolve();
+      expect(spawnCalls).toHaveLength(3);
+      expect(spawnCalls.some(({ args }) => args.includes("Enter"))).toBe(false);
+    } finally {
+      operation.dispose();
+    }
+  });
+
+  it("does not fall back from systemd after a restore is cancelled", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+    const controller = new AbortController();
+    const operation = createRestoreOperation(controller.signal);
+    const child = new FakeSpawnChild({
+      autoClose: false,
+      code: 1,
+      beforeClose: () => controller.abort(),
+    });
+    spawnQueue.push(child);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw new Error("mock group");
+    });
+    try {
+      const launch = createTmuxCommandSession({
+        sessionName: "restore-test",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "sleep 60",
+        operation,
+      });
+      child.stderr.write("Failed to connect to bus");
+      child.close();
+      await expect(launch).rejects.toThrow("cancelled");
+      expect(spawnCalls).toHaveLength(1);
+      expect(execFileAsyncMock).not.toHaveBeenCalled();
+    } finally {
+      operation.dispose();
+      kill.mockRestore();
+    }
+  });
+
+  it("abandons restore readiness without sending late trust input", async () => {
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+    const controller = new AbortController();
+    const operation = createRestoreOperation(controller.signal);
+    let finish!: (value: { stdout: string; stderr: string }) => void;
+    execFileAsyncMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    try {
+      const ready = waitForTmuxReady("restore-test", ["not-yet-ready"], 120_000, {
+        agent: "cursor",
+        operation,
+      });
+      controller.abort();
+      await expect(ready).rejects.toThrow("cancelled");
+      finish({ stdout: "Do you trust the authors of the files in this folder?", stderr: "" });
+      await Promise.resolve();
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("send-keys"))).toBe(
+        false,
+      );
+    } finally {
+      operation.dispose();
+    }
+  });
+
+  it("kills and observes a restore launch that ignores TERM at its deadline", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "direct";
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+    vi.useFakeTimers();
+    const operation = createRestoreOperation();
+    const child = new FakeSpawnChild({ autoClose: false, closeOnKill: true, ignoreTerm: true });
+    spawnQueue.push(child);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw new Error("no process group in mock");
+    });
+    try {
+      const launch = createTmuxCommandSession({
+        sessionName: "restore-test",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "sleep 60",
+        operation,
+      });
+      const rejected = expect(launch).rejects.toMatchObject({ statusCode: 504 });
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(child.killedSignals).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejected;
+      expect(child.killedSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(spawnCalls).toHaveLength(1);
+    } finally {
+      operation.dispose();
+      kill.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+  it.each(["direct", "required"])(
+    "cancels and reaps a never-completing restore launch in %s scope",
+    async (scope) => {
+      process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = scope === "required" ? "1" : scope;
+      const { createTmuxSidecarSession } = await import("../../src/runtime-tmux.js");
+      const controller = new AbortController();
+      const operation = createRestoreOperation(controller.signal);
+      const child = new FakeSpawnChild({ autoClose: false, closeOnKill: true });
+      spawnQueue.push(child);
+      const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+        throw new Error("no process group in mock");
+      });
+      const created = vi.fn();
+      try {
+        const launch = createTmuxSidecarSession({
+          sessionId: "restore-test",
+          sidecarName: "mcp",
+          cwd: TEST_TMP_DIR,
+          command: "sleep 60",
+          operation,
+          onCreated: created,
+        });
+        expect(spawnCalls.at(-1)?.file).toBe(scope === "direct" ? "tmux" : "systemd-run");
+        controller.abort();
+        await expect(launch).rejects.toThrow("cancelled");
+        expect(child.killedSignals).toEqual(["SIGTERM"]);
+        expect(created).not.toHaveBeenCalled();
+        expect(spawnCalls).toHaveLength(1);
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+      } finally {
+        operation.dispose();
+        kill.mockRestore();
+      }
+    },
+  );
+
+  it("prevents restore set-option and respawn after cancellation in onCreated", async () => {
+    process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "direct";
+    const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+    const controller = new AbortController();
+    const operation = createRestoreOperation(controller.signal);
+    const child = new FakeSpawnChild({ autoClose: false });
+    spawnQueue.push(child);
+    try {
+      const launch = createTmuxCommandSession({
+        sessionName: "restore-test",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "sleep 60",
+        operation,
+        onCreated: () => controller.abort(),
+      });
+      child.close();
+      await expect(launch).rejects.toThrow("cancelled");
+      expect(spawnCalls).toHaveLength(1);
+      expect(execFileAsyncMock).not.toHaveBeenCalled();
+    } finally {
+      operation.dispose();
+    }
+  });
   const originalSkipCodexSubmitAck = process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   const originalSystemdScope = process.env["SPUR_TMUX_SYSTEMD_SCOPE"];
+
+  const originalTmpdir = process.env["TMPDIR"];
+
+  beforeAll(() => {
+    process.env["TMPDIR"] = TEST_TMP_DIR;
+  });
+
+  afterAll(() => {
+    if (originalTmpdir === undefined) delete process.env["TMPDIR"];
+    else process.env["TMPDIR"] = originalTmpdir;
+    rmSync(TEST_TMP_DIR, { recursive: true, force: true });
+    rmSync(LAUNCH_SCRIPT_DIR, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     delete process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   });
 
   afterEach(() => {
+    removePaneEnvFiles();
     execFileAsyncMock.mockReset();
     spawnMock.mockClear();
     spawnCalls.length = 0;
@@ -147,10 +374,10 @@ describe("runtime-tmux", () => {
     await expect(killTmuxSessionTree("api-1--dev")).resolves.toBe(false);
   });
 
-  // AC1: every fork issued through the file-local tmux() chokepoint carries
-  // the timeout option — capture-pane and send-keys cover the swallowed-error
-  // path and the propagating path respectively.
-  it("AC1: forks capture-pane with a 5s timeout", async () => {
+  // AC1: read probes (capture-pane) carry a deadline signal, writes
+  // (send-keys) keep the execFile timeout — capture-pane and send-keys cover
+  // the swallowed-error path and the propagating path respectively.
+  it("AC1: forks capture-pane with a deadline signal, not a timeout", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "pane text", stderr: "" });
 
     const { captureTmuxPane } = await import("../../src/runtime-tmux.js");
@@ -160,7 +387,8 @@ describe("runtime-tmux", () => {
     const call = execFileAsyncMock.mock.calls.find(
       ([file, args]) => file === "tmux" && args[0] === "capture-pane",
     );
-    expect(call?.[2]).toEqual({ timeout: 5_000 });
+    expect(call?.[2]?.signal).toBeInstanceOf(AbortSignal);
+    expect(call?.[2]).not.toHaveProperty("timeout");
   });
 
   it("AC1: forks send-keys with a 5s timeout", async () => {
@@ -231,7 +459,11 @@ describe("runtime-tmux", () => {
     // script, then stays as that shell; nothing is typed, and the launch
     // never rides the tmux command line.
     const scriptPath = join(LAUNCH_SCRIPT_DIR, "agent-launch.sh");
-    expect(args.at(-1)).toBe(`exec "$SHELL" -lic '. '\\''${scriptPath}'\\''; exec "$SHELL" -l'`);
+    const [envFileName] = paneEnvFiles(LAUNCH_SCRIPT_DIR);
+    const envFile = join(LAUNCH_SCRIPT_DIR, envFileName ?? "missing");
+    expect(args.at(-1)).toBe(
+      `exec sh '${envFile}' "$SHELL" -lic '. '\\''${scriptPath}'\\''; exec "$SHELL" -l'`,
+    );
     expect(readFileSync(scriptPath, "utf8")).toBe(
       "codex --dangerously-bypass-approvals-and-sandbox\n",
     );
@@ -350,7 +582,12 @@ describe("runtime-tmux", () => {
     expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
     expect(readFileSync(oldInodeLink, "utf8")).toBe("old launch\n");
     expect(statSync(oldInodeLink).mode & 0o777).toBe(0o644);
-    expect(readdirSync(launchScriptDir).sort()).toEqual(["agent-launch.sh", "old-inode"]);
+    const names = readdirSync(launchScriptDir).sort();
+    expect(names.filter((name) => !PANE_ENV_FILE.test(name))).toEqual([
+      "agent-launch.sh",
+      "old-inode",
+    ]);
+    expect(names.filter((name) => PANE_ENV_FILE.test(name))).toHaveLength(1);
   });
 
   it("runs the launch script's quotes, $, backticks, and newlines exactly as written", async () => {
@@ -362,12 +599,22 @@ describe("runtime-tmux", () => {
     const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
     const out = join(home, "out.txt");
     const launchCommand = `printf '%s\\n' "it's" '$HOME' '\`echo nope\`' 'line one\nline two' > ${out}`;
-    await createTmuxSession({
-      sessionName: "api-1",
-      cwd: "/tmp/worktree",
-      launchCommand,
-      launchScriptDir: home,
-    });
+    const originalHome = process.env["HOME"];
+    process.env["HOME"] = home;
+    try {
+      // The launcher exports HOME/PATH from the daemon env, so both are pinned
+      // here to keep the login shell off the operator's rc files.
+      await createTmuxSession({
+        sessionName: "api-1",
+        cwd: "/tmp/worktree",
+        launchCommand,
+        launchScriptDir: home,
+        env: { HOME: home, PATH: process.env["PATH"] ?? "" },
+      });
+    } finally {
+      if (originalHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = originalHome;
+    }
     const paneCommand = String(
       execFileAsyncMock.mock.calls.find(([, args]) => args.includes("new-session"))?.[1]?.at(-1),
     );
@@ -416,10 +663,13 @@ describe("runtime-tmux", () => {
         throw new Error("Expected createTmuxSession to invoke tmux");
       }
       const [, args] = firstCall;
-      expect(args).not.toContain("-e CLAUDECODE=1");
-      expect(args.some((arg) => arg.startsWith("CLAUDECODE="))).toBe(false);
-      expect(args.some((arg) => arg.startsWith("CLAUDE_CODE_SESSION_ID="))).toBe(false);
-      expect(args.some((arg) => arg.startsWith("CLAUDE_CODE_CHILD_SESSION="))).toBe(false);
+      expect(args.join("\n").includes("stale-ancestor-session-id")).toBe(false);
+      const [envFileName] = paneEnvFiles(LAUNCH_SCRIPT_DIR);
+      const envFile = readFileSync(join(LAUNCH_SCRIPT_DIR, envFileName ?? "missing"), "utf8");
+      expect(envFile.includes("CLAUDECODE")).toBe(false);
+      expect(envFile.includes("CLAUDE_CODE_SESSION_ID")).toBe(false);
+      expect(envFile.includes("CLAUDE_CODE_CHILD_SESSION")).toBe(false);
+      expect(envFile.includes("stale-ancestor-session-id")).toBe(false);
     } finally {
       if (originalClaudecode === undefined) delete process.env["CLAUDECODE"];
       else process.env["CLAUDECODE"] = originalClaudecode;
@@ -428,6 +678,566 @@ describe("runtime-tmux", () => {
       if (originalChildSession === undefined) delete process.env["CLAUDE_CODE_CHILD_SESSION"];
       else process.env["CLAUDE_CODE_CHILD_SESSION"] = originalChildSession;
     }
+  });
+
+  // The daemon's whole env, including per-call agent env that can hold API
+  // keys, reaches the pane through an owner-only env file the pane's launcher
+  // reads and deletes. tmux and systemd-run argv are readable by every local
+  // user, so no env value may ride them.
+  describe("pane env file", () => {
+    async function withProcessEnv(
+      vars: Record<string, string>,
+      run: () => Promise<void>,
+    ): Promise<void> {
+      const saved = Object.keys(vars).map((key) => [key, process.env[key]] as const);
+      Object.assign(process.env, vars);
+      try {
+        await run();
+      } finally {
+        for (const [key, value] of saved) {
+          if (value === undefined) Reflect.deleteProperty(process.env, key);
+          else process.env[key] = value;
+        }
+      }
+    }
+
+    function respawnCommand(): string {
+      return String(
+        execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "respawn-pane")?.[1]?.at(-1),
+      );
+    }
+
+    function newSessionCommand(): string {
+      return String(
+        execFileAsyncMock.mock.calls.find(([, args]) => args.includes("new-session"))?.[1]?.at(-1),
+      );
+    }
+
+    // Runs a pane command as tmux does (default-shell -c), with an rc-free HOME.
+    async function runPaneCommand(paneCommand: string, home: string): Promise<void> {
+      const { execFileSync } =
+        await vi.importActual<typeof childProcessModule>("node:child_process");
+      execFileSync("sh", ["-c", paneCommand], {
+        env: { SHELL: "/bin/bash", HOME: home, PATH: process.env["PATH"] ?? "" },
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    }
+
+    it.each(["direct", "auto"])(
+      "keeps agent pane env values off tmux and systemd-run argv (%s scope)",
+      async (scope) => {
+        process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = scope;
+        execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+        const inherited = `inherited-${randomUUID()}`;
+        const perCall = `percall-${randomUUID()}`;
+        const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-env-"));
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+        await withProcessEnv({ SPUR_TEST_PANE_SECRET: inherited }, () =>
+          createTmuxSession({
+            sessionName: "api-1",
+            cwd: "/tmp/worktree",
+            launchCommand: "claude",
+            launchScriptDir,
+            env: {
+              SPUR_TEST_PERCALL_SECRET: perCall,
+              NPM_CONFIG_GLOBALCONFIG: "/pin/npmrc",
+              npm_config_globalconfig: "/pin/npmrc",
+            },
+          }),
+        );
+
+        expect(execFileAsyncMock.mock.calls).toHaveLength(1);
+        expect(execFileAsyncMock.mock.calls[0]?.[0]).toBe(
+          scope === "auto" ? "systemd-run" : "tmux",
+        );
+        for (const [, args] of execFileAsyncMock.mock.calls) {
+          const argv = args.join("\0");
+          expect(argv.includes(inherited)).toBe(false);
+          expect(argv.includes(perCall)).toBe(false);
+          expect(args.includes("-e")).toBe(false);
+        }
+        const files = paneEnvFiles(launchScriptDir);
+        expect(files).toHaveLength(1);
+        const envFile = join(launchScriptDir, files[0] ?? "missing");
+        expect(statSync(envFile).mode & 0o777).toBe(0o600);
+        const content = readFileSync(envFile, "utf8");
+        expect(content.includes(`command export SPUR_TEST_PANE_SECRET='${inherited}'`)).toBe(true);
+        expect(content.includes(`command export SPUR_TEST_PERCALL_SECRET='${perCall}'`)).toBe(true);
+        // The npm pin stays in agent panes: exported, never `env -u`-stripped.
+        expect(content.includes("command export NPM_CONFIG_GLOBALCONFIG='/pin/npmrc'")).toBe(true);
+        expect(content.includes("command export npm_config_globalconfig='/pin/npmrc'")).toBe(true);
+        expect(newSessionCommand()).not.toContain("env -u");
+      },
+    );
+
+    it("keeps command pane env values off every tmux argv and writes them to a 0600 env file", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const inherited = `inherited-${randomUUID()}`;
+      const perCall = `percall-${randomUUID()}`;
+      const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+      await withProcessEnv({ SPUR_TEST_PANE_SECRET: inherited }, () =>
+        createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand: "pnpm dev",
+          env: { SPUR_TEST_PERCALL_SECRET: perCall },
+        }),
+      );
+
+      expect(execFileAsyncMock.mock.calls).toHaveLength(3);
+      for (const [, args] of execFileAsyncMock.mock.calls) {
+        const argv = args.join("\0");
+        expect(argv.includes(inherited)).toBe(false);
+        expect(argv.includes(perCall)).toBe(false);
+        expect(args.includes("-e")).toBe(false);
+      }
+      const files = paneEnvFiles(TEST_TMP_DIR);
+      expect(files).toHaveLength(1);
+      const envFile = join(TEST_TMP_DIR, files[0] ?? "missing");
+      expect(statSync(envFile).mode & 0o777).toBe(0o600);
+      const content = readFileSync(envFile, "utf8");
+      expect(content.includes(`command export SPUR_TEST_PANE_SECRET='${inherited}'`)).toBe(true);
+      expect(content.includes(`command export SPUR_TEST_PERCALL_SECRET='${perCall}'`)).toBe(true);
+      expect(respawnCommand().startsWith(`exec sh '${envFile}' env -u `)).toBe(true);
+    });
+
+    it("delivers the agent pane env exactly, keeps tmux's SHELL, and drops identity, tmux-managed, and invalid keys", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const home = mkdtempSync(join(tmpdir(), "spur-launch-home-"));
+      const out = join(home, "out.txt");
+      const secret = "it's $HOME `echo nope`\nline two";
+      const launchCommand = `printf '%s|%s|%s|%s' "$SPUR_TEST_PANE_SECRET" "$SHELL" "\${CLAUDECODE-unset}" "\${TERM-unset}" > ${out}`;
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+      await withProcessEnv(
+        {
+          HOME: home,
+          SHELL: "/bin/sentinel-shell",
+          TERM: "sentinel-term",
+          CLAUDECODE: "1",
+          PWD: "/sentinel-pwd",
+        },
+        () =>
+          createTmuxSession({
+            sessionName: "api-1",
+            cwd: "/tmp/worktree",
+            launchCommand,
+            launchScriptDir: home,
+            env: {
+              SPUR_TEST_PANE_SECRET: secret,
+              HOME: home,
+              PATH: process.env["PATH"] ?? "",
+              "BAD%KEY": "x",
+            },
+          }),
+      );
+
+      const [envFileName] = paneEnvFiles(home);
+      const envFile = join(home, envFileName ?? "missing");
+      const content = readFileSync(envFile, "utf8");
+      expect(content.includes("export PWD=")).toBe(false);
+      expect(content.includes("BAD%KEY")).toBe(false);
+
+      await runPaneCommand(newSessionCommand(), home);
+
+      // An interactive bash picks its own TERM when none is set, so only the
+      // sentinel's absence is pinned for it.
+      const launched = readFileSync(out, "utf8");
+      expect(launched.startsWith(`${secret}|/bin/bash|unset|`)).toBe(true);
+      expect(launched.includes("sentinel-term")).toBe(false);
+      expect(existsSync(envFile)).toBe(false);
+    });
+
+    it("delivers the command pane env and unsets every npm pin key, then removes the file", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const home = mkdtempSync(join(tmpdir(), "spur-command-home-"));
+      const out = join(home, "out.txt");
+      const secret = "it's $HOME `echo nope`\nline two";
+      const pin = Object.fromEntries(NPM_PIN_SANITIZE_ENV_KEYS.map((key) => [key, "/pin"]));
+      const checks = NPM_PIN_SANITIZE_ENV_KEYS.map(
+        (key) => `printf '%s ' "\${${key}-unset}" >> ${out}`,
+      ).join("; ");
+      const launchCommand = `printf '%s|' "$SPUR_TEST_PANE_SECRET" > ${out}; ${checks}`;
+      const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+      await withProcessEnv({ HOME: home }, () =>
+        createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand,
+          env: {
+            ...pin,
+            SPUR_TEST_PANE_SECRET: secret,
+            HOME: home,
+            PATH: process.env["PATH"] ?? "",
+          },
+        }),
+      );
+      const [envFileName] = paneEnvFiles(TEST_TMP_DIR);
+      const envFile = join(TEST_TMP_DIR, envFileName ?? "missing");
+
+      await runPaneCommand(respawnCommand(), home);
+
+      expect(readFileSync(out, "utf8")).toBe(
+        `${secret}|${NPM_PIN_SANITIZE_ENV_KEYS.map(() => "unset ").join("")}`,
+      );
+      expect(existsSync(envFile)).toBe(false);
+    });
+
+    // A readonly name (PPID, SHELLOPTS) turns a bare `export` into a fatal
+    // error under a POSIX-mode sh (bash as /bin/sh); `command export` must
+    // leave the launcher running.
+    it("keeps the launcher running under bash --posix when the env carries readonly names", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const home = mkdtempSync(join(tmpdir(), "spur-launch-posix-"));
+      const out = join(home, "out.txt");
+      const secret = "it's $HOME";
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+      await createTmuxSession({
+        sessionName: "api-1",
+        cwd: "/tmp/worktree",
+        launchCommand: "true",
+        launchScriptDir: home,
+        env: { PPID: "1", SHELLOPTS: "x", SPUR_TEST_PANE_SECRET: secret },
+      });
+      const [envFileName] = paneEnvFiles(home);
+      const { execFileSync } =
+        await vi.importActual<typeof childProcessModule>("node:child_process");
+      execFileSync(
+        "bash",
+        [
+          "--posix",
+          join(home, envFileName ?? "missing"),
+          "sh",
+          "-c",
+          `printf '%s' "$SPUR_TEST_PANE_SECRET" > ${out}`,
+        ],
+        { env: { HOME: home, PATH: process.env["PATH"] ?? "" }, stdio: "ignore" },
+      );
+
+      expect(readFileSync(out, "utf8")).toBe(secret);
+    });
+
+    it("rejects a NUL env value before any tmux call or env file, without echoing the value", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-nul-"));
+      const env = { NUL_VAR: "nul-secret\0tail" };
+      const { createTmuxSession, createTmuxCommandSession } =
+        await import("../../src/runtime-tmux.js");
+
+      const failures = await Promise.all([
+        createTmuxSession({
+          sessionName: "api-1",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir,
+          env,
+        }).catch((error: unknown) => error),
+        createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand: "pnpm dev",
+          env,
+        }).catch((error: unknown) => error),
+      ]);
+
+      for (const failure of failures) {
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain("NUL_VAR");
+        expect((failure as Error).message.includes("nul-secret")).toBe(false);
+      }
+      expect(execFileAsyncMock).not.toHaveBeenCalled();
+      expect(paneEnvFiles(launchScriptDir)).toEqual([]);
+      expect(paneEnvFiles(TEST_TMP_DIR)).toEqual([]);
+    });
+
+    it("leaves no env file behind when tmux rejects the agent pane's new-session", async () => {
+      execFileAsyncMock.mockRejectedValue(new Error("tmux boom"));
+      const launchScriptDir = mkdtempSync(join(tmpdir(), "spur-launch-reject-"));
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+
+      await expect(
+        createTmuxSession({
+          sessionName: "api-1",
+          cwd: "/tmp/worktree",
+          launchCommand: "claude",
+          launchScriptDir,
+        }),
+      ).rejects.toThrow("tmux boom");
+
+      expect(paneEnvFiles(launchScriptDir)).toEqual([]);
+    });
+
+    it.each(["new-session", "set-option", "respawn-pane"])(
+      "leaves no env file behind when the command pane's %s rejects",
+      async (failing) => {
+        execFileAsyncMock.mockImplementation(async (_file, args) => {
+          if (args.includes(failing)) throw new Error("tmux boom");
+          return { stdout: "", stderr: "" };
+        });
+        const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+        await expect(
+          createTmuxCommandSession({
+            sessionName: "api-1--dev",
+            cwd: "/tmp/worktree",
+            launchCommand: "pnpm dev",
+          }),
+        ).rejects.toThrow("tmux boom");
+
+        expect(paneEnvFiles(TEST_TMP_DIR)).toEqual([]);
+      },
+    );
+
+    it("writes no command pane env file when onCreated throws, and never respawns", async () => {
+      execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const { createTmuxCommandSession } = await import("../../src/runtime-tmux.js");
+
+      await expect(
+        createTmuxCommandSession({
+          sessionName: "api-1--dev",
+          cwd: "/tmp/worktree",
+          launchCommand: "pnpm dev",
+          onCreated: () => {
+            throw new Error("onCreated boom");
+          },
+        }),
+      ).rejects.toThrow("onCreated boom");
+
+      expect(paneEnvFiles(TEST_TMP_DIR)).toEqual([]);
+      expect(execFileAsyncMock.mock.calls.some(([, args]) => args[0] === "respawn-pane")).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("agent launch input-attempt boundary", () => {
+    it.each(["direct", "1", "auto"])(
+      "observes fully prepared files immediately before %s dispatch",
+      async (scope) => {
+        process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = scope;
+        const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-"));
+        const order: string[] = [];
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        execFileAsyncMock.mockImplementation(async (_file, args) => {
+          expect(order).toEqual(["before"]);
+          expect(args).toContain("new-session");
+          order.push("dispatch");
+          return { stdout: "", stderr: "" };
+        });
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: dir,
+          beforeLaunch: () => {
+            expect(execFileAsyncMock).not.toHaveBeenCalled();
+            expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+            expect(paneEnvFiles(dir)).toHaveLength(1);
+            order.push("before");
+          },
+        };
+        await createTmuxSession(input);
+        expect(order).toEqual(["before", "dispatch"]);
+        expect(execFileAsyncMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["script", "env"])(
+      "does not observe or dispatch failed %s preparation",
+      async (step) => {
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        const dir = join(TEST_TMP_DIR, `boundary-fail-${step}`);
+        if (step === "script") writeFileSync(dir, "owned regular file");
+        const beforeLaunch = vi.fn();
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: dir,
+          ...(step === "env" ? { env: { INVALID: "nul\0value" } } : {}),
+          beforeLaunch,
+        };
+        await expect(createTmuxSession(input)).rejects.toThrow();
+        expect(beforeLaunch).not.toHaveBeenCalled();
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+        expect(spawnCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(["write", "chmod"] as const)(
+      "cleans a partial env file after original %s preparation failure",
+      async (step) => {
+        const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-env-fault-"));
+        const failure = new Error(`owned env-file ${step} failure`);
+        const beforeLaunch = vi.fn();
+        let envFile: string | undefined;
+        vi.doMock("node:fs", async (importOriginal) => {
+          const actual = await importOriginal<typeof fsModule>();
+          const isEnvFile = (file: Parameters<typeof writeFileSync>[0]): file is string =>
+            typeof file === "string" && file.startsWith(join(dir, ".spur-pane-env."));
+          const fail = (file: string): never => {
+            envFile = file;
+            expect(actual.readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe(
+              "echo prepared\n",
+            );
+            expect(actual.statSync(join(dir, "agent-launch.sh")).isFile()).toBe(true);
+            expect(actual.statSync(file).size).toBeGreaterThan(0);
+            throw failure;
+          };
+          return {
+            ...actual,
+            writeFileSync: ((file, data, options) => {
+              if (step === "write" && isEnvFile(file)) {
+                actual.writeFileSync(file, "partial owned env file\n", options);
+                fail(file);
+              }
+              actual.writeFileSync(file, data, options);
+            }) satisfies typeof actual.writeFileSync,
+            chmodSync: ((file, mode) => {
+              if (step === "chmod" && isEnvFile(file)) fail(file);
+              actual.chmodSync(file, mode);
+            }) satisfies typeof actual.chmodSync,
+          };
+        });
+        try {
+          vi.resetModules();
+          const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+          await expect(
+            createTmuxSession({
+              sessionName: "boundary",
+              cwd: TEST_TMP_DIR,
+              launchCommand: "echo prepared",
+              launchScriptDir: dir,
+              beforeLaunch,
+            }),
+          ).rejects.toBe(failure);
+          expect(envFile).toBeDefined();
+          expect(envFile && existsSync(envFile)).toBe(false);
+          expect(paneEnvFiles(dir)).toEqual([]);
+          expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+          expect(beforeLaunch).not.toHaveBeenCalled();
+          expect(execFileAsyncMock).not.toHaveBeenCalled();
+          expect(spawnCalls).toHaveLength(0);
+        } finally {
+          vi.doUnmock("node:fs");
+          vi.resetModules();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      "authorizes each auto fallback dispatch; revoked=%s",
+      async (revoked) => {
+        process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+        const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+        const order: string[] = [];
+        const refusal = new Error("claim revoked");
+        const beforeLaunch = vi.fn(() => {
+          order.push("before");
+          if (revoked && beforeLaunch.mock.calls.length === 2) throw refusal;
+        });
+        execFileAsyncMock.mockImplementation(async (file) => {
+          order.push(file);
+          if (file === "systemd-run")
+            throw Object.assign(new Error("spawn systemd-run ENOENT"), { code: "ENOENT" });
+          return { stdout: "", stderr: "" };
+        });
+        const input = {
+          sessionName: "boundary",
+          cwd: TEST_TMP_DIR,
+          launchCommand: "echo prepared",
+          launchScriptDir: mkdtempSync(join(TEST_TMP_DIR, "boundary-auto-")),
+          beforeLaunch,
+        };
+        if (revoked) await expect(createTmuxSession(input)).rejects.toBe(refusal);
+        else await createTmuxSession(input);
+        expect(order).toEqual(
+          revoked
+            ? ["before", "systemd-run", "before"]
+            : ["before", "systemd-run", "before", "tmux"],
+        );
+        expect(beforeLaunch).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("does not classify first-hook refusal as unavailable systemd", async () => {
+      process.env["SPUR_TMUX_SYSTEMD_SCOPE"] = "auto";
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const refusal = new Error("Failed to connect to bus");
+      const input = {
+        sessionName: "boundary",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "echo prepared",
+        launchScriptDir: mkdtempSync(join(TEST_TMP_DIR, "boundary-refused-")),
+        beforeLaunch: () => {
+          throw refusal;
+        },
+      };
+      await expect(createTmuxSession(input)).rejects.toBe(refusal);
+      expect(execFileAsyncMock).not.toHaveBeenCalled();
+    });
+
+    it("rechecks cancellation after preparation before observing a dispatch", async () => {
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const controller = new AbortController();
+      const operation = createRestoreOperation(controller.signal);
+      const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-cancel-"));
+      const beforeLaunch = vi.fn();
+      try {
+        await expect(
+          createTmuxSession({
+            sessionName: "boundary",
+            cwd: TEST_TMP_DIR,
+            launchCommand: "echo prepared",
+            launchScriptDir: dir,
+            env: {
+              get CANCEL_DURING_PREPARATION() {
+                controller.abort();
+                return "prepared";
+              },
+            },
+            operation,
+            beforeLaunch,
+          }),
+        ).rejects.toThrow("cancelled");
+        expect(readFileSync(join(dir, "agent-launch.sh"), "utf8")).toBe("echo prepared\n");
+        expect(paneEnvFiles(dir)).toEqual([]);
+        expect(beforeLaunch).not.toHaveBeenCalled();
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+        expect(spawnCalls).toHaveLength(0);
+      } finally {
+        operation.dispose();
+      }
+    });
+
+    it("preserves callback refusal when env-file cleanup also fails", async () => {
+      const { createTmuxSession } = await import("../../src/runtime-tmux.js");
+      const dir = mkdtempSync(join(TEST_TMP_DIR, "boundary-cleanup-"));
+      const refusal = new Error("original claim refusal");
+      let envFile: string | undefined;
+      const input = {
+        sessionName: "boundary",
+        cwd: TEST_TMP_DIR,
+        launchCommand: "echo prepared",
+        launchScriptDir: dir,
+        beforeLaunch: () => {
+          envFile = join(dir, paneEnvFiles(dir)[0] ?? "missing-env");
+          rmSync(envFile);
+          mkdirSync(envFile);
+          throw refusal;
+        },
+      };
+      try {
+        await expect(createTmuxSession(input)).rejects.toBe(refusal);
+        expect(execFileAsyncMock).not.toHaveBeenCalled();
+      } finally {
+        if (envFile) rmSync(envFile, { recursive: true, force: true });
+      }
+    });
   });
 
   it("starts tmux sessions through a user systemd scope when auto is enabled", async () => {
@@ -699,6 +1509,16 @@ describe("runtime-tmux", () => {
     expect(JSON.stringify(execFileAsyncMock.mock.calls)).not.toContain(sentinel);
     expect(JSON.stringify(spawnCalls.map(({ args }) => args))).not.toContain(sentinel);
     expect(buffers.size).toBe(0);
+    // T8: the list-buffers read carries a deadline signal; the delete write keeps its timeout.
+    const listBuffersCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "list-buffers",
+    );
+    expect(listBuffersCall?.[2]?.signal).toBeInstanceOf(AbortSignal);
+    expect(listBuffersCall?.[2]).not.toHaveProperty("timeout");
+    const deleteBufferCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "delete-buffer",
+    );
+    expect(deleteBufferCall?.[2]).toEqual({ timeout: 5_000 });
   });
 
   it("does not treat a vanished target session as server-wide buffer absence", async () => {
@@ -997,8 +1817,10 @@ describe("runtime-tmux", () => {
     // The sanitize wrap strips every env name either of nvm's own
     // incompatibility guards reacts to before the pane ever sources
     // `~/.nvm/nvm.sh` — see nvm-guard-sanitize.test.ts for the repro.
-    expect(respawnCommand).toBe(
-      "env -u NPM_CONFIG_PREFIX -u npm_config_prefix -u NPM_CONFIG_GLOBALCONFIG -u npm_config_globalconfig -u PREFIX sh -lc 'cd front && yarn start'",
+    expect(String(respawnCommand)).toMatch(
+      new RegExp(
+        `^exec sh '${TEST_TMP_DIR}/\\.spur-pane-env\\.[0-9a-f-]{36}' env -u NPM_CONFIG_PREFIX -u npm_config_prefix -u NPM_CONFIG_GLOBALCONFIG -u npm_config_globalconfig -u PREFIX sh -lc 'cd front && yarn start'$`,
+      ),
     );
     // Regression: `exec cd ...` in dash fails with "exec: cd: not found".
     expect(respawnCommand).not.toContain("exec cd");
@@ -1022,9 +1844,9 @@ describe("runtime-tmux", () => {
     });
 
     // Only the launch payload itself (the launch script the pane command
-    // sources) must be unwrapped — unlike the earlier `-e KEY=VALUE`
-    // new-session args, which legitimately carry the session's own env
-    // (including the pin) and are exempt from this assertion.
+    // sources) must be unwrapped — unlike the pane env file, which
+    // legitimately carries the session's own env (including the pin) and is
+    // exempt from this assertion.
     const newSession = execFileAsyncMock.mock.calls.find(([, args]) =>
       args.includes("new-session"),
     );
@@ -1338,10 +2160,34 @@ describe("runtime-tmux", () => {
     expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: null,
+      paneDead: false,
     });
     expect(await lookupTmuxPanePid("other-1", { fresh: true })).toEqual({
       status: "ok",
       panePid: 4242,
+      paneDead: false,
+    });
+  });
+
+  it("R1 lookupTmuxPanePid carries the dead flag from the same pane row", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "list-panes") {
+        return { stdout: "api-1 1 1 1 4242 /dev/pts/1\nlive-1 1 1 0 4243 /dev/pts/2", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { lookupTmuxPanePid } = await import("../../src/runtime-tmux.js");
+
+    expect(await lookupTmuxPanePid("api-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 4242,
+      paneDead: true,
+    });
+    expect(await lookupTmuxPanePid("live-1", { fresh: true })).toEqual({
+      status: "ok",
+      panePid: 4243,
+      paneDead: false,
     });
   });
 
@@ -1368,7 +2214,8 @@ describe("runtime-tmux", () => {
     }
     const [, , options] = psCall;
     expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
-    expect(options?.timeout).toBe(5_000);
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+    expect(options).not.toHaveProperty("timeout");
   });
 
   it("reads a wrapper-launched agent as alive once the canonical binary name is a matcher (issue #800)", async () => {
@@ -1776,9 +2623,8 @@ describe("runtime-tmux", () => {
             // literal no-controlling-terminal marker (-1), not merely
             // absent.
             "100 1 100 -1 pts/1 4200 -zsh",
-            // This child's pgid column is unparseable; getPsSnapshot
-            // normalizes it to -1 too. Without the `fgPgid <= 0` guard,
-            // -1 === -1 would read this row alive.
+            // Reject this child's unparseable pgid instead of normalizing
+            // it to -1 and matching the pane's foreground group.
             "101 100 abc 100 pts/1 2048 codex-wrapper-child",
           ].join("\n"),
           stderr: "",
@@ -1787,16 +2633,133 @@ describe("runtime-tmux", () => {
       throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
     });
 
-    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+    const { isProcessRunningInTmux, isHistoricalPsProbeDiagnostic, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+    const diagnostic =
+      "ps failed: malformed process table output (line 2/2, 7 columns, shape N N T N T N, 75 bytes, no trailing newline)";
 
     // Pass 1 must miss this row too, or the test would prove nothing about
     // pass 2: "codex-wrapper-child" never satisfies the "codex" matcher
     // (no `/` or whitespace boundary after "codex").
-    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toThrow(
-      "malformed process table output",
-    );
+    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toMatchObject({
+      name: "TmuxProbeUnknownError",
+      message: diagnostic,
+    });
     await expect(
       isProcessRunningInTmux("intelas-c007", ["codex"], { paneChildFallback: true }),
-    ).rejects.toThrow("malformed process table output");
+    ).rejects.toMatchObject({ name: "TmuxProbeUnknownError", message: diagnostic });
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+      diagnostic,
+    });
+    expect(isHistoricalPsProbeDiagnostic(diagnostic)).toBe(false);
+  });
+
+  it("qualifies only the two complete historical ps diagnostics", async () => {
+    const { isHistoricalPsProbeDiagnostic, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+    const failed = "ps failed: Command failed: ps -eo pid,ppid,pgid,tpgid,tty,rss,args\n";
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "ps") throw new Error(`Command failed: ${file} ${args.join(" ")}\n`);
+      return { stdout: "s 1 1 0 100 /dev/pts/1", stderr: "" };
+    });
+    expect((await probeTmuxProcessMatch("s", ["codex"])).diagnostic).toBe(failed);
+    expect(isHistoricalPsProbeDiagnostic(failed)).toBe(true);
+    expect(isHistoricalPsProbeDiagnostic("ps failed: malformed process table output")).toBe(true);
+    for (const diagnostic of [
+      failed.trimEnd(),
+      failed + "\n",
+      failed + "stderr",
+      " " + failed,
+      failed.replace(" -eo ", " -e "),
+      failed.replace("rss,args", "args,rss"),
+      failed.replace("ps -eo", "other -eo"),
+      "ps failed: permission denied",
+      "ps failed: malformed process table output extra",
+      "Resource readout " + failed,
+    ])
+      expect(isHistoricalPsProbeDiagnostic(diagnostic)).toBe(false);
+  });
+
+  function installPsTable(stdout: string): void {
+    execFileAsyncMock.mockImplementation(async (file, args) => {
+      if (file === "tmux" && args.includes("list-panes") && args.includes("-a")) {
+        return { stdout: "intelas-c007 1 1 0 100 /dev/pts/1", stderr: "" };
+      }
+      if (file === "ps") {
+        return { stdout, stderr: "" };
+      }
+      throw new Error(`unexpected exec: ${file} ${args.join(" ")}`);
+    });
+  }
+
+  it("T4: a truncated final ps line fails the whole snapshot with a redacted shape diagnostic", async () => {
+    const table =
+      "100 1 100 100 pts/1 4200 -zsh\n101 100 100 100 pts/1 2048 codex SECRET-ARG\n4123 1 41";
+    installPsTable(table);
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    const error = await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(table.length).toBe(83);
+    expect(message).toBe(
+      "ps failed: malformed process table output (line 3/3, 3 columns, shape N N N, 83 bytes, no trailing newline)",
+    );
+    expect(message).not.toContain("SECRET-ARG");
+    expect(message).not.toContain("codex");
+  });
+
+  it("T5: a non-numeric id column fails the whole snapshot with shape only", async () => {
+    installPsTable("100 1 100 100 pts/1 4200 -zsh\n101 100 abc 100 pts/1 2048 SECRET-ARG\n");
+    const { isProcessRunningInTmux } = await import("../../src/runtime-tmux.js");
+
+    const error = await isProcessRunningInTmux("intelas-c007", ["codex"]).catch((e: unknown) => e);
+
+    const message = (error as Error).message;
+    expect(message).toContain("line 2/3, 7 columns, shape N N T N T N");
+    expect(message).toContain(", trailing newline)");
+    expect(message).not.toContain("abc");
+    expect(message).not.toContain("SECRET-ARG");
+  });
+
+  it("T6: real procps row shapes parse without a diagnostic", async () => {
+    installPsTable(
+      [
+        "100 1 100 100 pts/1 4200 -zsh",
+        "102 100 100 100 pts/1 0 [codex] <defunct>",
+        "103 100 100 100 pts/1 1540 ?",
+        "104 100 100 100 pts/1 1544  ",
+        "2 0 0 -1 ? 0 [kthreadd]",
+      ].join("\n"),
+    );
+    const { probeTmuxProcessMatch } = await import("../../src/runtime-tmux.js");
+
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toEqual({
+      alive: false,
+      matchedByName: false,
+      unresponsive: false,
+    });
+  });
+
+  it.each([
+    ["empty stdout", ""],
+    ["header-only", "    PID    PPID    PGID   TPGID TT          RSS COMMAND\n"],
+  ])("T7: %s fails closed as unknown, never as an empty healthy table", async (_label, stdout) => {
+    installPsTable(stdout);
+    const { isProcessRunningInTmux, probeTmuxProcessMatch } =
+      await import("../../src/runtime-tmux.js");
+
+    await expect(isProcessRunningInTmux("intelas-c007", ["codex"])).rejects.toMatchObject({
+      name: "TmuxProbeUnknownError",
+      message: expect.stringContaining("malformed process table output (no data rows"),
+    });
+    await expect(probeTmuxProcessMatch("intelas-c007", ["codex"])).resolves.toMatchObject({
+      alive: false,
+      diagnostic: expect.stringContaining("ps failed: malformed process table output"),
+    });
   });
 });

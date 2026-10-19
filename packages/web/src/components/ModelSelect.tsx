@@ -140,14 +140,14 @@ export function ModelSelect({
       agent,
       model: value,
       modelLabel: catalog?.models.find((model) => model.id === value)?.label,
-      loading: loading || catalogAgent !== agent,
+      loading: loading || catalogAgent !== agent || (value === null && models.length > 0),
       error: error ?? catalog?.reasoningError ?? null,
       levels:
         value === null
           ? catalog?.defaultReasoningEfforts
           : catalog?.models.find((model) => model.id === value)?.reasoningEfforts,
     });
-  }, [agent, value, loading, error, catalog, catalogAgent]);
+  }, [agent, value, loading, error, catalog, catalogAgent, models]);
 
   // If the current selection is not part of the freshly loaded list, drop it.
   useEffect(() => {

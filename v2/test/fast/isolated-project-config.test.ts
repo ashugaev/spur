@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildIsolatedProjectConfig,
+  isolatedTelegramProjectBoundary,
   projectUsesCurrentRepository,
 } from "../../src/isolated-project-config.js";
 
@@ -29,6 +30,51 @@ afterEach(() => {
 });
 
 describe("isolated project config", () => {
+  it("skips env resolution for unknown selection and rejects invalid declared Telegram paths", () => {
+    const repoDir = createRepo("spur-isolated-project-boundary-");
+    cleanupPaths.push(repoDir);
+    const input = join(repoDir, "spur.yaml");
+    writeFileSync(
+      input,
+      `projects:\n  test:\n    sources: {prod: {type: telegram, token: '\${ABSENT_TELEGRAM_TOKEN}'}}\n`,
+    );
+    expect(isolatedTelegramProjectBoundary(input, "unknown")).toEqual({
+      selected: false,
+      configuredTokens: [],
+    });
+    expect(() => isolatedTelegramProjectBoundary(input, "test")).toThrow(
+      "Invalid isolated Telegram project path",
+    );
+  });
+  it("repins explicit tilde project, preserves defaults, disables nested automatic sidecars", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+    const output = buildIsolatedProjectConfig(
+      `projects:\n  api:\n    path: ~/project\n    defaultAgent: claude\n    defaultModels: {claude: sonnet}\n    sidecars:\n      isolated-daemon: {command: daemon, autoStart: true}\n      isolated-ui: {command: ui, autoStart: true}\n  other:\n    path: /tmp/other\n    sources: {prod: {type: github}}\n`,
+      repoDir,
+      "feature/current",
+      {
+        project: "api",
+        telegram: { token: "fake", chatId: -123, allowedUsers: [456], allowedChats: [-123] },
+      },
+    );
+    const parsed = parseYaml(output);
+    expect(parsed.projects.api.path).toBe(repoDir);
+    expect(parsed.projects.api.defaultBranch).toBe("feature/current");
+    expect(parsed.projects.api.defaultModels).toEqual({ claude: "sonnet" });
+    expect(parsed.projects.api.sources["tg-dev"].autoSpawn).toEqual({
+      enabled: true,
+      project: "api",
+      agent: "claude",
+      selfDestruct: { enabled: false },
+    });
+    expect(parsed.projects.api.sidecars["isolated-daemon"].autoStart).toBe(false);
+    expect(parsed.projects.api.sidecars["isolated-ui"].autoStart).toBe(false);
+    expect(parsed.projects.other.sources).toBeUndefined();
+    expect(() =>
+      buildIsolatedProjectConfig("projects: {}", repoDir, undefined, { project: "missing" }),
+    ).toThrow("Unknown isolated project");
+  });
   it("matches projects that use the current repository", () => {
     const repoDir = createRepo("spur-isolated-project-config-");
     cleanupPaths.push(repoDir);

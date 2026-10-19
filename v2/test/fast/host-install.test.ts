@@ -85,6 +85,12 @@ vi.mock("../../src/update-health.js", async () => {
     probe: probeMock,
     probeInfo: probeInfoMock,
     probeHeadroom: probeHeadroomMock,
+    // This sentinel stands in for an uninitialized default installation.
+    // Missing explicit selections are rejected by update-health's own tests.
+    resolveDaemonPortReadOnly: () =>
+      process.env["SPUR_CONFIG"] === "/nonexistent/spur-host-install-test-instance-config.yaml"
+        ? 4310
+        : actual.resolveDaemonPortReadOnly(),
   };
 });
 
@@ -2100,7 +2106,17 @@ describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
   it("reports ok:true when configured ui.port matches the web unit's actual PORT", async () => {
     const fakeHome = await writeFakeUnits(MINIMAL_UNIT_BODY, "[Service]\nEnvironment=PORT=4311\n");
     await pinInstanceConfig(
-      ["server:", "  host: 127.0.0.1", "  port: 4310", "", "ui:", "  port: 4311", ""].join("\n"),
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        "  port: 4310",
+        "",
+        "ui:",
+        "  port: 4311",
+        "mcp:",
+        "  port: 4321",
+        "",
+      ].join("\n"),
     );
     execState.systemctlAvailable = true;
     const checks = await collectHostInstallChecks(fakeHome);
@@ -2112,7 +2128,7 @@ describe("collectHostInstallChecks: E2 web-ui-port-drift", () => {
 });
 
 describe("collectHostInstallChecks: F1 corrupt instance config", () => {
-  it("surfaces instance-config-corrupt without throwing, while the daemon probe still falls back to the default port", async () => {
+  it("surfaces instance-config-corrupt without probing another instance", async () => {
     await pinInstanceConfig("server:\n  host: 127.0.0.1\nprojects: [unclosed\n");
     const checks = await collectHostInstallChecks("/tmp/spur-host-install-test-f1");
     expect(checks.find((check) => check.id === "instance-config-corrupt")).toMatchObject({
@@ -2127,9 +2143,7 @@ describe("collectHostInstallChecks: F1 corrupt instance config", () => {
     expect(checks.find((check) => check.id === "data-dir-disk-space")).toBeUndefined();
     expect(checks.find((check) => check.id === "data-dir-log-bytes")).toBeUndefined();
     expect(checks.find((check) => check.id === "web-ui-port-drift")).toBeUndefined();
-    expect(probeInfoMock).toHaveBeenCalledWith(
-      expect.objectContaining({ url: expect.stringContaining(":4310/info") }),
-    );
+    expect(probeInfoMock).not.toHaveBeenCalled();
   });
 });
 

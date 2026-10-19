@@ -24,7 +24,7 @@ Autonomous workers invoked via the `Task` tool. Source: .agents/agents/
   architect             .agents/agents/architect.md             Produce an executable spec: recon findings, change map, invariants, acceptance criteria bound to verification
   spec-critic           .agents/agents/spec-critic.md           Falsify the architect's spec before the developer builds — check cited facts, change map, bound acceptance criteria
   developer             .agents/agents/developer.md             Implement, fix-after-review, fix-after-test
-  reviewer              .agents/agents/reviewer.md              Static diff analysis plus build/lint/test gate
+  reviewer              .agents/agents/reviewer.md              Changed-code/direct-caller review and named targeted checks
   designer              .agents/agents/designer.md              UI review for visible web changes
   design-author         .agents/agents/design-author.md         Author and export a UI design before implementation (Claude Design); drive approval; hand a runtime-neutral design-spec to any coding agent
   tester                .agents/agents/tester.md                Validation gate at the cheapest crossing tier
@@ -83,6 +83,8 @@ TASK MEMORY
 
 ALWAYS-ON RULES
 
+  Follow `.agents/skills/github/references/agent-protocol.md` for product/interface approval, every agent GitHub comment/review footer, and conditional merge authority.
+
   Keep instructions lean. Only include constraints that materially change implementation.
   Think twice, write once. Prefer the shortest form that preserves correctness.
   Never modify code with scripts (`sed`, `awk`, codemods, `find -exec`, mass replace). Edit files one at a time, by hand, after reading the file's context.
@@ -100,13 +102,13 @@ ALWAYS-ON RULES
   Do not ask the same question twice in one task. Ask the smallest precise question that changes implementation.
   Absolute local filesystem paths in docs and comments are an antipattern. Use relative paths or `~/`-style placeholders.
   Never publish operator environment detail to GitHub — issue and PR titles, bodies, comments, commit messages, CI logs. Banned: IP addresses, hostnames, VM and machine names, OS usernames, internal URLs and ports, tokens, absolute home paths, names of the operator's personal skills, agents, or unrelated projects and repos. Say `the host`, `a dev box`, `a local daemon` instead. Real names stay in session artifacts and local notes. Redact before posting, never after.
-  Run full test suites in GitHub CI; consume automatic result notifications. Locally run only targeted quick checks when needed.
-  Before marking implementation complete, run the relevant package `build` command(s) and fix failures.
+  Run only named test files for changed modules/direct callers locally; GitHub CI owns full suites, package/repo build, typecheck, lint and e2e. Enforce for workers, reviewers and testers; consume automatic CI notifications.
+  Start reviewers immediately on available diff; never inspect, query or wait for CI in review lanes. Owner alone checks required green CI at authorized merge gate. Require live/browser proof only for actual runtime/UI-flow changes.
   For every code change, write or update tests at the cheapest tier that crosses the changed boundary.
   Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
   Commit messages: conventional commits for semantic-release on `main`. Format: `type(scope): subject`. `fix:` patch (`0.1.1` → `0.1.2`), `feat:` minor (`0.1.1` → `0.2.0`), `feat!:` or footer `BREAKING CHANGE:` major. `chore:`, `docs:`, `refactor:`, `test:`, `ci:` do not publish a new npm version. Squash-merge PR titles use the same prefix. No `wip` on merged commits.
-  Default close-out: push to the existing PR branch, or create a new PR and leave it open for a human to merge. Never run `gh pr merge --auto`; auto-merge is disabled repo-wide and only an admin can enable it. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
-  Query CI status or review comments only on explicit user request; Spur notifications alone do not authorize queries.
+  Default close-out: push existing PR branch or create open PR for human merge. Auto-merge stays OFF unless separate user authorization, admin configuration and activation proof satisfy agent-protocol.md. Never merge with failing CI; pre-existing failures remain your responsibility.
+  Query CI status or review comments only on explicit user request or bounded verification in a user-authorized review workflow; approval/completion wakes resume that authority, never grant it. Other Spur notifications do not authorize queries.
   Use `Spur` in code, config, docs, and CLI surfaces.
   Never hardcode a model version in source. A per-agent default model is a version-free alias (`opus`, `auto`) declared with its agent and registered in the one per-agent default map. Pin a version in config.
   Manager mode is strict. Outside `$manager`, agents can deviate from canonical gates.

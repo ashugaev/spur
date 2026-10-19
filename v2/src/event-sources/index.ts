@@ -13,6 +13,7 @@ import { sentrySourceModule } from "./sentry.js";
 import { scriptSourceModule } from "./script.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
+import { webhookSourceModule } from "./webhook.js";
 import type {
   SourceGroupController,
   SourceHandle,
@@ -21,6 +22,7 @@ import type {
   SourceProjectListItem,
   SourceSpawnSessionRequest,
   SourceSessionListItem,
+  SourceWorkbench,
 } from "./types.js";
 
 interface StartConfiguredSourcesDeps {
@@ -28,8 +30,10 @@ interface StartConfiguredSourcesDeps {
   bus: EventBus;
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
+  getSession(sessionId: string): Promise<SourceSessionListItem | null>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   listProjects?(): Promise<SourceProjectListItem[]>;
+  workbench?: SourceWorkbench;
 }
 
 /**
@@ -61,6 +65,7 @@ const SOURCE_MODULES = {
   sentry: sentrySourceModule,
   service: serviceSourceModule,
   telegram: telegramSourceModule,
+  webhook: webhookSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
 // A jira source with no `query` is consumed by the backlog subsystem only,
@@ -92,15 +97,15 @@ export async function startConfiguredSources(
   const logger = deps.logger ?? {};
   const startedSources: StartedSource[] = [];
 
-  // Resolved lazily (only when a source calls it — voice transcription
-  // today), never at startup: an isolated daemon's own web UI port is
-  // genuinely unknown at this point (see resolveWebBaseUrl in ports.ts).
-  // Cached after the first SUCCESSFUL resolution only, shared by every
-  // source module started below, so a repeat failure (isolated-ui still not
-  // reserved) keeps retrying on the next call instead of latching closed
-  // forever, while a resolved instance doesn't re-shell out on every message.
+  // Receipt-backed isolated UI can stop or change port; resolve each use.
+  // Production and legacy helper results retain successful-resolution cache.
   let cachedWebBaseUrl: string | null = null;
   const resolveWebBaseUrlCached = async (): Promise<string | null> => {
+    if (
+      process.env["SPUR_SESSION_TOOL_DIR"] &&
+      process.env["SPUR_ISOLATED_UI_ENDPOINT_FILE"] !== undefined
+    )
+      return resolveWebBaseUrl(deps.config.ui.port);
     if (cachedWebBaseUrl !== null) return cachedWebBaseUrl;
     const resolved = await resolveWebBaseUrl(deps.config.ui.port);
     if (resolved !== null) cachedWebBaseUrl = resolved;
@@ -132,6 +137,8 @@ export async function startConfiguredSources(
           config: source,
           deferInitialSync: true,
           listSessions: deps.listSessions,
+          getSession: deps.getSession,
+          ...(deps.workbench ? { workbench: deps.workbench } : {}),
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),
           emit(name: string, data?: unknown): void {

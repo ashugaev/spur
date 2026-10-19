@@ -68,7 +68,7 @@ instruction changed, it stays cut.
 
 Grep before returning:
 
-  grep -niE 'because|in order to|note that|keep in mind|it is important|might|may |could |generally|typically|usually|simply|just |very |really' <file>
+  grep -niE '\b(because|in order to|note that|keep in mind|it is important|might|may|could|generally|typically|usually|simply|just|very|really)\b' <file>
 
 
 COMPRESSION PASS, MANDATORY

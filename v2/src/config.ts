@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, totalmem } from "node:os";
+import { isIP } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { Cron } from "croner";
@@ -12,6 +13,7 @@ import {
   SENTRY_ISSUE_NEW_EVENT,
   SCRIPT_ITEM_NEW_EVENT,
   TELEGRAM_MESSAGE_EVENT,
+  WEBHOOK_RECEIVED_EVENT,
   WORK_ITEM_NEW_EVENT_NAMES,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AdmissionCapSource,
@@ -47,6 +49,7 @@ import {
   type TagDefinition,
   type TelegramAutoSpawnConfig,
   type TelegramSourceConfig,
+  type WebhookSourceConfig,
   type TriggerSpawnConfig,
   type TriggerSpawnBlockConfig,
   type TriggerConfig,
@@ -64,7 +67,8 @@ import {
   DEFAULT_USER_ACTION_LOG_RETAIN_ARCHIVES,
   DEFAULT_USER_ACTION_LOG_SHARD_HOT_BYTES,
 } from "./user-action-log.js";
-import { DEFAULT_UI_PORT } from "./ports.js";
+import { DEFAULT_MCP_PORT, DEFAULT_UI_PORT, defaultMcpPort } from "./ports.js";
+import { readInstalledInstancePath } from "./installed-instance.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { SLOT_LABEL_RE } from "./session-slots.js";
@@ -99,6 +103,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
+  mcpPort: number;
   codexHome: string;
   voiceProvider:
     | "whisper_cpp"
@@ -520,6 +525,14 @@ function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string
   return resolved.includes(MISSING_ENV_SENTINEL) ? undefined : resolved;
 }
 
+export function resolveProjectEnvValue(
+  configDir: string,
+  projectPath: string,
+  raw: string,
+): string | undefined {
+  return resolveEnvVars(raw, readProjectEnv(resolveFrom(configDir, projectPath)));
+}
+
 function resolveOptionalUrl(
   raw: string,
   label: string,
@@ -552,6 +565,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    mcpPort: DEFAULT_MCP_PORT,
     codexHome: join(homedir(), ".codex"),
     voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
@@ -675,6 +689,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   }
   if (source.type === "telegram") {
     return [TELEGRAM_MESSAGE_EVENT];
+  }
+  if (source.type === "webhook") {
+    return [WEBHOOK_RECEIVED_EVENT];
   }
   if (source.type === "jira") {
     return source.query !== undefined ? [JIRA_WORK_ITEM_NEW_EVENT] : [];
@@ -823,6 +840,27 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     provider === "github"
       ? asOptionalPositiveInteger(raw["pollDisabledRecheckMs"], `${label}.pollDisabledRecheckMs`)
       : undefined;
+  const selfMarker =
+    provider === "github" ? asOptionalString(raw["selfMarker"], `${label}.selfMarker`) : undefined;
+  if (selfMarker !== undefined && !selfMarker.includes("{session}")) {
+    throw new Error(`${label}.selfMarker must contain {session}`);
+  }
+  const signPosts =
+    provider === "github" ? asOptionalBoolean(raw["signPosts"], `${label}.signPosts`) : undefined;
+  if (signPosts === true) {
+    if (selfMarker === undefined) {
+      throw new Error(`${label}.signPosts requires ${label}.selfMarker`);
+    }
+    if (/[\r\n]/.test(selfMarker)) {
+      throw new Error(`${label}.selfMarker must be one line when signPosts is set`);
+    }
+    if (selfMarker.startsWith(">")) {
+      throw new Error(`${label}.selfMarker must not start with ">" when signPosts is set`);
+    }
+    if (selfMarker.includes("`")) {
+      throw new Error(`${label}.selfMarker must not contain a backtick when signPosts is set`);
+    }
+  }
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
@@ -833,6 +871,8 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
     ...(adaptivePoll !== undefined ? { adaptivePoll } : {}),
     ...(maxReviewBatchTargets !== undefined ? { maxReviewBatchTargets } : {}),
     ...(pollDisabledRecheckMs !== undefined ? { pollDisabledRecheckMs } : {}),
+    ...(selfMarker !== undefined ? { selfMarker } : {}),
+    ...(signPosts === true ? { signPosts } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -1144,6 +1184,56 @@ function parseTelegramSource(
   };
 }
 
+function parseWebhookSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+  projectEnv: Record<string, string>,
+): WebhookSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const allowedKeys = new Set(["type", "host", "port", "path", "secret"]);
+  const unknownKey = Object.keys(raw).find((key) => !allowedKeys.has(key));
+  if (unknownKey) {
+    throw new Error(`${label}.${unknownKey} is not supported for webhook sources`);
+  }
+
+  const host = asOptionalString(raw["host"], `${label}.host`) ?? "127.0.0.1";
+  const ipVersion = isIP(host);
+  if (ipVersion === 0 || host.includes("%")) {
+    throw new Error(`${label}.host must be an IPv4 or IPv6 literal without a zone id`);
+  }
+  const normalizedHost =
+    ipVersion === 6 ? new URL(`http://[${host}]/`).hostname.slice(1, -1) : host;
+
+  const path = asString(raw["path"], `${label}.path`);
+  const pathBytes = Buffer.byteLength(path);
+  if (
+    pathBytes < 1 ||
+    pathBytes > 2_048 ||
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    /[^\x21-\x7e]|[?#]/.test(path)
+  ) {
+    throw new Error(
+      `${label}.path must be 1 through 2048 visible ASCII bytes, start with one "/", and contain no "?" or "#"`,
+    );
+  }
+
+  const secret = resolveRequiredEnvString(raw["secret"], `${label}.secret`, projectEnv);
+  const secretBytes = Buffer.byteLength(secret);
+  if (secretBytes < 16 || secretBytes > 512 || /[^\x21-\x7e]/.test(secret)) {
+    throw new Error(`${label}.secret must be 16 through 512 visible ASCII bytes`);
+  }
+
+  return {
+    type: "webhook",
+    host: normalizedHost,
+    port: asPortNumber(raw["port"], `${label}.port`),
+    path,
+    secret,
+  };
+}
+
 function parseSource(
   projectId: string,
   sourceId: string,
@@ -1181,6 +1271,9 @@ function parseSource(
   if (type === "telegram") {
     return parseTelegramSource(projectId, sourceId, raw, projectEnv);
   }
+  if (type === "webhook") {
+    return parseWebhookSource(projectId, sourceId, raw, projectEnv);
+  }
   if (type === "github-ci") {
     return parseGitHubCiSource(projectId, sourceId, raw);
   }
@@ -1201,6 +1294,93 @@ function validateTelegramBotTokens(projects: Record<string, ProjectConfig>): voi
         );
       }
       owners.set(source.token, owner);
+    }
+  }
+}
+
+function webhookBindLabel(host: string, port: number): string {
+  return `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+}
+
+function normalizeBindHost(host: string): string {
+  if (isIP(host) !== 6 || host.includes("%")) return host;
+  return new URL(`http://[${host}]/`).hostname.slice(1, -1);
+}
+
+function ipv4MappedHost(host: string): string | undefined {
+  const match = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+  if (!match) return undefined;
+  const high = Number.parseInt(match[1] ?? "", 16);
+  const low = Number.parseInt(match[2] ?? "", 16);
+  if (high > 0xffff || low > 0xffff) return undefined;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
+}
+
+function overlapBindHost(host: string): { host: string; version: number } {
+  const normalized = normalizeBindHost(host);
+  const mapped = ipv4MappedHost(normalized);
+  if (mapped !== undefined) return { host: mapped, version: 4 };
+  return { host: normalized, version: isIP(normalized) };
+}
+
+function bindHostsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = overlapBindHost(left);
+  const normalizedRight = overlapBindHost(right);
+  if (normalizedLeft.version === 0 || normalizedRight.version === 0) {
+    return true;
+  }
+  if (
+    (normalizedLeft.host === "::" && normalizedRight.version === 4) ||
+    (normalizedRight.host === "::" && normalizedLeft.version === 4)
+  ) {
+    return true;
+  }
+  if (normalizedLeft.version !== normalizedRight.version) return false;
+  return (
+    normalizedLeft.host === normalizedRight.host ||
+    normalizedLeft.host === "0.0.0.0" ||
+    normalizedRight.host === "0.0.0.0" ||
+    normalizedLeft.host === "::" ||
+    normalizedRight.host === "::"
+  );
+}
+
+export function validateWebhookSourceBindings(
+  projects: Record<string, ProjectConfig>,
+  daemonBind?: { host: string; port: number },
+  uiBind?: { host: string; port: number },
+): void {
+  const existingBinds: Array<{ host: string; port: number; owner: string }> = [];
+  for (const [projectId, project] of Object.entries(projects)) {
+    for (const [sourceId, source] of Object.entries(project.sources)) {
+      if (source.type !== "webhook") continue;
+      const owner = `projects.${projectId}.sources.${sourceId}`;
+      const endpoint = webhookBindLabel(source.host, source.port);
+      if (
+        daemonBind !== undefined &&
+        source.port === daemonBind.port &&
+        bindHostsOverlap(source.host, daemonBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps server bind ${webhookBindLabel(normalizeBindHost(daemonBind.host), daemonBind.port)}`,
+        );
+      }
+      if (
+        uiBind !== undefined &&
+        source.port === uiBind.port &&
+        bindHostsOverlap(source.host, uiBind.host)
+      ) {
+        throw new Error(
+          `${owner} webhook bind ${endpoint} overlaps ui bind ${webhookBindLabel(normalizeBindHost(uiBind.host), uiBind.port)}`,
+        );
+      }
+      const existing = existingBinds.find(
+        (bind) => bind.port === source.port && bindHostsOverlap(bind.host, source.host),
+      );
+      if (existing) {
+        throw new Error(`${owner} duplicates webhook bind ${endpoint} owned by ${existing.owner}`);
+      }
+      existingBinds.push({ host: source.host, port: source.port, owner });
     }
   }
 }
@@ -1585,6 +1765,9 @@ function parseTrigger(
     if (spawnDeskGroup !== undefined) {
       throw new Error(`${label}.spawnDeskGroup is only supported on spawn triggers`);
     }
+    if (sourceConfig.type === "webhook") {
+      throw new Error(`${label}.send is not supported for webhook sources; use spawn`);
+    }
     return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
@@ -1704,6 +1887,22 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
     sources[sourceId] = parseSource(projectId, sourceId, sourceValue, projectEnv, path);
+  }
+  // Every github source polls every session of the project and filters with its own
+  // selfMarker, so a signing source's marker must be the one all marker sources match.
+  for (const [signerId, signer] of Object.entries(sources)) {
+    if (signer.type !== "github" || signer.signPosts !== true) continue;
+    for (const [otherId, other] of Object.entries(sources)) {
+      if (
+        other.type === "github" &&
+        other.selfMarker !== undefined &&
+        other.selfMarker !== signer.selfMarker
+      ) {
+        throw new Error(
+          `projects.${projectId}.sources.${otherId}.selfMarker must match projects.${projectId}.sources.${signerId}.selfMarker because ${signerId} sets signPosts`,
+        );
+      }
+    }
   }
   const backlogRaw = raw["backlog"] ? asObject(raw["backlog"], `${label}.backlog`) : {};
   const backlog: Record<string, BacklogConfig> = {};
@@ -2211,6 +2410,57 @@ function parseAdmission(value: unknown, mode: ConfigMode): AdmissionConfig {
   };
 }
 
+export type InstanceConnectionConfig = Pick<
+  AppConfig,
+  "configPath" | "server" | "ui" | "mcp" | "dataDir"
+>;
+
+function parseConnectionFields(
+  root: Record<string, unknown>,
+  configPath: string,
+  mode: ConfigMode,
+  defaults: ConfigDefaults,
+): InstanceConnectionConfig {
+  const server = root["server"] ? asObject(root["server"], "server") : {};
+  const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const mcp = mode === "instance" && root["mcp"] ? asObject(root["mcp"], "mcp") : {};
+  const serverHost =
+    mode === "instance"
+      ? (asOptionalString(server["host"], "server.host") ?? defaults.serverHost)
+      : defaults.serverHost;
+  const serverPort =
+    mode === "instance"
+      ? (asOptionalNumber(server["port"], "server.port") ?? defaults.serverPort)
+      : defaults.serverPort;
+  const uiPort =
+    mode === "instance"
+      ? (asOptionalNumber(ui["port"], "ui.port") ?? defaults.uiPort)
+      : defaults.uiPort;
+  const mcpPort =
+    mode === "instance"
+      ? (asOptionalNumber(mcp["port"], "mcp.port") ?? defaultMcpPort(serverPort, uiPort))
+      : defaults.mcpPort;
+  if (!Number.isInteger(mcpPort) || mcpPort < 1 || mcpPort > 65535) {
+    throw new Error("mcp.port must be an integer between 1 and 65535");
+  }
+  if (mcpPort === serverPort || mcpPort === uiPort) {
+    throw new Error("mcp.port must differ from server.port and ui.port");
+  }
+  return {
+    configPath,
+    server: { host: serverHost, port: serverPort },
+    ui: { port: uiPort },
+    mcp: { port: mcpPort },
+    dataDir:
+      mode === "instance"
+        ? resolveFrom(
+            dirname(configPath),
+            asOptionalString(root["dataDir"], "dataDir") ?? defaults.dataDir,
+          )
+        : defaults.dataDir,
+  };
+}
+
 function parseConfigFile(
   configPath: string,
   mode: ConfigMode,
@@ -2221,9 +2471,7 @@ function parseConfigFile(
   const root = asObject(raw, "config");
 
   const resolvedDefaults = defaults ?? defaultConfigDefaults(configDir);
-  const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
-  const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
   const models = mode === "instance" && root["models"] ? asObject(root["models"], "models") : {};
   const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const eventLog = root["eventLog"] ? asObject(root["eventLog"], "eventLog") : {};
@@ -2253,24 +2501,22 @@ function parseConfigFile(
     normalizedProjects[projectId] = parsedProject;
   }
   validateTelegramBotTokens(normalizedProjects);
+  const connection = parseConnectionFields(root, configPath, mode, resolvedDefaults);
+  const {
+    server: { host: serverHost, port: serverPort },
+    ui: { port: uiPort },
+    dataDir,
+  } = connection;
+  validateWebhookSourceBindings(
+    normalizedProjects,
+    { host: serverHost, port: serverPort },
+    { host: "127.0.0.1", port: uiPort },
+  );
 
   const tags = parseTags(root["tags"]);
 
   const projectsRootRaw =
     mode === "instance" ? asOptionalString(root["projectsRoot"], "projectsRoot") : undefined;
-
-  const serverPort =
-    mode === "instance"
-      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
-      : resolvedDefaults.serverPort;
-
-  const dataDir =
-    mode === "instance"
-      ? resolveFrom(
-          configDir,
-          asOptionalString(root["dataDir"], "dataDir") ?? resolvedDefaults.dataDir,
-        )
-      : resolvedDefaults.dataDir;
 
   const projectsRoot =
     projectsRootRaw !== undefined
@@ -2278,15 +2524,7 @@ function parseConfigFile(
       : join(dataDir, "projects");
 
   return {
-    configPath,
-    server: {
-      host:
-        mode === "instance"
-          ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
-          : resolvedDefaults.serverHost,
-      port: serverPort,
-    },
-    dataDir,
+    ...connection,
     worktreeDir:
       mode === "instance"
         ? resolveFrom(
@@ -2305,12 +2543,6 @@ function parseConfigFile(
           ? (asOptionalString(tmux["socketName"], "tmux.socketName") ??
             defaultTmuxSocketName(serverPort))
           : resolvedDefaults.tmuxSocketName,
-    },
-    ui: {
-      port:
-        mode === "instance"
-          ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
-          : resolvedDefaults.uiPort,
     },
     models: {
       codexHome:
@@ -2519,7 +2751,8 @@ export function defaultVoiceModelPath(): string {
 }
 
 export function resolveInstanceConfigPath(input?: string): string {
-  const candidate = input?.trim() || process.env["SPUR_CONFIG"]?.trim();
+  const candidate =
+    input?.trim() || process.env["SPUR_CONFIG"]?.trim() || readInstalledInstancePath();
   return candidate
     ? resolveFrom(process.cwd(), candidate)
     : resolveFrom(process.cwd(), DEFAULT_INSTANCE_CONFIG_PATH);
@@ -2647,10 +2880,10 @@ export function ensureInstanceConfig(input?: string): { configPath: string; init
   return { configPath, initialized: true };
 }
 
-export type InstanceConfigReadResult =
+export type InstanceConfigReadResult<T = AppConfig> =
   | { status: "absent" }
   | { status: "invalid"; error: string }
-  | { status: "ok"; config: AppConfig };
+  | { status: "ok"; config: T };
 
 // Read-only counterpart to `loadConfig`/`ensureInstanceConfig`: never
 // bootstrap-writes `~/.spur/config.yaml` when it is missing (that write is a
@@ -2659,11 +2892,36 @@ export type InstanceConfigReadResult =
 // real, corrupt instance config sitting on disk" (an error) without ever
 // creating the file as a side effect of merely checking it.
 export function loadInstanceConfigReadOnly(input?: string): InstanceConfigReadResult {
-  if (!instanceConfigExists(input)) {
-    return { status: "absent" };
-  }
+  return readInstanceConfig(input, (path) => parseConfigFile(path, "instance"));
+}
+
+export function loadInstanceConnectionConfigReadOnly(
+  input?: string,
+): InstanceConfigReadResult<InstanceConnectionConfig> {
+  return readInstanceConfig(input, (path) => {
+    const content = readFileSync(path, "utf8");
+    let raw: unknown;
+    try {
+      raw = parseYaml(content);
+    } catch {
+      throw new Error("Instance configuration YAML is invalid");
+    }
+    return parseConnectionFields(
+      asObject(raw, "config"),
+      path,
+      "instance",
+      defaultConfigDefaults(dirname(path)),
+    );
+  });
+}
+
+function readInstanceConfig<T>(
+  input: string | undefined,
+  parse: (path: string) => T,
+): InstanceConfigReadResult<T> {
   try {
-    return { status: "ok", config: parseConfigFile(resolveInstanceConfigPath(input), "instance") };
+    if (!instanceConfigExists(input)) return { status: "absent" };
+    return { status: "ok", config: parse(resolveInstanceConfigPath(input)) };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
   }
@@ -2711,6 +2969,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          mcpPort: defaults.mcp.port,
           codexHome: defaults.models.codexHome,
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,

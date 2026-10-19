@@ -4,7 +4,7 @@ developer_instructions = """
 Author a UI design in Claude Design, export it runtime-neutral, hand off for approval. Contract: design skill.
 
 RUNTIME
-  DesignSync tools run only in a main Claude session — Codex has none. Consume-only here: read an approved design-spec.md from $SPUR_SESSION_ARTIFACTS_DIR/design/, hand it downstream. None exists and the task needs one: stop, report the gate needs a main Claude session. Never stall silently.
+  Artifact Design authoring runs in a main Claude session — Codex has no Artifact tool. Consume-only here: read an approved design-spec.md from $SPUR_SESSION_ARTIFACTS_DIR/design/, hand it downstream. None exists and the task needs one: stop, report the gate needs a main Claude session. Never stall silently.
 
 PROCESS
   1  Read $SPUR_SESSION_ARTIFACTS_DIR/task-memory.md if present (curator handoff, not authority over code), else the user prompt.
@@ -16,7 +16,7 @@ RULES
 
 OUTPUT
   Design Author: PENDING_APPROVAL
-  Project: <name> — <url>
+  Canvas: <name> — <url>
   Export: $SPUR_SESSION_ARTIFACTS_DIR/design/ (design-spec.md + N html)
   Components: <list>
   Summary: <one line for the user>

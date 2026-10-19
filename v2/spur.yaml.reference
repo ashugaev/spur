@@ -15,7 +15,7 @@ projects:
     defaultAgent: claude
     defaultModels:
       claude: opus
-      codex: gpt-5-codex
+      codex: gpt-6.1-sol
       cursor: auto
     reasoningEffort:
       claude: medium
@@ -86,6 +86,11 @@ projects:
         allowedChats:
           - -1000000000000
         chatId: -1000000000000
+      incoming:
+        type: webhook
+        port: 8456
+        path: /events
+        secret: "example-webhook-secret"
     triggers:
       nightly-sweep:
         source: nightly
@@ -112,3 +117,8 @@ projects:
         event: service:crashed
         spawn:
           prompt: "The reference-project service crashed. Investigate the logs and fix the cause."
+      webhook-event:
+        source: incoming
+        event: webhook:received
+        spawn:
+          prompt: "Handle webhook body {{body}} received at {{receivedAt}}."

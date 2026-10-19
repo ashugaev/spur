@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -33,9 +34,41 @@ import {
   waitForOpenCodeLaunchMessage,
   parseOpenCodeLatestUserMessage,
   withOpenCodeLaunchIdentityLock,
+  assertOpenCodeCompatibility,
 } from "../../src/agents/opencode.js";
 
 describe("OpenCode adapter", () => {
+  it("kills and reaps a TERM-resistant compatibility probe within the restore drain budget", async ({
+    onTestFinished,
+  }) => {
+    const directory = await mkdtemp(join(tmpdir(), "spur-opencode-version-"));
+    const executable = fileURLToPath(
+      new URL("./fixtures/term-resistant-opencode.mjs", import.meta.url),
+    );
+    const pidFile = join(directory, "pid");
+    onTestFinished(async () => {
+      const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    });
+    vi.stubEnv("SPUR_OPENCODE_BIN", executable);
+    vi.stubEnv("SPUR_TEST_OPENCODE_PID", pidFile);
+    const startedAt = Date.now();
+    await expect(assertOpenCodeCompatibility()).rejects.toMatchObject({
+      cause: { killed: true, signal: "SIGKILL" },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(15_000);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10_000);
+
   it("combines selected variant with MCP and permissions without replacing native selected options", () => {
     const config = JSON.parse(
       buildOpenCodeConfig([{ server: "tools", url: "http://localhost/mcp" }], true, {
@@ -1087,6 +1120,48 @@ describe("OpenCode adapter", () => {
         expect((await readOpenCodeState("ses_1"))?.state).toBe("working");
       } finally {
         database.close();
+        await rm(dataHome, { recursive: true, force: true });
+      }
+    });
+
+    it("takes message identity from the id column for token usage, embedded id wins", async () => {
+      const dataHome = await mkdtemp(join(tmpdir(), "spur-opencode-db-"));
+      await mkdir(join(dataHome, "opencode"), { recursive: true });
+      const database = new DatabaseSync(join(dataHome, "opencode", "opencode.db"));
+      database.exec(
+        "CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL)",
+      );
+      const insert = database.prepare("INSERT INTO message VALUES (?, ?, ?, 0, ?)");
+      const assistant = (tokens: { input: number; output: number }): string =>
+        JSON.stringify({
+          role: "assistant",
+          time: { completed: 1 },
+          tokens: { ...tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+        });
+      // Native shape: no id inside data.
+      insert.run("msg_a", "ses_1", 100, assistant({ input: 10, output: 5 }));
+      // Embedded id wins over the column: rows with different column ids but
+      // the same embedded id count once.
+      const embedded = (tokens: { input: number; output: number }): string =>
+        JSON.stringify({
+          id: "msg_embedded",
+          role: "assistant",
+          time: { completed: 2 },
+          tokens: { ...tokens, reasoning: 0, cache: { read: 0, write: 0 } },
+        });
+      insert.run("msg_b", "ses_1", 200, embedded({ input: 7, output: 3 }));
+      insert.run("msg_c", "ses_1", 300, embedded({ input: 100, output: 50 }));
+      database.close();
+      vi.stubEnv("XDG_DATA_HOME", dataHome);
+      try {
+        const result = await readOpenCodeStructuredState("ses_1");
+        expect(result.state).toMatchObject({ state: "waiting", reason: "assistant completed" });
+        expect(result.tokenUsage).toMatchObject({
+          inputTokens: 17,
+          outputTokens: 8,
+          totalTokens: 25,
+        });
+      } finally {
         await rm(dataHome, { recursive: true, force: true });
       }
     });

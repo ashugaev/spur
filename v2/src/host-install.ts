@@ -60,6 +60,10 @@ import {
   probe,
   probeHeadroom,
   probeInfo,
+  probeMcpIdentity,
+  makeTargets,
+  requiredServices,
+  SERVICE_UNITS,
   readWebPort,
   resolveDaemonPortReadOnly,
   type ProbeReason,
@@ -675,7 +679,11 @@ function extractExecStartJsTarget(contents: string, home: string): string | unde
   let target: string | undefined;
   for (const line of contents.split("\n")) {
     const match = /^ExecStart=(.+)$/.exec(line.trim());
-    const token = match?.[1]?.split(/\s+/).find((part) => part.endsWith(".js"));
+    let command = match?.[1];
+    if (command?.startsWith("/usr/bin/env ")) {
+      command = /^\/usr\/bin\/env "SPUR_CONFIG=(?:[^"\\]|\\.)*" (.+)$/.exec(command)?.[1];
+    }
+    const token = command?.split(/\s+/).find((part) => part.endsWith(".js"));
     if (token) target = token;
   }
   return target?.replaceAll("%h", home);
@@ -1546,6 +1554,34 @@ export async function collectHostInstallChecks(
 
   const daemonHost =
     instanceConfig.status === "ok" ? instanceConfig.config.server.host : "127.0.0.1";
+  if (instanceConfig.status === "ok" && unitsInstalled) {
+    const targets = makeTargets({
+      daemon: instanceConfig.config.server.port,
+      web: instanceConfig.config.ui.port,
+      mcp: instanceConfig.config.mcp.port,
+    });
+    for (const id of requiredServices(scope).filter((id) => id === "mcp" || id === "tunnel")) {
+      const unit = SERVICE_UNITS[id];
+      const installed = existsSync(join(scope.unitDir, unit));
+      const active = installed && isActive(scope.ctl, unit);
+      const result = active ? await probeMcpIdentity(targets[id], scope) : { ok: false };
+      checks.push({
+        id: `spur-${id}`,
+        ok: result.ok,
+        severity: "error",
+        detail: !installed
+          ? `${unit} missing`
+          : !active
+            ? describeInactiveUnit(scope.ctl, unit)
+            : result.ok
+              ? `${unit} initialized and ready`
+              : `${unit} identity or readiness failed`,
+        fix: installed ? `${scope.restartCmd} ${unit}` : "spur reinit",
+      });
+    }
+  }
+  // An absent config provides no selected runtime target for health probes.
+  if (instanceConfig.status !== "ok") return checks;
   const health = await checkServiceHealth(
     scope,
     daemonActive,
@@ -1710,7 +1746,13 @@ export function resolveNpmInitScript(cliEntrypoint: string): string {
 
 export function runNpmInit(
   cliEntrypoint: string,
-  options: { noStart?: boolean; exposeWeb?: boolean; webPort?: string; tailscale?: boolean },
+  options: {
+    noStart?: boolean;
+    exposeWeb?: boolean;
+    webPort?: string;
+    tailscale?: boolean;
+    configPath?: string;
+  },
 ): void {
   const script = resolveNpmInitScript(cliEntrypoint);
   if (!existsSync(script)) {
@@ -1723,6 +1765,7 @@ export function runNpmInit(
   ensureNpmPinFile();
   healNpmrcPrefixLine();
   const args: string[] = [];
+  if (options.configPath) args.push("--config", options.configPath);
   if (options.noStart) {
     args.push("--no-start");
   }

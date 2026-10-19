@@ -5,7 +5,7 @@ A mobile-friendly dashboard for software engineers that brings all your AI agent
 Local daemon + CLI orchestrator for AI coding agents.
 
 - Spawns agents (`claude` / `codex` / `cursor` / `opencode`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
-- Watches sources (`cron`, `github`, `gitlab`, `sentry`, `service`, `telegram`) and routes events to triggers
+- Watches sources (`cron`, `github`, `gitlab`, `sentry`, `service`, `telegram`, `webhook`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
 ## Install
@@ -25,6 +25,8 @@ By hand: [docs/install-from-npm.md](docs/install-from-npm.md) (npm) · [docs/ins
 ## Docs
 
 - [docs/commands.md](docs/commands.md) — CLI reference (spawn, wake, list, service, sidecars)
+- [docs/mcp.md](docs/mcp.md) — full-access MCP over stdio, SSH or HTTP; optional OpenAI tunnel
+- [docs/ci-admission.md](docs/ci-admission.md) — CI runner admission classes and limits
 - [docs/daemon-api.md](docs/daemon-api.md) — daemon HTTP routes
 - [docs/configuration.md](docs/configuration.md) — config layers, fields, sources/triggers, events
 - [docs/dashboard-search.md](docs/dashboard-search.md) — dashboard search fields and desk behavior

@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReasoningSelect } from "@/components/ReasoningSelect";
 import { ModelReasoningField } from "@/components/ModelReasoningField";
-import type { ReasoningIntent } from "@/lib/reasoning-effort";
+import { serializeReasoningIntent, type ReasoningIntent } from "@/lib/reasoning-effort";
+import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
+import type { AgentModelsResponse } from "@/lib/types";
 
 afterEach(() => {
   cleanup();
@@ -66,6 +68,99 @@ describe("ReasoningSelect", () => {
 });
 
 describe("model capability revalidation", () => {
+  it.each([
+    { order: "catalog-first", supported: false },
+    { order: "defaults-first", supported: false },
+    { order: "catalog-first", supported: true },
+    { order: "defaults-first", supported: true },
+  ])(
+    "initial carry waits for preselection: $order, supported=$supported",
+    async ({ order, supported }) => {
+      let releaseCatalog!: (response: Response) => void;
+      let releaseDefaults!: (response: Response) => void;
+      const catalogResponse = new Promise<Response>((resolve) => {
+        releaseCatalog = resolve;
+      });
+      const defaultsResponse = new Promise<Response>((resolve) => {
+        releaseDefaults = resolve;
+      });
+      const fetch = vi.fn((url: string) =>
+        url.startsWith("/api/models?") ? catalogResponse : defaultsResponse,
+      );
+      vi.stubGlobal("fetch", fetch);
+      const catalog: AgentModelsResponse = {
+        models: [
+          {
+            id: "reasoning",
+            label: "Reasoning model",
+            reasoningEfforts: supported ? ["max"] : ["low", "medium", "high"],
+          },
+        ],
+        defaultReasoningEfforts: ["low", "medium", "high"],
+      };
+      const changed = vi.fn();
+      function InitialCarryComposer() {
+        const [model, setModel] = useState<string | null>(null);
+        const [intent, setIntent] = useState<ReasoningIntent>({ kind: "carried", level: "max" });
+        const defaults = useResolvedSpawnDefaults("project", "claude");
+        return (
+          <>
+            <ModelReasoningField
+              agent="claude"
+              value={model}
+              onChange={setModel}
+              carry={{ agent: "claude", model: "reasoning" }}
+              spawnDefaults={defaults}
+              onValidityChange={() => {}}
+              lifecycle
+              reasoningLabel="Respawn reasoning"
+              reasoningIntent={intent}
+              onReasoningChange={(next) => {
+                changed(model, next);
+                setIntent(next);
+              }}
+            />
+            <output data-testid="selected-model">{model ?? "unresolved"}</output>
+            <output data-testid="serialized-request">
+              {JSON.stringify({ reasoningEffort: serializeReasoningIntent(intent) })}
+            </output>
+          </>
+        );
+      }
+      render(<InitialCarryComposer />);
+      const completeCatalog = () => releaseCatalog(new Response(JSON.stringify(catalog)));
+      const completeDefaults = () =>
+        releaseDefaults(new Response(JSON.stringify({ model: "reasoning", worktree: false })));
+      expect(screen.getByLabelText("Resolving reasoning")).toBeTruthy();
+      await act(async () => {
+        (order === "catalog-first" ? completeCatalog : completeDefaults)();
+      });
+      expect(screen.getByTestId("selected-model").textContent).toBe("unresolved");
+      expect(changed).not.toHaveBeenCalled();
+      expect(screen.queryByText(/not offered/)).toBeNull();
+      expect(screen.getByLabelText("Resolving reasoning")).toBeTruthy();
+      await act(async () => {
+        (order === "catalog-first" ? completeDefaults : completeCatalog)();
+      });
+      expect(screen.getByTestId("selected-model").textContent).toBe("reasoning");
+      expect(changed.mock.calls.filter(([model]) => model === null)).toEqual([]);
+      if (supported) {
+        expect(changed).not.toHaveBeenCalled();
+        expect(screen.queryByText(/not offered/)).toBeNull();
+        expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("max");
+        expect(screen.getByTestId("serialized-request").textContent).toBe("{}");
+      } else {
+        expect(changed).toHaveBeenCalledExactlyOnceWith("reasoning", { kind: "clear" });
+        expect(screen.getByText("Max not offered by Reasoning model, using Default")).toBeTruthy();
+        expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe("default");
+        expect(screen.getByTestId("serialized-request").textContent).toBe(
+          '{"reasoningEffort":null}',
+        );
+      }
+      expect(fetch.mock.calls.filter(([url]) => url.startsWith("/api/models?"))).toHaveLength(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
   it("preserves untouched carried intent after initial preselection on capability error, but blocks changed model", async () => {
     vi.stubGlobal(
       "fetch",
