@@ -307,20 +307,67 @@ function strictSessionMeta(line: unknown): { cwd: string; threadId: string } | n
   return { cwd, threadId };
 }
 
+async function* readRolloutLines(
+  filePath: string,
+  start: number,
+  range?: { handle: FileHandle; end: number },
+): AsyncGenerator<string> {
+  if (range) {
+    let position = start;
+    let pending: Buffer = Buffer.alloc(0);
+    while (position < range.end) {
+      const chunk = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, range.end - position));
+      const { bytesRead } = await range.handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) throw new Error("Incomplete original rollout read");
+      position += bytesRead;
+      const combined = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+      let offset = 0;
+      for (
+        let newline = combined.indexOf(10);
+        newline >= 0;
+        newline = combined.indexOf(10, offset)
+      ) {
+        yield combined.subarray(offset, newline).toString("utf8");
+        offset = newline + 1;
+      }
+      pending = combined.subarray(offset);
+    }
+    if (pending.length) throw new Error("Incomplete original rollout line");
+    return;
+  }
+  const input = createReadStream(filePath, { encoding: "utf-8", start });
+  let failure: Error | undefined;
+  // Keep listeners through destroy: stream errors can arrive after iteration ends.
+  input.on("error", (error: Error) => {
+    failure = error;
+    reader.close();
+  });
+  const reader = createInterface({ input, crlfDelay: Infinity });
+  reader.on("error", (error: Error) => {
+    failure = error;
+    reader.close();
+  });
+  try {
+    for await (const line of reader) {
+      if (failure) throw failure;
+      yield line;
+    }
+    if (failure) throw failure;
+  } finally {
+    reader.close();
+    input.destroy();
+  }
+}
+
 async function readSessionMeta(
   filePath: string,
-  originalRange?: { fd: number; end: number },
+  originalRange?: { handle: FileHandle; end: number },
 ): Promise<{ cwd: string; threadId: string | null; isSubagent: boolean } | null> {
   try {
-    const input = createReadStream(filePath, {
-      encoding: "utf-8",
-      ...(originalRange ? { ...originalRange, start: 0, autoClose: false } : {}),
-    });
-    const reader = createInterface({ input, crlfDelay: Infinity });
     let linesRead = 0;
     let threadId: string | null = null;
     let originalCwd: string | null = null;
-    for await (const line of reader) {
+    for await (const line of readRolloutLines(filePath, 0, originalRange)) {
       if (!originalRange && linesRead >= 10) {
         break;
       }
@@ -965,7 +1012,7 @@ export async function scanCodexRolloutForMessage(
         const ending = Buffer.alloc(1);
         await original.read(ending, 0, 1, observed.size - 1);
         if (ending[0] !== 10) continue;
-        const meta = await readSessionMeta(filePath, { fd: original.fd, end: offset - 1 });
+        const meta = await readSessionMeta(filePath, { handle: original, end: offset });
         if (
           !meta ||
           meta.threadId !== strict.nativeSessionId ||
@@ -976,29 +1023,21 @@ export async function scanCodexRolloutForMessage(
       }
       let found = false;
       if (!observed || observed.size > offset) {
-        const input = createReadStream(filePath, {
-          encoding: "utf-8",
-          start: offset,
-          ...(original && observed
-            ? { fd: original.fd, end: observed.size - 1, autoClose: false }
-            : {}),
-        });
-        const reader = createInterface({ input, crlfDelay: Infinity });
-        try {
-          for await (const rawLine of reader) {
-            const trimmedLine = rawLine.trim();
-            if (!trimmedLine) continue;
-            const extracted = extractUserTextFromLine(trimmedLine, strict);
-            if (
-              extracted !== null &&
-              (strict ? extracted === messageText : extracted.trim() === trimmedTarget)
-            ) {
-              found = true;
-              if (!strict) break;
-            }
+        for await (const rawLine of readRolloutLines(
+          filePath,
+          offset,
+          original && observed ? { handle: original, end: observed.size } : undefined,
+        )) {
+          const trimmedLine = rawLine.trim();
+          if (!trimmedLine) continue;
+          const extracted = extractUserTextFromLine(trimmedLine, strict);
+          if (
+            extracted !== null &&
+            (strict ? extracted === messageText : extracted.trim() === trimmedTarget)
+          ) {
+            found = true;
+            if (!strict) break;
           }
-        } finally {
-          reader.close();
         }
       }
       if (strict && !found && baseline.size === 1 && files.length === 1) {
@@ -1026,7 +1065,9 @@ export async function scanCodexRolloutForMessage(
     } catch {
       // Ignore unreadable files.
     } finally {
-      await original?.close();
+      await original?.close().catch(() => {
+        // Already closed or inaccessible.
+      });
     }
   }
   return {
