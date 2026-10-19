@@ -308,6 +308,7 @@ export class McpGateway {
       cursor?: string | undefined;
       limit?: number | undefined;
       maxBytes?: number | undefined;
+      source?: "events" | "runtime" | undefined;
     },
     signal: AbortSignal,
   ): Promise<Record<string, unknown>> {

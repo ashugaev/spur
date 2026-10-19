@@ -11,7 +11,7 @@ import {
 import { parseAgentName } from "./agents/index.js";
 import { AgentReasoningEffortError, listAgentModelCatalog } from "./agents/models.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
-import { AutoPingError, AutoPingService } from "./auto-ping.js";
+import { AutoPingError, AutoPingService, redactAutoPingHandles } from "./auto-ping.js";
 import { assertConfigMayUseProdSlot } from "./config.js";
 import { projectConversationPage } from "./conversation-page.js";
 import type { ProcSnapshot } from "./sidecars/reap.js";
@@ -25,6 +25,7 @@ import { startDeploySwitch } from "./deploy-switch.js";
 import { EventBus } from "./event-bus.js";
 import {
   DEFAULT_EVENT_LOG_CONFIG,
+  appendEventLog,
   flushEventLogCollapse,
   logSpurEvent,
   setEventLogConfig,
@@ -808,16 +809,32 @@ export async function startServer(
   testOverrides?: { sidecarSnapshot?: () => Promise<ProcSnapshot> },
 ): Promise<StartedServer> {
   const ghPathState = await initializeGhPath();
-  if (ghPathState.status === "unavailable") {
-    (logger.warn ?? writeStderr)(
-      `${ghPathState.message}; GitHub automation disabled until gh is available`,
-    );
-  }
   assertConfigMayUseProdSlot(configPath);
   const service = new SessionService(configPath, undefined, {
     deferBackgroundLoops: true,
     ...(testOverrides?.sidecarSnapshot ? { sidecarSnapshot: testOverrides.sidecarSnapshot } : {}),
   });
+  const runtimeLog =
+    (level: "info" | "warn", output: ((message: string) => void) | undefined) =>
+    (message: string): void => {
+      try {
+        appendEventLog(service.config.dataDir, {
+          event: "daemon.diagnostic",
+          level,
+          message: redactAutoPingHandles(message),
+        });
+      } catch {
+        // Retention cannot block existing logger output.
+      }
+      output?.(message);
+    };
+  logger = {
+    info: runtimeLog("info", logger.info),
+    warn: runtimeLog("warn", logger.warn ?? writeStderr),
+  };
+  if (ghPathState.status === "unavailable") {
+    logger.warn?.(`${ghPathState.message}; GitHub automation disabled until gh is available`);
+  }
   const autoPing = new AutoPingService(service.config.dataDir);
   let ready = false;
   const switchStatePath = deploySwitchStatePath(service.config.dataDir);
@@ -2556,7 +2573,7 @@ export async function startServer(
       message,
       details: memoryCeilingWarning,
     });
-    process.stderr.write(`${message}\n`);
+    runtimeLog("warn", writeStderr)(message);
   }
 
   ready = true;

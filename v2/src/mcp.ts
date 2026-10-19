@@ -174,11 +174,12 @@ export function createMcpWrapper(gateway: McpGateway): McpServer {
   );
   register(
     "read_daemon_logs",
-    "Read bounded daemon/http events from the fixed live daemon journal, excluding session/service/sidecar events. Forward nextCursor; rotation requires an explicit fresh read. Archives and stdout/journald are excluded; oversized records report truncation.",
+    "Read bounded daemon logs: source=runtime selects captured daemon logger/server diagnostics; events selects structured daemon/http events. Session/service/sidecar logs, prebootstrap raw stdio and external journals are excluded. Forward nextCursor; rotation requires a fresh read; oversized records report truncation.",
     {
       cursor: z.string().max(1024).optional(),
       limit: z.number().int().min(1).max(100).optional(),
       maxBytes: z.number().int().min(1024).max(16384).optional(),
+      source: z.enum(["events", "runtime"]).optional(),
     },
     false,
     (input, signal) => gateway.daemonLogs(input, signal),

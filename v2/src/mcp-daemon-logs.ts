@@ -14,6 +14,7 @@ const cursorSchema = z
     discarding: z.boolean(),
     prefixLength: z.number().int().min(0).max(64),
     prefixHash: z.string(),
+    source: z.enum(["events", "runtime"]),
   })
   .strict();
 
@@ -24,10 +25,12 @@ export function readDaemonLogs(
     cursor?: string | undefined;
     limit?: number | undefined;
     maxBytes?: number | undefined;
+    source?: "events" | "runtime" | undefined;
   },
 ) {
   const limit = input.limit ?? 50;
   const maxBytes = input.maxBytes ?? 16384;
+  const selection = input.source ?? "events";
   if (
     !Number.isInteger(limit) ||
     limit < 1 ||
@@ -44,12 +47,13 @@ export function readDaemonLogs(
       cursor = cursorSchema.parse(
         JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8")),
       );
+      if (cursor.source !== selection) throw new Error("Log cursor source mismatch");
     } catch {
       throw new Error("Invalid daemon log cursor");
     }
   }
   let fd: number | undefined;
-  const source = "daemon-event-journal";
+  const source = selection === "runtime" ? "daemon-runtime-diagnostics" : "daemon-event-journal";
   try {
     fd = openSync(
       eventLogPath(dataDir),
@@ -57,17 +61,20 @@ export function readDaemonLogs(
     );
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new Error("Daemon journal is not a regular file");
-    const prefixLength = cursor?.prefixLength ?? Math.min(64, stat.size);
+    const prefixLength = Math.min(64, stat.size);
     const prefix = Buffer.alloc(prefixLength);
     readSync(fd, prefix, 0, prefixLength, 0);
     const prefixHash = createHash("sha256").update(prefix).digest("hex");
+    const previousPrefixHash = cursor
+      ? createHash("sha256").update(prefix.subarray(0, cursor.prefixLength)).digest("hex")
+      : undefined;
     if (
       cursor &&
       (cursor.ino !== stat.ino ||
         cursor.dev !== stat.dev ||
         cursor.birth !== stat.birthtimeMs ||
         stat.size < cursor.size ||
-        cursor.prefixHash !== prefixHash)
+        cursor.prefixHash !== previousPrefixHash)
     ) {
       return {
         source,
@@ -90,6 +97,8 @@ export function readDaemonLogs(
     while (position < bytesRead && entries.length < limit) {
       const newline = buffer.indexOf(10, position);
       if (newline < 0) {
+        // Re-read an ordinary line from its start on the next bounded page.
+        if (!discarding && position > 0) break;
         // A partial final line can still be in flight. Re-read it after append.
         if (offset + bytesRead === stat.size && !discarding && bytesRead < maxBytes) break;
         if (!discarding) truncatedRecords++;
@@ -119,6 +128,7 @@ export function readDaemonLogs(
           !(record.event.startsWith("daemon.") || record.event.startsWith("http."))
         )
           continue;
+        if (selection === "runtime" && record.event !== "daemon.diagnostic") continue;
         entries.push(record);
       } catch {
         invalidRecords++;
@@ -135,6 +145,7 @@ export function readDaemonLogs(
         discarding,
         prefixLength,
         prefixHash,
+        source: selection,
       }),
     ).toString("base64url");
     return {
@@ -143,10 +154,12 @@ export function readDaemonLogs(
       entries,
       nextCursor,
       eof: offset === stat.size,
-      bytesScanned: position,
+      bytesScanned: bytesRead,
       truncatedRecords,
       invalidRecords,
       archivesIncluded: false,
+      diagnosticCapture:
+        "Daemon logger callbacks and server warnings; raw stdout/stderr before server startup and external journals are unavailable",
     };
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? error.code : undefined;

@@ -94,3 +94,62 @@ it("retains existing auto-ping handle redaction", async () => {
   expect(result.entries).toMatchObject([{ message: "[auto-ping-handle]" }]);
   expect(JSON.stringify(result)).not.toContain(handle);
 });
+
+it("returns variable-size ordinary records exactly once across page boundaries", async () => {
+  const data = await createTempDir("mcp-log-boundary-");
+  const expected = Array.from({ length: 80 }, (_, index) => ({
+    event: "daemon.test",
+    index,
+    message: "x".repeat(100 + ((index * 137) % 800)),
+  }));
+  writeFileSync(
+    join(data, "events.jsonl"),
+    expected.map((entry) => JSON.stringify(entry) + "\n").join(""),
+  );
+  const observed: unknown[] = [];
+  let cursor: string | undefined;
+  let eof = false;
+  for (let page = 0; page < 200; page++) {
+    const result = readDaemonLogs(data, { cursor, maxBytes: 1024 });
+    expect(result.truncatedRecords).toBe(0);
+    expect(result.invalidRecords).toBe(0);
+    observed.push(...result.entries);
+    cursor = result.nextCursor ?? undefined;
+    eof = result.eof ?? false;
+    if (eof) break;
+  }
+  expect(eof).toBe(true);
+  expect(observed).toEqual(expected);
+});
+
+it("selects captured runtime diagnostics and confines cursors to their source", async () => {
+  const data = await createTempDir("mcp-runtime-diagnostic-");
+  writeFileSync(
+    join(data, "events.jsonl"),
+    line(1) +
+      JSON.stringify({
+        event: "daemon.diagnostic",
+        level: "warn",
+        message: "owned backend warning",
+      }) +
+      "\n",
+  );
+  const runtime = readDaemonLogs(data, { source: "runtime" });
+  expect(runtime).toMatchObject({
+    source: "daemon-runtime-diagnostics",
+    entries: [{ event: "daemon.diagnostic", message: "owned backend warning" }],
+  });
+  expect(() => readDaemonLogs(data, { cursor: runtime.nextCursor! })).toThrow("cursor");
+});
+
+it("strengthens an initially empty journal cursor after append", async () => {
+  const data = await createTempDir("mcp-empty-log-");
+  const file = join(data, "events.jsonl");
+  writeFileSync(file, "");
+  const empty = readDaemonLogs(data, {});
+  appendFileSync(file, line(1));
+  const appended = readDaemonLogs(data, { cursor: empty.nextCursor! });
+  expect(appended.entries).toMatchObject([{ message: "1" }]);
+  writeFileSync(file, line(2) + line(3));
+  expect(readDaemonLogs(data, { cursor: appended.nextCursor! }).status).toBe("rotated");
+});

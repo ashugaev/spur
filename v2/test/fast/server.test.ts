@@ -447,6 +447,14 @@ describe("startServer", () => {
       expect(stderrSpy).toHaveBeenCalledWith(
         "Spur fleet cgroup /system.slice/spur-daemon.service has unlimited memory.max and systemd-oomd is absent\n",
       );
+      expect(
+        readEventLog(dataDir).filter((entry) => entry.event === "daemon.diagnostic"),
+      ).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          message: expect.stringContaining("has unlimited memory.max"),
+        }),
+      );
     } finally {
       await server.stop();
       vi.restoreAllMocks();

@@ -71,11 +71,14 @@ A crashed admission lock fails closed; inspect the original receipt and daemon s
 
 ## Read daemon logs
 
-`read_daemon_logs` reads `daemon.*` and `http.*` events without a `sessionId` from the fixed live daemon journal.
-Session, service and sidecar output remains under `get_session_logs`; stdout/journald and compressed archives are excluded.
+`read_daemon_logs` selects `source: "events"` (default) or `source: "runtime"` from the fixed live daemon journal.
+`events` includes `daemon.*`/`http.*` records without a `sessionId`; `runtime` selects captured daemon logger/server diagnostics.
+Server startup, automation/backlog logger callbacks and server warnings retain their messages as `daemon.diagnostic` records under existing event-log rotation.
+Session, service and sidecar output remains under `get_session_logs`; raw pre-bootstrap stdout/stderr, external journals and compressed archives are excluded.
 `limit` defaults to 50, maximum 100; `maxBytes` bounds scanned bytes, defaults to 16384, range 1024–16384.
 Pass `nextCursor` as `cursor`; `eof` describes the observed file end, and the cursor also supports later appends.
-Incomplete final lines wait for append; oversized records are skipped with `truncatedRecords`, malformed records with `invalidRecords`.
+Incomplete page-boundary lines resume from their start; incomplete final lines wait for append.
+Records exceeding a whole page are skipped with `truncatedRecords`, malformed records with `invalidRecords`.
 `rotated` covers replacement/truncation; omit the cursor for an explicit fresh read of the live journal.
 `unavailable` distinguishes missing/inaccessible journals; caller paths are never accepted.
 Reads remain available during backend outage through the selected instance's local journal.
