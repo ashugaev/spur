@@ -65950,7 +65950,9 @@ describe("SessionService", () => {
           createReadStream: (...args: Parameters<typeof realFs.createReadStream>) => {
             const options = args[1];
             if (
-              armed && args[0] === target && typeof options === "object" &&
+              armed &&
+              args[0] === target &&
+              typeof options === "object" &&
               typeof options.fd === "number" &&
               ++borrowedStreams === (stage === "metadata" ? 1 : 2)
             ) {
