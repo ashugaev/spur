@@ -86,6 +86,7 @@ describe("startServer", () => {
         expect(serviceSpy).toHaveBeenCalledWith(
           ...(operation === "spawn" ? [] : ["demo-1"]),
           expect.objectContaining({ reasoningEffort: "ultra" }),
+          ...(operation === "spawn" ? [{ acceptQueued: true }] : []),
           ...(operation === "handoff" ? [undefined] : []),
         );
       } finally {
@@ -529,59 +530,139 @@ describe("startServer", () => {
     }
   });
 
-  it("returns 429 naming the cap and live count when spawn is denied by the admission cap", async () => {
-    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
-    const repoDir = join(root, "repo");
-    const dataDir = join(root, "data");
-    const worktreeDir = join(root, "worktrees");
-    const port = await findFreePort();
-    await mkdir(repoDir, { recursive: true });
-    const configPath = join(root, "spur.yaml");
-    await writeFile(
-      configPath,
-      [
-        "server:",
-        "  host: 127.0.0.1",
-        `  port: ${port}`,
-        `dataDir: ${dataDir}`,
-        `worktreeDir: ${worktreeDir}`,
-        "projects:",
-        "  demo:",
-        `    path: ${repoDir}`,
-      ].join("\n"),
-      "utf8",
-    );
+  it.each([
+    { route: "/sessions", pressure: "cap" },
+    { route: "/sessions/background", pressure: "cap" },
+    { route: "/sessions", pressure: "memory" },
+    { route: "/sessions/background", pressure: "memory" },
+  ] as const)(
+    "resource spawn queue HTTP: $route accepts under $pressure pressure",
+    async ({ route, pressure }) => {
+      const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+      const repoDir = join(root, "repo");
+      const dataDir = join(root, "data");
+      const worktreeDir = join(root, "worktrees");
+      const port = await findFreePort();
+      await mkdir(repoDir, { recursive: true });
+      const configPath = join(root, "spur.yaml");
+      await writeFile(
+        configPath,
+        [
+          "server:",
+          "  host: 127.0.0.1",
+          `  port: ${port}`,
+          `dataDir: ${dataDir}`,
+          `worktreeDir: ${worktreeDir}`,
+          "admission:",
+          "  maxLiveSessions: 1",
+          "  memoryGuard:",
+          "    enforce: true",
+          "    shedEnabled: false",
+          "    minAvailableBytes: 1073741824",
+          "    minFreeSwapBytes: 0",
+          "    admissionFloorBytes: 4294967296",
+          "    shedCriticalFloorBytes: 1073741824",
+          "projects:",
+          "  demo:",
+          `    path: ${repoDir}`,
+        ].join("\n"),
+        "utf8",
+      );
 
-    const { SessionAdmissionDeniedError } = await import("../../src/session-service.js");
-    const originalSpawn = SessionService.prototype.spawn;
-    let server: Awaited<ReturnType<typeof startServer>> | undefined;
-    try {
-      SessionService.prototype.spawn = async function mockSpawn() {
-        throw new SessionAdmissionDeniedError(
-          'Cannot spawn session for project "demo": at the global cap of 2 live sessions (2 live now). Stop one of: demo-1 (demo).',
-          "cap",
-        );
-      };
-
-      server = await startServer(configPath, {
-        info: () => undefined,
-        warn: () => undefined,
+      const memorySpy = vi.spyOn(hostMemory, "readHostMemory").mockReturnValue({
+        totalBytes: 64_000_000_000,
+        availableBytes: pressure === "memory" ? 0 : 32_000_000_000,
+        swapTotalBytes: 8_000_000_000,
+        swapFreeBytes: 8_000_000_000,
       });
+      const cgroupSpy = vi.spyOn(hostMemory, "readCgroupMemorySnapshot").mockReturnValue(null);
+      const pressureSpy = vi.spyOn(hostMemory, "readCgroupPressure").mockReturnValue(null);
+      let server: StartedServer | undefined;
+      try {
+        server = await startServer(configPath, {
+          info: () => undefined,
+          warn: () => undefined,
+        });
+        if (pressure === "cap") {
+          writeSession(dataDir, {
+            id: "demo-occupied",
+            project: "demo",
+            agent: "claude",
+            prompt: "occupy the cap",
+            branch: "main",
+            worktree: false,
+            worktreePath: repoDir,
+            tmuxSession: "demo-occupied",
+            launchCommand: "claude",
+            status: "running",
+            createdAt: "2026-04-15T00:00:00.000Z",
+            updatedAt: "2026-04-15T00:00:00.000Z",
+          });
+        }
 
-      const response = await fetch(`http://127.0.0.1:${port}/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: "demo", prompt: "hello" }),
-      });
-      expect(response.status).toBe(429);
-      const body = (await response.json()) as { error: string };
-      expect(body.error).toContain("2");
-      expect(body.error).toContain("cap");
-    } finally {
-      SessionService.prototype.spawn = originalSpawn;
-      await server?.stop();
-    }
-  });
+        const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            project: "demo",
+            prompt: "hello",
+            branch: "feature/queued",
+            model: "opus",
+          }),
+          signal: AbortSignal.timeout(3_000),
+        });
+        expect(response.status).toBe(201);
+        const body = (await response.json()) as SessionView;
+        expect(body).toMatchObject({
+          id: expect.stringMatching(/^demo-/),
+          project: "demo",
+          prompt: "hello",
+          branch: "feature/queued",
+          model: "opus",
+          status: "spawning",
+          launchCommand: "",
+          runtimeAlive: false,
+          workspaceExists: false,
+        });
+        expect(fs.existsSync(body.worktreePath)).toBe(false);
+        const headroom = await fetch(`http://127.0.0.1:${port}/headroom`);
+        expect(await headroom.json()).toMatchObject({
+          live: { count: pressure === "cap" ? 1 : 0 },
+          projectedRoom: pressure === "cap" ? 0 : 1,
+        });
+        expect(
+          readEventLog(dataDir).filter((entry) => entry.event === "session.spawn.failed"),
+        ).toEqual([]);
+
+        for (const invalid of [
+          { request: { project: "missing" }, error: /Unknown project/ },
+          { request: { mode: "missing" }, error: /Unknown mode/ },
+          { request: { branch: "" }, error: /branch must be a non-empty string/ },
+        ]) {
+          const invalidResponse = await fetch(`http://127.0.0.1:${port}${route}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: "demo", prompt: "invalid", ...invalid.request }),
+            signal: AbortSignal.timeout(3_000),
+          });
+          expect(invalidResponse.status).toBeGreaterThanOrEqual(400);
+          expect(invalidResponse.status).not.toBe(429);
+          expect(await invalidResponse.json()).toMatchObject({
+            error: expect.stringMatching(invalid.error),
+          });
+        }
+      } finally {
+        try {
+          await server?.stop();
+        } finally {
+          memorySpy.mockRestore();
+          cgroupSpy.mockRestore();
+          pressureSpy.mockRestore();
+          await rm(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it("flushes a pending collapsed warn before the final daemon.stopped log", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
@@ -1965,15 +2046,74 @@ describe("startServer", () => {
       });
 
       expect(spawnArgs).toHaveLength(1);
-      // Options (2nd argument) carry the internal origin; the HTTP route passes none.
-      expect(spawnArgs[0]?.[1]).toBeUndefined();
+      // The HTTP route opts into queue receipts without forwarding source-only metadata.
+      expect(spawnArgs[0]?.[1]).toEqual({ acceptQueued: true });
     } finally {
       SessionService.prototype.spawn = originalSpawn;
       await server?.stop();
     }
   });
 
-  it("routes POST /sessions/background to background spawn", async () => {
+  it("resource spawn queue HTTP: healthy foreground waits for its launched result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${join(root, "data")}`,
+        `worktreeDir: ${join(root, "worktrees")}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+    );
+    const launched = { id: "demo-1", status: "running" } as SessionView;
+    let resolveLaunch!: (session: SessionView) => void;
+    const launch = new Promise<SessionView>((resolve) => {
+      resolveLaunch = resolve;
+    });
+    const spawnSpy = vi.spyOn(SessionService.prototype, "spawn").mockReturnValue(launch);
+    const backgroundSpy = vi.spyOn(SessionService.prototype, "spawnInBackground");
+    let server: StartedServer | undefined;
+    try {
+      server = await startServer(configPath, { info: () => undefined, warn: () => undefined });
+      let acknowledged = false;
+      const response = fetch(`http://127.0.0.1:${port}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "hello" }),
+        signal: AbortSignal.timeout(3_000),
+      }).then((result) => {
+        acknowledged = true;
+        return result;
+      });
+      await vi.waitFor(() => expect(spawnSpy).toHaveBeenCalledOnce());
+      expect(spawnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ project: "demo", prompt: "hello" }),
+        { acceptQueued: true },
+      );
+      expect(acknowledged).toBe(false);
+      expect(backgroundSpy).not.toHaveBeenCalled();
+      resolveLaunch(launched);
+      const result = await response;
+      expect(result.status).toBe(201);
+      expect(await result.json()).toMatchObject(launched);
+    } finally {
+      resolveLaunch(launched);
+      spawnSpy.mockRestore();
+      backgroundSpy.mockRestore();
+      await server?.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resource spawn queue HTTP: routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
     const dataDir = join(root, "data");

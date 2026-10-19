@@ -85,6 +85,28 @@ it("preserves daemon status/message and never follows redirects or replays mutat
     );
   }
 });
+it("forwards accepted queued spawn identity and durable receipt without treating it as launched", async () => {
+  const { fixture, call } = await setup();
+  const accepted = {
+    id: "test-queued",
+    status: "spawning",
+    spawnReceipt: { version: 1, acceptedAt: "2026-10-19T09:00:00.000Z" },
+    spawnIntent: { version: 1, phase: "queued" },
+  };
+  fixture.state.override = (path) =>
+    path === "/sessions" || path === "/sessions/background"
+      ? { status: 201, value: accepted }
+      : undefined;
+  for (const background of [true, false]) {
+    const before = fixture.calls.length;
+    const result = await call("spawn_session", { project: "test", prompt: "queued", background });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, status: 201, body: accepted });
+    expect(fixture.calls.slice(before).filter((request) => request.method === "POST")).toHaveLength(
+      1,
+    );
+  }
+});
 it("forwards every catalog example to a fixed method/template preserving fields", async () => {
   const fixture = await mcpFixture();
   cleanups.push(fixture.close);

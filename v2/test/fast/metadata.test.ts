@@ -60,6 +60,7 @@ import {
 } from "../../src/metadata.js";
 import { appendEventLog } from "../../src/event-log.js";
 import type {
+  DurableSpawnIntent,
   PersistedPendingBatch,
   PersistedSpawnWork,
   SessionRecord,
@@ -1005,6 +1006,191 @@ describe("pending send batches", () => {
     recordPendingSendBatch(dataDir, record);
     deletePendingSendBatch(dataDir, "does-not-exist");
     expect(readPendingSendBatches(dataDir).size).toBe(1);
+  });
+});
+
+describe("durable spawn metadata", () => {
+  function acceptedSession(): SessionRecord & { spawnIntent: DurableSpawnIntent } {
+    const at = "2026-10-14T10:00:00.000Z";
+    return {
+      id: "api-1",
+      project: "api",
+      workspaceId: "api-1",
+      agent: "claude",
+      model: "opus",
+      reasoningEffort: "high",
+      claudeAccountId: "account-1",
+      prompt: "review changes",
+      branch: "feature/review",
+      worktree: true,
+      worktreePath: "/tmp/worktrees/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "",
+      status: "spawning",
+      createdAt: at,
+      updatedAt: at,
+      startupAttachmentIds: ["input/context.txt"],
+      queuedMessages: { messages: ["check tests"], awaitingPrompt: false },
+      spawnReceipt: { version: 1, acceptedAt: at },
+      spawnIntent: {
+        version: 1,
+        phase: "queued",
+        request: {
+          project: "api",
+          prompt: "review changes",
+          originalTaskPrompt: "original task",
+          steps: ["review changes", "report findings"],
+          agent: "claude",
+          model: "opus",
+          reasoningEffort: "high",
+          mode: "manager",
+          planMode: true,
+          restrictWrites: true,
+          allowedTriggers: ["review"],
+          branch: "feature/review",
+          overrides: { worktree: true, defaultBranch: "main" },
+          reuseWorkspaceSessionId: "api-anchor",
+          bareSpawnMessage: true,
+          preflightBatchId: "preflight-1",
+          slots: { links: [{ label: "tracker", url: "https://example.com/issue/1" }] },
+          selfDestruct: { enabled: true, conditions: "review complete" },
+          bootstrap: false,
+          claudeAccountId: "account-1",
+          subscriptions: [{ targetSessionId: "api-anchor", states: ["stopped"], message: "done" }],
+        },
+        mode: { name: "manager", skill: "manager" },
+        defaultBranch: "main",
+        preflightBatchId: "preflight-1",
+        startupAttachments: [{ id: "input/context.txt", name: "context.txt" }],
+        launchSelection: {
+          model: "opus",
+          reasoningEffort: "high",
+          reasoningVariantNames: ["high"],
+        },
+        submission: { state: "pending" },
+        telegramOrigin: { projectId: "api", sourceId: "tg", chatId: -123, messageThreadId: 7 },
+      },
+    };
+  }
+
+  it.each(["queued", "workspace_ready", "launching", "submitted"] as const)(
+    "round-trips the %s checkpoint and replay behavior",
+    async (phase) => {
+      const dataDir = await newDataDir();
+      const session = acceptedSession();
+      session.spawnIntent.phase = phase;
+      if (phase === "launching" || phase === "submitted") {
+        session.agentLaunchId = "launch-1";
+        session.agentSessionId = "provider-1";
+        session.spawnIntent.pane = { pid: 1234, starttime: 5678 };
+        session.spawnIntent.submission = {
+          state: phase === "submitted" ? "confirmed" : "uncertain",
+          uncertainAt: session.createdAt,
+          message: "review changes",
+          ackBaseline: { agent: "claude", file: "/tmp/transcript.jsonl", size: 42 },
+        };
+      }
+      writeSession(dataDir, session);
+      expect(readSession(dataDir, session.id)).toMatchObject(session);
+      expect(listSessions(dataDir)[0]?.spawnIntent).toEqual(session.spawnIntent);
+    },
+  );
+
+  it.each([
+    { label: "version", patch: { version: 2 } },
+    { label: "phase", patch: { phase: "unknown" } },
+    {
+      label: "attachment traversal",
+      patch: { startupAttachments: [{ id: "../other/file", name: "file" }] },
+    },
+    {
+      label: "attachment data",
+      patch: { startupAttachments: [{ id: "file", name: "file", data: "secret" }] },
+    },
+    { label: "submission state", patch: { submission: { state: "unknown" } } },
+    { label: "uncertainty time", patch: { submission: { state: "uncertain" } } },
+    {
+      label: "ack baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "codex", offsets: { file: "bad" } } },
+      },
+    },
+    {
+      label: "negative baseline",
+      patch: {
+        submission: { state: "pending", ackBaseline: { agent: "claude", file: "file", size: -1 } },
+      },
+    },
+    { label: "pane identity", patch: { pane: { pid: 1234, starttime: "bad" } } },
+    { label: "mode", patch: { mode: { name: "manager" } } },
+    { label: "credentials", patch: { credentials: "secret" } },
+    {
+      label: "inline attachment",
+      patch: { request: { project: "api", attachments: [{ name: "file", data: "secret" }] } },
+    },
+    { label: "config path", patch: { request: { project: "api", configPath: "/tmp/config" } } },
+    { label: "project mismatch", patch: { request: { project: "other" } } },
+    {
+      label: "subscription",
+      patch: {
+        request: {
+          project: "api",
+          subscriptions: [{ targetSessionId: "api-2", states: ["unknown"] }],
+        },
+      },
+    },
+  ])("rejects corrupt $label instead of stripping durable intent", async ({ patch }) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    writeSession(dataDir, session);
+    const path = join(dataDir, "sessions", "api", "api-1.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ ...session, spawnIntent: { ...session.spawnIntent, ...patch } }),
+    );
+    expect(() => readSession(dataDir, session.id)).toThrow("Invalid durable spawn metadata");
+    expect(() => listSessions(dataDir)).toThrow("Invalid durable spawn metadata");
+  });
+
+  it.each([
+    { label: "missing receipt", patch: { spawnReceipt: undefined } },
+    {
+      label: "receipt version",
+      patch: { spawnReceipt: { version: 2, acceptedAt: "2026-10-14T10:00:00.000Z" } },
+    },
+    { label: "receipt time", patch: { spawnReceipt: { version: 1, acceptedAt: "invalid" } } },
+    { label: "terminal intent", patch: { status: "killed" } },
+  ])("rejects $label at the write boundary", async ({ patch }) => {
+    const dataDir = await newDataDir();
+    const session = acceptedSession();
+    expect(() => writeSession(dataDir, { ...session, ...patch } as SessionRecord)).toThrow(
+      "Invalid durable spawn metadata",
+    );
+    expect(readSession(dataDir, session.id)).toBeNull();
+  });
+
+  it("keeps legacy records compatible without fabricating durable state", async () => {
+    const dataDir = await newDataDir();
+    const { spawnIntent: _intent, spawnReceipt: _receipt, ...legacy } = acceptedSession();
+    writeSession(dataDir, legacy);
+    expect(readSession(dataDir, legacy.id)).toMatchObject(legacy);
+    expect(readSession(dataDir, legacy.id)).not.toHaveProperty("spawnIntent");
+    expect(readSession(dataDir, legacy.id)).not.toHaveProperty("spawnReceipt");
+  });
+
+  it("preserves the accepted receipt after retirement and archival", async () => {
+    const dataDir = await newDataDir();
+    const { spawnIntent: _intent, ...accepted } = acceptedSession();
+    const terminal: SessionRecord = { ...accepted, status: "killed" };
+    writeSession(dataDir, terminal);
+    expect(readSession(dataDir, terminal.id)?.spawnReceipt).toEqual(terminal.spawnReceipt);
+    archiveSessions(dataDir, [terminal]);
+    expect(listSessions(dataDir)).toEqual([]);
+    const archived = JSON.parse(
+      readFileSync(join(dataDir, "sessions-archive", "api", "api-1.json"), "utf-8"),
+    );
+    expect(archived).toMatchObject({ status: "killed", spawnReceipt: terminal.spawnReceipt });
+    expect(archived).not.toHaveProperty("spawnIntent");
   });
 });
 

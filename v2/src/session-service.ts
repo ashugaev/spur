@@ -514,6 +514,7 @@ import {
   type SharedMemoryScope,
   type StartSidecarRequest,
   type SessionRecord,
+  type DurableSpawnIntent,
   type CursorRestoreBoundary,
   type SessionSlots,
   type SessionStatus,
@@ -3044,6 +3045,8 @@ interface SessionSpawnOptions {
   closeoutOwnerTransfer?: boolean;
   sensitivePromptSuffix?: string;
   receiptToken?: symbol;
+  /** HTTP accepts a spawning identity when admission must wait. */
+  acceptQueued?: boolean;
   /** Set by source adapters, never from the HTTP body. */
   telegramOrigin?: TelegramSpawnOrigin;
   triggerBirthKey?: string;
@@ -3067,9 +3070,40 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   reuseWorkspacePath?: string;
   placeholder: SessionRecord;
-  sessionToolDir: string;
   startupAttachments: StoredImageAttachment[];
   preflightBatchId: string;
+}
+
+class SpawnAdmissionCancelledError extends Error {
+  constructor(readonly reason: "disposed" | "killed" | "handoff") {
+    super(`Spawn admission cancelled: ${reason}`);
+  }
+}
+
+interface SpawnAdmissionWaiter {
+  projectId: string;
+  sessionId?: string;
+  replacingSessionId?: string;
+  reservation?: symbol;
+  resolve: (reservation: symbol) => void;
+  reject: (error: SpawnAdmissionCancelledError) => void;
+}
+
+interface HandoffAdmission {
+  token: symbol;
+  session: SessionRecord;
+  launchSelection: AgentLaunchSelection;
+  admissionReservation: symbol;
+}
+
+interface BackgroundSpawnOptions {
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
+  modeResolution?: "strict" | "carried";
+  telegramOrigin?: TelegramSpawnOrigin;
+  promptKind?: UserInputKind;
+  validatedLaunchSelection?: AgentLaunchSelection;
+  closeoutOwnerTransfer?: boolean;
 }
 
 function resolveCarriedSpawnModel(
@@ -3604,6 +3638,18 @@ export class SessionService {
     { request: SpawnSessionRequest; result: Promise<SessionView> }
   >();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
+  private readonly durableSpawnRuns = new Set<string>();
+  private readonly durableSpawnIds = new Set<string>();
+  private durableRecoveryBusy = false;
+  private readonly spawnCompletions = new Map<
+    string,
+    {
+      promise: Promise<SessionView>;
+      resolve: (session: SessionView) => void;
+      reject: (error: Error) => void;
+    }
+  >();
+  private durableRecoveryCursor = 0;
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
   private readonly queuedDeliveryAttempts = new Set<Promise<boolean>>();
@@ -3611,10 +3657,16 @@ export class SessionService {
   // admission check until its spawning record is written. Other admissions
   // count the slot; a handoff passes its existing reservation to its successor.
   private readonly admissionReservations = new Map<symbol, string>();
+  private readonly spawnAdmissionWaiters = new Set<SpawnAdmissionWaiter>();
+  private readonly pendingSpawnIds = new Set<string>();
+  private admissionStopped = false;
   private readonly foregroundSpawnReceipts = new Map<symbol, ForegroundSpawnReceipt>();
   private readonly handoffsInFlight = new Map<
     string,
-    { token: symbol; lifecycleIds: string[]; sourceStamp: HandoffSourceStamp }
+    {
+      token: symbol;
+      phase: "waiting" | "activating";
+    }
   >();
   // Session ids this process is actively reopening. Guards against two
   // overlapping reopen() calls both passing the completed-status check and
@@ -3860,6 +3912,14 @@ export class SessionService {
   }
 
   dispose(): void {
+    this.admissionStopped = true;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      this.cancelSpawnAdmission(waiter, "disposed");
+    }
+    for (const completion of this.spawnCompletions.values()) {
+      completion.reject(new SpawnAdmissionCancelledError("disposed"));
+    }
+    this.spawnCompletions.clear();
     // Settles every queued lookup as skipped:cancelled so a prCheckRuns drain
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
@@ -3915,6 +3975,8 @@ export class SessionService {
   }
 
   private async runMemoryShedTick(): Promise<void> {
+    await this.recoverDurableSpawns();
+    this.drainSpawnAdmissions();
     // One host-memory read shared by both calls below: updateMemoryHold's
     // wake-context check and runMemoryShed's opening pressure sample would
     // otherwise each take their own /proc read microseconds apart for the
@@ -5929,6 +5991,10 @@ export class SessionService {
         (entry) => !removeIds.has(entry.id),
       ),
     }));
+    this.protectDurableSpawns();
+    queueMicrotask(() => {
+      if (!this.admissionStopped) void this.trackBackgroundLoop(this.recoverDurableSpawns());
+    });
     this.resumeSessionDelivery();
   }
 
@@ -6234,6 +6300,9 @@ export class SessionService {
     operationId: string | undefined,
     work: () => Promise<SessionView | { completedIds: string[] }>,
   ): Promise<SessionView | CompleteDeskResponse> {
+    if (action === "complete") {
+      for (const id of targetIds) this.cancelWaitingHandoff(id);
+    }
     for (const id of targetIds) {
       if (!readSession(this.config.dataDir, id)) {
         throw new SessionResourceNotFoundError(`Session not found: ${id}`);
@@ -12111,6 +12180,17 @@ export class SessionService {
   }
 
   private assertSpawnNotKilled(sessionId: string): void {
+    const current = readSession(this.config.dataDir, sessionId);
+    if (this.admissionStopped && current?.spawnIntent) {
+      throw new SpawnAdmissionCancelledError("disposed");
+    }
+    if (
+      current?.spawnReceipt &&
+      (isTerminalSessionStatus(current.status) ||
+        (!current.spawnIntent && current.status !== "running"))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
     if (this.spawnWasKilled(sessionId)) {
       throw new Error(`Session ${sessionId} was killed while spawning`);
     }
@@ -12355,9 +12435,30 @@ export class SessionService {
   // messages carry over. Check, read, and write run in one synchronous span.
   private writeSpawnRecord(record: SessionRecord): SessionRecord {
     this.assertSpawnNotKilled(record.id);
-    const carried = this.carrySpawnQueue(record);
+    const persisted = readSession(this.config.dataDir, record.id);
+    if (
+      record.spawnIntent &&
+      persisted?.spawnReceipt &&
+      (!persisted.spawnIntent ||
+        ((persisted.spawnIntent.phase === "launching" ||
+          persisted.spawnIntent.phase === "submitted") &&
+          record.agentLaunchId !== persisted.agentLaunchId))
+    ) {
+      throw new SpawnAdmissionCancelledError("killed");
+    }
+    const carried = this.carrySpawnQueue({ ...persisted, ...record });
     writeSession(this.config.dataDir, carried);
     return carried;
+  }
+
+  private assertSpawnAccountReady(accountId?: string): void {
+    if (!accountId) return;
+    const account = findAccount(this.config.dataDir, accountId);
+    if (!account || !isAccountReady(account)) {
+      throw new Error(
+        `Claude account ${accountId} is not ready (credentials or onboarding incomplete)`,
+      );
+    }
   }
 
   async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
@@ -12414,12 +12515,8 @@ export class SessionService {
   ): Promise<SessionView> {
     const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation =
-      options?.admissionReservation ??
-      this.reserveAdmission(request.project, "spawn", {
-        ...(options?.replacingSessionId ? { replacingSessionId: options.replacingSessionId } : {}),
-      });
-    let admissionReserved = true;
+    let admissionReservation = options?.admissionReservation;
+    let admissionReserved = admissionReservation !== undefined;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -12478,6 +12575,34 @@ export class SessionService {
           this.config.models.codexHome,
         ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
+      if (admissionReservation === undefined) {
+        this.drainSpawnAdmissions();
+        admissionReservation =
+          this.tryReserveSpawnAdmission(request.project, options?.replacingSessionId, false) ??
+          undefined;
+        if (admissionReservation === undefined) {
+          const accepted = await this.acceptBackgroundSpawn(request, {
+            ...options,
+            ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
+            validatedLaunchSelection: launchSelection,
+          });
+          if (options?.acceptQueued) return accepted.session;
+          return await accepted.completion;
+        }
+        admissionReserved = true;
+      }
+      this.consumeSpawnAdmission(admissionReservation);
       if (
         request.preflightBatchId ||
         (!reuseCtx && !request.branch && worktree && project.preflight && prompt)
@@ -12803,14 +12928,7 @@ export class SessionService {
       // sharing one worktree bind to their own transcript instead of guessing
       // by newest mtime.
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
-      if (request.claudeAccountId) {
-        const account = findAccount(this.config.dataDir, request.claudeAccountId);
-        if (!account || !isAccountReady(account)) {
-          throw new Error(
-            `Claude account ${request.claudeAccountId} is not ready (credentials or onboarding incomplete)`,
-          );
-        }
-      }
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchOptions = {
         ...planOptions,
         ...this.resolveClaudeAuthPlanOptions({
@@ -13042,6 +13160,7 @@ export class SessionService {
 
       return await this.enrich(updatedRecord);
     } catch (error) {
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const failureReceipt = options?.receiptToken
         ? this.foregroundSpawnReceipts.get(options.receiptToken)
         : undefined;
@@ -13226,7 +13345,7 @@ export class SessionService {
       });
       throw error;
     } finally {
-      if (admissionReserved) {
+      if (admissionReserved && admissionReservation !== undefined) {
         this.admissionReservations.delete(admissionReservation);
       }
       if (sessionId) {
@@ -13562,10 +13681,12 @@ export class SessionService {
     );
   }
 
-  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+  private async prepareBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options: BackgroundSpawnOptions = {},
+  ): Promise<PreparedSpawn> {
+    const triggerBirthRequest = options.triggerBirthRequest;
     request = normalizeShepherdSpawnRequest(request);
-    const admissionReservation = this.reserveAdmission(request.project, "spawn");
-    let admissionReserved = true;
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -13591,7 +13712,7 @@ export class SessionService {
     } | null = null;
     try {
       ({ project, prompt, steps, mode, planMode, restrictWrites, allowedTriggers, selfDestruct } =
-        this.resolveSpawnTarget(request));
+        this.resolveSpawnTarget(request, options.modeResolution ?? "strict"));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -13605,13 +13726,26 @@ export class SessionService {
       reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = resolveSpawnAgent(request.agent, project, this.config);
-      launchSelection = await resolveSpawnRequestLaunchSelection(
-        request,
-        project,
-        agent,
-        this.config.models.codexHome,
-      );
+      launchSelection =
+        options.validatedLaunchSelection ??
+        (await resolveSpawnRequestLaunchSelection(
+          request,
+          project,
+          agent,
+          this.config.models.codexHome,
+        ));
       resolvedModel = launchSelection.model;
+      this.assertSpawnAccountReady(request.claudeAccountId);
+      if (worktree && request.branch && !reuseCtx) {
+        await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          requestBranchSource: "explicit",
+          worktree,
+          fallbackBranch: "",
+          project,
+        });
+      }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -13653,12 +13787,19 @@ export class SessionService {
         restrictWrites,
         worktree,
         reusesWorkspace: reuseCtx !== null,
+        ...(options.closeoutOwnerTransfer !== undefined
+          ? { transferredOwner: options.closeoutOwnerTransfer }
+          : {}),
       });
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        ...(options.triggerBirthKey && triggerBirthRequest
+          ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+          : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
+        ...(request.claudeAccountId ? { claudeAccountId: request.claudeAccountId } : {}),
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
         ...(request.reasoningEffort !== undefined
           ? { reasoningEffort: request.reasoningEffort }
@@ -13689,12 +13830,51 @@ export class SessionService {
         originalTaskPrompt,
       };
       this.assertReuseAnchorPresent(reuseCtx);
-      writeSession(this.config.dataDir, placeholder);
+      const startupAttachments = this.storeAttachments(
+        workspaceIdOf(placeholder),
+        request.attachments,
+      );
+      const { attachments: _attachments, configPath: _configPath, ...storedRequest } = request;
+      placeholder.spawnReceipt = { version: 1, acceptedAt: createdAt };
+      placeholder.spawnIntent = {
+        version: 1,
+        phase: "queued",
+        request: {
+          ...storedRequest,
+          prompt,
+          agent,
+          ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
+          ...(steps ? { steps } : {}),
+          planMode,
+          restrictWrites,
+          ...(allowedTriggers !== undefined ? { allowedTriggers } : {}),
+          ...(selfDestruct !== undefined ? { selfDestruct } : {}),
+        },
+        ...(mode ? { mode } : {}),
+        defaultBranch,
+        preflightBatchId,
+        startupAttachments: startupAttachments.map(({ id, name }) => ({ id, name })),
+        launchSelection,
+        submission: { state: "pending" },
+        ...(options.telegramOrigin ? { telegramOrigin: options.telegramOrigin } : {}),
+      };
+      if (startupAttachments.length > 0) {
+        placeholder.startupAttachmentIds = startupAttachments.map(({ id }) => id);
+      }
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
+      if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+      this.pendingSpawnIds.add(sessionId);
+      this.spawnsInFlight.add(sessionId);
+      writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
-      this.admissionReservations.delete(admissionReservation);
-      admissionReserved = false;
+      if (options.telegramOrigin) {
+        writeTelegramReplyTarget(this.config.dataDir, {
+          sessionId,
+          ...options.telegramOrigin,
+          lastInboundAt: nowIso(),
+        });
+      }
 
       this.logEvent("session.spawn.started", {
         level: "info",
@@ -13712,12 +13892,8 @@ export class SessionService {
         },
       });
 
-      const startupAttachments = this.storeAttachments(
-        workspaceIdOf(placeholder),
-        request.attachments,
-      );
       this.logUserInput(sessionId, request.project, {
-        kind: "spawn_prompt",
+        kind: options.promptKind ?? "spawn_prompt",
         text: prompt,
         source: "spawn_background",
         attachments: startupAttachments,
@@ -13741,11 +13917,15 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         ...(reuseCtx ? { reuseWorkspacePath: reuseCtx.workspacePath } : {}),
         placeholder,
-        sessionToolDir: this.prepareSessionTools(sessionId, agent, request.project),
         startupAttachments,
         preflightBatchId,
       };
     } catch (error) {
+      if (sessionId) {
+        this.pendingSpawnIds.delete(sessionId);
+        this.spawnsInFlight.delete(sessionId);
+      }
+      if (error instanceof SpawnAdmissionCancelledError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (sessionId && project && placeholderWritten) {
         const erroredWorkspaceId = reuseCtx?.workspaceId ?? sessionId;
@@ -13797,10 +13977,6 @@ export class SessionService {
         },
       });
       throw error;
-    } finally {
-      if (admissionReserved) {
-        this.admissionReservations.delete(admissionReservation);
-      }
     }
   }
 
@@ -13826,6 +14002,17 @@ export class SessionService {
     let launchedRecord: SessionRecord | undefined;
     let launchCandidate: SessionRecord | undefined;
     try {
+      this.assertSpawnNotKilled(sessionId);
+      const current = readSession(this.config.dataDir, sessionId);
+      if (current?.spawnIntent) {
+        prepared.placeholder = { ...current };
+        if (current.error !== undefined) {
+          delete prepared.placeholder.error;
+          delete prepared.placeholder.errorSource;
+          writeSession(this.config.dataDir, prepared.placeholder);
+        }
+      }
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent, request.project);
       let resolvedBranch = prepared.resolvedBranch;
       let preflightOutcome: SpawnPreflightSelection["outcome"] | undefined;
       let preflightBranch: string | undefined;
@@ -14008,6 +14195,11 @@ export class SessionService {
         });
       }
 
+      prepared.placeholder = this.checkpointSpawn(
+        { ...prepared.placeholder, worktreePath: workspacePath },
+        "workspace_ready",
+      );
+
       const firstStage = prepared.steps?.[0];
       const taskPrompt = buildSessionPrompt(prompt, planMode, restrictWrites, mode);
       const initialMessage =
@@ -14020,15 +14212,23 @@ export class SessionService {
         startupAttachments,
       );
       const sidecarNames = manualSidecarNames(resolveSessionSidecars({ agent }, project));
-      const spawnInitialMessage = buildInitialMessage(
-        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
-        sidecarNames,
-        this.config.tags,
-        project.branchNaming?.regex,
-        selfDestruct,
-        telegramAgentInstructions(project, false),
-        githubPostInstructions(project, sessionId),
-      );
+      const composedInitialMessage = [...startupAttachmentLines, initialMessage]
+        .filter((line) => line.trim())
+        .join("\n");
+      const spawnInitialMessage = request.bareSpawnMessage
+        ? composedInitialMessage
+        : buildInitialMessage(
+            composedInitialMessage,
+            sidecarNames,
+            this.config.tags,
+            project.branchNaming?.regex,
+            selfDestruct,
+            telegramAgentInstructions(
+              project,
+              prepared.placeholder.spawnIntent?.telegramOrigin !== undefined,
+            ),
+            githubPostInstructions(project, sessionId),
+          );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
         worktreePath: workspacePath,
@@ -14036,7 +14236,7 @@ export class SessionService {
         updatedAt: nowIso(),
       });
       if (budgetLimited) {
-        prepared.placeholder = budgetLimited;
+        prepared.placeholder = this.retireDurableSpawn(budgetLimited);
         return "completed";
       }
 
@@ -14049,7 +14249,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         worktreePath: workspacePath,
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         ...prepared.launchSelection,
         restrictWrites,
         modelsCacheHome: this.config.models.codexHome,
@@ -14059,11 +14259,13 @@ export class SessionService {
       // Pin a native session id at launch for claude (fresh per attempt so a
       // retry never reuses a possibly-existing transcript id).
       const claudeSessionId = agent === "claude" ? randomUUID() : undefined;
+      this.assertSpawnAccountReady(request.claudeAccountId);
       const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
         ...withAgentModeOptions(
           withProjectAgentOptions(project, { ...hookSetup, ...prepared.launchSelection }),
           { planMode, restrictWrites },
         ),
+        ...this.resolveClaudeAuthPlanOptions(prepared.placeholder),
         ...(prepared.placeholder.model !== undefined ? { model: prepared.placeholder.model } : {}),
         ...(startupImagePaths.length > 0 ? { startupImagePaths } : {}),
         ...(claudeSessionId ? { agentSessionId: claudeSessionId } : {}),
@@ -14106,7 +14308,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         artifactsSessionId: workspaceIdOf(runningRecord),
-        sessionToolDir: prepared.sessionToolDir,
+        sessionToolDir,
         dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
@@ -14115,11 +14317,39 @@ export class SessionService {
       });
       const launchAgent = agent;
       const launchSessionId = sessionId;
+      const startupMessage = launchPlan.initialMessage.trim()
+        ? launchPlan.initialMessage
+        : spawnInitialMessage;
+      const startupBinding =
+        startupMessage.trim() && agent !== "opencode"
+          ? await createAgentSubmitAckBinding(agent, {
+              ...this.submitAckContext(runningRecord),
+              freshLaunch: true,
+            })
+          : null;
+      runningRecord = this.checkpointSpawn(
+        { ...runningRecord, status: "spawning" },
+        agent === "opencode" ? "workspace_ready" : "launching",
+        {
+          state: promptDeliveredOnLaunch && agent !== "opencode" ? "uncertain" : "pending",
+          ...(promptDeliveredOnLaunch && agent !== "opencode" ? { uncertainAt: nowIso() } : {}),
+          message: startupMessage,
+          ...(startupBinding ? { ackBaseline: startupBinding.baseline } : {}),
+        },
+      );
+      prepared.placeholder = runningRecord;
       const launchAndBind = async (): Promise<void> => {
         const openCodeSessionBaseline =
           launchAgent === "opencode"
             ? await captureOpenCodeSessionBaseline(workspacePath)
             : undefined;
+        if (openCodeSessionBaseline) {
+          runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+            ...runningRecord.spawnIntent?.submission,
+            state: promptDeliveredOnLaunch ? "uncertain" : "pending",
+            ...(promptDeliveredOnLaunch ? { uncertainAt: nowIso() } : {}),
+          });
+        }
 
         stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
         this.assertSpawnNotKilled(sessionId);
@@ -14128,7 +14358,7 @@ export class SessionService {
           sessionName: launchSessionId,
           cwd: workspacePath,
           launchCommand: launchPlan.launchCommand,
-          launchScriptDir: prepared.sessionToolDir,
+          launchScriptDir: sessionToolDir,
           env: sessionEnv,
         });
         const current = readSession(this.config.dataDir, runningRecord.id);
@@ -14136,7 +14366,17 @@ export class SessionService {
           runningRecord = withQueuedMessages(runningRecord, queuedMessages(current), true);
         }
         launchedRecord = runningRecord;
-        writeSession(this.config.dataDir, { ...runningRecord, status: "spawning" });
+        this.writeSpawnRecord(runningRecord);
+        const pane = await this.lookupPanePidQuietly(launchSessionId, { fresh: true });
+        if (pane.status === "ok" && pane.panePid !== null) {
+          const starttime = await readProcessStarttime(pane.panePid);
+          if (starttime !== null) {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", undefined, {
+              pid: pane.panePid,
+              starttime,
+            });
+          }
+        }
         this.logEvent("session.spawn.tmux_created", {
           level: "info",
           sessionId: launchSessionId,
@@ -14177,11 +14417,26 @@ export class SessionService {
 
       this.assertSpawnNotKilled(sessionId);
       let firstStepSubmitted = false;
+      let openCodeLaunchConfirmed = false;
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
         const launchSentAt = Date.now();
+        runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "uncertain",
+          uncertainAt: new Date(launchSentAt).toISOString(),
+          message: launchPlan.initialMessage,
+        });
         const sendOutcome = await this.sendAgentMessage(runningRecord, launchPlan.initialMessage, {
           freshLaunch: true,
+          onPaneWritten: (ackBaseline, pastedAt) => {
+            runningRecord = this.checkpointSpawn(runningRecord, "launching", {
+              state: "uncertain",
+              uncertainAt: new Date(pastedAt).toISOString(),
+              message: launchPlan.initialMessage,
+              ...(ackBaseline ? { ackBaseline } : {}),
+            });
+          },
         });
         runningRecord = this.withLaunchSubmitOutcome(runningRecord, sendOutcome, launchSentAt);
         initialPromptSent = true;
@@ -14197,12 +14452,12 @@ export class SessionService {
           },
         });
       } else if (promptDeliveredOnLaunch) {
-        if (
-          agent === "opencode" &&
-          (!runningRecord.agentSessionId ||
-            !(await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId)))
-        ) {
-          throw new Error("OpenCode did not persist the launch prompt");
+        if (agent === "opencode") {
+          openCodeLaunchConfirmed =
+            runningRecord.agentSessionId !== undefined &&
+            (await waitForOpenCodeLaunchMessage(runningRecord.agentSessionId));
+          if (!openCodeLaunchConfirmed)
+            throw new Error("OpenCode did not persist the launch prompt");
         }
         initialPromptSent = true;
         firstStepSubmitted = true;
@@ -14219,6 +14474,18 @@ export class SessionService {
           },
         });
       }
+      const deliveryConfirmed =
+        !startupMessage.trim() ||
+        (launchPlan.initialMessage.trim()
+          ? firstStepSubmitted
+          : openCodeLaunchConfirmed ||
+            (startupBinding !== null && (await startupBinding.scan(startupMessage)).found));
+      if (deliveryConfirmed) {
+        runningRecord = this.checkpointSpawn(runningRecord, "submitted", {
+          ...runningRecord.spawnIntent?.submission,
+          state: "confirmed",
+        });
+      }
       if (pipeline && firstStepSubmitted) {
         this.logFirstPipelineStepSent(sessionId, request.project, pipeline.steps.length);
       }
@@ -14228,6 +14495,7 @@ export class SessionService {
       if (latestBackground && hasQueuedMessages(latestBackground)) {
         runningRecord = withQueuedMessages(runningRecord, queuedMessages(latestBackground), true);
       }
+      runningRecord = { ...runningRecord, status: "running" };
       let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
@@ -14240,6 +14508,9 @@ export class SessionService {
       }
       updatedRecord = this.writeSpawnRecord(updatedRecord);
       updatedRecord = this.applyRequestedStateSubscriptions(updatedRecord, request.subscriptions);
+      if (updatedRecord.spawnIntent?.submission.state === "confirmed") {
+        updatedRecord = this.retireDurableSpawn(updatedRecord);
+      }
       await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -14259,17 +14530,50 @@ export class SessionService {
       }
       return "completed";
     } catch (error) {
+      const interrupted = readSession(this.config.dataDir, sessionId);
+      if (
+        (this.admissionStopped && interrupted?.spawnIntent) ||
+        error instanceof SpawnAdmissionCancelledError ||
+        (interrupted?.spawnReceipt && !interrupted.spawnIntent)
+      ) {
+        if (!this.admissionStopped && launchCandidate) {
+          const cancelledLaunch = launchCandidate;
+          await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (
+              current?.spawnReceipt &&
+              !current.spawnIntent &&
+              current.status !== "running" &&
+              current.agentLaunchId === cancelledLaunch.agentLaunchId
+            ) {
+              await this.killAgentPaneAndConfirmExit(cancelledLaunch, { failOnSurvivors: false });
+            }
+          });
+        }
+        return "completed";
+      }
+      let launchProvenAbsent = false;
+      if (interrupted?.spawnIntent?.phase === "launching") {
+        const evidence = await this.observeDurableRuntime(interrupted);
+        launchProvenAbsent =
+          evidence.state === "absent" && interrupted.spawnIntent.submission.state === "pending";
+        if (!launchProvenAbsent) {
+          this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+          return "completed";
+        }
+      }
       const message = error instanceof Error ? error.message : String(error);
       const killedBeforeRetention = this.spawnWasKilled(sessionId);
       if (
         !killedBeforeRetention &&
+        !launchProvenAbsent &&
         !launchedRecord &&
         launchCandidate &&
         (await this.launchResourcesMayRemain(launchCandidate))
       ) {
         launchedRecord = launchCandidate;
       }
-      if (launchedRecord && !this.spawnWasKilled(sessionId)) {
+      if (launchedRecord && !launchProvenAbsent && !this.spawnWasKilled(sessionId)) {
         const retained = await this.retainLaunchedError(launchedRecord, error);
         if (retained.status !== "killed") return "completed";
       }
@@ -14301,12 +14605,20 @@ export class SessionService {
         });
       }
       if (!finalFailure) {
-        this.writeSpawnRecord({
-          ...prepared.placeholder,
+        const fresh = readSession(this.config.dataDir, sessionId);
+        if (!fresh?.spawnIntent)
+          throw new Error(`Missing launch intent for ${sessionId}`, { cause: error });
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = fresh;
+        const { pane: _pane, ...intent } = fresh.spawnIntent;
+        prepared.placeholder = {
+          ...unlaunched,
           launchCommand: "",
           status: "spawning",
           updatedAt: nowIso(),
-        });
+          spawnIntent: { ...intent, phase: "queued", submission: { state: "pending" } },
+        };
+        writeSession(this.config.dataDir, prepared.placeholder);
+        this.pendingSpawnIds.add(sessionId);
         this.logEvent("session.spawn.retrying", {
           level: "warn",
           sessionId,
@@ -14333,7 +14645,7 @@ export class SessionService {
             errorSource: "other",
           });
       if (persistedFailure) {
-        writeSession(this.config.dataDir, persistedFailure);
+        this.retireDurableSpawn(persistedFailure);
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
@@ -14355,21 +14667,98 @@ export class SessionService {
   }
 
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
-    const prepared = await this.prepareBackgroundSpawn(request);
-    this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = await this.enrich(prepared.placeholder);
+    return (await this.acceptBackgroundSpawn(request)).session;
+  }
+
+  private async acceptBackgroundSpawn(
+    request: SpawnSessionRequest,
+    options?: BackgroundSpawnOptions,
+  ): Promise<{ session: SessionView; completion: Promise<SessionView> }> {
+    const prepared = await this.prepareBackgroundSpawn(request, options);
+    this.registerDurableSpawn(prepared.placeholder);
+    const completion = this.startBackgroundSpawn(prepared);
+    const session = await this.enrich(prepared.placeholder);
+    return { session, completion };
+  }
+
+  private startBackgroundSpawn(prepared: PreparedSpawn): Promise<SessionView> {
+    if (this.admissionStopped) {
+      const cancelled = Promise.reject<SessionView>(new SpawnAdmissionCancelledError("disposed"));
+      void cancelled.catch(() => {});
+      return cancelled;
+    }
+    const existing = this.spawnCompletions.get(prepared.sessionId);
+    if (this.durableSpawnRuns.has(prepared.sessionId)) {
+      if (!existing) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
+      return existing.promise;
+    }
+    this.durableSpawnRuns.add(prepared.sessionId);
+    if (!this.spawnCompletions.has(prepared.sessionId)) {
+      let resolve!: (session: SessionView) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<SessionView>((accept, fail) => {
+        resolve = accept;
+        reject = fail;
+      });
+      void promise.catch(() => {});
+      this.spawnCompletions.set(prepared.sessionId, { promise, resolve, reject });
+    }
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
           try {
             for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+              const reservation = await this.waitForSpawnAdmission(prepared.request.project, {
+                sessionId: prepared.sessionId,
+              });
+              try {
+                await this.withWorkspaceLifecycleLocks(prepared.sessionId, async () => {
+                  this.consumeSpawnAdmission(reservation);
+                  const current = readSession(this.config.dataDir, prepared.sessionId);
+                  if (!current || current.status !== "spawning") {
+                    throw new SpawnAdmissionCancelledError("killed");
+                  }
+                  this.pendingSpawnIds.delete(prepared.sessionId);
+                });
+              } finally {
+                this.admissionReservations.delete(reservation);
+              }
               const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
               if (result === "completed") {
                 return;
               }
             }
+          } catch (error) {
+            if (!(error instanceof SpawnAdmissionCancelledError)) {
+              this.holdDurableSpawn(
+                prepared.sessionId,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
           } finally {
-            this.spawnsInFlight.delete(prepared.placeholder.id);
+            this.durableSpawnRuns.delete(prepared.sessionId);
+            const current = readSession(this.config.dataDir, prepared.sessionId);
+            if (!current?.spawnIntent) {
+              this.durableSpawnIds.delete(prepared.sessionId);
+              this.pendingSpawnIds.delete(prepared.sessionId);
+              this.spawnsInFlight.delete(prepared.sessionId);
+              const completion = this.spawnCompletions.get(prepared.sessionId);
+              if (current?.status === "running") {
+                if (completion) completion.resolve(await this.enrich(current));
+              } else {
+                completion?.reject(
+                  new Error(current?.error ?? `Spawn cancelled for ${prepared.sessionId}`),
+                );
+              }
+              this.spawnCompletions.delete(prepared.sessionId);
+            } else {
+              this.registerDurableSpawn(current);
+              if (current.status === "running") {
+                const completion = this.spawnCompletions.get(prepared.sessionId);
+                if (completion) completion.resolve(await this.enrich(current));
+                this.spawnCompletions.delete(prepared.sessionId);
+              }
+            }
             resolve();
           }
         })();
@@ -14377,7 +14766,391 @@ export class SessionService {
     });
     this.backgroundSpawnRuns.add(run);
     void run.finally(() => this.backgroundSpawnRuns.delete(run));
-    return placeholder;
+    const completion = this.spawnCompletions.get(prepared.sessionId);
+    if (!completion) throw new Error(`Missing spawn completion for ${prepared.sessionId}`);
+    return completion.promise;
+  }
+
+  private registerDurableSpawn(record: SessionRecord): void {
+    if (!record.spawnIntent || isTerminalSessionStatus(record.status)) return;
+    this.durableSpawnIds.add(record.id);
+    this.spawnsInFlight.add(record.id);
+    if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+      this.pendingSpawnIds.add(record.id);
+    } else {
+      this.pendingSpawnIds.delete(record.id);
+    }
+  }
+
+  private protectDurableSpawns(): void {
+    for (const record of listSessions(this.config.dataDir).sort((a, b) =>
+      (a.spawnReceipt?.acceptedAt ?? a.createdAt).localeCompare(
+        b.spawnReceipt?.acceptedAt ?? b.createdAt,
+      ),
+    )) {
+      this.registerDurableSpawn(record);
+    }
+  }
+
+  private holdDurableSpawn(sessionId: string, reason: string): void {
+    if (this.admissionStopped) return;
+    const current = readSession(this.config.dataDir, sessionId);
+    if (!current?.spawnIntent || isTerminalSessionStatus(current.status)) return;
+    this.registerDurableSpawn(current);
+    if (current.error === reason) return;
+    writeSession(this.config.dataDir, { ...current, error: reason, errorSource: "other" });
+    this.logEvent("session.spawn.recovery_held", {
+      level: "warn",
+      sessionId,
+      projectId: current.project,
+      message: reason,
+    });
+  }
+
+  private async prepareRecoveredSpawn(record: SessionRecord): Promise<PreparedSpawn> {
+    const intent = record.spawnIntent;
+    if (!intent) throw new Error(`Missing launch intent for ${record.id}`);
+    const project = intent.request.bootstrap
+      ? this.resolveSpawnTarget(intent.request, "carried").project
+      : this.getProject(record.project);
+    this.assertSpawnAccountReady(record.claudeAccountId);
+    const startupAttachments = intent.startupAttachments.map(({ id, name }) => {
+      const artifact = readSessionArtifact(this.config.dataDir, workspaceIdOf(record), id);
+      if (!artifact) throw new Error(`Missing startup artifact ${id} for ${record.id}`);
+      return { id, name, path: artifact.path };
+    });
+    let reuseWorkspacePath =
+      intent.request.reuseWorkspaceSessionId || intent.phase !== "queued"
+        ? record.worktreePath
+        : undefined;
+    if (!reuseWorkspacePath && record.worktree && workspaceExists(record.worktreePath)) {
+      const ownedPath = await findWorktreePathForBranch(project.path, record.branch);
+      if (ownedPath && tryRealpath(ownedPath) === tryRealpath(record.worktreePath)) {
+        reuseWorkspacePath = record.worktreePath;
+      } else {
+        throw new Error(`Accepted workspace ownership is unresolved for ${record.id}`);
+      }
+    }
+    if (reuseWorkspacePath && !workspaceExists(reuseWorkspacePath)) {
+      throw new Error(`Missing accepted workspace for ${record.id}`);
+    }
+    return {
+      request: intent.request,
+      launchSelection: intent.launchSelection,
+      project,
+      agent: record.agent,
+      prompt: record.prompt,
+      ...(intent.request.steps ? { steps: intent.request.steps } : {}),
+      ...(intent.mode ? { mode: intent.mode } : {}),
+      planMode: record.planMode === true,
+      restrictWrites: record.restrictWrites === true,
+      ...(record.allowedTriggers ? { allowedTriggers: record.allowedTriggers } : {}),
+      ...(record.selfDestruct ? { selfDestruct: record.selfDestruct } : {}),
+      worktree: record.worktree,
+      defaultBranch: intent.defaultBranch,
+      sessionId: record.id,
+      ...(reuseWorkspacePath ? { reuseWorkspacePath } : {}),
+      ...(reuseWorkspacePath
+        ? {
+            resolvedBranch: {
+              branch: record.branch,
+              ...(record.branchSource ? { branchSource: record.branchSource } : {}),
+            },
+          }
+        : {}),
+      placeholder: record,
+      startupAttachments,
+      preflightBatchId: intent.preflightBatchId,
+    };
+  }
+
+  private checkpointSpawn(
+    record: SessionRecord,
+    phase: DurableSpawnIntent["phase"],
+    submission = record.spawnIntent?.submission,
+    pane = record.spawnIntent?.pane,
+  ): SessionRecord {
+    if (!record.spawnIntent || !submission)
+      throw new Error(`Missing launch intent for ${record.id}`);
+    return this.writeSpawnRecord({
+      ...record,
+      spawnIntent: { ...record.spawnIntent, phase, submission, ...(pane ? { pane } : {}) },
+    });
+  }
+
+  private retireDurableSpawn(record: SessionRecord, preserveCompletion = false): SessionRecord {
+    const { spawnIntent: _intent, ...settled } = record;
+    writeSession(this.config.dataDir, settled);
+    this.durableSpawnIds.delete(record.id);
+    this.pendingSpawnIds.delete(record.id);
+    this.spawnsInFlight.delete(record.id);
+    if (record.status !== "running" && !preserveCompletion) {
+      this.spawnCompletions
+        .get(record.id)
+        ?.reject(new Error(record.error ?? `Spawn cancelled for ${record.id}`));
+      this.spawnCompletions.delete(record.id);
+    }
+    return settled;
+  }
+
+  private async observeDurableRuntime(
+    record: SessionRecord,
+  ): Promise<
+    | { state: "absent" }
+    | { state: "matching"; generation: PaneGeneration }
+    | { state: "unknown"; reason: string }
+  > {
+    const intent = record.spawnIntent;
+    if (!intent || !record.agentLaunchId || !record.launchCommand) {
+      return { state: "unknown", reason: `Incomplete launch ownership for ${record.id}` };
+    }
+    const [pane, capture] = await Promise.all([
+      this.lookupPanePidQuietly(record.tmuxSession, { fresh: true }),
+      captureAgentProcessesForLaunch({
+        sessionId: record.id,
+        agentLaunchId: record.agentLaunchId,
+        processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+        recovery: true,
+      }),
+    ]);
+    if (pane.status !== "ok" || capture.status !== "ok") {
+      return { state: "unknown", reason: `Launch ownership probe unavailable for ${record.id}` };
+    }
+    if (pane.panePid === null && capture.complete === true && capture.processes.length === 0) {
+      return { state: "absent" };
+    }
+    if (
+      pane.panePid === null ||
+      pane.paneDead ||
+      capture.processes.length === 0 ||
+      capture.processes.some((process) => process.identity === null)
+    ) {
+      return { state: "unknown", reason: `Launch ownership remains uncertain for ${record.id}` };
+    }
+    const starttime = await readProcessStarttime(pane.panePid);
+    const paneCapture = await capturePaneAgentProcesses({
+      sessionId: record.id,
+      agentLaunchId: record.agentLaunchId,
+      panePid: pane.panePid,
+      paneDead: pane.paneDead,
+      processMatchers: agentProcessMatchers(record.agent, record.launchCommand),
+    });
+    if (
+      starttime === null ||
+      paneCapture.status !== "ok" ||
+      !capture.processes.some((owned) =>
+        paneCapture.processes.some(
+          (child) => child.pid === owned.pid && child.identity === owned.identity,
+        ),
+      ) ||
+      (intent.pane && (intent.pane.pid !== pane.panePid || intent.pane.starttime !== starttime))
+    ) {
+      return { state: "unknown", reason: `Launch generation remains uncertain for ${record.id}` };
+    }
+    for (const process of capture.processes) {
+      const cwd = await readProcessCwd(process.pid);
+      if (!cwd || tryRealpath(cwd) !== tryRealpath(record.worktreePath)) {
+        return {
+          state: "unknown",
+          reason: `Launch workspace identity remains uncertain for ${record.id}`,
+        };
+      }
+    }
+    return {
+      state: "matching",
+      generation: {
+        tmuxSession: record.tmuxSession,
+        panePid: pane.panePid,
+        processStarttime: starttime,
+      },
+    };
+  }
+
+  private async recoverDurableRuntime(record: SessionRecord): Promise<void> {
+    const intent = record.spawnIntent;
+    if (!intent) return;
+    if (record.agent === "opencode" && !record.agentSessionId) {
+      throw new Error(`OpenCode native launch identity remains uncertain for ${record.id}`);
+    }
+    const evidence = await this.observeDurableRuntime(record);
+    if (evidence.state === "unknown") throw new Error(evidence.reason);
+    const openCodeLaunchConfirmed =
+      record.agent === "opencode" &&
+      record.agentSessionId !== undefined &&
+      (await waitForOpenCodeLaunchMessage(record.agentSessionId, 0));
+    if (evidence.state === "absent") {
+      await this.withWorkspaceLifecycleLocks(record.id, async () => {
+        const current = readSession(this.config.dataDir, record.id);
+        if (
+          !current?.spawnIntent ||
+          isTerminalSessionStatus(current.status) ||
+          current.agentLaunchId !== record.agentLaunchId
+        )
+          return;
+        const submission = current.spawnIntent.submission;
+        if (submission.state !== "pending") {
+          const binding = submission.ackBaseline
+            ? await resumeAgentSubmitAckBinding(
+                current.agent,
+                this.submitAckContext(current),
+                submission.ackBaseline,
+              )
+            : null;
+          if (
+            submission.state === "confirmed" ||
+            openCodeLaunchConfirmed ||
+            (binding && submission.message && (await binding.scan(submission.message)).found)
+          ) {
+            const stopped: SessionRecord = { ...current, status: "stopped", updatedAt: nowIso() };
+            delete stopped.error;
+            delete stopped.errorSource;
+            const settled = this.retireDurableSpawn(stopped, true);
+            const completion = this.spawnCompletions.get(record.id);
+            if (completion) completion.resolve(await this.enrich(settled));
+            this.spawnCompletions.delete(record.id);
+            return;
+          }
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+        }
+        const { agentLaunchId: _launch, agentSessionId: _provider, ...unlaunched } = current;
+        const { pane: _pane, ...baseIntent } = current.spawnIntent;
+        const resumed: SessionRecord = {
+          ...unlaunched,
+          launchCommand: "",
+          status: "spawning",
+          spawnIntent: {
+            ...baseIntent,
+            phase: "workspace_ready",
+            submission: { state: "pending" },
+          },
+        };
+        delete resumed.error;
+        delete resumed.errorSource;
+        writeSession(this.config.dataDir, resumed);
+        this.registerDurableSpawn(resumed);
+        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(resumed));
+      });
+      return;
+    }
+    const { panePid, processStarttime: starttime } = evidence.generation;
+    if (intent.submission.state !== "confirmed" && !openCodeLaunchConfirmed) {
+      const binding = intent.submission.ackBaseline
+        ? await resumeAgentSubmitAckBinding(
+            record.agent,
+            this.submitAckContext(record),
+            intent.submission.ackBaseline,
+          )
+        : null;
+      const message = intent.submission.message;
+      if (intent.submission.state === "pending" && message?.trim()) {
+        const freshBinding = await createAgentSubmitAckBinding(record.agent, {
+          ...this.submitAckContext(record),
+          freshLaunch: true,
+        });
+        if (!freshBinding)
+          throw new Error(`Startup provider identity unavailable for ${record.id}`);
+        const generation = {
+          tmuxSession: record.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        };
+        const uncertain = await this.withWorkspaceLifecycleLocks(record.id, async () => {
+          const current = readSession(this.config.dataDir, record.id);
+          if (
+            !current?.spawnIntent ||
+            isTerminalSessionStatus(current.status) ||
+            current.agentLaunchId !== record.agentLaunchId ||
+            !(await this.paneGenerationMatches(current, generation))
+          ) {
+            throw new SpawnAdmissionCancelledError("killed");
+          }
+          return this.checkpointSpawn(current, "launching", {
+            state: "uncertain",
+            uncertainAt: nowIso(),
+            message,
+            ackBaseline: freshBinding.baseline,
+          });
+        });
+        const sent = await this.sendAgentMessageWithGeneration(
+          uncertain,
+          message,
+          { freshLaunch: true },
+          (actual) => {
+            const latest = readSession(this.config.dataDir, record.id);
+            if (
+              this.admissionStopped ||
+              !latest?.spawnIntent ||
+              isTerminalSessionStatus(latest.status) ||
+              latest.agentLaunchId !== record.agentLaunchId ||
+              actual.panePid !== generation.panePid ||
+              actual.processStarttime !== generation.processStarttime
+            )
+              throw new SpawnAdmissionCancelledError("killed");
+          },
+        );
+        if (sent.outcome !== "submitted")
+          throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      } else if (!binding || !message || !(await binding.scan(message)).found) {
+        throw new Error(`Startup submission remains uncertain for ${record.id}`);
+      }
+    }
+    await this.withWorkspaceLifecycleLocks(record.id, async () => {
+      const current = readSession(this.config.dataDir, record.id);
+      if (
+        this.admissionStopped ||
+        !current?.spawnIntent ||
+        isTerminalSessionStatus(current.status) ||
+        current.agentLaunchId !== record.agentLaunchId
+      )
+        return;
+      if (
+        !(await this.paneGenerationMatches(current, {
+          tmuxSession: current.tmuxSession,
+          panePid,
+          processStarttime: starttime,
+        }))
+      )
+        throw new Error(`Launch generation changed for ${record.id}`);
+      const project = this.getProject(current.project);
+      let launched: SessionRecord = { ...current, status: "running", updatedAt: nowIso() };
+      delete launched.submitUnconfirmedAt;
+      delete launched.error;
+      delete launched.errorSource;
+      launched = await this.startAutoStartSidecars(launched, project);
+      launched = this.applyRequestedStateSubscriptions(launched, intent.request.subscriptions);
+      launched = this.retireDurableSpawn(launched);
+      const completion = this.spawnCompletions.get(record.id);
+      if (completion) completion.resolve(await this.enrich(launched));
+      this.spawnCompletions.delete(record.id);
+      if (this.shouldRunDelivery(launched)) this.scheduleDeliveryRunner(launched.id);
+    });
+  }
+
+  private async recoverDurableSpawns(): Promise<void> {
+    if (this.admissionStopped || this.durableRecoveryBusy) return;
+    const ids = [...this.durableSpawnIds].filter((id) => !this.durableSpawnRuns.has(id));
+    if (ids.length === 0) return;
+    const sessionId = ids[this.durableRecoveryCursor++ % ids.length];
+    if (!sessionId) return;
+    const record = readSession(this.config.dataDir, sessionId);
+    if (!record?.spawnIntent || isTerminalSessionStatus(record.status)) {
+      this.durableSpawnIds.delete(sessionId);
+      this.pendingSpawnIds.delete(sessionId);
+      this.spawnsInFlight.delete(sessionId);
+      return;
+    }
+    this.durableRecoveryBusy = true;
+    try {
+      if (record.spawnIntent.phase === "queued" || record.spawnIntent.phase === "workspace_ready") {
+        void this.startBackgroundSpawn(await this.prepareRecoveredSpawn(record));
+      } else {
+        await this.recoverDurableRuntime(record);
+      }
+    } catch (error) {
+      this.holdDurableSpawn(sessionId, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.durableRecoveryBusy = false;
+    }
   }
 
   async spawnShepherd(
@@ -18447,6 +19220,22 @@ export class SessionService {
       if (targetStatus === "completed" && !request.skipPrCheck) {
         session = await this.applyOpenPrAction(session, request.prAction);
       }
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages(
+            {
+              ...session,
+              status: targetStatus,
+              updatedAt: nowIso(),
+            },
+            [],
+            false,
+          ),
+        );
+        for (const waiter of this.spawnAdmissionWaiters) {
+          if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+        }
+      }
       if (!request.skipRuntimeTeardown) {
         await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
         await this.cleanupSessionServices(session);
@@ -18576,6 +19365,15 @@ export class SessionService {
           session = await this.applyOpenPrAction(session, request.prAction);
         }
       }
+      this.cancelWaitingHandoff(sessionId);
+      if (session.spawnIntent) {
+        session = this.retireDurableSpawn(
+          withQueuedMessages({ ...session, status: "killed", updatedAt: nowIso() }, [], false),
+        );
+      }
+      for (const waiter of this.spawnAdmissionWaiters) {
+        if (waiter.sessionId === sessionId) this.cancelSpawnAdmission(waiter, "killed");
+      }
       await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
       await this.cleanupSessionServices(session);
       this.removeSessionArtifacts(session, { preserveStartup: true });
@@ -18609,7 +19407,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
 
-    if (session.status === "killed") {
+    if (currentSession.status === "killed") {
       this.logEvent("session.kill.noop", {
         level: "info",
         sessionId,
@@ -18636,7 +19434,8 @@ export class SessionService {
     delete record.queuedMessageTyped;
     delete record.submitRequeuedMessage;
     delete record.submitFailedMessage;
-    writeSession(this.config.dataDir, record);
+    if (record.spawnIntent) this.retireDurableSpawn(record);
+    else writeSession(this.config.dataDir, record);
     if (this.shouldRemoveWorktreeOnTerminal(record)) {
       const cleanup = await this.resolveCleanupContext(record);
       try {
@@ -21153,18 +21952,85 @@ export class SessionService {
     request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
   ): Promise<SessionView> {
-    return this.runLifecycle("complete", [sessionId], undefined, () =>
-      this.handoffTransaction(sessionId, request, options),
-    );
+    const waiting = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+      const session = this.validateHandoffSource(sessionId, options);
+      if (this.handoffsInFlight.has(sessionId)) {
+        throw new Error(`Handoff already in flight for ${sessionId}`);
+      }
+      const agent = parseAgentName(request.agent);
+      const token = Symbol(`handoff:${sessionId}`);
+      this.handoffsInFlight.set(sessionId, {
+        token,
+        phase: "waiting",
+      });
+      try {
+        const launchSelection = await resolveSpawnRequestLaunchSelection(
+          resolveRespawnRequest(session, {
+            agent,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            ...(request.reasoningEffort !== undefined
+              ? { reasoningEffort: request.reasoningEffort }
+              : {}),
+          }),
+          this.getProject(session.project),
+          agent,
+          this.config.models.codexHome,
+        );
+        if (this.handoffsInFlight.get(sessionId)?.token !== token) {
+          throw new SpawnAdmissionCancelledError("handoff");
+        }
+        return { token, session, launchSelection };
+      } catch (error) {
+        if (this.handoffsInFlight.get(sessionId)?.token === token) {
+          this.handoffsInFlight.delete(sessionId);
+        }
+        throw error;
+      }
+    });
+    let reservation: symbol | undefined;
+    try {
+      if (this.handoffsInFlight.get(sessionId)?.token !== waiting.token) {
+        throw new SpawnAdmissionCancelledError("handoff");
+      }
+      reservation = await this.waitForSpawnAdmission(waiting.session.project, {
+        replacingSessionId: sessionId,
+      });
+      const claim = this.handoffsInFlight.get(sessionId);
+      if (claim?.token !== waiting.token) throw new SpawnAdmissionCancelledError("handoff");
+      this.consumeSpawnAdmission(reservation);
+      claim.phase = "activating";
+      const admissionReservation = reservation;
+      return await this.runLifecycle("complete", [sessionId], undefined, () =>
+        this.handoffTransaction(sessionId, request, options, {
+          ...waiting,
+          admissionReservation,
+        }),
+      );
+    } finally {
+      if (reservation !== undefined) this.admissionReservations.delete(reservation);
+      if (this.handoffsInFlight.get(sessionId)?.token === waiting.token) {
+        this.handoffsInFlight.delete(sessionId);
+      }
+    }
+  }
+
+  private cancelWaitingHandoff(sessionId: string): void {
+    const claim = this.handoffsInFlight.get(sessionId);
+    if (claim?.phase !== "waiting") return;
+    this.handoffsInFlight.delete(sessionId);
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.replacingSessionId === sessionId) this.cancelSpawnAdmission(waiter, "handoff");
+    }
   }
 
   private async handoffTransaction(
     sessionId: string,
     request: HandoffSessionRequest,
-    options?: { todoActor?: TodoActor },
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
   ): Promise<SessionView> {
     const prepared = await this.withWorkspaceLifecycleLocks(sessionId, () =>
-      this.prepareHandoffLocked(sessionId, request, options),
+      this.prepareHandoffLocked(sessionId, request, options, waiting),
     );
     try {
       const spawned = await this.spawn(prepared.spawnRequest, prepared.spawnOptions);
@@ -21231,20 +22097,13 @@ export class SessionService {
       return await this.enrich(finalized);
     } finally {
       this.foregroundSpawnReceipts.delete(prepared.receiptToken);
-      await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
-        if (this.handoffsInFlight.get(sessionId)?.token === prepared.token) {
-          this.handoffsInFlight.delete(sessionId);
-        }
-      });
-      this.admissionReservations.delete(prepared.admissionReservation);
     }
   }
 
-  private async prepareHandoffLocked(
+  private validateHandoffSource(
     sessionId: string,
-    request: HandoffSessionRequest,
     options?: { todoActor?: TodoActor },
-  ): Promise<PreparedHandoff> {
+  ): SessionRecord {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -21272,33 +22131,29 @@ export class SessionService {
       this.logManualStatusFailure("handoff", "completed", sessionId, session.project, error);
       throw error;
     }
-    // Gate before any teardown below. The source session is still on-disk as
-    // running/spawning here, so a denial leaves it fully untouched — no kill,
-    // no status flip. The successor replaces the source rather than adding to
-    // the fleet, so exclude it from the live count: a handoff at exactly the
-    // cap is net-neutral (stop one, start one) and must be allowed.
-    const admissionReservation = this.reserveAdmission(session.project, "spawn", {
-      replacingSessionId: session.id,
-    });
+    return session;
+  }
+
+  private async prepareHandoffLocked(
+    sessionId: string,
+    request: HandoffSessionRequest,
+    options: { todoActor?: TodoActor } | undefined,
+    waiting: HandoffAdmission,
+  ): Promise<PreparedHandoff> {
+    const session = this.validateHandoffSource(sessionId, options);
+    const admissionReservation = waiting.admissionReservation;
+    if (
+      this.handoffsInFlight.get(sessionId)?.token !== waiting.token ||
+      workspaceIdOf(session) !== workspaceIdOf(waiting.session) ||
+      session.worktreePath !== waiting.session.worktreePath ||
+      session.closeoutOwner !== waiting.session.closeoutOwner
+    ) {
+      throw new Error(`Handoff source changed before admission for ${sessionId}`);
+    }
 
     try {
-      if (this.handoffsInFlight.has(sessionId)) {
-        throw new Error(`Handoff already in flight for ${sessionId}`);
-      }
       const agent = parseAgentName(request.agent);
-      const carriedRequest = resolveRespawnRequest(session, {
-        agent,
-        ...(request.model !== undefined ? { model: request.model } : {}),
-        ...(request.reasoningEffort !== undefined
-          ? { reasoningEffort: request.reasoningEffort }
-          : {}),
-      });
-      const launchSelection = await resolveSpawnRequestLaunchSelection(
-        carriedRequest,
-        this.getProject(session.project),
-        agent,
-        this.config.models.codexHome,
-      );
+      const launchSelection = waiting.launchSelection;
       const notes = request.notes?.trim();
       const originalTask = extractBareUserTask(session.originalTaskPrompt ?? session.prompt);
       const { attachments: clonedAttachments, missingIds: missingStartupAttachmentIds } =
@@ -21369,7 +22224,7 @@ export class SessionService {
         },
       });
 
-      const token = Symbol(`handoff:${sessionId}`);
+      const token = waiting.token;
       const receiptToken = Symbol(`handoff-receipt:${sessionId}`);
       const lifecycleIds = this.lifecycleIdsFor(sourceForSpawn);
       const sourceStamp: HandoffSourceStamp = {
@@ -21382,7 +22237,6 @@ export class SessionService {
         updatedAt: sourceForSpawn.updatedAt,
         tmuxSession: sourceForSpawn.tmuxSession,
       };
-      this.handoffsInFlight.set(sessionId, { token, lifecycleIds, sourceStamp });
       const knownTags = new Set(this.config.tags.map((tag) => tag.name));
       const carryTags = (session.slots?.tags ?? []).filter((tag) => knownTags.has(tag));
       return {
@@ -22531,7 +23385,10 @@ export class SessionService {
     records: SessionRecord[];
   } {
     const live = listSessions(this.config.dataDir).filter(
-      (session) => session.id !== excludeSessionId && this.isLiveSessionRecord(session),
+      (session) =>
+        session.id !== excludeSessionId &&
+        !this.pendingSpawnIds.has(session.id) &&
+        this.isLiveSessionRecord(session),
     );
     const byProject = new Map<string, number>();
     for (const session of live) {
@@ -22630,13 +23487,13 @@ export class SessionService {
   private assertAdmissible(
     projectId: string,
     context: "spawn" | "restore" | "wake",
-    opts?: { replacingSessionId?: string; admissionReservation?: symbol },
+    opts?: { replacingSessionId?: string; admissionReservation?: symbol; quiet?: boolean },
   ): void {
     const admission = this.config.admission;
     const sample = this.evaluateMemoryDenial(context);
     const legacyGuardDetail = sample?.legacyDetail;
     const floorGuardDetail = sample?.floorDetail;
-    if (legacyGuardDetail) {
+    if (legacyGuardDetail && !opts?.quiet) {
       this.logEvent("session.admission.memory_guard", {
         level: "warn",
         projectId,
@@ -22654,11 +23511,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": memory guard crossed — ${denialDetail}`,
         "memory_guard",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const live = this.countLiveSessions(opts?.replacingSessionId);
@@ -22678,11 +23536,12 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at its per-project cap of ${projectCap} live sessions (${this.admissionOccupancy(projectLive, projectReserved)}). ${this.admissionDenialAction(projectCandidates)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
     const totalLive = live.total + reservedTotal;
@@ -22691,24 +23550,85 @@ export class SessionService {
         `Cannot ${context} session for project "${projectId}": at the global cap of ${admission.maxLiveSessions} live sessions (${this.admissionOccupancy(live.total, reservedTotal)}). ${this.admissionDenialAction(live.records)}`,
         "cap",
       );
-      this.logEvent("session.admission.denied", {
-        level: "warn",
-        projectId,
-        message: denial.message,
-      });
+      if (!opts?.quiet)
+        this.logEvent("session.admission.denied", {
+          level: "warn",
+          projectId,
+          message: denial.message,
+        });
       throw denial;
     }
   }
 
-  private reserveAdmission(
+  private tryReserveSpawnAdmission(
     projectId: string,
-    context: "spawn" | "restore",
-    opts?: { replacingSessionId?: string },
-  ): symbol {
-    this.assertAdmissible(projectId, context, opts);
+    replacingSessionId?: string,
+    quiet = true,
+  ): symbol | null {
+    if (this.admissionStopped) throw new SpawnAdmissionCancelledError("disposed");
+    try {
+      this.assertAdmissible(projectId, "spawn", {
+        ...(replacingSessionId ? { replacingSessionId } : {}),
+        quiet,
+      });
+    } catch (error) {
+      if (error instanceof SessionAdmissionDeniedError) return null;
+      throw error;
+    }
     const reservation = Symbol(projectId);
     this.admissionReservations.set(reservation, projectId);
     return reservation;
+  }
+
+  private waitForSpawnAdmission(
+    projectId: string,
+    opts: { sessionId?: string; replacingSessionId?: string } = {},
+  ): Promise<symbol> {
+    if (this.admissionStopped) return Promise.reject(new SpawnAdmissionCancelledError("disposed"));
+    return new Promise<symbol>((resolve, reject) => {
+      this.drainSpawnAdmissions();
+      const waiter: SpawnAdmissionWaiter = { projectId, ...opts, resolve, reject };
+      const reservation = this.tryReserveSpawnAdmission(projectId, opts.replacingSessionId, false);
+      this.spawnAdmissionWaiters.add(waiter);
+      if (reservation !== null) {
+        waiter.reservation = reservation;
+        resolve(reservation);
+      }
+    });
+  }
+
+  private drainSpawnAdmissions(): void {
+    if (this.admissionStopped) return;
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== undefined) continue;
+      const reservation = this.tryReserveSpawnAdmission(
+        waiter.projectId,
+        waiter.replacingSessionId,
+      );
+      if (reservation === null) continue;
+      waiter.reservation = reservation;
+      waiter.resolve(reservation);
+    }
+  }
+
+  private consumeSpawnAdmission(reservation: symbol): void {
+    for (const waiter of this.spawnAdmissionWaiters) {
+      if (waiter.reservation !== reservation) continue;
+      this.spawnAdmissionWaiters.delete(waiter);
+      break;
+    }
+    if (this.admissionStopped || !this.admissionReservations.has(reservation)) {
+      throw new SpawnAdmissionCancelledError(this.admissionStopped ? "disposed" : "killed");
+    }
+  }
+
+  private cancelSpawnAdmission(
+    waiter: SpawnAdmissionWaiter,
+    reason: SpawnAdmissionCancelledError["reason"],
+  ): void {
+    this.spawnAdmissionWaiters.delete(waiter);
+    if (waiter.reservation !== undefined) this.admissionReservations.delete(waiter.reservation);
+    waiter.reject(new SpawnAdmissionCancelledError(reason));
   }
 
   // Cheap admission snapshot for the daemon-startup log: cap and live count

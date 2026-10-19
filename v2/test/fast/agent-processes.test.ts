@@ -625,6 +625,92 @@ describe("terminateAgentProcesses", () => {
 });
 
 describe("captureAgentProcessesForLaunch", () => {
+  describe("durable spawn capture completeness", () => {
+    it("does not prove absence with empty matchers", async () => {
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: [],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("requires readable environment and generation for each relevant live candidate", async () => {
+      fakeTable = [{ pid: 30, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude" }];
+      identities.set(30, "start-30");
+      readProcessEnvValueMock.mockResolvedValueOnce({ status: "unreadable" });
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("proves absence only with complete nonmatching candidate evidence", async () => {
+      fakeTable = [
+        {
+          pid: 30,
+          ppid: 1,
+          rssKb: 1,
+          elapsedSeconds: 1,
+          args: "claude",
+          env: { SPUR_SESSION: "other" },
+        },
+      ];
+      identities.set(30, "start-30");
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: true });
+      identities.delete(30);
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: false });
+    });
+
+    it("accepts an unreadable candidate only after a fresh snapshot proves it gone", async () => {
+      identities.set(30, "start-30");
+      snapshotProcessesMock.mockResolvedValueOnce({
+        status: "ok",
+        processes: [{ pid: 30, ppid: 1, rssKb: 1, elapsedSeconds: 1, args: "claude" }],
+      });
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "ok", processes: [], complete: true });
+    });
+
+    it("does not turn an unavailable process snapshot into absence", async () => {
+      processSnapshotUnavailable = true;
+      expect(
+        await captureAgentProcessesForLaunch({
+          sessionId: "api-1",
+          agentLaunchId: "launch-a",
+          processMatchers: ["claude"],
+          recovery: true,
+        }),
+      ).toEqual({ status: "unavailable" });
+    });
+  });
+
   it("captures only the exact session launch and preserves pid identity", async () => {
     identities.set(30, "start-30");
     fakeTable = [
