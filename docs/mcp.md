@@ -82,6 +82,7 @@ Connect ChatGPT in three steps:
 Keep credentials outside Spur config, command arguments, transcripts and chat.
 MCP authentication and tunnel authentication are separate: selecting no MCP authentication still requires a tunnel runtime API key.
 Full API-key permissions do not grant its owner access to an unrelated tunnel or organization.
+Use [organization-level tunnel permissions](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access), not project membership alone.
 
 To supervise an existing profile, create a private environment file:
 
