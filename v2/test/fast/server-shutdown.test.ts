@@ -36,7 +36,10 @@ const delayedSourcesStop = vi.hoisted(() => ({ enabled: false, delayMs: 20 }));
 const throwingRuntimeLogsStop = vi.hoisted(() => ({ enabled: false }));
 
 const capturedSourceDeps = vi.hoisted(
-  () => ({ deps: undefined }) as { deps: { getSession(id: string): Promise<unknown> } | undefined },
+  () =>
+    ({ deps: undefined }) as {
+      deps: Parameters<typeof EventSourcesModule.startConfiguredSources>[0] | undefined;
+    },
 );
 
 vi.mock("../../src/event-sources/index.js", async (importOriginal) => {

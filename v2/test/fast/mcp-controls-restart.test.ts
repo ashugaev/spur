@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { expect, it, vi } from "vitest";
+import { z } from "zod";
 import { startMcpHttp } from "../../src/mcp-http.js";
 import { writeSession, readSession } from "../../src/metadata.js";
 import { readUserActionLog } from "../../src/user-action-log.js";
@@ -305,7 +306,12 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     expect(generation).toBe(2);
     const sentinelAfter = await paneIdentity();
     expect(sentinelAfter).toEqual(sentinel);
-    expect(before.structuredContent?.daemon).not.toEqual(after.structuredContent?.daemon);
+    const statusSchema = z.object({
+      daemon: z.object({ pid: z.number(), lifecycleInstanceId: z.string() }),
+    });
+    expect(statusSchema.parse(before.structuredContent).daemon).not.toEqual(
+      statusSchema.parse(after.structuredContent).daemon,
+    );
     expect(readSession(data, "owned-session")).toMatchObject({
       status: "stopped",
       scheduledWake,
@@ -375,10 +381,13 @@ it("restarts only an owned backend, retains session/history/queue/wake and resol
     } finally {
       try {
         if (sentinel) {
+          const stoppedSentinel = sentinel;
           await tmux(["kill-server"]);
           await vi.waitFor(
             async () =>
-              expect(await readLiveProcessStarttime(sentinel.pid)).not.toBe(sentinel.starttime),
+              expect(await readLiveProcessStarttime(stoppedSentinel.pid)).not.toBe(
+                stoppedSentinel.starttime,
+              ),
             { timeout: 5000 },
           );
           sentinelStopped = true;

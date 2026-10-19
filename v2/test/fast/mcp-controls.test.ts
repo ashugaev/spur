@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { createMcpServer } from "../../src/mcp.js";
 import { mcpFixture, session } from "./mcp-fixture.js";
 import { restartDaemonIfRunning } from "../../src/client.js";
@@ -148,7 +149,10 @@ it("keeps serialized daemon log output bounded with pagination and rejects paths
   });
   const second = await client.callTool({
     name: "read_daemon_logs",
-    arguments: { cursor: first.structuredContent?.nextCursor, limit: 1 },
+    arguments: {
+      cursor: z.object({ nextCursor: z.string() }).parse(first.structuredContent).nextCursor,
+      limit: 1,
+    },
   });
   expect(second.structuredContent).toMatchObject({ entries: [{ message: "event-1" }] });
   expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(131072);
