@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { getBuildId } from "./build-identity.js";
 import {
   consentPolicy,
   proposeConsent,
@@ -18,6 +19,9 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import {
   annotateLifecycleError,
+  createRestoreOperation,
+  RestoreOperationError,
+  type RestoreOperationContext,
   SessionLifecycleError,
   SessionLifecycleRegister,
 } from "./session-lifecycle.js";
@@ -97,6 +101,7 @@ import {
   resolveSidecarIdleTtlMinutes,
   type SidecarReapCandidate,
   type SidecarReapPlan,
+  type WorkspaceRuntime,
 } from "./sidecars/policy.js";
 import {
   deleteAgentHookState,
@@ -303,6 +308,7 @@ import {
   waitForTmuxReady,
   PromptReadyTimeoutError,
   TmuxProbeUnknownError,
+  isHistoricalPsProbeDiagnostic,
   type TmuxPanePidLookup,
 } from "./runtime-tmux.js";
 import {
@@ -584,6 +590,7 @@ import {
   probeWorkspace,
   worktreePathFor,
 } from "./workspace.js";
+import { renderSelfMarker } from "./review-providers/github.js";
 import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 import { getVersion } from "./version.js";
 import { readAutoUpdateFlag, writeAutoUpdateFlag } from "./auto-update-config.js";
@@ -596,6 +603,38 @@ import { appendUpdateLedgerLine, readUpdateLedger, updateLedgerPath } from "./up
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const STATUS_DETECTION_ERROR_PREFIX = "Session status detection failed: ";
 const REPORTING_DETECTION_ERROR_PREFIX = STATUS_DETECTION_ERROR_PREFIX + "Resource readout ";
+const INFERRED_RUNTIME_EXIT_ERROR = "Agent runtime exited unexpectedly.";
+const LEGACY_RUNTIME_DIAGNOSTICS = [
+  "tmux list-windows failed:",
+  "tmux list-panes failed:",
+  "ps failed:",
+  "tmux process failed:",
+];
+
+function recoverableRuntimeError(session: SessionRecord): boolean {
+  if (session.error === INFERRED_RUNTIME_EXIT_ERROR) {
+    return (
+      session.errorSource === "inferred_runtime_exit" ||
+      (session.errorSource === undefined && session.launchCommand !== "")
+    );
+  }
+  if (
+    !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) ||
+    session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+  )
+    return false;
+  if (session.errorSource === "runtime_probe") return true;
+  if (session.errorSource === "other") {
+    return isHistoricalPsProbeDiagnostic(session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length));
+  }
+  if (session.errorSource !== undefined) return false;
+  const diagnostic = session.error.slice(STATUS_DETECTION_ERROR_PREFIX.length);
+  return (
+    diagnostic === "runtime state unknown" ||
+    diagnostic === "runtime probe (tmux or ps) timed out; runtime state unknown" ||
+    LEGACY_RUNTIME_DIAGNOSTICS.some((prefix) => diagnostic.startsWith(prefix))
+  );
+}
 // Not a message prefix (the message starts with "Session <id> ...") — a
 // substring marker matched via .includes() in isForeignAgentProcessMessage.
 const FOREIGN_AGENT_PROCESS_MARKER = "already has a live agent process";
@@ -713,6 +752,8 @@ const SIDECAR_START_CONFLICT_BACKOFF_BASE_MS = 60_000;
 const SIDECAR_START_CONFLICT_BACKOFF_MAX_MS = 900_000;
 const SIDECAR_START_CONFLICT_DEADLINE_MS = 1_800_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
+const LIFECYCLE_REBUILD_PASSES = 3;
+const LIFECYCLE_ASSEMBLY_BUDGET_MS = 5_000;
 // Idle (non-live) dashboard entries can only drift from filesystem state
 // (workspaceExists, hasServiceIssues, workspace slots), never from agent
 // activity, so they don't need every-tick re-enrichment — a small bounded
@@ -951,6 +992,8 @@ export class SidecarProbeUnresponsiveError extends Error {
   readonly statusCode = 503;
 }
 
+class SidecarLaunchIncompleteError extends Error {}
+
 export class OpenPrActionRequiredError extends Error {
   readonly statusCode = 409;
   readonly payload: OpenPrActionRequiredPayload;
@@ -1159,6 +1202,14 @@ type SessionLifecycleStamp = {
   tmuxSession: string;
 };
 
+type ScheduledWakeClaim = {
+  session: SessionRecord;
+  wake: NonNullable<SessionRecord["scheduledWake"]>;
+  revision: number;
+  manual: boolean;
+  stage: "unattempted" | "input-started" | "accepted";
+};
+
 type AgentMessageTarget = Pick<
   SessionRecord,
   "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath" | "agentSessionId"
@@ -1181,6 +1232,7 @@ type StartedAgentMessage =
     };
 
 type AgentMessageOptions = AgentMessageWriteOptions & {
+  operation?: RestoreOperationContext;
   skipSubmitAck?: boolean;
   authorizeInput?: (send: () => Promise<void>) => Promise<boolean>;
 };
@@ -1222,6 +1274,17 @@ type PreparedDelivery = {
 type ReadySessionForSend = {
   session: SessionRecord;
   recoveryMessage: PlannedAgentMessage | null;
+};
+
+type PreparedSessionObservation = {
+  session: SessionRecord;
+  revision: number;
+};
+
+type SessionPreparationOptions = {
+  operation?: RestoreOperationContext;
+  preparedObservation?: PreparedSessionObservation;
+  observePreparedSession?: (session: SessionRecord) => void;
 };
 
 type ForegroundSpawnReceipt = {
@@ -1297,6 +1360,20 @@ interface SessionRuntimeSnapshot {
   probeUnresponsive: boolean;
   diagnostic?: string;
 }
+// Plan-time facts the reap executor re-proves under the workspace lifecycle lock.
+interface SidecarReapEntryContext {
+  identity: SidecarProcessIdentity | undefined;
+  workspaceRuntime: WorkspaceRuntime | undefined;
+  // Set with workspaceRuntime "dead": member id -> runtime key of every member
+  // whose samples produced that verdict. Execute trusts the verdict only for
+  // exactly these members and runtimes.
+  confirmedMembers: ReadonlyMap<string, string> | undefined;
+}
+
+// "dead_looking" = one plain read found no live agent; it is confirmed by a
+// later fresh read before anything treats it as dead.
+type MemberRuntimeSample = "live" | "dead" | "dead_looking" | "unknown";
+
 interface SessionStateResult {
   session: SessionRecord;
   runtime: SessionRuntimeSnapshot;
@@ -1518,11 +1595,42 @@ function buildConversationResponse(
  * return zero entries with no scrollable element left to trigger a
  * recovery re-fetch.
  */
-function clampPageStart(from: number, floor: number, totalEntries: number): number {
+// The fields readRuntimeSnapshot keys on (tmux name, agent, launch command)
+// plus the native session id a restore/relaunch rewrites.
+function memberRuntimeKey(
+  member: Pick<SessionRecord, "tmuxSession" | "agent" | "launchCommand" | "agentSessionId">,
+): string {
+  return [member.tmuxSession, member.agent, member.launchCommand, member.agentSessionId ?? ""].join(
+    "\u0000",
+  );
+}
+
+function confirmedMemberMap(members: readonly SessionRecord[]): Map<string, string> {
+  return new Map(members.map((member) => [member.id, memberRuntimeKey(member)]));
+}
+
+// Workspace verdict: any live member wins, then any unknown; "pending" while a
+// dead-looking member still awaits its fresh confirm read.
+function foldMemberRuntime(samples: readonly MemberRuntimeSample[]): WorkspaceRuntime | "pending" {
+  if (samples.includes("live")) return "live";
+  if (samples.includes("unknown")) return "unknown";
+  return samples.includes("dead_looking") ? "pending" : "dead";
+}
+
+function clampPageStart(
+  from: number,
+  floor: number,
+  totalEntries: number,
+  preserveEnd = false,
+): number {
   const boundedFloor = Math.max(floor, 0);
   if (totalEntries <= 0) return boundedFloor;
   const candidate = Math.max(from, boundedFloor);
-  if (candidate < totalEntries && boundedFloor <= totalEntries) return candidate;
+  if (
+    (candidate < totalEntries || (preserveEnd && candidate === totalEntries)) &&
+    boundedFloor <= totalEntries
+  )
+    return candidate;
   return Math.max(totalEntries - CONVERSATION_PAGE_ENTRIES, 0);
 }
 
@@ -1926,6 +2034,7 @@ function createRuntimeInfo(
 ): RuntimeInfo {
   return {
     lifecycleInstanceId,
+    buildId: getBuildId(),
     ok: true,
     apiVersion: SPUR_DAEMON_API_VERSION,
     version: getVersion(),
@@ -2093,6 +2202,30 @@ function telegramAgentInstructions(
   ].join("\n");
 }
 
+/**
+ * GitHub post-signing block for the launch prompt. Present for every session of
+ * a project with a `signPosts` github source: each github source polls every
+ * session of its project, so the marker (equal across the project's marker
+ * sources, enforced at config load) marks any session's posts as its own.
+ */
+function githubPostInstructions(
+  project: ProjectConfig | undefined,
+  sessionId: string,
+): string | undefined {
+  if (!project) return undefined;
+  for (const source of Object.values(project.sources)) {
+    if (source.type !== "github" || source.signPosts !== true) continue;
+    const marker = renderSelfMarker(source.selfMarker, sessionId);
+    return [
+      "GitHub posts: this GitHub login is shared with the operator and other agents.",
+      `- End every PR or issue comment, inline review comment, review thread reply, review body and PR description you post with \`${marker}\` as its own last line, exactly once. Never inside a \`>\` quote.`,
+      "- Spur treats a post carrying that line as this session's own and skips it; an unsigned post can come back to you as someone else's feedback.",
+      "- Commit messages and PR titles stay unsigned.",
+    ].join("\n");
+  }
+  return undefined;
+}
+
 function buildInitialMessage(
   initialMessage: string,
   sidecarNames: string[],
@@ -2100,6 +2233,7 @@ function buildInitialMessage(
   branchNamingRegex?: string,
   selfDestruct?: SelfDestructConfig,
   telegramInstructions?: string,
+  githubInstructions?: string,
 ): string {
   let base = initialMessage.trim()
     ? withSelfDestructInstructions(
@@ -2116,6 +2250,9 @@ function buildInitialMessage(
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
+  }
+  if (githubInstructions) {
+    base = `${base}\n\n${githubInstructions}`;
   }
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
@@ -2537,9 +2674,15 @@ export async function detectOrphanedSidecarTrees(
   return worktreeTrees;
 }
 
-async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
+async function verifySidecarStartup(
+  sessionId: string,
+  sidecarName: string,
+  operation?: RestoreOperationContext,
+): Promise<void> {
+  operation?.assertActive();
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
   await sleep(SIDECAR_STARTUP_VERIFY_MS);
+  operation?.assertActive();
   if (!(await tmuxPaneDead(tmuxSession))) return;
   const output = (await captureTmuxPaneOrEmpty(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
   // Signal the pane's process tree before tearing down tmux, same as every
@@ -2549,7 +2692,8 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   // caller's catch block (session-service.ts ~6540) supplies that via
   // reapSidecarByName against the identity already persisted before this
   // call runs.
-  await signalSidecarPane(tmuxSession);
+  operation?.assertActive();
+  await signalSidecarPane(tmuxSession, undefined, operation);
   const detail = output ? `\nLast output:\n${output}` : "";
   throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
@@ -2890,6 +3034,20 @@ type SpawnPreflightSelection =
       outcome: "no-project-branch-requirements";
       attempts: number;
     };
+
+interface SessionSpawnOptions {
+  promptKind?: UserInputKind;
+  modeResolution?: "strict" | "carried";
+  replacingSessionId?: string;
+  admissionReservation?: symbol;
+  validatedLaunchSelection?: AgentLaunchSelection;
+  closeoutOwnerTransfer?: boolean;
+  sensitivePromptSuffix?: string;
+  receiptToken?: symbol;
+  /** Set by source adapters, never from the HTTP body. */
+  telegramOrigin?: TelegramSpawnOrigin;
+  triggerBirthKey?: string;
+}
 
 interface PreparedSpawn {
   launchSelection: AgentLaunchSelection;
@@ -3402,6 +3560,8 @@ export class SessionService {
   private lastArtifactRetentionSweepAt = Date.now();
   private scheduledWakeTimer: NodeJS.Timeout | null = null;
   private scheduledWakeMonitorRunning = false;
+  private readonly scheduledWakeClaims = new Map<string, ScheduledWakeClaim>();
+  private readonly scheduledWakeLastFailure = new Map<string, string>();
   private sidecarReaperTimer: NodeJS.Timeout | null = null;
   private sidecarReaperRunning = false;
   private memoryShedTimer: NodeJS.Timeout | null = null;
@@ -3439,6 +3599,10 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly triggerBirthsInFlight = new Map<
+    string,
+    { request: SpawnSessionRequest; result: Promise<SessionView> }
+  >();
   private readonly backgroundSpawnRuns = new Set<Promise<void>>();
   private readonly backgroundLoopRuns = new Set<Promise<void>>();
   // startQueuedDeliveryAttempt runs, drained by settleBackgroundSpawns.
@@ -3700,6 +3864,8 @@ export class SessionService {
     // cannot hang on a batch that will never flush.
     cancelPendingPrLookups();
     this.deliveryStopped = true;
+    this.scheduledWakeClaims.clear();
+    this.scheduledWakeLastFailure.clear();
     this.sidecarEndpoints.clear();
     this.sidecarObservation = undefined;
     this.sidecarObservationRevision += 1;
@@ -4483,8 +4649,18 @@ export class SessionService {
     tmuxNames: ReadonlySet<string>,
     sessions: readonly SessionRecord[],
     psSnapshot: ProcSnapshot,
-  ): Promise<SidecarReapCandidate[]> {
+  ): Promise<{
+    candidates: SidecarReapCandidate[];
+    context: Map<string, SidecarReapEntryContext>;
+  }> {
     const seenTmuxNames = new Set<string>();
+    const context = new Map<string, SidecarReapEntryContext>();
+    const memberSamples = new Map<string, Promise<MemberRuntimeSample>>();
+    const pendingRuntime: {
+      candidate: SidecarReapCandidate;
+      members: readonly SessionRecord[];
+      samples: readonly MemberRuntimeSample[];
+    }[] = [];
     const connectionCache = new Map<number, Promise<"established" | "none" | "unknown">>();
     const probeConnections = (port: number): Promise<"established" | "none" | "unknown"> => {
       let pending = connectionCache.get(port);
@@ -4573,7 +4749,7 @@ export class SessionService {
           }
         }
 
-        candidates.push({
+        const candidate: SidecarReapCandidate = {
           ownerId,
           sidecarName,
           tmuxName,
@@ -4591,10 +4767,109 @@ export class SessionService {
           ),
           connections,
           ageSeconds: identity ? (psSnapshot.byPid.get(identity.pid)?.etimes ?? null) : null,
+        };
+        // Runtime liveness is resolved only when a "dead" verdict would
+        // actually reap this candidate: every earlier veto, every workspace
+        // without retained error, and a candidate still inside its idle TTL
+        // never probe (policy stays pure; the hypothesis is evaluated here).
+        const needsRuntime =
+          workspaceRetainedError &&
+          planSidecarReap({
+            nowMs: Date.now(),
+            config: this.config.sidecarGc,
+            candidates: [{ ...candidate, workspaceRuntime: "dead" }],
+          }).reap.length > 0;
+        let samples: MemberRuntimeSample[] = [];
+        const runtimeMembers =
+          needsRuntime && owner ? this.listWorkspaceRuntimeMembers(owner, sessions) : [];
+        if (needsRuntime) {
+          samples = await Promise.all(
+            runtimeMembers.map((member) => {
+              let pending = memberSamples.get(member.id);
+              if (!pending) {
+                pending = this.sampleMemberRuntime(member, false);
+                memberSamples.set(member.id, pending);
+              }
+              return pending;
+            }),
+          );
+        }
+        const workspaceRuntime = needsRuntime ? foldMemberRuntime(samples) : undefined;
+        if (workspaceRuntime === "pending") {
+          pendingRuntime.push({ candidate, members: runtimeMembers, samples });
+        } else if (workspaceRuntime) {
+          candidate.workspaceRuntime = workspaceRuntime;
+        }
+        candidates.push(candidate);
+        context.set(tmuxName, {
+          identity,
+          workspaceRuntime: candidate.workspaceRuntime,
+          confirmedMembers: undefined,
         });
       }
     }
-    return candidates;
+    // Confirm every dead-looking member once per pass: ONE shared sleep, then
+    // an independent fresh re-sample per distinct member (a plain read could
+    // replay pane/ps caches the previous fresh call never refreshed).
+    if (pendingRuntime.length > 0) {
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+      const confirmed = new Map<string, MemberRuntimeSample>();
+      for (const { members, samples } of pendingRuntime) {
+        for (const [index, member] of members.entries()) {
+          if (samples[index] !== "dead_looking" || confirmed.has(member.id)) continue;
+          if (this.isDeliveryStopped()) return { candidates: [], context };
+          const fresh = await this.sampleMemberRuntime(member, true);
+          confirmed.set(member.id, fresh === "dead_looking" ? "dead" : fresh);
+        }
+      }
+      for (const { candidate, members, samples } of pendingRuntime) {
+        const resolved = foldMemberRuntime(
+          samples.map((sample, index) =>
+            sample === "dead_looking"
+              ? (confirmed.get(members[index]?.id ?? "") ?? "unknown")
+              : sample,
+          ),
+        );
+        // A second pending after confirm is impossible (confirmed maps
+        // dead_looking away); keep the type honest and fail closed.
+        candidate.workspaceRuntime = resolved === "pending" ? "unknown" : resolved;
+        const entry = context.get(candidate.tmuxName);
+        if (entry) {
+          entry.workspaceRuntime = candidate.workspaceRuntime;
+          if (candidate.workspaceRuntime === "dead") {
+            entry.confirmedMembers = confirmedMemberMap(members);
+          }
+        }
+      }
+    }
+    return { candidates, context };
+  }
+
+  // One member's runtime liveness for the sidecar reaper. In-flight lifecycle
+  // work reads "unknown" (never dead); a probe failure or unresponsive tmux/ps
+  // also reads "unknown". Terminal members are probed too: a live agent under
+  // a completed/killed record still holds the workspace.
+  private async sampleMemberRuntime(
+    member: SessionRecord,
+    fresh: boolean,
+  ): Promise<MemberRuntimeSample> {
+    if (
+      member.status === "spawning" ||
+      this.spawnsInFlight.has(member.id) ||
+      this.handoffsInFlight.has(member.id) ||
+      this.reopensInFlight.has(member.id) ||
+      this.isInRestoreWarmup(member.id) ||
+      this.lifecycle.snapshot(member.id).operation?.phase === "pending"
+    ) {
+      return "unknown";
+    }
+    try {
+      const runtime = await this.readRuntimeSnapshot(member, { fresh });
+      if (runtime.processAlive) return "live";
+      return runtime.probeUnresponsive ? "unknown" : "dead_looking";
+    } catch {
+      return "unknown";
+    }
   }
 
   // Signals every `reap` entry (pane-alive routes through reapSidecarByName;
@@ -4602,14 +4877,23 @@ export class SessionService {
   // killSidecar) and logs a warn-only event for every `age_cap`
   // entry. Never throws — reapSidecarByName/reapRecordedIdentity already
   // degrade a survivor to a log, not a rejected promise.
-  private async executeSidecarReapPlan(plan: SidecarReapPlan): Promise<void> {
+  private async executeSidecarReapPlan(
+    plan: SidecarReapPlan,
+    context: ReadonlyMap<string, SidecarReapEntryContext>,
+  ): Promise<void> {
     if (this.isDeliveryStopped() || (plan.reap.length === 0 && plan.warn.length === 0)) {
       return;
     }
     const selected: SidecarReapPlan["reap"] = [];
     for (const entry of plan.reap) {
       const owner = readSession(this.config.dataDir, entry.ownerId);
-      if (owner && (await this.workspaceRetainsResources(owner))) continue;
+      if (
+        owner &&
+        context.get(entry.tmuxName)?.workspaceRuntime !== "dead" &&
+        (await this.workspaceRetainsResources(owner))
+      ) {
+        continue;
+      }
       if (this.isDeliveryStopped()) return;
       selected.push(entry);
     }
@@ -4624,49 +4908,14 @@ export class SessionService {
         : { ok: false, byPid: new Map(), byPgid: new Map() };
     for (const entry of selected) {
       if (this.isDeliveryStopped()) return;
-      const owner = readSession(this.config.dataDir, entry.ownerId);
-      if (owner && (await this.workspaceRetainsResources(owner))) {
-        this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
-        continue;
-      }
-      const identity = owner?.sidecarProcs?.[entry.sidecarName];
-      if (this.isDeliveryStopped()) return;
-      const treeRssKb =
-        identity && preSignalSnapshot.ok
-          ? collectTree(identity.pid, preSignalSnapshot).reduce(
-              (sum, pid) => sum + (preSignalSnapshot.byPid.get(pid)?.rssKb ?? 0),
-              0,
-            )
-          : 0;
-
-      // touchUpdatedAt: false — a reap is the opposite of activity; bumping
-      // it here would reset the workspace idle clock and buy every other
-      // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
-      const currentOwner = readSession(this.config.dataDir, entry.ownerId);
-      if (
-        currentOwner &&
-        this.listDeskSessions(currentOwner, listSessions(this.config.dataDir)).some((member) =>
-          hasRetainedSessionError(member),
-        )
-      ) {
-        this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
-        continue;
-      }
-      const outcome = await this.killSidecar(entry.ownerId, entry.sidecarName, {
-        touchUpdatedAt: false,
-      });
-      if (this.isDeliveryStopped()) return;
-      this.logEvent("session.sidecar.reaped", {
-        level: "info",
-        sessionId: entry.ownerId,
-        message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} reaped (${entry.reason}).`,
-        details: {
-          sidecarName: entry.sidecarName,
-          reason: entry.reason,
-          treeRssKb,
-          survivors: outcome?.survivors ?? [],
-        },
-      });
+      const entryContext = context.get(entry.tmuxName) ?? {
+        identity: undefined,
+        workspaceRuntime: undefined,
+        confirmedMembers: undefined,
+      };
+      await this.withWorkspaceLifecycleLocks(entry.ownerId, () =>
+        this.reapSidecarEntryLocked(entry, entryContext, preSignalSnapshot),
+      );
     }
     const warnThrottleMs = this.config.sidecarGc.maxAgeWarnMinutes * 60_000;
     for (const entry of plan.warn) {
@@ -4684,6 +4933,93 @@ export class SessionService {
         details: { sidecarName: entry.sidecarName, reason: entry.reason },
       });
     }
+  }
+
+  // One reap entry under the workspace lifecycle lock, re-proving every plan-
+  // time fact at execution: the sidecar is the one the plan saw, it still
+  // exists, and no workspace member runtime is live. Each skip releases the
+  // endpoint invalidation and emits nothing. No liveness-confirm sleep here
+  // (killSidecar's own reap grace runs under the lock, as in stopSidecarLocked).
+  private async reapSidecarEntryLocked(
+    entry: SidecarReapPlan["reap"][number],
+    entryContext: SidecarReapEntryContext,
+    preSignalSnapshot: ProcSnapshot,
+  ): Promise<void> {
+    if (this.isDeliveryStopped()) return;
+    const owner = readSession(this.config.dataDir, entry.ownerId);
+    const identity = owner?.sidecarProcs?.[entry.sidecarName];
+    const skip = (): void => this.allowSidecarEndpoint(entry.ownerId, entry.sidecarName);
+    if (
+      identity?.pid !== entryContext.identity?.pid ||
+      identity?.starttime !== entryContext.identity?.starttime
+    ) {
+      skip();
+      return;
+    }
+    if (!(await sidecarTmuxAlive(entry.ownerId, entry.sidecarName)) && !identity) {
+      skip();
+      return;
+    }
+    if (this.isDeliveryStopped()) return;
+    if (owner) {
+      const listed = listSessions(this.config.dataDir);
+      const members = this.listDeskSessions(owner, listed);
+      if (entryContext.workspaceRuntime === "dead") {
+        // The plan confirmed death with two samples for a specific member set
+        // and runtimes; anything else needs the next pass's own confirmation.
+        const runtimeMembers = this.listWorkspaceRuntimeMembers(owner, listed);
+        if (
+          runtimeMembers.some(
+            (member) => entryContext.confirmedMembers?.get(member.id) !== memberRuntimeKey(member),
+          )
+        ) {
+          skip();
+          return;
+        }
+        for (const member of runtimeMembers) {
+          const sample = await this.sampleMemberRuntime(member, true);
+          if (sample === "live" || sample === "unknown") {
+            skip();
+            return;
+          }
+        }
+      } else if (
+        members.some((member) =>
+          hasRetainedSessionError(member, this.lastClassifiedLogStates.get(member.id)),
+        )
+      ) {
+        // An error that appeared after a plan that never confirmed death
+        // stays retained (as before this change); the next pass confirms.
+        skip();
+        return;
+      }
+    }
+    if (this.isDeliveryStopped()) return;
+    const treeRssKb =
+      identity && preSignalSnapshot.ok
+        ? collectTree(identity.pid, preSignalSnapshot).reduce(
+            (sum, pid) => sum + (preSignalSnapshot.byPid.get(pid)?.rssKb ?? 0),
+            0,
+          )
+        : 0;
+    // touchUpdatedAt: false — a reap is the opposite of activity; bumping
+    // it here would reset the workspace idle clock and buy every other
+    // sidecar on the same (multi-sidecar) workspace a fresh idleTtl window.
+    const outcome = await this.killSidecar(entry.ownerId, entry.sidecarName, {
+      touchUpdatedAt: false,
+    });
+    if (this.isDeliveryStopped()) return;
+    this.logEvent("session.sidecar.reaped", {
+      level: "info",
+      sessionId: entry.ownerId,
+      message: `Sidecar ${entry.sidecarName} on ${entry.ownerId} reaped (${entry.reason}).`,
+      details: {
+        sidecarName: entry.sidecarName,
+        reason: entry.reason,
+        treeRssKb,
+        survivors: outcome?.survivors ?? [],
+      },
+    });
   }
 
   // Shared by the SIDECAR_REAPER_INTERVAL_MS reaper tick and boot:
@@ -4720,13 +5056,17 @@ export class SessionService {
     if (!this.config.sidecarGc.enabled) {
       return { reap: [], warn: [], keep: [] };
     }
-    const candidates = await this.collectSidecarReapCandidates(tmuxNames, sessions, psSnapshot);
+    const { candidates, context } = await this.collectSidecarReapCandidates(
+      tmuxNames,
+      sessions,
+      psSnapshot,
+    );
     const plan = planSidecarReap({
       nowMs: Date.now(),
       config: this.config.sidecarGc,
       candidates,
     });
-    await this.executeSidecarReapPlan(plan);
+    await this.executeSidecarReapPlan(plan, context);
     return plan;
   }
 
@@ -4889,80 +5229,32 @@ export class SessionService {
             (this.isLiveSessionRecord(session) && !isStaleParked(session))) &&
           Date.parse(scheduledWake.dueAt) <= now
         ) {
-          const scheduledWakeClaimed = await this.withWorkspaceLifecycleLocks(
-            session.id,
-            async () => {
-              // Claim the due occurrence BEFORE sending: clear scheduledWake and
-              // persist it first. A slow or failing send must not leave the wake
-              // due, or the `<= now` guard stays true and it re-fires every tick
-              // forever.
-              const current = readSession(this.config.dataDir, session.id) ?? session;
-              // CAS: only claim if the wake is unchanged (no concurrent re-arm/cancel).
-              const claimed =
-                current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-                current.scheduledWake.message === scheduledWake.message;
-              if (claimed) {
-                const { scheduledWake: _scheduledWake, ...base } = current;
-                const cleared: SessionRecord = { ...base, updatedAt: nowIso() };
-                writeSession(this.config.dataDir, cleared);
-                return true;
-              }
-              return false;
-            },
-          );
-          if (scheduledWakeClaimed) {
-            try {
-              await this.send(session.id, { message: scheduledWake.message });
+          let claim: ScheduledWakeClaim | null = null;
+          try {
+            claim = await this.claimScheduledWake(session, false);
+            if (claim)
+              await this.sendWithAttempt(session.id, { message: scheduledWake.message }, claim);
+          } catch (error) {
+            if (
+              !(error instanceof SessionAdmissionDeniedError) &&
+              claim &&
+              claim.stage !== "accepted" &&
+              this.scheduledWakeClaimCurrent(claim)
+            ) {
+              this.logScheduledWakeFailure(session, scheduledWake, error);
+            }
+          } finally {
+            if (claim?.stage === "accepted") {
+              this.scheduledWakeLastFailure.delete(session.id);
               this.logEvent("session.wake.sent", {
                 level: "info",
                 sessionId: session.id,
                 projectId: session.project,
                 message: `Sent scheduled wake to ${session.id}`,
-                details: {
-                  dueAt: scheduledWake.dueAt,
-                },
+                details: { dueAt: scheduledWake.dueAt },
               });
-            } catch (error) {
-              if (error instanceof SessionAdmissionDeniedError) {
-                // Admission refused this stale-parked wake, not a delivery
-                // failure — the occurrence above was already claimed
-                // (scheduledWake cleared and persisted) before this send
-                // attempt, so losing it here would drop the wake forever.
-                // Re-arm the exact same occurrence (CAS: only if nothing
-                // else re-armed/cancelled it in the meantime) so the next
-                // poll tick retries once the fleet has headroom again.
-                await this.withWorkspaceLifecycleLocks(session.id, async () => {
-                  const afterDenial = readSession(this.config.dataDir, session.id);
-                  if (afterDenial && !afterDenial.scheduledWake) {
-                    writeSession(this.config.dataDir, {
-                      ...afterDenial,
-                      scheduledWake,
-                      updatedAt: nowIso(),
-                    });
-                  }
-                });
-                this.logEvent("session.wake.deferred", {
-                  level: "warn",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Deferred scheduled wake for ${session.id}: ${error.message}`,
-                  details: {
-                    dueAt: scheduledWake.dueAt,
-                  },
-                });
-              } else {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logEvent("session.wake.failed", {
-                  level: "error",
-                  sessionId: session.id,
-                  projectId: session.project,
-                  message: `Failed to send scheduled wake to ${session.id}: ${message}`,
-                  details: {
-                    dueAt: scheduledWake.dueAt,
-                  },
-                });
-              }
             }
+            if (claim) this.releaseScheduledWakeClaim(claim);
           }
         }
 
@@ -5308,6 +5600,9 @@ export class SessionService {
               if (
                 !current?.serverErrorAt ||
                 current.status !== "running" ||
+                this.restoreOwnsRuntimeRecovery(session.id) ||
+                this.isInRestoreWarmup(session.id) ||
+                this.paneWriteLocks.has(current.tmuxSession) ||
                 this.memoryHold.engaged ||
                 now - Date.parse(current.serverErrorAt) < CLAUDE_SERVER_ERROR_REACTIVATION_MS ||
                 (current.serverErrorReactivationAttempts ?? 0) >= AUTOMATIC_REMINDER_MAX_ATTEMPTS
@@ -5331,11 +5626,22 @@ export class SessionService {
               return true;
             });
             if (claimed) {
+              let suppressed = false;
+              const allowDelivery = () => {
+                suppressed ||=
+                  this.restoreOwnsRuntimeRecovery(session.id) || this.isInRestoreWarmup(session.id);
+                return !suppressed;
+              };
               try {
-                await this.send(session.id, {
-                  message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
-                  queue: false,
-                });
+                await this.deliverPrepared(
+                  session.id,
+                  this.prepareSendMessage(session, {
+                    message: CLAUDE_SERVER_ERROR_REACTIVATION_PROMPT,
+                    queue: false,
+                  }),
+                  { entryPoint: "send", allowDelivery },
+                );
+                if (!allowDelivery()) continue;
                 this.logEvent("session.server_error.reactivated", {
                   level: "info",
                   sessionId: session.id,
@@ -5989,20 +6295,22 @@ export class SessionService {
     );
   }
 
-  private lifecycleSource(record: SessionRecord): SessionRecord {
-    if (this.lifecycle.snapshot(record.id).revision === 0) return record;
-    const current = listSessions(this.config.dataDir).find((session) => session.id === record.id);
-    return current && isDeepStrictEqual(current, record) ? current : record;
-  }
-
   private async finalizeLifecycleRows<T extends { id: string; slots?: SessionSlots }>(
-    rows: { view: T; source: SessionRecord | null; revision: number }[],
-    rebuild: (record: SessionRecord) => Promise<{ view: T; source: SessionRecord } | undefined>,
-    includePending = false,
+    rows: {
+      view: T;
+      source: SessionRecord | null;
+      revision: number;
+      identity?: boolean;
+    }[],
+    rebuild: (
+      record: SessionRecord,
+      listing: SessionRecord[] | undefined,
+    ) => Promise<{ view: T; source: SessionRecord | null } | undefined>,
+    options: { includePending: boolean; signal?: AbortSignal | undefined },
   ): Promise<(T & { lifecycle: SessionLifecycleSnapshot })[]> {
-    const rebuildExisting = async (record: SessionRecord) => {
+    const rebuildExisting = async (record: SessionRecord, listing: SessionRecord[] | undefined) => {
       try {
-        const rebuilt = await rebuild(record);
+        const rebuilt = await rebuild(record, listing);
         if (!rebuilt && readSession(this.config.dataDir, record.id))
           throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         return rebuilt;
@@ -6015,66 +6323,110 @@ export class SessionService {
         throw error;
       }
     };
-    const missingPending = () =>
-      listSessions(this.config.dataDir).filter((record) => {
-        const operation = this.lifecycle.snapshot(record.id).operation;
-        return (
-          operation?.phase === "pending" &&
-          operation.action !== "complete" &&
-          !rows.some((row) => row.view.id === record.id)
-        );
-      });
-    if (includePending) {
-      for (const record of missingPending()) {
-        const revision = this.lifecycle.snapshot(record.id).revision;
-        const rebuilt = await rebuildExisting(record);
-        if (rebuilt) rows.push({ ...rebuilt, revision });
-      }
-    }
-    const changed = (row: (typeof rows)[number]) => {
-      const receipt = this.lifecycle.snapshot(row.view.id);
-      if (!readSession(this.config.dataDir, row.view.id)) return true;
+    // Pure: every input is the store read of the current pass, never a fresh read.
+    const changed = (
+      row: (typeof rows)[number],
+      record: SessionRecord,
+      receipt: SessionLifecycleSnapshot,
+    ) => {
       if (receipt.revision === 0 && row.revision === 0) return false;
-      const current = listSessions(this.config.dataDir).find(
-        (session) => session.id === row.view.id,
-      );
-      if (!current) return true;
       return (
-        current !== row.source ||
         receipt.revision !== row.revision ||
+        (record !== row.source &&
+          (row.identity === true || !isDeepStrictEqual(record, row.source))) ||
         !isDeepStrictEqual(
           row.view.slots,
           this.projectSidecarSlots(
-            current,
-            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, current)),
+            record,
+            deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, record)),
           ),
         )
       );
     };
-    const rebuiltRows = await Promise.all(
-      rows.map(async (row) => {
-        if (!changed(row)) return row;
-        const current = readSession(this.config.dataDir, row.view.id);
-        if (!current) return undefined;
-        const revision = this.lifecycle.snapshot(current.id).revision;
-        const rebuilt = await rebuildExisting(current);
-        if (!rebuilt) return undefined;
-        row.view = rebuilt.view;
-        row.source = rebuilt.source;
-        row.revision = revision;
-        return row;
-      }),
-    );
-    if (includePending) {
-      const missing = missingPending()[0];
-      if (missing) throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(missing.id));
+    let live = [...rows];
+    const startedAt = Date.now();
+    for (let pass = 0; ; pass += 1) {
+      options.signal?.throwIfAborted();
+      // One synchronous span: capture receipts, then read the store, then compare.
+      const receipts = new Map(
+        live.map((row) => [row.view.id, this.lifecycle.snapshot(row.view.id)]),
+      );
+      const listing = options.includePending ? listSessions(this.config.dataDir) : undefined;
+      const current = new Map<string, SessionRecord>();
+      if (listing) {
+        for (const record of listing) if (!current.has(record.id)) current.set(record.id, record);
+      } else {
+        for (const row of live) {
+          const record = readSession(this.config.dataDir, row.view.id);
+          if (record) current.set(record.id, record);
+        }
+      }
+      live = live.filter((row) => current.has(row.view.id));
+      const liveIds = new Set(live.map((row) => row.view.id));
+      const pickup = listing
+        ? [...current.values()].filter((record) => {
+            const operation = this.lifecycle.snapshot(record.id).operation;
+            return (
+              operation?.phase === "pending" &&
+              operation.action !== "complete" &&
+              !liveIds.has(record.id)
+            );
+          })
+        : [];
+      for (const record of pickup) receipts.set(record.id, this.lifecycle.snapshot(record.id));
+      const stale = live.filter((row) =>
+        changed(
+          row,
+          current.get(row.view.id) as SessionRecord,
+          receipts.get(row.view.id) as SessionLifecycleSnapshot,
+        ),
+      );
+      if (stale.length === 0 && pickup.length === 0) {
+        return live.map((row) => ({
+          ...row.view,
+          lifecycle: receipts.get(row.view.id) as SessionLifecycleSnapshot,
+        }));
+      }
+      if (
+        pass === LIFECYCLE_REBUILD_PASSES ||
+        (pass > 0 && Date.now() - startedAt >= LIFECYCLE_ASSEMBLY_BUDGET_MS)
+      ) {
+        const refused = pickup[0]?.id ?? (stale[0] as (typeof stale)[number]).view.id;
+        throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(refused));
+      }
+      options.signal?.throwIfAborted();
+      const dropped = new Set<string>();
+      const [, added] = await Promise.all([
+        Promise.all(
+          stale.map(async (row) => {
+            const id = row.view.id;
+            const rebuilt = await rebuildExisting(current.get(id) as SessionRecord, listing);
+            if (!rebuilt) {
+              dropped.add(id);
+              return;
+            }
+            row.view = rebuilt.view;
+            row.source = rebuilt.source;
+            row.revision = (receipts.get(id) as SessionLifecycleSnapshot).revision;
+            row.identity = false;
+          }),
+        ),
+        Promise.all(
+          pickup.map(async (record) => {
+            const rebuilt = await rebuildExisting(record, listing);
+            return rebuilt
+              ? {
+                  ...rebuilt,
+                  revision: (receipts.get(record.id) as SessionLifecycleSnapshot).revision,
+                  identity: false,
+                }
+              : undefined;
+          }),
+        ),
+      ]);
+      live = live.filter((row) => !dropped.has(row.view.id));
+      for (const row of added) if (row) live.push(row);
     }
-    return rebuiltRows.flatMap((row) => {
-      if (!row || !readSession(this.config.dataDir, row.view.id)) return [];
-      const lifecycle = this.lifecycle.snapshot(row.view.id);
-      if (changed(row)) throw this.lifecycleSnapshotChanged(lifecycle);
-      return [{ ...row.view, lifecycle }];
-    });
   }
 
   private logEvent(
@@ -6202,14 +6554,29 @@ export class SessionService {
     return resolveClaudeAuthPlanOptions(this.config.dataDir, session);
   }
 
-  private async withSidecarPortLock<T>(task: () => Promise<T>): Promise<T> {
+  private async withSidecarPortLock<T>(
+    task: () => Promise<T>,
+    operation?: RestoreOperationContext,
+  ): Promise<T> {
+    operation?.assertActive();
     const previous = this.sidecarPortLock;
     let release!: () => void;
     this.sidecarPortLock = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await previous.catch(() => {});
+    if (operation) {
+      try {
+        await operation.wait(previous.catch(() => {}));
+      } catch (error) {
+        // Keep the cancelled waiter's place until its predecessor drains.
+        void previous.finally(release).catch(() => {});
+        throw error;
+      }
+    } else {
+      await previous.catch(() => {});
+    }
     try {
+      operation?.assertActive();
       return await task();
     } finally {
       release();
@@ -6221,16 +6588,33 @@ export class SessionService {
   // one turn chain instead of racing; delete only under the identity guard
   // so a waiter that already replaced the entry keeps its own (same idiom
   // as triggers.ts enqueue).
-  private async withPaneWriteLock<T>(paneKey: string, task: () => Promise<T>): Promise<T> {
+  private async withPaneWriteLock<T>(
+    paneKey: string,
+    task: (owner: Promise<void>) => Promise<T>,
+    operation?: RestoreOperationContext,
+  ): Promise<T> {
     const previous = this.paneWriteLocks.get(paneKey) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     this.paneWriteLocks.set(paneKey, current);
-    await previous;
+    if (operation) {
+      try {
+        await operation.wait(previous);
+        operation.assertActive();
+      } catch (error) {
+        void previous.finally(() => {
+          release();
+          if (this.paneWriteLocks.get(paneKey) === current) {
+            this.paneWriteLocks.delete(paneKey);
+          }
+        });
+        throw error;
+      }
+    } else await previous;
     try {
-      return await task();
+      return await task(current);
     } finally {
       release();
       if (this.paneWriteLocks.get(paneKey) === current) {
@@ -6239,14 +6623,32 @@ export class SessionService {
     }
   }
 
-  private async withSessionLifecycleLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+  private async withSessionLifecycleLock<T>(
+    sessionId: string,
+    task: () => Promise<T>,
+    operation?: RestoreOperationContext,
+  ): Promise<T> {
     const previous = this.sessionLifecycleLocks.get(sessionId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     this.sessionLifecycleLocks.set(sessionId, current);
-    await previous.catch(() => {});
+    const predecessor = previous.catch(() => {});
+    if (operation) {
+      try {
+        await operation.wait(predecessor);
+        operation.assertActive();
+      } catch (error) {
+        void predecessor.finally(() => {
+          release();
+          if (this.sessionLifecycleLocks.get(sessionId) === current) {
+            this.sessionLifecycleLocks.delete(sessionId);
+          }
+        });
+        throw error;
+      }
+    } else await predecessor;
     try {
       return await task();
     } finally {
@@ -6263,13 +6665,17 @@ export class SessionService {
   private async withSessionLifecycleLocks<T>(
     sessionIds: readonly string[],
     task: () => Promise<T>,
+    operation?: RestoreOperationContext,
   ): Promise<T> {
     const [sessionId, ...remaining] = [...new Set(sessionIds)].sort();
     if (!sessionId) {
+      operation?.assertActive();
       return task();
     }
-    return this.withSessionLifecycleLock(sessionId, () =>
-      this.withSessionLifecycleLocks(remaining, task),
+    return this.withSessionLifecycleLock(
+      sessionId,
+      () => this.withSessionLifecycleLocks(remaining, task, operation),
+      operation,
     );
   }
 
@@ -6466,14 +6872,19 @@ export class SessionService {
         const probeEligible = async (requireLive = false): Promise<SessionRecord | undefined> => {
           const current = readEligible();
           if (!current) return undefined;
+          const probeRevision = this.lifecycle.snapshot(current.id).revision;
           const runtime = await this.readRuntimeSnapshot(current, { fresh: true });
           const latest = readEligible();
           if (!latest) return undefined;
           const workspace = probeWorkspace(latest.worktreePath);
           if (runtime.probeUnresponsive || runtime.diagnostic || workspace.diagnostic) {
             this.retainDetectionError(
-              latest,
+              current,
               runtime.diagnostic ?? workspace.diagnostic ?? "runtime state unknown",
+              runtime.diagnostic !== undefined || workspace.diagnostic === undefined
+                ? "runtime_probe"
+                : "other",
+              probeRevision,
             );
             return undefined;
           }
@@ -6637,9 +7048,15 @@ export class SessionService {
       ).filter((name): name is string => name !== null);
       const current = readSession(this.config.dataDir, latest.id);
       if (!current || hasRetainedSessionError(current)) return;
+      const probeRevision = this.lifecycle.snapshot(current.id).revision;
       const confirmed = await this.readRuntimeSnapshot(current, { fresh: true });
       if (confirmed.probeUnresponsive) {
-        this.retainDetectionError(current, confirmed.diagnostic ?? "runtime state unknown");
+        this.retainDetectionError(
+          current,
+          confirmed.diagnostic ?? "runtime state unknown",
+          "runtime_probe",
+          probeRevision,
+        );
         return;
       }
       if (hasRetainedSessionError(readSession(this.config.dataDir, latest.id) ?? latest)) return;
@@ -6728,6 +7145,7 @@ export class SessionService {
         ...(staleSidecars.length ? { staleSidecars } : {}),
       };
       delete parked.error;
+      delete parked.errorSource;
       writeSession(this.config.dataDir, parked);
       this.stateCache.delete(latest.id);
       await this.refreshDashboardCacheEntry(parked);
@@ -6912,6 +7330,12 @@ export class SessionService {
   // killed+retainInList sessions are still enriched by its idle round-robin;
   // runDashboardCacheTick owns their pruning.
   private pruneSessionScopedState(liveIds: ReadonlySet<string>): void {
+    for (const sessionId of this.scheduledWakeClaims.keys()) {
+      if (!liveIds.has(sessionId)) this.scheduledWakeClaims.delete(sessionId);
+    }
+    for (const sessionId of this.scheduledWakeLastFailure.keys()) {
+      if (!liveIds.has(sessionId)) this.scheduledWakeLastFailure.delete(sessionId);
+    }
     for (const [chatId, pausedUntil] of this.telegramTypingPausedUntil) {
       if (pausedUntil <= Date.now()) this.telegramTypingPausedUntil.delete(chatId);
     }
@@ -7310,9 +7734,19 @@ export class SessionService {
       );
       let reaped = 0;
       let liveUnderTerminal = 0;
+      // One fleet fork for the whole pass: absent records read the shared
+      // snapshot instead of each forcing their own list-windows. Holds while
+      // the fork finishes within RUNTIME_PROBE_CACHE_TTL_MS; a slower call
+      // degrades to a re-fork per expired read, as before.
+      await refreshTmuxFleetSnapshot();
       for (const session of sessions) {
         let agentAlive = false;
-        const presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        let presence = await getTmuxSessionPresence(session.tmuxSession);
+        if (presence.present) {
+          // The snapshot can be a whole pass old for later records, so a name
+          // it lists is re-probed fresh before anything acts on it.
+          presence = await getTmuxSessionPresence(session.tmuxSession, { fresh: true });
+        }
         if (presence.present) {
           // A lone "process gone" read is inconclusive, not a verdict: a
           // transient tmux/ps failure reads exactly like an exited agent.
@@ -7356,13 +7790,16 @@ export class SessionService {
           // everything else.
           continue;
         }
+        if (!session.sidecarNames?.length) continue;
+        // Snapshot "absent" can be 2s stale: a mid-pass reopen makes this owner restorable.
+        const latest = readSession(this.config.dataDir, session.id);
+        if (!latest || !isTerminalSessionStatus(latest.status)) continue;
         // A desk-shared sidecar's pane is named after the desk anchor, so on a
         // terminal anchor this loop would otherwise reap the pane a restorable
         // sibling is still using. Same active-workspace semantics as the
         // policy pass (collectSidecarReapCandidates): any non-terminal member
         // holds the shared pane.
-        const deskSiblingsAlive =
-          (session.sidecarNames?.length ?? 0) > 0 && this.hasActiveWorkspaceMembers(session);
+        const deskSiblingsAlive = this.hasActiveWorkspaceMembers(session);
         // Resolved unconditionally (not only when deskSiblingsAlive): every
         // sidecar's owner id below needs it, since a desk-shared sidecar's
         // pane is named after the desk anchor/owner, never this session's
@@ -7490,8 +7927,8 @@ export class SessionService {
         limit: gcConfig.maxGroupsPerSweep,
         pathExists: (path) => workspaceExists(path),
       });
-      // sizes: true so the sweep can report freed bytes; the du cost is bounded
-      // by maxGroupsPerSweep, and only reclaim groups are measured.
+      // sizes: true so the sweep can report freed bytes; only reclaim groups
+      // are measured, and the executor probes at most 2 * maxGroupsPerSweep.
       const report = await executeSessionGc(
         plan,
         // A stale-parked session (isStaleParked) merely went idle — it is
@@ -7514,7 +7951,10 @@ export class SessionService {
       this.logEvent("session.gc.completed", {
         level: "info",
         message: `Session GC sweep: ${report.totals.worktreesRemoved} worktree(s) removed, ${report.totals.recordsArchived} record(s) archived, ${report.totals.freedBytes ?? 0} byte(s) freed.`,
-        details: { totals: report.totals, sessionIds: report.groups.flatMap((g) => g.sessionIds) },
+        details: {
+          totals: report.totals,
+          sessionIds: report.groups.filter((g) => g.archived).flatMap((g) => g.archiveSessionIds),
+        },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -8635,7 +9075,9 @@ export class SessionService {
   private async sidecarStartConflictGate(
     sessionId: string,
     sidecarName: string,
+    operation?: RestoreOperationContext,
   ): Promise<SidecarPortConflictError | null> {
+    operation?.assertActive();
     const key = this.sidecarConflictKey(sessionId, sidecarName);
     const state = this.sidecarStartConflictState.get(key);
     // A defensive guard, not an active code path: sidecarStartConflictState
@@ -8663,12 +9105,14 @@ export class SessionService {
       // One fleet refresh for the whole batch — same pattern as the reclaim
       // scan, never N independent fresh reads.
       await refreshTmuxFleetSnapshot();
+      operation?.assertActive();
       // Cheap re-probe over only the previously blocked candidates — reuses
       // the same reservation-or-occupancy predicate the initial scan used,
       // never raw isHostPortFree alone.
       const stillBlocked = await Promise.all(
         state.candidates.map((candidate) => this.isConflictCandidateStillBlocked(candidate)),
       );
+      operation?.assertActive();
       if (stillBlocked.some((blocked) => !blocked)) {
         this.sidecarStartConflictState.delete(key);
         return null;
@@ -9000,7 +9444,9 @@ export class SessionService {
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
     clearPort?: number,
+    operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
+    operation?.assertActive();
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       if (clearPort !== undefined) {
         throw new InvalidClearPortError(
@@ -9138,6 +9584,7 @@ export class SessionService {
               // host-free right here, so releasing it can never be
               // rolled back into a wrong state even if this attempt later
               // fails for an unrelated portId.
+              operation?.assertActive();
               this.releaseSidecarPortFromSession(liveSession.id, scName, port);
               continue;
             }
@@ -9348,13 +9795,19 @@ export class SessionService {
     const reservedForSidecar: Record<string, number> = {};
     let changed = false;
     for (const plan of plans) {
+      operation?.assertActive();
       if (plan.kind === "clear") {
         if (plan.crossSession) {
           this.invalidateSidecarEndpoint(
             plan.crossSession.sessionId,
             plan.crossSession.sidecarName,
           );
-          await this.reapSidecarByName(plan.crossSession.sessionId, plan.crossSession.sidecarName);
+          await this.reapSidecarByName(
+            plan.crossSession.sessionId,
+            plan.crossSession.sidecarName,
+            operation,
+          );
+          operation?.assertActive();
           this.clearSidecarProcEntry(plan.crossSession.sessionId, plan.crossSession.sidecarName);
           this.releaseSidecarPortFromSession(
             plan.crossSession.sessionId,
@@ -9363,6 +9816,7 @@ export class SessionService {
           );
         }
         await clearPortListener(plan.port);
+        operation?.assertActive();
         reservedForSidecar[plan.env] = plan.port;
         changed = true;
         continue;
@@ -9388,6 +9842,7 @@ export class SessionService {
       },
       updatedAt: nowIso(),
     };
+    operation?.assertActive();
     writeSession(this.config.dataDir, updated);
     return updated;
   }
@@ -9399,9 +9854,17 @@ export class SessionService {
     sidecarDepth: number;
     clearPort?: number;
     onStarted?: () => void;
+    operation?: RestoreOperationContext;
   }): Promise<SessionRecord> {
+    args.operation?.assertActive();
     if (args.clearPort === undefined) {
-      const cached = await this.sidecarStartConflictGate(args.session.id, args.sidecarName);
+      const probe = this.sidecarStartConflictGate(
+        args.session.id,
+        args.sidecarName,
+        args.operation,
+      );
+      const cached = await (args.operation ? args.operation.wait(probe) : probe);
+      args.operation?.assertActive();
       if (cached) {
         throw cached;
       }
@@ -9417,6 +9880,7 @@ export class SessionService {
     sidecarDepth: number;
     clearPort?: number;
     onStarted?: () => void;
+    operation?: RestoreOperationContext;
   }): Promise<SessionRecord> {
     return this.withSidecarPortLock(async () => {
       // Mutated only while the lock is held: the only racer is
@@ -9428,6 +9892,7 @@ export class SessionService {
       try {
         return await this.startSidecarInternalBody(args);
       } catch (error) {
+        args.operation?.assertActive();
         if (error instanceof SidecarPortConflictError) {
           this.recordSidecarStartConflict(
             args.session.id,
@@ -9437,7 +9902,7 @@ export class SessionService {
         }
         throw error;
       }
-    });
+    }, args.operation);
   }
 
   private async startSidecarInternalBody(args: {
@@ -9448,34 +9913,52 @@ export class SessionService {
     sidecarDepth: number;
     clearPort?: number;
     onStarted?: () => void;
+    operation?: RestoreOperationContext;
   }): Promise<SessionRecord> {
+    const operation = args.operation;
+    const wait = <T>(promise: Promise<T>): Promise<T> =>
+      operation ? operation.wait(promise) : promise;
+    operation?.assertActive();
     args.session = this.pruneLegacySidecarLinks(args.session, new Set([args.sidecarName]));
     const tmuxName = sidecarTmuxSession(args.session.id, args.sidecarName);
     this.invalidateSidecarEndpoint(args.session.id, args.sidecarName);
     // Presence AND unresponsiveness off one read each: a timeout-killed probe
     // reports "absent"/"dead", and acting on that reaps a healthy sidecar.
-    const presence = await getSidecarTmuxPresence(args.session.id, args.sidecarName, {
-      fresh: true,
-    });
+    const presence = await wait(
+      getSidecarTmuxPresence(args.session.id, args.sidecarName, {
+        fresh: true,
+      }),
+    );
     const alive = presence.present;
     // `remain-on-exit` leaves a `pane_dead=1` pane that still reports
     // "session exists" — that pane's escapee tree can hold a reserved port
     // forever unless treated as not-alive here and reaped before restart.
-    const panePresence = alive ? await getTmuxPanePresence(tmuxName, { fresh: true }) : null;
+    const panePresence = alive ? await wait(getTmuxPanePresence(tmuxName, { fresh: true })) : null;
+    const owner = readSession(this.config.dataDir, args.session.id);
+    const incompleteLaunch = owner?.sidecarLaunches?.[args.sidecarName];
+    const ProbeError = incompleteLaunch
+      ? SidecarLaunchIncompleteError
+      : SidecarProbeUnresponsiveError;
     // Unconditional: reapSidecarByName kills by tmux name, destructive with
     // or without a recorded identity.
     if (panePresence?.unresponsive || panePresence?.diagnostic) {
-      throw new SidecarProbeUnresponsiveError(
+      throw new ProbeError(
         `Sidecar ${args.sidecarName} pane state is unreadable (tmux did not answer); retry shortly`,
       );
     }
     const paneDead = panePresence?.dead ?? false;
     if (alive && !paneDead) {
+      if (incompleteLaunch) {
+        throw new SidecarLaunchIncompleteError(
+          `Sidecar "${args.sidecarName}" has an incomplete launch; stop the sidecar before retrying`,
+        );
+      }
       this.allowSidecarEndpoint(args.session.id, args.sidecarName);
       return args.session;
     }
     if (paneDead) {
-      await this.reapSidecarByName(args.session.id, args.sidecarName);
+      await this.reapSidecarByName(args.session.id, args.sidecarName, operation);
+      operation?.assertActive();
       this.clearSidecarProcEntry(args.session.id, args.sidecarName);
     } else if (!alive) {
       // tmux session/window is gone entirely (killed externally, crashed)
@@ -9484,15 +9967,11 @@ export class SessionService {
       // leak shape reapRecordedIdentity targets — before reserving the
       // port for a new instance, or a still-live escapee tree from the
       // old instance keeps running under the reused port.
-      const owner = readSession(this.config.dataDir, args.session.id);
       const identity = owner?.sidecarProcs?.[args.sidecarName];
-      // Narrowed to an identity-present start: "absent" from an unreadable
-      // probe must not reap a recorded identity. A first start has no
-      // identity, so reapRecordedIdentity and clearSidecarProcEntry below are
-      // both no-ops there — refusing it would turn a harmless launch into a
-      // hard failure. Thrown before any write.
-      if ((presence.unresponsive || presence.diagnostic) && owner && identity) {
-        throw new SidecarProbeUnresponsiveError(
+      // An unreadable probe cannot reclaim a recorded process or an
+      // interrupted launch whose identity was never captured.
+      if ((presence.unresponsive || presence.diagnostic) && (identity || incompleteLaunch)) {
+        throw new ProbeError(
           `Sidecar ${args.sidecarName} tmux state is unreadable (tmux did not answer); retry shortly`,
         );
       }
@@ -9507,30 +9986,32 @@ export class SessionService {
       // entirely, so it must run first).
       const recordedPorts = Object.values(owner?.sidecarPorts?.[args.sidecarName] ?? {});
       if (owner && identity && recordedPorts.length > 0) {
-        const starttime = await readProcessStarttime(identity.pid);
+        const starttime = await wait(readProcessStarttime(identity.pid));
         const stillSameProcess = starttime !== null && starttime === identity.starttime;
         const stillOccupied =
           stillSameProcess &&
-          (await Promise.all(recordedPorts.map((port) => isHostPortFree(port)))).every(
+          (await wait(Promise.all(recordedPorts.map((port) => isHostPortFree(port))))).every(
             (free) => !free,
           );
         if (stillOccupied) {
-          const snapshot = await snapshotProcesses();
+          const snapshot = await wait(snapshotProcesses());
           const attributed =
             snapshot.ok &&
             (
-              await Promise.all(
-                recordedPorts.map(async (port) => {
-                  let listenerPids: number[];
-                  try {
-                    listenerPids = await findListenerPids(port);
-                  } catch {
-                    return false;
-                  }
-                  return listenerPids.some((pid) =>
-                    collectTree(identity.pid, snapshot).includes(pid),
-                  );
-                }),
+              await wait(
+                Promise.all(
+                  recordedPorts.map(async (port) => {
+                    let listenerPids: number[];
+                    try {
+                      listenerPids = await findListenerPids(port);
+                    } catch {
+                      return false;
+                    }
+                    return listenerPids.some((pid) =>
+                      collectTree(identity.pid, snapshot).includes(pid),
+                    );
+                  }),
+                ),
               )
             ).every(Boolean);
           if (attributed) {
@@ -9554,7 +10035,8 @@ export class SessionService {
         }
       }
       if (owner && identity) {
-        const outcome = await reapRecordedIdentity(identity, owner.worktreePath);
+        const outcome = await reapRecordedIdentity(identity, owner.worktreePath, operation);
+        operation?.assertActive();
         this.logSidecarReapSurvivors(args.session.id, args.sidecarName, outcome);
       }
       this.clearSidecarProcEntry(args.session.id, args.sidecarName);
@@ -9565,11 +10047,13 @@ export class SessionService {
     // only ever touches this session's own pane/identity) but before
     // ensureSidecarReservation, so a real collision is caught before any
     // reservation side effect runs.
-    await this.refuseOverlappingCrossWorkspaceSidecar(
-      args.session,
-      args.sidecarName,
-      args.sidecar,
-      args.clearPort,
+    await wait(
+      this.refuseOverlappingCrossWorkspaceSidecar(
+        args.session,
+        args.sidecarName,
+        args.sidecar,
+        args.clearPort,
+      ),
     );
 
     // Built-ins may defer command resolution (e.g. a bundle-resolved bin
@@ -9578,12 +10062,16 @@ export class SessionService {
       BUILTIN_SIDECARS[args.sidecarName]?.resolveCommand?.() ?? args.sidecar.command;
 
     const agentConfig = this.sessionAgentConfig(args.session);
-    const reservedSession = await this.ensureSidecarReservation(
-      args.session,
-      args.sidecarName,
-      args.sidecar,
-      args.clearPort,
+    const reservedSession = await wait(
+      this.ensureSidecarReservation(
+        args.session,
+        args.sidecarName,
+        args.sidecar,
+        args.clearPort,
+        operation,
+      ),
     );
+    operation?.assertActive();
 
     const existingToolDir = join(this.config.dataDir, "session-tools", reservedSession.id);
     const sessionToolDir = existsSync(existingToolDir)
@@ -9612,9 +10100,21 @@ export class SessionService {
     // a `let`: control-flow analysis does not follow the callback's write and
     // reads a captured `let` as still-false in the catch.
     const launch = { paneCreated: false };
+    const previousLaunchId = readSession(this.config.dataDir, reservedSession.id)
+      ?.sidecarLaunches?.[args.sidecarName];
+    const launchId = operation || previousLaunchId ? randomUUID() : undefined;
+    if (launchId) {
+      operation?.assertActive();
+      const current = readSession(this.config.dataDir, reservedSession.id) ?? reservedSession;
+      writeSession(this.config.dataDir, {
+        ...current,
+        sidecarLaunches: { ...current.sidecarLaunches, [args.sidecarName]: launchId },
+      });
+    }
     let startedSession: SessionRecord;
     try {
       await createTmuxSidecarSession({
+        ...(operation ? { operation } : {}),
         sessionId: reservedSession.id,
         sidecarName: args.sidecarName,
         cwd: reservedSession.worktreePath,
@@ -9630,6 +10130,18 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
+      operation?.assertActive();
+      if (
+        launchId &&
+        readSession(this.config.dataDir, reservedSession.id)?.sidecarLaunches?.[
+          args.sidecarName
+        ] !== launchId
+      ) {
+        throw new SidecarLaunchIncompleteError(
+          `Sidecar "${args.sidecarName}" launch ownership changed; retry after the current launch finishes`,
+        );
+      }
+      if (launchId) this.clearSidecarLaunch(reservedSession.id, args.sidecarName, launchId);
       // Record this instance's identity so a tree that outlives its
       // tmux supervisor is still identifiable and reapable later — see
       // SidecarProcessIdentity. Best-effort: a pid/starttime read failing
@@ -9639,11 +10151,11 @@ export class SessionService {
       // an identity on disk to reap by even once the pane itself is dead;
       // recording it only after a successful verify would leave that catch
       // with nothing to signal (Finding B3).
-      const freshPanePid = await getTmuxPanePid(
-        sidecarTmuxSession(reservedSession.id, args.sidecarName),
-        { fresh: true },
+      const freshPanePid = await wait(
+        getTmuxPanePid(sidecarTmuxSession(reservedSession.id, args.sidecarName), { fresh: true }),
       );
-      const starttime = freshPanePid !== null ? await readProcessStarttime(freshPanePid) : null;
+      const starttime =
+        freshPanePid !== null ? await wait(readProcessStarttime(freshPanePid)) : null;
       const identity: SidecarProcessIdentity | undefined =
         freshPanePid !== null && starttime !== null
           ? { pid: freshPanePid, pgid: freshPanePid, starttime }
@@ -9674,19 +10186,28 @@ export class SessionService {
           ? {}
           : { sidecarNames: [...sidecarNames, args.sidecarName] }),
       };
+      const pendingLaunches = readSession(this.config.dataDir, reservedSession.id)?.sidecarLaunches;
+      if (pendingLaunches) updated.sidecarLaunches = pendingLaunches;
+      else delete updated.sidecarLaunches;
       if (Object.keys(nextSidecarProcs).length > 0) {
         updated.sidecarProcs = nextSidecarProcs;
       } else {
         delete updated.sidecarProcs;
       }
+      operation?.assertActive();
       writeSession(this.config.dataDir, updated);
 
-      await verifySidecarStartup(reservedSession.id, args.sidecarName);
+      await wait(verifySidecarStartup(reservedSession.id, args.sidecarName, operation));
 
       this.clearSidecarStartConflict(args.session.id, args.sidecarName);
       this.allowSidecarEndpoint(reservedSession.id, args.sidecarName);
       startedSession = readSession(this.config.dataDir, updated.id) ?? updated;
     } catch (error) {
+      // A revoked launch has uncertain runtime occupancy. Keep its reservation
+      // and identity evidence; a later owner must probe before reclaiming it.
+      // The launch adapter has already terminated/reaped its client process.
+      operation?.assertActive();
+      if (error instanceof SidecarLaunchIncompleteError) throw error;
       // Keyed on whether `new-session` actually created the session, never on
       // the pre-launch probe. The only thing that ever justified skipping is
       // ownership: a launch that created nothing may have failed on a tmux
@@ -9710,19 +10231,36 @@ export class SessionService {
           details: { sidecarName: args.sidecarName },
         });
       } else {
-        await this.reapSidecarByName(reservedSession.id, args.sidecarName);
+        await this.reapSidecarByName(reservedSession.id, args.sidecarName, operation);
+        operation?.assertActive();
         this.clearSidecarProcEntry(reservedSession.id, args.sidecarName);
+        if (launchId) this.clearSidecarLaunch(reservedSession.id, args.sidecarName, launchId);
       }
-      const baseRecord =
-        reservedSession !== args.session
-          ? args.session
-          : (readSession(this.config.dataDir, args.session.id) ?? args.session);
       if (reservedSession !== args.session) {
-        // Rolls the reserved-port state back off this session's own record.
-        writeSession(this.config.dataDir, { ...baseRecord, updatedAt: nowIso() });
+        const current = readSession(this.config.dataDir, args.session.id);
+        // Roll back only this attempt's reservation, never another sidecar or
+        // an updated reservation written by a newer owner.
+        if (
+          current &&
+          JSON.stringify(current.sidecarPorts?.[args.sidecarName]) ===
+            JSON.stringify(reservedSession.sidecarPorts?.[args.sidecarName])
+        ) {
+          const sidecarPorts = Object.fromEntries(
+            Object.entries(current.sidecarPorts ?? {}).filter(
+              ([name]) => name !== args.sidecarName,
+            ),
+          );
+          const previous = args.session.sidecarPorts?.[args.sidecarName];
+          if (previous) sidecarPorts[args.sidecarName] = previous;
+          const updated = { ...current, updatedAt: nowIso() };
+          if (Object.keys(sidecarPorts).length > 0) updated.sidecarPorts = sidecarPorts;
+          else delete updated.sidecarPorts;
+          writeSession(this.config.dataDir, updated);
+        }
       }
       throw error;
     }
+    operation?.assertActive();
     args.onStarted?.();
     return startedSession;
   }
@@ -9737,6 +10275,7 @@ export class SessionService {
   private async startMcpSidecars(
     session: SessionRecord,
     project: ProjectConfig,
+    operation?: RestoreOperationContext,
   ): Promise<{ session: SessionRecord; mcpBindings: SidecarMcpBinding[] }> {
     const mcpSidecars = Object.fromEntries(
       Object.entries(resolveSessionSidecars(session, project)).filter(
@@ -9745,6 +10284,7 @@ export class SessionService {
     );
     let updated = session;
     for (const [name, sidecar] of Object.entries(mcpSidecars)) {
+      operation?.assertActive();
       try {
         updated = await this.startSidecarInternal({
           session: updated,
@@ -9752,8 +10292,11 @@ export class SessionService {
           sidecarName: name,
           sidecar,
           sidecarDepth: ROOT_SIDECAR_DEPTH,
+          ...(operation ? { operation } : {}),
         });
       } catch (error) {
+        operation?.assertActive();
+        if (error instanceof SidecarLaunchIncompleteError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.logEvent("session.sidecar.autostart.failed", {
           level: "warn",
@@ -9767,7 +10310,7 @@ export class SessionService {
       const portConfig = sidecar.mcp && sidecar.ports?.[sidecar.mcp.portId];
       const port = portConfig ? updated.sidecarPorts?.[name]?.[portConfig.env] : undefined;
       if (readiness && typeof port === "number") {
-        const ready = await readiness(port);
+        const ready = await (operation ? operation.wait(readiness(port)) : readiness(port));
         if (!ready) {
           this.logEvent("session.sidecar.mcp_not_ready", {
             level: "warn",
@@ -9779,6 +10322,7 @@ export class SessionService {
         }
       }
     }
+    operation?.assertActive();
     return { session: updated, mcpBindings: collectMcpBindings(mcpSidecars, updated.sidecarPorts) };
   }
 
@@ -10162,7 +10706,9 @@ export class SessionService {
     clearPort?: number;
     skipNames?: ReadonlySet<string>;
     onStarted: (name: string, sidecar: ProjectConfig["sidecars"][string]) => void;
+    operation?: RestoreOperationContext;
   }): Promise<SessionRecord> {
+    args.operation?.assertActive();
     if (this.sidecarDependencyChainSkipped(args.sidecarName, args.project, args.skipNames)) {
       return args.session;
     }
@@ -10170,6 +10716,7 @@ export class SessionService {
     const visited = new Set<string>();
 
     const start = async (sidecarName: string, clearPort?: number): Promise<void> => {
+      args.operation?.assertActive();
       if (visited.has(sidecarName)) return;
       visited.add(sidecarName);
 
@@ -10198,6 +10745,7 @@ export class SessionService {
         sidecarName,
         sidecar,
         sidecarDepth: args.sidecarDepth,
+        ...(args.operation ? { operation: args.operation } : {}),
         ...(clearPort !== undefined ? { clearPort } : {}),
         onStarted: () => args.onStarted(sidecarName, sidecar),
       });
@@ -10302,6 +10850,7 @@ export class SessionService {
   async list(options?: {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
+    signal?: AbortSignal | undefined;
   }): Promise<SessionListView[]> {
     const allSessions = listSessions(this.config.dataDir);
     this.lifecycle.prune(new Set(allSessions.map((session) => session.id)));
@@ -10322,14 +10871,17 @@ export class SessionService {
           view,
           source: this.dashboardEnrichedRecords.get(view.id) ?? null,
           revision: this.lifecycle.snapshot(view.id).revision,
+          identity: true,
         }));
-      for (const record of allSessions) {
-        if (this.dashboardCache.has(record.id) || this.lifecycle.snapshot(record.id).revision === 0)
-          continue;
-        const revision = this.lifecycle.snapshot(record.id).revision;
+      for (const { id } of allSessions) {
+        // One synchronous span: capture the revision, then read the record.
+        const revision = this.lifecycle.snapshot(id).revision;
+        if (this.dashboardCache.has(id) || revision === 0) continue;
+        const record = readSession(this.config.dataDir, id);
+        if (!record) continue;
         try {
           const assembled = await this.assembleDashboard(record);
-          if (assembled) rows.push({ ...assembled, revision });
+          if (assembled) rows.push({ ...assembled, revision, identity: false });
           else if (readSession(this.config.dataDir, record.id))
             throw this.lifecycleSnapshotChanged(this.lifecycle.snapshot(record.id));
         } catch (error) {
@@ -10344,7 +10896,7 @@ export class SessionService {
       const views = await this.finalizeLifecycleRows(
         rows,
         (record) => this.assembleDashboard(record),
-        true,
+        { includePending: true, signal: options.signal },
       );
       for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
       return views.filter(included);
@@ -10375,11 +10927,16 @@ export class SessionService {
     );
     const views = await this.finalizeLifecycleRows(
       rows.filter((row) => row !== undefined),
-      (record) => this.enrichWithClassified(record),
-      true,
+      (record, listing) => this.enrichWithClassified(record, undefined, listing),
+      { includePending: true, signal: options?.signal },
     );
     for (const view of views) this.guardSidecarViews(view.id, view.sidecars);
     return views.filter(included);
+  }
+
+  getSessionIdentity(sessionId: string): Pick<SessionRecord, "id" | "agent"> {
+    const { id, agent } = this.requireSession(sessionId);
+    return { id, agent };
   }
 
   async get(sessionId: string): Promise<SessionView> {
@@ -10676,7 +11233,7 @@ export class SessionService {
 
   async getConversation(
     sessionId: string,
-    options?: { from?: number },
+    options?: { from?: number; preserveEnd?: boolean },
   ): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -10699,7 +11256,8 @@ export class SessionService {
       const tail = await this.readConversationSerialized(session);
       if (!tail) {
         const entries = await readFullEntries();
-        const startIndex = from === undefined ? 0 : clampPageStart(from, 0, entries.length);
+        const startIndex =
+          from === undefined ? 0 : clampPageStart(from, 0, entries.length, options?.preserveEnd);
         return buildConversationResponse(
           entries.slice(startIndex),
           entries.length,
@@ -10716,14 +11274,14 @@ export class SessionService {
         const sliceStart =
           from === undefined
             ? Math.max(tailStartIndex, totalEntries - CONVERSATION_PAGE_ENTRIES, 0)
-            : clampPageStart(from, tailStartIndex, totalEntries);
+            : clampPageStart(from, tailStartIndex, totalEntries, options?.preserveEnd);
         const entries = tailEntries.slice(sliceStart - tailStartIndex);
         return buildConversationResponse(entries, totalEntries, sliceStart, state, durationMs);
       }
 
       // Deep scroll-back below the retained window: fall back to a full read.
       const fullEntries = await readFullEntries();
-      const startIndex = clampPageStart(from, 0, fullEntries.length);
+      const startIndex = clampPageStart(from, 0, fullEntries.length, options?.preserveEnd);
       return buildConversationResponse(
         fullEntries.slice(startIndex),
         fullEntries.length,
@@ -10737,7 +11295,7 @@ export class SessionService {
     const startIndex =
       from === undefined
         ? Math.max(0, entries.length - CONVERSATION_PAGE_ENTRIES)
-        : clampPageStart(from, 0, entries.length);
+        : clampPageStart(from, 0, entries.length, options?.preserveEnd);
     return buildConversationResponse(
       entries.slice(startIndex),
       entries.length,
@@ -10822,9 +11380,11 @@ export class SessionService {
     session: SessionRecord,
     project: ProjectConfig,
     skipNames?: ReadonlySet<string>,
+    operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
     let updatedRecord = session;
     for (const [name, sidecar] of Object.entries(resolveSessionSidecars(session, project))) {
+      operation?.assertActive();
       if (!sidecar.autoStart) continue;
       const sidecarDepth = ROOT_SIDECAR_DEPTH;
       try {
@@ -10833,6 +11393,7 @@ export class SessionService {
           project,
           sidecarName: name,
           sidecarDepth,
+          ...(operation ? { operation } : {}),
           ...(skipNames ? { skipNames } : {}),
           onStarted: (startedName, startedSidecar) => {
             this.logEvent("session.sidecar.started", {
@@ -10854,6 +11415,8 @@ export class SessionService {
           },
         });
       } catch (sidecarError) {
+        operation?.assertActive();
+        if (sidecarError instanceof SidecarLaunchIncompleteError) throw sidecarError;
         const sidecarMessage =
           sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
         this.logEvent("session.sidecar.autostart.failed", {
@@ -10864,6 +11427,7 @@ export class SessionService {
         });
       }
     }
+    operation?.assertActive();
     return updatedRecord;
   }
 
@@ -10950,7 +11514,9 @@ export class SessionService {
   private async finishStaleWake(
     record: SessionRecord,
     project: ProjectConfig,
+    operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
+    operation?.assertActive();
     // Raw stopReason check, not isStaleParked: both callers pass a record
     // already flipped to status:"running" by the relaunch/restore that
     // preceded this call, so isStaleParked (which requires
@@ -10967,12 +11533,14 @@ export class SessionService {
     }
     let updated = record;
     for (const name of record.staleSidecars ?? []) {
+      operation?.assertActive();
       try {
         updated = await this.startSidecarWithDependencies({
           session: updated,
           project,
           sidecarName: name,
           sidecarDepth: ROOT_SIDECAR_DEPTH,
+          ...(operation ? { operation } : {}),
           onStarted: (startedName, startedSidecar) => {
             this.logEvent("session.sidecar.started", {
               level: "info",
@@ -10988,6 +11556,8 @@ export class SessionService {
           },
         });
       } catch (sidecarError) {
+        operation?.assertActive();
+        if (sidecarError instanceof SidecarLaunchIncompleteError) throw sidecarError;
         const sidecarMessage =
           sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
         this.logEvent("session.sidecar.stale_wake.failed", {
@@ -11009,9 +11579,11 @@ export class SessionService {
         }
       }
     }
-    delete updated.stopReason;
-    delete updated.staleSidecars;
-    return updated;
+    operation?.assertActive();
+    // `updated` can be readSession's shared cached record: copy, never delete
+    // in place.
+    const { stopReason: _clearedStale, staleSidecars: _replayed, ...awake } = updated;
+    return awake;
   }
 
   async restoreRebootedSessions(drifted: { id: string; project: string }[]): Promise<void> {
@@ -11068,15 +11640,17 @@ export class SessionService {
     const driftedSessions: { id: string; project: string }[] = [];
 
     for (const session of candidates) {
+      const probeRevision = this.lifecycle.snapshot(session.id).revision;
       const runtime = await this.readRuntimeSnapshot(session);
       const current = readSession(this.config.dataDir, session.id);
       if (!current) continue;
       const workspace = probeWorkspace(current.worktreePath);
       const reconciled = await this.reconcileUnexpectedStop(
-        current,
+        session,
         runtime,
         "boot",
         workspace.missing,
+        probeRevision,
       ).catch((error: unknown) => {
         if (
           error instanceof SessionResourceNotFoundError &&
@@ -11090,10 +11664,12 @@ export class SessionService {
       if (!readSession(this.config.dataDir, session.id)) continue;
       if (reconciled.session.status === "stopped" || reconciled.session.status === "errored") {
         if (
-          !hasRetainedSessionError(reconciled.session) &&
+          !hasRetainedSessionError(current) &&
+          !current.serverErrorAt &&
           !reconciled.runtime.probeUnresponsive &&
           !reconciled.runtime.diagnostic &&
           !workspace.diagnostic &&
+          workspace.exists &&
           (!reconciled.runtime.paneUsable || !reconciled.runtime.processAlive)
         ) {
           const usage = await this.readFinalTokenUsage(session, reconciled.runtime);
@@ -11101,7 +11677,11 @@ export class SessionService {
           if (persisted.status === "missing") continue;
         }
         drifted += 1;
-        if (reconciled.session.status === "stopped") {
+        if (
+          reconciled.session.status === "stopped" ||
+          (reconciled.session.errorSource === "inferred_runtime_exit" &&
+            !reconciled.session.serverErrorAt)
+        ) {
           driftedSessions.push({ id: session.id, project: session.project });
         }
       } else {
@@ -11588,31 +12168,88 @@ export class SessionService {
     session: SessionRecord,
     state: SessionState,
     agentActivityAt: Date | null,
+    mode: "normal" | "ack-only" = "normal",
   ): Promise<SessionRecord> {
     const holdAt = session.submitUnconfirmedAt;
-    if (!holdAt || !agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)) {
+    const ackOnly = mode === "ack-only";
+    const typed = session.queuedMessageTyped;
+    const strictCodex = session.agent === "codex" && typed?.ackBaseline?.agent === "codex";
+    const qualifiedObservation = ackOnly || strictCodex;
+    if (
+      !holdAt ||
+      (!qualifiedObservation &&
+        (!agentActivityAt || agentActivityAt.getTime() < Date.parse(holdAt)))
+    ) {
       return session;
     }
-    const typed = session.queuedMessageTyped;
     if (!typed?.ackBaseline) {
+      if (ackOnly) return session;
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest || latest.submitUnconfirmedAt !== holdAt) {
         return latest ?? session;
       }
       return this.confirmSubmitHold(latest, "activity");
     }
+    const observed = qualifiedObservation ? { ...session } : session;
+    const originalTyped = {
+      ...typed,
+      ackBaseline: qualifiedObservation ? structuredClone(typed.ackBaseline) : typed.ackBaseline,
+    };
+    const lifecycle = this.lifecycle.snapshot(session.id);
+    const matchesObservation = (latest: SessionRecord | null): boolean => {
+      const currentLifecycle = this.lifecycle.snapshot(session.id);
+      return (
+        latest !== null &&
+        !this.isDeliveryStopped() &&
+        latest.status === "running" &&
+        observed.status === "running" &&
+        sameSessionRuntimeOwner(latest, observed) &&
+        latest.workspaceId === observed.workspaceId &&
+        latest.deskId === observed.deskId &&
+        latest.agentLaunchId === observed.agentLaunchId &&
+        latest.submitUnconfirmedAt === holdAt &&
+        latest.queuedMessageTyped?.typedAt === originalTyped.typedAt &&
+        latest.queuedMessageTyped.message === originalTyped.message &&
+        isDeepStrictEqual(latest.queuedMessageTyped.ackBaseline, originalTyped.ackBaseline) &&
+        currentLifecycle.instanceId === lifecycle.instanceId &&
+        currentLifecycle.revision === lifecycle.revision &&
+        currentLifecycle.operation === lifecycle.operation &&
+        currentLifecycle.operation?.phase !== "pending"
+      );
+    };
+    if (
+      qualifiedObservation &&
+      (session.agent !== "codex" ||
+        !session.agentSessionId?.trim() ||
+        !session.agentLaunchId?.trim() ||
+        originalTyped.typedAt !== holdAt ||
+        originalTyped.ackBaseline.agent !== "codex" ||
+        !matchesObservation(readSession(this.config.dataDir, session.id)))
+    )
+      return session;
     if (this.submitHoldScans.has(session.id)) {
       return session;
     }
     this.submitHoldScans.add(session.id);
     let acked: boolean;
+    let qualifiedNoMatch: boolean;
     try {
       const binding = await resumeAgentSubmitAckBinding(
         session.agent,
-        this.submitAckContext(session),
-        typed.ackBaseline,
+        {
+          ...this.submitAckContext(session),
+          ...(qualifiedObservation ? { codexAckScope: "current-native-baseline" as const } : {}),
+        },
+        originalTyped.ackBaseline,
       );
-      acked = binding ? (await binding.scan(typed.message)).found : false;
+      if (qualifiedObservation && !matchesObservation(readSession(this.config.dataDir, session.id)))
+        return readSession(this.config.dataDir, session.id) ?? session;
+      const scan = binding ? await binding.scan(originalTyped.message) : undefined;
+      acked = scan?.found ?? false;
+      qualifiedNoMatch = scan?.qualifiedNoMatch === true;
+    } catch (error) {
+      if (!qualifiedObservation) throw error;
+      return readSession(this.config.dataDir, session.id) ?? session;
     } finally {
       this.submitHoldScans.delete(session.id);
     }
@@ -11621,13 +12258,21 @@ export class SessionService {
     if (
       !latest ||
       latest.submitUnconfirmedAt !== holdAt ||
-      latest.queuedMessageTyped?.typedAt !== typed.typedAt
+      latest.queuedMessageTyped?.typedAt !== typed.typedAt ||
+      (qualifiedObservation && !matchesObservation(latest))
     ) {
       return latest ?? session;
     }
     if (acked) {
       return this.confirmSubmitHold(latest, "ack");
     }
+    if (
+      ackOnly ||
+      (strictCodex && !qualifiedNoMatch) ||
+      !agentActivityAt ||
+      agentActivityAt.getTime() < Date.parse(holdAt)
+    )
+      return latest;
     const turnEnded =
       state === "waiting" &&
       Date.now() - agentActivityAt.getTime() >= agentQueuedSendPromptGraceMs(session.agent);
@@ -11715,21 +12360,59 @@ export class SessionService {
     return carried;
   }
 
-  async spawn(
+  async spawn(request: SpawnSessionRequest, options?: SessionSpawnOptions): Promise<SessionView> {
+    if (options?.triggerBirthKey) {
+      const key = options.triggerBirthKey;
+      const existing = this.getTriggerBirth(request.project, key, request);
+      if (existing) {
+        return this.get(existing.id);
+      }
+      const pending = this.triggerBirthsInFlight.get(key);
+      if (pending) {
+        if (!isDeepStrictEqual(pending.request, request)) {
+          throw new Error("Trigger birth key already belongs to a different spawn request");
+        }
+        return pending.result;
+      }
+      const original = structuredClone(request);
+      // Defer execution until the identity is registered, before the first await.
+      const result = Promise.resolve().then(() =>
+        this.spawnOnce(original, { ...options, triggerBirthKey: key }),
+      );
+      this.triggerBirthsInFlight.set(key, { request: original, result });
+      try {
+        return await result;
+      } finally {
+        if (this.triggerBirthsInFlight.get(key)?.result === result) {
+          this.triggerBirthsInFlight.delete(key);
+        }
+      }
+    }
+    return this.spawnOnce(request, options);
+  }
+
+  getTriggerBirth(
+    projectId: string,
+    key: string,
+    request?: SpawnSessionRequest,
+  ): SessionRecord | undefined {
+    const existing = listSessions(this.config.dataDir).find(
+      (session) => session.triggerBirthKey === key,
+    );
+    if (existing && existing.project !== projectId) {
+      throw new Error("Trigger birth key already belongs to a different project");
+    }
+    if (existing && request && !isDeepStrictEqual(existing.triggerBirthRequest, request)) {
+      throw new Error("Trigger birth key already belongs to a different spawn request");
+    }
+    return existing;
+  }
+
+  private async spawnOnce(
     request: SpawnSessionRequest,
-    options?: {
-      promptKind?: UserInputKind;
-      modeResolution?: "strict" | "carried";
-      replacingSessionId?: string;
-      admissionReservation?: symbol;
-      validatedLaunchSelection?: AgentLaunchSelection;
-      closeoutOwnerTransfer?: boolean;
-      sensitivePromptSuffix?: string;
-      receiptToken?: symbol;
-      /** Internal: set by a source adapter, never from the HTTP body. */
-      telegramOrigin?: TelegramSpawnOrigin;
-    },
+    options?: SessionSpawnOptions,
   ): Promise<SessionView> {
+    const triggerBirthRequest = options?.triggerBirthKey ? structuredClone(request) : undefined;
     request = normalizeShepherdSpawnRequest(request);
     const admissionReservation =
       options?.admissionReservation ??
@@ -11938,6 +12621,9 @@ export class SessionService {
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
+        ...(options?.triggerBirthKey && triggerBirthRequest
+          ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+          : {}),
         workspaceId: reuseCtx?.workspaceId ?? sessionId,
         agent,
         ...(resolvedModel !== undefined ? { model: resolvedModel } : {}),
@@ -11969,6 +12655,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -12073,6 +12760,7 @@ export class SessionService {
             project.branchNaming?.regex,
             selfDestruct,
             telegramAgentInstructions(project, options?.telegramOrigin !== undefined),
+            githubPostInstructions(project, sessionId),
           );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...placeholder,
@@ -12391,7 +13079,15 @@ export class SessionService {
           // spawn is already failing; a survivor throw here would bury the
           // original error instead of surfacing it.
           await this.killAgentPaneAndConfirmExit(
-            { id: sessionId, tmuxSession: sessionId, agent, launchCommand: "" },
+            {
+              id: sessionId,
+              tmuxSession: sessionId,
+              agent,
+              launchCommand: "",
+              ...(launchCandidate?.agentLaunchId
+                ? { agentLaunchId: launchCandidate.agentLaunchId }
+                : {}),
+            },
             { failOnSurvivors: false },
           );
           // Non-mcp project sidecars are desk-shared: a sibling can already be
@@ -12440,6 +13136,9 @@ export class SessionService {
           const erroredRecord: SessionRecord = {
             id: sessionId,
             project: request.project,
+            ...(options?.triggerBirthKey && triggerBirthRequest
+              ? { triggerBirthKey: options.triggerBirthKey, triggerBirthRequest }
+              : {}),
             workspaceId: failedSpawnSession.workspaceId,
             agent,
             prompt,
@@ -12454,6 +13153,7 @@ export class SessionService {
             createdAt: createdAt ?? nowIso(),
             updatedAt: nowIso(),
             error: message,
+            errorSource: "other",
           };
           const killed = this.spawnWasKilled(sessionId);
           const persistedFailure = killed ? null : this.carrySpawnQueue(erroredRecord);
@@ -12544,6 +13244,7 @@ export class SessionService {
     prepared: PreparedSpawn,
     workspacePath: string,
     finalFailure: boolean,
+    agentLaunchId: string | undefined,
   ): Promise<void> {
     // Called from the background-spawn retry catch, which wraps every stage
     // from tmux.create through record.write — same rationale as the
@@ -12557,6 +13258,7 @@ export class SessionService {
         tmuxSession: prepared.sessionId,
         agent: prepared.agent,
         launchCommand: prepared.placeholder.launchCommand,
+        ...(agentLaunchId ? { agentLaunchId } : {}),
       },
       { failOnSurvivors: false },
     );
@@ -12579,6 +13281,18 @@ export class SessionService {
     if (prepared.worktree && workspacePath && !prepared.reuseWorkspacePath) {
       await removeWorktree(prepared.project.path, workspacePath);
       this.unregisterWorktreeConfig(workspacePath);
+    }
+  }
+
+  // The reuse context is captured before awaits (preflight, id reservation);
+  // session GC can archive the workspace anchor in between. Checked
+  // synchronously right before the placeholder write, so in this process the
+  // child is either visible to GC's membership recheck or refused here.
+  private assertReuseAnchorPresent(reuseCtx: { workspaceId: string } | null | undefined): void {
+    if (reuseCtx && !readSession(this.config.dataDir, reuseCtx.workspaceId)) {
+      throw new Error(
+        `reuseWorkspaceSessionId: workspace anchor ${reuseCtx.workspaceId} was archived`,
+      );
     }
   }
 
@@ -12643,6 +13357,19 @@ export class SessionService {
           workspaceIdOf(member) === anchor &&
           member.status !== "killed",
       )
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  // Every record of the workspace, killed ones included: a killed record can
+  // still own a live agent (kill path tolerates survivors), so liveness must
+  // not inherit listDeskSessions' killed filter.
+  private listWorkspaceRuntimeMembers(
+    session: SessionRecord,
+    sessionBatch: readonly SessionRecord[],
+  ): SessionRecord[] {
+    const anchor = workspaceIdOf(session);
+    return sessionBatch
+      .filter((member) => member.project === session.project && workspaceIdOf(member) === anchor)
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
@@ -12961,6 +13688,7 @@ export class SessionService {
         ...(selfDestruct !== undefined ? { selfDestruct } : {}),
         originalTaskPrompt,
       };
+      this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
@@ -13053,6 +13781,7 @@ export class SessionService {
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
+          errorSource: "other",
         });
       }
       this.logEvent("session.spawn.failed", {
@@ -13298,6 +14027,7 @@ export class SessionService {
         project.branchNaming?.regex,
         selfDestruct,
         telegramAgentInstructions(project, false),
+        githubPostInstructions(project, sessionId),
       );
       const budgetLimited = this.holdBudgetLimitedLaunch({
         ...spawnPlaceholder,
@@ -13549,7 +14279,12 @@ export class SessionService {
         this.spawnWasKilled(sessionId) ||
         attempt >= SPAWN_RETRY_ATTEMPTS ||
         initialPromptSent;
-      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalAttempt);
+      await this.cleanupBackgroundSpawnAttempt(
+        prepared,
+        workspacePath,
+        finalAttempt,
+        launchCandidate?.agentLaunchId,
+      );
       // Re-read after the cleanup await: a kill can land during it.
       const killed = this.spawnWasKilled(sessionId);
       const finalFailure = finalAttempt || killed;
@@ -13595,6 +14330,7 @@ export class SessionService {
             status: "errored",
             updatedAt: nowIso(),
             error: message,
+            errorSource: "other",
           });
       if (persistedFailure) {
         writeSession(this.config.dataDir, persistedFailure);
@@ -13730,6 +14466,10 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
+    if (request.target === "scheduled") {
+      this.scheduledWakeClaims.delete(sessionId);
+      this.scheduledWakeLastFailure.delete(sessionId);
+    }
     return this.enrich(updated);
   }
 
@@ -13765,19 +14505,17 @@ export class SessionService {
         `Cannot dispatch scheduled wake for ${session.id}: session not deliverable`,
       );
     }
-    await this.withWorkspaceLifecycleLocks(session.id, async () => {
-      const current = readSession(this.config.dataDir, session.id) ?? session;
-      const claimed =
-        current.scheduledWake?.dueAt === scheduledWake.dueAt &&
-        current.scheduledWake.message === scheduledWake.message;
-      if (!claimed) {
-        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
-      }
-      const { scheduledWake: _scheduledWake, ...base } = current;
-      writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
-    });
+    const claim = await this.claimScheduledWake(session, true);
+    if (!claim)
+      throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
     try {
-      await this.send(session.id, { message: scheduledWake.message, queue: false });
+      await this.sendWithAttempt(
+        session.id,
+        { message: scheduledWake.message, queue: false },
+        claim,
+      );
+      if (claim.stage !== "accepted")
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
       this.logEvent("session.wake.sent", {
         level: "info",
         sessionId: session.id,
@@ -13788,7 +14526,12 @@ export class SessionService {
     } catch (error) {
       await this.withWorkspaceLifecycleLocks(session.id, async () => {
         const afterFailure = readSession(this.config.dataDir, session.id);
-        if (afterFailure && !afterFailure.scheduledWake) {
+        if (
+          afterFailure &&
+          !afterFailure.scheduledWake &&
+          claim.stage === "unattempted" &&
+          this.scheduledWakeClaimCurrent(claim, afterFailure)
+        ) {
           writeSession(this.config.dataDir, {
             ...afterFailure,
             scheduledWake,
@@ -13796,6 +14539,104 @@ export class SessionService {
           });
         }
       });
+      throw error;
+    } finally {
+      this.releaseScheduledWakeClaim(claim);
+    }
+  }
+
+  private async claimScheduledWake(
+    session: SessionRecord,
+    manual: boolean,
+  ): Promise<ScheduledWakeClaim | null> {
+    return this.withWorkspaceLifecycleLocks(session.id, async () => {
+      const current = readSession(this.config.dataDir, session.id);
+      const wake = session.scheduledWake;
+      if (
+        !wake ||
+        !current ||
+        isTerminalSessionStatus(current.status) ||
+        current.scheduledWake?.dueAt !== wake.dueAt ||
+        current.scheduledWake.message !== wake.message ||
+        (!manual && this.scheduledWakeClaims.has(session.id)) ||
+        this.lifecycle.snapshot(session.id).operation?.phase === "pending"
+      )
+        return null;
+      if (isStaleParked(current) || current.stopReason === "memory_shed") {
+        this.assertWakeAdmissible(current, manual ? undefined : wake);
+      }
+      const claim: ScheduledWakeClaim = {
+        session: current,
+        wake,
+        manual,
+        revision: this.lifecycle.snapshot(session.id).revision,
+        stage: "unattempted",
+      };
+      this.scheduledWakeClaims.set(session.id, claim);
+      if (manual) {
+        const { scheduledWake: _wake, ...base } = current;
+        writeSession(this.config.dataDir, { ...base, updatedAt: nowIso() });
+      }
+      return claim;
+    });
+  }
+
+  private scheduledWakeClaimCurrent(
+    claim: ScheduledWakeClaim,
+    current = readSession(this.config.dataDir, claim.session.id),
+  ): boolean {
+    const lifecycle = this.lifecycle.snapshot(claim.session.id);
+    return Boolean(
+      current &&
+      this.scheduledWakeClaims.get(claim.session.id) === claim &&
+      lifecycle.revision === claim.revision &&
+      lifecycle.operation?.phase !== "pending" &&
+      !isTerminalSessionStatus(current.status) &&
+      this.lifecycleStateMatches(current, this.lifecycleStamp(claim.session)) &&
+      sameSessionRuntimeOwner(current, claim.session) &&
+      current.agentLaunchId === claim.session.agentLaunchId &&
+      !this.restoreOwnsRuntimeRecovery(current.id) &&
+      (claim.manual ||
+        claim.stage === "accepted" ||
+        (current.scheduledWake?.dueAt === claim.wake.dueAt &&
+          current.scheduledWake.message === claim.wake.message)),
+    );
+  }
+
+  private releaseScheduledWakeClaim(claim: ScheduledWakeClaim): void {
+    if (this.scheduledWakeClaims.get(claim.session.id) === claim)
+      this.scheduledWakeClaims.delete(claim.session.id);
+  }
+
+  private logScheduledWakeFailure(
+    session: SessionRecord,
+    wake: NonNullable<SessionRecord["scheduledWake"]>,
+    error: unknown,
+  ): void {
+    const failure = error instanceof Error ? error.message : String(error);
+    const transition = `${wake.dueAt}\n${wake.message}\n${failure}`;
+    if (this.scheduledWakeLastFailure.get(session.id) === transition) return;
+    this.scheduledWakeLastFailure.set(session.id, transition);
+    const denied = error instanceof SessionAdmissionDeniedError;
+    this.logEvent(denied ? "session.wake.deferred" : "session.wake.failed", {
+      level: denied ? "warn" : "error",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `${denied ? "Deferred scheduled wake for" : "Failed to send scheduled wake to"} ${session.id}: ${failure}`,
+      details: { dueAt: wake.dueAt },
+    });
+  }
+
+  private assertWakeAdmissible(
+    session: SessionRecord,
+    scheduledWake?: NonNullable<SessionRecord["scheduledWake"]>,
+  ): void {
+    try {
+      this.assertAdmissible(session.project, "wake");
+    } catch (error) {
+      // Record the actual refusal before releasing ownership to a replacement.
+      if (scheduledWake && error instanceof SessionAdmissionDeniedError)
+        this.logScheduledWakeFailure(session, scheduledWake, error);
       throw error;
     }
   }
@@ -14034,6 +14875,8 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
+    this.scheduledWakeClaims.delete(sessionId);
+    this.scheduledWakeLastFailure.delete(sessionId);
     this.logEvent("session.wake.scheduled", {
       level: "info",
       sessionId,
@@ -14379,6 +15222,7 @@ export class SessionService {
   private async sendWithAttempt(
     sessionId: string,
     request: SendMessageRequest,
+    wakeClaim?: ScheduledWakeClaim,
   ): Promise<{ view: SessionView; attempt: Promise<boolean> | null }> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -14391,11 +15235,18 @@ export class SessionService {
     if (session.status === "spawning" && request.queue !== false) {
       // Held on the placeholder; the spawn carries it into the running record
       // behind the initial prompt (carrySpawnQueue) and arms delivery.
-      const queued = this.appendQueuedMessage(
-        session,
-        this.prepareSendMessage(session, request),
-        true,
-      );
+      const queued = wakeClaim
+        ? await this.withWorkspaceLifecycleLocks(sessionId, async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+            return this.appendQueuedMessage(
+              current,
+              this.prepareSendMessage(session, request),
+              true,
+              wakeClaim,
+            );
+          })
+        : this.appendQueuedMessage(session, this.prepareSendMessage(session, request), true);
       return { view: await this.enrich(queued), attempt: null };
     }
     assertSendableStatus(session);
@@ -14405,11 +15256,30 @@ export class SessionService {
         interrupt: request.interrupt === true,
         entryPoint: "send",
         hasAttachments: (request.attachments?.length ?? 0) > 0,
+        ...(wakeClaim
+          ? {
+              allowDelivery: () => this.scheduledWakeClaimCurrent(wakeClaim),
+              observeDelivery: (stage: ScheduledWakeClaim["stage"]) => {
+                if (wakeClaim.stage !== "accepted") wakeClaim.stage = stage;
+              },
+              wakeClaim,
+            }
+          : {}),
       });
       return { view, attempt: null };
     }
     const activationStamp = this.lifecycleStamp(session);
-    await this.ensureReadyForQueuedSend(sessionId, activationStamp);
+    const operation = wakeClaim
+      ? createRestoreOperation(undefined, () => this.scheduledWakeClaimCurrent(wakeClaim))
+      : undefined;
+    try {
+      await this.ensureReadyForQueuedSend(sessionId, activationStamp, {
+        ...(operation ? { operation } : {}),
+        ...(wakeClaim ? { wakeClaim } : {}),
+      });
+    } finally {
+      operation?.dispose();
+    }
     const activeRecord = await this.withWorkspaceLifecycleLocks(sessionId, async () => {
       const readySession = readSession(this.config.dataDir, sessionId);
       if (!readySession) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
@@ -14428,6 +15298,7 @@ export class SessionService {
         latest.queuedMessages?.awaitingPrompt === true ||
           sendState !== "waiting" ||
           submitPending(latest),
+        wakeClaim,
       );
     });
     const attempt =
@@ -14441,18 +15312,37 @@ export class SessionService {
   private async ensureReadyForQueuedSend(
     sessionId: string,
     expectedLifecycle?: SessionLifecycleStamp,
+    options?: SessionPreparationOptions & {
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<void> {
+    const parentOperation = options?.operation;
+    const wakeClaim = options?.wakeClaim;
+    parentOperation?.assertActive();
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const preparationRevision = this.lifecycle.snapshot(sessionId).revision;
     this.assertTokenBudgetAllowsActivation(hint);
     const runtime = await this.readRuntimeSnapshot(hint);
+    parentOperation?.assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
-      await this.captureAgentSessionId(hint, 0);
+      await this.capturePreparedAgentSessionId(hint, preparationRevision, options);
       return;
     }
-    await this.withPaneWriteLock(hint.tmuxSession, async () => {
+    const observation = options?.preparedObservation;
+    if (observation && !this.preparedSessionObservationCurrent(observation))
+      throw new RestoreOperationError();
+    const scopedOperation = observation
+      ? createRestoreOperation(parentOperation?.signal, () => {
+          parentOperation?.assertActive();
+          return this.preparedSessionObservationCurrent(observation);
+        })
+      : undefined;
+    const operation = scopedOperation ?? parentOperation;
+    const pending = this.withPaneWriteLock(hint.tmuxSession, async () => {
       const lifecycleIds = this.lifecycleIdsFor(hint);
       const ready = await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        operation?.assertActive();
         const current = readSession(this.config.dataDir, sessionId);
         if (!current) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
         const parkedDuringProbe =
@@ -14474,10 +15364,16 @@ export class SessionService {
         if (current.tmuxSession !== hint.tmuxSession) {
           throw new Error(`Session ${sessionId} changed before queued send`);
         }
-        return this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+        return this.ensureSessionReadyForSend(current, {
+          paneAlreadyOwned: true,
+          ...options,
+          ...(operation ? { operation } : {}),
+        });
       });
       if (!ready) return;
+      operation?.assertActive();
       const generation = await this.capturePaneGeneration(ready.session);
+      operation?.assertActive();
       const stamp = this.lifecycleStamp(
         readSession(this.config.dataDir, sessionId) ?? ready.session,
       );
@@ -14487,8 +15383,10 @@ export class SessionService {
           ready.recoveryMessage.message,
           {
             ...ready.recoveryMessage.options,
+            ...(operation ? { operation } : {}),
             authorizeInput: (send) =>
               this.withSessionLifecycleLocks(lifecycleIds, async () => {
+                operation?.assertActive();
                 const current = readSession(this.config.dataDir, sessionId);
                 if (
                   !current ||
@@ -14497,25 +15395,39 @@ export class SessionService {
                 ) {
                   return false;
                 }
+                operation?.assertActive();
+                if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+                  options.wakeClaim.stage = "input-started";
                 await send();
                 return true;
               }),
           },
         );
         const outcome = await this.completeAgentMessage(submission, {
+          ...(operation ? { operation } : {}),
+          ...(wakeClaim ? { allowDelivery: () => this.scheduledWakeClaimCurrent(wakeClaim) } : {}),
           authorizeResend: (send) =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              operation?.assertActive();
               const current = readSession(this.config.dataDir, sessionId);
               if (!current || !(await this.paneGenerationMatches(current, generation))) {
                 return false;
               }
+              operation?.assertActive();
+              if (options?.wakeClaim && options.wakeClaim.stage === "unattempted")
+                options.wakeClaim.stage = "input-started";
               await send();
               return true;
             }),
           recoveryGenerationMatches: () =>
             this.withSessionLifecycleLocks(lifecycleIds, async () => {
+              operation?.assertActive();
               const current = readSession(this.config.dataDir, sessionId);
-              return Boolean(current && (await this.paneGenerationMatches(current, generation)));
+              const matches = Boolean(
+                current && (await this.paneGenerationMatches(current, generation)),
+              );
+              operation?.assertActive();
+              return matches;
             }),
         });
         if (outcome === "stale") {
@@ -14523,12 +15435,16 @@ export class SessionService {
         }
       }
       await this.withSessionLifecycleLocks(lifecycleIds, async () => {
+        operation?.assertActive();
         const current = readSession(this.config.dataDir, sessionId);
         if (!current || !(await this.paneGenerationMatches(current, generation))) {
           throw new Error(`Session ${sessionId} changed during queued send recovery`);
         }
+        operation?.assertActive();
       });
     });
+    if (scopedOperation) await pending.finally(() => scopedOperation.dispose());
+    else await pending;
   }
 
   // Appends one message to the persisted queue on top of `base`, or returns
@@ -14545,8 +15461,14 @@ export class SessionService {
     base: SessionRecord,
     message: string,
     awaitingPrompt: boolean,
+    wakeClaim?: ScheduledWakeClaim,
   ): SessionRecord {
     const latest = readSession(this.config.dataDir, base.id) ?? base;
+    if (wakeClaim && !this.scheduledWakeClaimCurrent(wakeClaim, latest)) {
+      throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${base.id}`);
+    }
+    const { scheduledWake: _wake, ...withoutWake } = base;
+    const acceptedBase = wakeClaim ? withoutWake : base;
     const latestQueued = queuedMessages(latest);
     if (latestQueued.includes(message)) {
       this.logEvent("session.message.duplicate_ignored", {
@@ -14559,14 +15481,20 @@ export class SessionService {
           messageLength: message.length,
         },
       });
-      return latest;
+      if (!wakeClaim) return latest;
+      const { scheduledWake: _duplicateWake, ...consumed } = latest;
+      const record = { ...consumed, updatedAt: nowIso() };
+      writeSession(this.config.dataDir, record);
+      wakeClaim.stage = "accepted";
+      return record;
     }
     const record = withQueuedMessages(
-      { ...base, updatedAt: nowIso() },
+      { ...acceptedBase, updatedAt: nowIso() },
       [...latestQueued, message],
       awaitingPrompt,
     );
     writeSession(this.config.dataDir, record);
+    if (wakeClaim) wakeClaim.stage = "accepted";
     this.logEvent("session.message.queued", {
       level: "info",
       sessionId: base.id,
@@ -14833,6 +15761,7 @@ export class SessionService {
   // for flush.
   async flushQueuedMessage(sessionId: string, message: string): Promise<SessionView> {
     const session = this.readSessionWithQueuedMessage(sessionId, message);
+    const probeRevision = this.lifecycle.snapshot(sessionId).revision;
     this.assertTokenBudgetAllowsActivation(session);
     assertSendableStatus(session);
     if (this.paneWriteLocks.has(session.tmuxSession) || this.queueDeliveryInFlight.has(sessionId)) {
@@ -14869,6 +15798,11 @@ export class SessionService {
           },
         });
       }
+    } catch (error) {
+      if (error instanceof TmuxProbeUnknownError) {
+        this.retainDetectionError(session, error.message, "runtime_probe", probeRevision);
+      }
+      throw error;
     } finally {
       this.queueDeliveryInFlight.delete(sessionId);
     }
@@ -14880,6 +15814,7 @@ export class SessionService {
     sessionId: string,
     paneKey: string,
     intent: DeliveryIntent,
+    wakeClaim?: ScheduledWakeClaim,
   ): Promise<PreparedDelivery | null> {
     const current = readSession(this.config.dataDir, sessionId);
     if (!current) {
@@ -14916,7 +15851,10 @@ export class SessionService {
     const readyResult =
       intent.kind === "queued-drain"
         ? { session: current, recoveryMessage: null }
-        : await this.ensureSessionReadyForSend(current, { paneAlreadyOwned: true });
+        : await this.ensureSessionReadyForSend(current, {
+            paneAlreadyOwned: true,
+            ...(wakeClaim ? { wakeClaim } : {}),
+          });
     const ready = readyResult.session;
     if (ready.tmuxSession !== paneKey) return null;
     if (intent.kind === "queued-drain") {
@@ -14948,12 +15886,15 @@ export class SessionService {
     message: string,
     typed: NonNullable<SessionRecord["queuedMessageTyped"]> | null,
     recovered: SubmitAckTimeoutError | null,
+    allowWrite?: () => boolean,
   ): Promise<SessionRecord | null> {
     return this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+      if (allowWrite?.() === false) return null;
       const beforeProbe = readSession(this.config.dataDir, prepared.session.id);
       if (!beforeProbe || workspaceIdOf(beforeProbe) !== workspaceIdOf(prepared.session))
         return null;
       const generationMatches = await this.paneGenerationMatches(beforeProbe, prepared.generation);
+      if (allowWrite?.() === false) return null;
       const latest = readSession(this.config.dataDir, prepared.session.id);
       if (
         !latest ||
@@ -15012,7 +15953,14 @@ export class SessionService {
     sessionId: string,
     message: string,
     intent: DeliveryIntent,
-    options?: { interrupt?: boolean; recoverOnLiveAckTimeout?: boolean; interactive?: boolean },
+    options?: {
+      interrupt?: boolean;
+      recoverOnLiveAckTimeout?: boolean;
+      interactive?: boolean;
+      allowDelivery?: () => boolean;
+      observeDelivery?: (stage: "input-started" | "accepted") => void;
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<{
     record: SessionRecord | null;
     recovered: SubmitAckTimeoutError | null;
@@ -15020,10 +15968,14 @@ export class SessionService {
   }> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const deliveryRevision = this.lifecycle.snapshot(sessionId).revision;
     const result = await this.withPaneWriteLock(hint.tmuxSession, async () => {
+      if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
       const lifecycleIds = this.lifecycleIdsFor(hint);
       const prepared = await this.withSessionLifecycleLocks(lifecycleIds, () =>
-        this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent),
+        options?.allowDelivery?.() === false
+          ? Promise.resolve(null)
+          : this.prepareDeliveryLocked(sessionId, hint.tmuxSession, intent, options?.wakeClaim),
       );
       if (!prepared) return { record: null, recovered: null };
 
@@ -15038,8 +15990,9 @@ export class SessionService {
           if (!current || !(await this.paneGenerationMatches(current, prepared.generation)))
             return false;
           const state = this.queuedDeliveryState(await this.classifySessionRecord(current));
+          if (options.allowDelivery?.() === false) return false;
           if (state === "waiting") return false;
-          await this.queueAheadOfBusyTurn(current, message, state);
+          await this.queueAheadOfBusyTurn(current, message, state, options.observeDelivery);
           return true;
         });
         if (queuedAhead)
@@ -15060,24 +16013,34 @@ export class SessionService {
               this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
                 const current = readSession(this.config.dataDir, sessionId);
                 if (
+                  options?.allowDelivery?.() === false ||
                   !current ||
                   !this.lifecycleStateMatches(current, prepared.stamp) ||
                   !(await this.paneGenerationMatches(current, prepared.generation))
                 ) {
                   return false;
                 }
+                if (options?.allowDelivery?.() === false) return false;
+                options?.observeDelivery?.("input-started");
                 await send();
                 return true;
               }),
           },
         );
         const recoveryOutcome = await this.completeAgentMessage(recoverySubmission, {
+          ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
           authorizeResend: (send) =>
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
-              if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+              if (
+                options?.allowDelivery?.() === false ||
+                !current ||
+                !(await this.paneGenerationMatches(current, prepared.generation))
+              ) {
                 return false;
               }
+              if (options?.allowDelivery?.() === false) return false;
+              options?.observeDelivery?.("input-started");
               await send();
               return true;
             }),
@@ -15085,10 +16048,13 @@ export class SessionService {
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               return Boolean(
-                current && (await this.paneGenerationMatches(current, prepared.generation)),
+                options?.allowDelivery?.() !== false &&
+                current &&
+                (await this.paneGenerationMatches(current, prepared.generation)),
               );
             }),
         });
+        if (options?.allowDelivery?.() === false) return { record: null, recovered: null };
         if (recoveryOutcome === "stale") {
           throw new Error(`Session ${sessionId} changed during recovery context delivery`);
         }
@@ -15124,7 +16090,46 @@ export class SessionService {
             if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
               return false;
             }
-            return (await this.classifySessionState(current)) !== "waiting";
+            const classified = await this.classifySessionRecord(current);
+            if (current.agent !== "codex") return classified.state !== "waiting";
+            let { state, source } = classified;
+            if (state === "error") {
+              const uncertainInput = `Cannot safely determine Codex input state for ${sessionId}; message not sent`;
+              if (
+                classified.runtime.probeUnresponsive ||
+                !classified.runtime.processAlive ||
+                !classified.runtime.paneUsable ||
+                !classified.workspacePresent
+              ) {
+                throw new Error(uncertainInput);
+              }
+              // Retained errors hide pending dialogs. Read native evidence
+              // without clearing the error or typing into an unanswered menu.
+              const native = await this.classifyCodexState(current);
+              const paneText = await captureTmuxPane(current.tmuxSession, 200, { fresh: true });
+              if (paneText === null) throw new Error(uncertainInput);
+              if (
+                rateLimitActive(native.rateLimit, Date.now()) ||
+                rateLimitActive(scanTmuxRateLimit(paneText), Date.now())
+              ) {
+                throw new SessionRateLimitedError(`Session ${sessionId} is rate limited`);
+              }
+              state = native.state;
+              source = native.source;
+              if (detectCodexMcpPermissionDialog(paneText)) {
+                state = "needs_input";
+              } else if (
+                source === "status" ||
+                (state !== "working" && state !== "waiting" && state !== "needs_input")
+              ) {
+                throw new Error(uncertainInput);
+              }
+            }
+            // Idle Ctrl-C can exit Codex; only native work or input cancels.
+            return (
+              state === "needs_input" ||
+              (state === "working" && (source === "hook" || source === "jsonl"))
+            );
           })) === true;
       }
 
@@ -15132,15 +16137,23 @@ export class SessionService {
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
           return Boolean(
-            current && (await this.paneGenerationMatches(current, prepared.generation)),
+            options?.allowDelivery?.() !== false &&
+            current &&
+            (await this.paneGenerationMatches(current, prepared.generation)),
           );
         });
       const authorizeGenerationResend = (send: () => Promise<void>) =>
         this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
           const current = readSession(this.config.dataDir, sessionId);
-          if (!current || !(await this.paneGenerationMatches(current, prepared.generation))) {
+          if (
+            options?.allowDelivery?.() === false ||
+            !current ||
+            !(await this.paneGenerationMatches(current, prepared.generation))
+          ) {
             return false;
           }
+          if (options?.allowDelivery?.() === false) return false;
+          options?.observeDelivery?.("input-started");
           await send();
           return true;
         });
@@ -15153,6 +16166,7 @@ export class SessionService {
           interrupt,
           interactive: options?.interactive === true,
           onPaneWritten: (ackBaseline, pastedAt) => {
+            options?.observeDelivery?.("accepted");
             const typed = {
               message,
               typedAt: new Date(pastedAt).toISOString(),
@@ -15182,12 +16196,15 @@ export class SessionService {
             this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const current = readSession(this.config.dataDir, sessionId);
               if (
+                options?.allowDelivery?.() === false ||
                 !current ||
                 !this.lifecycleStateMatches(current, prepared.stamp) ||
                 !(await this.paneGenerationMatches(current, prepared.generation))
               ) {
                 return false;
               }
+              if (options?.allowDelivery?.() === false) return false;
+              options?.observeDelivery?.("input-started");
               await send();
               return true;
             }),
@@ -15195,6 +16212,7 @@ export class SessionService {
         const outcome = await this.completeAgentMessage(submission, {
           authorizeResend: authorizeGenerationResend,
           recoveryGenerationMatches: generationStillMatches,
+          ...(options?.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
         });
         if (outcome === "stale") {
           throw new Error(`Session ${sessionId} changed during message delivery`);
@@ -15203,7 +16221,33 @@ export class SessionService {
       } catch (error) {
         if (intent.kind === "queued-drain") this.queuedDeliveryAckedAt.delete(sessionId);
         if (options?.recoverOnLiveAckTimeout !== true || !isRecoveredSubmitAckTimeout(error)) {
-          if (intent.kind === "queued-drain" && pane.typed) {
+          if (error instanceof TmuxProbeUnknownError && pane.typed) {
+            const typed = pane.typed;
+            await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
+              const latest = readSession(this.config.dataDir, sessionId);
+              if (
+                !latest ||
+                this.lifecycle.snapshot(sessionId).revision !== deliveryRevision ||
+                !this.lifecycleStateMatches(latest, prepared.stamp) ||
+                !sameSessionRuntimeOwner(latest, prepared.session) ||
+                latest.agentLaunchId !== prepared.session.agentLaunchId ||
+                (intent.kind === "queued-drain" &&
+                  (latest.queuedMessageTyped?.typedAt !== typed.typedAt ||
+                    latest.queuedMessageTyped.message !== message))
+              ) {
+                return;
+              }
+              const remaining =
+                intent.kind === "queued-flush"
+                  ? removeFirstOccurrence(queuedMessages(latest), message)
+                  : queuedMessages(latest);
+              writeSession(
+                this.config.dataDir,
+                this.withSubmitUnconfirmed(withQueuedMessages(latest, remaining, true), typed),
+              );
+              this.stateCache.delete(sessionId);
+            });
+          } else if (intent.kind === "queued-drain" && pane.typed) {
             await this.withSessionLifecycleLocks(prepared.lifecycleIds, async () => {
               const latest = readSession(this.config.dataDir, sessionId);
               if (
@@ -15221,11 +16265,22 @@ export class SessionService {
       } finally {
         this.queuedDeliveryTyped.delete(sessionId);
       }
-      const record = await this.commitPreparedDelivery(prepared, message, pane.typed, recovered);
+      const record = await this.commitPreparedDelivery(
+        prepared,
+        message,
+        pane.typed,
+        recovered,
+        options?.allowDelivery,
+      );
       return { record, recovered };
     });
-    if (result.record) {
-      await this.captureAgentSessionId(result.record, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+    if (result.record && options?.allowDelivery?.() !== false) {
+      await this.captureAgentSessionId(
+        result.record,
+        AGENT_SESSION_ID_REFRESH_WAIT_MS,
+        undefined,
+        options?.allowDelivery,
+      );
       result.record = readSession(this.config.dataDir, sessionId) ?? result.record;
     }
     return result;
@@ -15255,6 +16310,7 @@ export class SessionService {
     readySession: SessionRecord,
     message: string,
     state: SessionState,
+    observeDelivery?: (stage: "input-started" | "accepted") => void,
   ): Promise<SessionView> {
     const latest = readSession(this.config.dataDir, readySession.id) ?? readySession;
     const record = withQueuedMessages(
@@ -15263,6 +16319,7 @@ export class SessionService {
       true,
     );
     writeSession(this.config.dataDir, record);
+    observeDelivery?.("accepted");
     this.logEvent("session.message.queued_ahead", {
       level: "info",
       sessionId: record.id,
@@ -15286,6 +16343,9 @@ export class SessionService {
       interrupt?: boolean;
       entryPoint: "send" | "deliver" | "flush";
       hasAttachments?: boolean;
+      allowDelivery?: () => boolean;
+      observeDelivery?: (stage: "input-started" | "accepted") => void;
+      wakeClaim?: ScheduledWakeClaim;
     },
   ): Promise<SessionView> {
     // send and flush are user-driven: short ack pacing, and a live-process ack
@@ -15294,6 +16354,7 @@ export class SessionService {
     // drives its own retry.
     const interactive = options.entryPoint !== "deliver";
     const initialSession = readSession(this.config.dataDir, sessionId);
+    const probeRevision = this.lifecycle.snapshot(sessionId).revision;
     try {
       if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
       if (this.isLiveStateRateLimited(initialSession)) {
@@ -15319,10 +16380,14 @@ export class SessionService {
           ...(options.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
           recoverOnLiveAckTimeout: interactive,
           interactive,
+          ...(options.allowDelivery ? { allowDelivery: options.allowDelivery } : {}),
+          ...(options.observeDelivery ? { observeDelivery: options.observeDelivery } : {}),
+          ...(options.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
         },
       );
       const persisted = result.record ?? readSession(this.config.dataDir, sessionId);
       if (!persisted) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+      if (options.allowDelivery?.() === false) return await this.enrich(persisted);
       if (result.queuedAhead) {
         return { ...(await this.enrich(persisted)), queuedAheadReason: "no_interrupt" };
       }
@@ -15356,8 +16421,12 @@ export class SessionService {
       }
       return await this.enrich(persisted);
     } catch (error) {
+      if (options.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim)) throw error;
+      if (initialSession && options.allowDelivery?.() === false) {
+        return this.enrich(readSession(this.config.dataDir, sessionId) ?? initialSession);
+      }
       if (error instanceof TmuxProbeUnknownError && initialSession) {
-        this.retainDetectionError(initialSession, error.message);
+        this.retainDetectionError(initialSession, error.message, "runtime_probe", probeRevision);
       }
       if (
         error instanceof SessionRateLimitedError ||
@@ -15795,6 +16864,7 @@ export class SessionService {
     message: string,
     options?: AgentMessageOptions,
   ): Promise<StartedAgentMessage> {
+    options?.operation?.assertActive();
     const freshLaunch = options?.freshLaunch === true;
     const interactive = options?.interactive === true;
     const shouldWaitForSubmitAck =
@@ -15807,6 +16877,7 @@ export class SessionService {
           freshLaunch,
         })
       : null;
+    options?.operation?.assertActive();
     const startedAt = Date.now();
     const interruptState = { interrupted: false };
     if (options?.interrupt === true) {
@@ -15847,12 +16918,15 @@ export class SessionService {
     // lands before this, so it never confirms the pasted text.
     const pastedAt = Date.now();
     const send = async () => {
+      options?.operation?.assertActive();
       await sendMessageToTmux(session.tmuxSession, message, {
         agent: session.agent,
+        ...(options?.operation ? { operation: options.operation } : {}),
         ...(session.agent === "codex" && options?.interrupt === false
           ? { interrupt: false as const }
           : {}),
       });
+      options?.operation?.assertActive();
       this.recordPaneWrite(session, pastedAt);
       options?.onPaneWritten?.(binding?.baseline ?? null, pastedAt);
     };
@@ -15893,10 +16967,13 @@ export class SessionService {
   private async completeAgentMessage(
     started: StartedAgentMessage,
     options?: {
+      operation?: RestoreOperationContext;
+      allowDelivery?: () => boolean;
       authorizeResend?: (send: () => Promise<void>) => Promise<boolean>;
       recoveryGenerationMatches?: () => Promise<boolean>;
     },
   ): Promise<AgentSendOutcome | "stale"> {
+    options?.operation?.assertActive();
     if (started.kind === "complete") return started.outcome;
     const {
       session,
@@ -15932,12 +17009,15 @@ export class SessionService {
       },
     };
     for (let attempt = 0; attempt <= maxResends; attempt += 1) {
+      options?.operation?.assertActive();
       const earlyWindow = attempt === 0 && firstWindowMs !== undefined;
       lastResult = await this.waitForSubmitAck(
         trackedBinding,
         message,
         earlyWindow ? firstWindowMs : ackWindowMs,
       );
+      options?.operation?.assertActive();
+      if (options?.allowDelivery?.() === false) return "stale";
       if (lastResult.found) {
         this.paneWriteFenceAt.set(session.id, lastMissAt);
         return "submitted";
@@ -15968,7 +17048,12 @@ export class SessionService {
         if (earlyWindow && !(await this.earlySubmitResendAllowed(session))) {
           continue;
         }
-        const resend = () => sendSubmitKeyToTmux(session.tmuxSession);
+        const resend = () => {
+          options?.operation?.assertActive();
+          return options?.operation
+            ? sendSubmitKeyToTmux(session.tmuxSession, options.operation)
+            : sendSubmitKeyToTmux(session.tmuxSession);
+        };
         if (options?.authorizeResend) {
           if (!(await options.authorizeResend(resend))) return "stale";
         } else {
@@ -16002,6 +17087,8 @@ export class SessionService {
       processAlive = await options.recoveryGenerationMatches();
     }
     const probeUnresponsive = !finalProbe.alive && finalProbe.unresponsive;
+    options?.operation?.assertActive();
+    if (options?.allowDelivery?.() === false) return "stale";
     const elapsedMs = Date.now() - startedAt;
     // Interactive callers own the live-timeout policy (delivered + warn), so
     // they get the typed timeout, never this silent cursor pass. Neither does
@@ -16452,11 +17539,13 @@ export class SessionService {
     // fail-closed contract this frame would then depend on forever.
     if (session.status === "errored") {
       try {
+        const probeRevision = this.lifecycle.snapshot(session.id).revision;
         const runtime = await this.readRuntimeSnapshot(session);
         session = this.reconcileStaleErroredSession(
           session,
           runtime,
-          probeWorkspace(session.worktreePath).missing,
+          probeWorkspace(session.worktreePath).exists,
+          probeRevision,
         );
       } catch {
         // Fail closed, same as memoryShedCandidates: the heal is opportunistic
@@ -16523,12 +17612,22 @@ export class SessionService {
   // pid, or an unusable snapshot) still has the recorded identity to reap
   // by — without this read, every caller upstream of here (the failed-start
   // catch, the reap pass) is inert (Finding B3).
-  private async reapSidecarByName(ownerId: string, sidecarName: string): Promise<ReapOutcome> {
+  private async reapSidecarByName(
+    ownerId: string,
+    sidecarName: string,
+    operation?: RestoreOperationContext,
+  ): Promise<ReapOutcome> {
+    operation?.assertActive();
     this.invalidateSidecarEndpoint(ownerId, sidecarName);
     const owner = readSession(this.config.dataDir, ownerId);
     const identity = owner?.sidecarProcs?.[sidecarName];
     const fallback = owner && identity ? { identity, worktreePath: owner.worktreePath } : undefined;
-    const outcome = await reapSidecarPane(sidecarTmuxSession(ownerId, sidecarName), fallback);
+    const outcome = await reapSidecarPane(
+      sidecarTmuxSession(ownerId, sidecarName),
+      fallback,
+      operation,
+    );
+    operation?.assertActive();
     if (this.isDeliveryStopped()) return outcome;
     this.logSidecarReapSurvivors(ownerId, sidecarName, outcome);
     return outcome;
@@ -16548,6 +17647,18 @@ export class SessionService {
       message: `Sidecar ${sidecarName} reap on ${ownerId} left ${outcome.survivors.length} process(es) alive after the confirmation window`,
       details: { sidecarName, survivors: outcome.survivors },
     });
+  }
+
+  private clearSidecarLaunch(ownerId: string, sidecarName: string, launchId: string): void {
+    const record = readSession(this.config.dataDir, ownerId);
+    if (record?.sidecarLaunches?.[sidecarName] !== launchId) return;
+    const remaining = Object.fromEntries(
+      Object.entries(record.sidecarLaunches).filter(([name]) => name !== sidecarName),
+    );
+    const updated = { ...record };
+    if (Object.keys(remaining).length > 0) updated.sidecarLaunches = remaining;
+    else delete updated.sidecarLaunches;
+    writeSession(this.config.dataDir, updated);
   }
 
   // Drops sidecarProcs[sidecarName] from the owner record once its pane has
@@ -16739,6 +17850,13 @@ export class SessionService {
                 survivors,
                 ...(unverifiedPorts.length > 0 ? { unverifiedPorts } : {}),
               };
+      const pendingLaunchId = owner?.sidecarLaunches?.[sidecarName];
+      if (pendingLaunchId && sidecarStop.outcome !== "partial") {
+        const presence = await getSidecarTmuxPresence(ownerId, sidecarName, { fresh: true });
+        if (!presence.present && !presence.unresponsive && !presence.diagnostic) {
+          this.clearSidecarLaunch(ownerId, sidecarName, pendingLaunchId);
+        }
+      }
       if (sidecarStop.outcome !== "nothing-to-stop") {
         this.logEvent("session.sidecar.stopped", {
           level: "info",
@@ -16999,10 +18117,25 @@ export class SessionService {
   }
 
   private async killAgentPaneAndConfirmExit(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
-    options: { failOnSurvivors: boolean },
+    session: Pick<
+      SessionRecord,
+      "id" | "tmuxSession" | "agent" | "launchCommand" | "agentLaunchId"
+    >,
+    options: {
+      failOnSurvivors: boolean;
+      operation?: RestoreOperationContext;
+      assertCurrent?: () => void;
+    },
   ): Promise<void> {
-    const paneLookup = await this.lookupPanePidQuietly(session.tmuxSession);
+    const operation = options.operation;
+    const assertActive = () => {
+      operation?.assertActive();
+      options.assertCurrent?.();
+    };
+    assertActive();
+    const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
+    const paneLookup = await wait(this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }));
+    assertActive();
     if (paneLookup.status === "unavailable") {
       // tmux could not be read, so P1 has nothing to verify against. Record
       // it: the alternative is a silent pass that reads exactly like a clean
@@ -17013,10 +18146,16 @@ export class SessionService {
         message: `Session ${session.id}: tmux pane pid unreadable; cannot confirm the prior agent process exited`,
       });
     }
-    const capture = await capturePaneAgentProcesses({
-      panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
-      processMatchers: sessionProcessMatchers(session),
-    });
+    const capture = await wait(
+      capturePaneAgentProcesses({
+        sessionId: session.id,
+        agentLaunchId: session.agentLaunchId,
+        panePid: paneLookup.status === "ok" ? paneLookup.panePid : null,
+        paneDead: paneLookup.status === "ok" ? paneLookup.paneDead : false,
+        processMatchers: sessionProcessMatchers(session),
+      }),
+    );
+    assertActive();
     if (capture.status === "unavailable") {
       // The process table could not be read, so "no survivors" would be a
       // guess. Refusing a relaunch is recoverable; launching a duplicate is
@@ -17068,8 +18207,12 @@ export class SessionService {
         throw new Error(message);
       }
     }
-    await killTmuxSession(session.tmuxSession);
+    assertActive();
+    if (operation) await killTmuxSession(session.tmuxSession, operation);
+    else await killTmuxSession(session.tmuxSession);
+    assertActive();
     const outcome = await terminateAgentProcesses(capture.status === "ok" ? capture.processes : []);
+    assertActive();
     if (outcome.status === "clear") {
       return;
     }
@@ -17136,15 +18279,19 @@ export class SessionService {
 
   private async reconcileOwnedOrphanAgent(
     session: Pick<SessionRecord, "id" | "agent" | "launchCommand" | "agentLaunchId">,
+    operation?: RestoreOperationContext,
   ): Promise<void> {
+    operation?.assertActive();
     if (!session.agentLaunchId) {
       return;
     }
-    const capture = await captureAgentProcessesForLaunch({
+    const pending = captureAgentProcessesForLaunch({
       sessionId: session.id,
       agentLaunchId: session.agentLaunchId,
       processMatchers: sessionProcessMatchers(session),
     });
+    const capture = await (operation?.wait(pending) ?? pending);
+    operation?.assertActive();
     if (capture.status === "unavailable") {
       throw new Error(
         `Session ${session.id}: could not prove whether its prior agent launch exited; refusing to launch a replacement`,
@@ -17154,6 +18301,7 @@ export class SessionService {
       return;
     }
     const outcome = await terminateAgentProcesses(capture.processes);
+    operation?.assertActive();
     if (outcome.status === "clear") {
       return;
     }
@@ -17249,6 +18397,7 @@ export class SessionService {
         delete migrated.retainInList;
       }
       delete migrated.error;
+      delete migrated.errorSource;
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
       if (options?.skipEnrichment) return;
@@ -17268,6 +18417,7 @@ export class SessionService {
           delete record.retainInList;
         }
         delete record.error;
+        delete record.errorSource;
         writeSession(this.config.dataDir, record);
         this.stateCache.delete(sessionId);
         if (options?.skipEnrichment) return;
@@ -17351,6 +18501,7 @@ export class SessionService {
     }
     if (targetStatus === "stopped") {
       delete record.error;
+      delete record.errorSource;
     }
     if (startupAttachmentsCleaned) {
       delete record.startupAttachmentIds;
@@ -17523,10 +18674,51 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private async capturePreparedAgentSessionId(
+    session: SessionRecord,
+    revision: number,
+    options?: SessionPreparationOptions & { wakeClaim?: ScheduledWakeClaim },
+    advanceWakeClaim = true,
+  ): Promise<SessionRecord> {
+    const wakeClaim = options?.wakeClaim;
+    const observation = options?.preparedObservation;
+    let persisted: SessionRecord | undefined;
+    const captured = await this.captureAgentSessionId(
+      session,
+      0,
+      options?.operation,
+      () =>
+        this.lifecycle.snapshot(session.id).revision === revision &&
+        (!wakeClaim || this.scheduledWakeClaimCurrent(wakeClaim)) &&
+        (!observation || this.preparedSessionObservationCurrent(observation)),
+      (prepared) => {
+        persisted = prepared;
+        if (advanceWakeClaim && wakeClaim) wakeClaim.session = prepared;
+        options?.observePreparedSession?.(prepared);
+      },
+    );
+    if (
+      wakeClaim?.manual &&
+      (!this.scheduledWakeClaimCurrent(wakeClaim) ||
+        !sameSessionRuntimeOwner(captured, wakeClaim.session) ||
+        captured.agentLaunchId !== wakeClaim.session.agentLaunchId)
+    )
+      throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    if (observation && !this.preparedSessionObservationCurrent(observation))
+      throw new RestoreOperationError();
+    return persisted ?? captured;
+  }
+
   private async captureAgentSessionId(
     session: SessionRecord,
     timeoutMs: number,
+    operation?: RestoreOperationContext,
+    allowWrite?: () => boolean,
+    observePersistence?: (session: SessionRecord) => void,
   ): Promise<SessionRecord> {
+    operation?.assertActive();
+    const discoveryRevision = this.lifecycle.snapshot(session.id).revision;
+    if (allowWrite?.() === false) return readSession(this.config.dataDir, session.id) ?? session;
     if (!session.worktreePath) {
       return session;
     }
@@ -17548,12 +18740,16 @@ export class SessionService {
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const sessionAgentConfig = this.sessionAgentConfig(session);
     while (Date.now() <= deadline) {
-      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath, {
+      operation?.assertActive();
+      const pending = findAgentSessionId(session.agent, session.worktreePath, {
         ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
         ...(sessionAgentConfig.planOptions?.cursorConfigDir
           ? { cursorConfigDir: sessionAgentConfig.planOptions.cursorConfigDir }
           : {}),
       });
+      const agentSessionId = await (operation?.wait(pending) ?? pending);
+      operation?.assertActive();
+      if (allowWrite?.() === false) return readSession(this.config.dataDir, session.id) ?? session;
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
           return session;
@@ -17608,8 +18804,21 @@ export class SessionService {
           );
           return { ...session, agentSessionId };
         }
+        if (
+          observePersistence &&
+          (latest.agentSessionId !== undefined ||
+            !sameSessionRuntimeOwner(latest, session) ||
+            latest.agentLaunchId !== session.agentLaunchId ||
+            !this.lifecycleStateMatches(latest, this.lifecycleStamp(session)) ||
+            this.lifecycle.snapshot(session.id).revision !== discoveryRevision)
+        ) {
+          return latest;
+        }
+        operation?.assertActive();
+        if (allowWrite?.() === false) return latest;
+        const persisted = { ...latest, agentSessionId };
         try {
-          writeSession(this.config.dataDir, { ...latest, agentSessionId });
+          writeSession(this.config.dataDir, persisted);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.logEvent("session.agent_session_id.persist_failed", {
@@ -17629,6 +18838,7 @@ export class SessionService {
           );
           return { ...session, agentSessionId };
         }
+        observePersistence?.(persisted);
         this.agentSessionIdPersistBackoffUntil.delete(session.id);
         this.logEvent("session.agent_session_id.discovered", {
           level: "info",
@@ -17646,10 +18856,76 @@ export class SessionService {
           agentSessionId,
         };
       }
-      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
+      const pendingSleep = sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
+      await (operation?.wait(pendingSleep) ?? pendingSleep);
     }
 
     return session;
+  }
+
+  private writeRecoverySession(
+    record: SessionRecord,
+    wakeClaim?: ScheduledWakeClaim,
+    options?: SessionPreparationOptions,
+  ): SessionRecord {
+    let recovered = record;
+    const observation = options?.preparedObservation;
+    if (observation) {
+      options.operation?.assertActive();
+      const latest = readSession(this.config.dataDir, record.id);
+      if (!latest || !this.preparedSessionObservationCurrent(observation, latest))
+        throw new RestoreOperationError();
+      const {
+        scheduledWake: _wake,
+        intervalWake: _interval,
+        dailyWake: _daily,
+        slots: _slots,
+        ...base
+      } = recovered;
+      recovered = withQueuedMessages(
+        {
+          ...base,
+          ...(latest.scheduledWake ? { scheduledWake: latest.scheduledWake } : {}),
+          ...(latest.intervalWake ? { intervalWake: latest.intervalWake } : {}),
+          ...(latest.dailyWake ? { dailyWake: latest.dailyWake } : {}),
+          ...(latest.slots ? { slots: latest.slots } : {}),
+        },
+        queuedMessages(latest),
+        latest.queuedMessages?.awaitingPrompt === true,
+      );
+    }
+    if (wakeClaim) {
+      const latest = readSession(this.config.dataDir, record.id);
+      if (!latest || !this.scheduledWakeClaimCurrent(wakeClaim, latest))
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${record.id}`);
+      const { scheduledWake: _previousWake, ...base } = recovered;
+      recovered = withQueuedMessages(
+        { ...base, ...(latest.scheduledWake ? { scheduledWake: latest.scheduledWake } : {}) },
+        queuedMessages(latest),
+        latest.queuedMessages?.awaitingPrompt === true,
+      );
+    }
+    writeSession(this.config.dataDir, recovered);
+    if (wakeClaim) wakeClaim.session = recovered;
+    options?.observePreparedSession?.(recovered);
+    return recovered;
+  }
+
+  private preparedSessionObservationCurrent(
+    observation: PreparedSessionObservation,
+    current = readSession(this.config.dataDir, observation.session.id),
+  ): boolean {
+    const preceding = observation.session;
+    return Boolean(
+      current &&
+      !isTerminalSessionStatus(current.status) &&
+      sameSessionRuntimeOwner(current, preceding) &&
+      current.agentLaunchId === preceding.agentLaunchId &&
+      current.error === preceding.error &&
+      current.errorSource === preceding.errorSource &&
+      this.lifecycleStateMatches(current, this.lifecycleStamp(preceding)) &&
+      this.lifecycle.snapshot(current.id).revision === observation.revision,
+    );
   }
 
   // `paneAlreadyConfirmedGone`: set only by a caller that has JUST killed and
@@ -17662,23 +18938,36 @@ export class SessionService {
   // stays ambiguous and defaults to refusing recovery.
   private async ensureSessionReadyForSend(
     session: SessionRecord,
-    options?: { paneAlreadyConfirmedGone?: boolean; paneAlreadyOwned?: boolean },
+    options?: SessionPreparationOptions & {
+      paneAlreadyConfirmedGone?: boolean;
+      paneAlreadyOwned?: boolean;
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<ReadySessionForSend> {
+    const operation = options?.operation;
+    const assertActive = () => {
+      operation?.assertActive();
+      if (options?.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim))
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    };
+    assertActive();
+    const probeRevision = this.lifecycle.snapshot(session.id).revision;
     this.assertTokenBudgetAllowsActivation(session);
     // Same probeUnresponsive gate as reconcileUnexpectedStop — readRuntimeSnapshot
     // derives it from panesUnresponsive/sessionsUnresponsive so list-panes timeouts
     // cannot be mistaken for a dead agent when list-windows still answers.
     const runtime = await this.readRuntimeSnapshot(session);
+    assertActive();
     if (runtime.processAlive && !runtime.probeUnresponsive) {
       return {
-        session: await this.captureAgentSessionId(session, 0),
+        session: await this.capturePreparedAgentSessionId(session, probeRevision, options),
         recoveryMessage: null,
       };
     }
     if (runtime.probeUnresponsive && options?.paneAlreadyConfirmedGone !== true) {
       const diagnostic =
         runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown";
-      this.retainDetectionError(session, diagnostic);
+      this.retainDetectionError(session, diagnostic, "runtime_probe", probeRevision);
       throw new TmuxProbeUnknownError(diagnostic);
     }
     const current = readSession(this.config.dataDir, session.id) ?? session;
@@ -17694,7 +18983,7 @@ export class SessionService {
 
     const workspace = probeWorkspace(session.worktreePath);
     if (workspace.diagnostic) {
-      this.retainDetectionError(current, workspace.diagnostic);
+      this.retainDetectionError(session, workspace.diagnostic, "other", probeRevision);
       throw new TmuxProbeUnknownError(workspace.diagnostic);
     }
     const workspacePresent = workspace.exists;
@@ -17745,7 +19034,10 @@ export class SessionService {
       isStaleParked(session) ||
       (session.status === "stopped" && session.stopReason === "memory_shed")
     ) {
-      this.assertAdmissible(session.project, "wake");
+      this.assertWakeAdmissible(
+        session,
+        options?.wakeClaim && !options.wakeClaim.manual ? options.wakeClaim.wake : undefined,
+      );
     }
 
     const project = this.getProject(session.project);
@@ -17761,27 +19053,40 @@ export class SessionService {
     let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
+        ...options,
         paneAlreadyOwned: options?.paneAlreadyOwned === true,
+        ...(operation ? { operation } : {}),
+        ...(options?.wakeClaim ? { wakeClaim: options.wakeClaim } : {}),
       });
     } catch (error) {
+      assertActive();
       const latest = readSession(this.config.dataDir, session.id);
       if (
         latest &&
         !hasRetainedSessionError(latest) &&
         (await this.launchResourcesMayRemain(latest))
       ) {
-        await this.retainLaunchedError(latest, error);
+        assertActive();
+        await this.retainLaunchedError(latest, error, operation);
       }
       throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
     }
-    writeSession(this.config.dataDir, recovered.session);
+    operation?.assertActive();
+    recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
     // After the running record is on disk: a project sidecar can take tens of
     // seconds to come up, and the reaper's running|spawning filter must cover
     // that whole window without relying on the warmup cleared just above.
-    const withSidecars = await this.startAutoStartSidecars(recovered.session, project);
+    const withSidecars = await this.startAutoStartSidecars(
+      recovered.session,
+      project,
+      undefined,
+      operation,
+    );
+    operation?.assertActive();
     await this.refreshDashboardCacheEntry(withSidecars);
+    operation?.assertActive();
     this.logEvent("session.recover.completed", {
       level: "info",
       sessionId: session.id,
@@ -17803,8 +19108,22 @@ export class SessionService {
   private async relaunchSessionInPlace(
     session: SessionRecord,
     project: ProjectConfig,
-    options?: { paneAlreadyOwned?: boolean },
+    options?: SessionPreparationOptions & {
+      paneAlreadyOwned?: boolean;
+      wakeClaim?: ScheduledWakeClaim;
+    },
   ): Promise<ReadySessionForSend> {
+    const operation = options?.operation;
+    const assertActive = () => {
+      operation?.assertActive();
+      if (options?.wakeClaim && !this.scheduledWakeClaimCurrent(options.wakeClaim))
+        throw new WakeDispatchConflictError(`Wake target "scheduled" changed for ${session.id}`);
+    };
+    const beforeLaunch = () => {
+      assertActive();
+      if (options?.wakeClaim?.stage === "unattempted") options.wakeClaim.stage = "input-started";
+    };
+    assertActive();
     const launchSelection = await resolveSpawnRequestLaunchSelection(
       {
         project: session.project,
@@ -17818,6 +19137,7 @@ export class SessionService {
       this.config.models.codexHome,
       true,
     );
+    assertActive();
     this.clearTargetGoneNudgeGate(session.id);
     // A relaunch replays every sidecar from scratch; a cached refusal from
     // before this relaunch must never carry over.
@@ -17829,14 +19149,27 @@ export class SessionService {
       await this.lookupPanePidQuietly(session.tmuxSession),
       false,
     );
-    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
-    const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    assertActive();
+    await this.killAgentPaneAndConfirmExit(session, {
+      failOnSurvivors: true,
+      ...(operation ? { operation } : {}),
+    });
+    assertActive();
+    const sessionWithAgentId = await this.capturePreparedAgentSessionId(
+      session,
+      this.lifecycle.snapshot(session.id).revision,
+      options,
+      options?.wakeClaim?.manual === true,
+    );
+    assertActive();
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
     const sessionToolDir = this.prepareSessionTools(session.id, session.agent, session.project);
     const { session: mcpSidecarUpdate, mcpBindings } = await this.startMcpSidecars(
       session,
       project,
+      operation,
     );
+    assertActive();
     const hookSetup = await setupSessionAgentHooks({
       agent: session.agent,
       ...launchSelection,
@@ -17849,6 +19182,7 @@ export class SessionService {
       ...(mcpBindings.length > 0 ? { mcpBindings } : {}),
       ...(project.mcp?.exclude.length ? { mcpExclude: project.mcp.exclude } : {}),
     });
+    assertActive();
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
     const restrictWrites = resolveRestrictWrites(session);
@@ -17875,6 +19209,7 @@ export class SessionService {
         project,
         readTelegramReplyTarget(this.config.dataDir, session.id)?.lastInboundAt !== undefined,
       ),
+      githubPostInstructions(project, session.id),
     );
     const planOptions = {
       ...withAgentModeOptions(
@@ -17952,9 +19287,11 @@ export class SessionService {
     let launched = false;
     let freshOpenCodeRecord: SessionRecord | undefined;
     const launchFreshOpenCode = async (): Promise<void> => {
+      assertActive();
       const {
         agentSessionId: _staleAgentSessionId,
         error: _staleError,
+        errorSource: _staleErrorSource,
         sidecarProcs: _staleSidecarProcs,
         ...freshBase
       } = sessionWithAgentId;
@@ -17973,18 +19310,28 @@ export class SessionService {
       try {
         await withOpenCodeLaunchIdentityLock(session.worktreePath, async () => {
           const baseline = await captureOpenCodeSessionBaseline(session.worktreePath);
+          assertActive();
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: baseLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            beforeLaunch,
+            ...(operation ? { operation } : {}),
           });
-          writeSession(this.config.dataDir, currentRetentionCandidate);
+          assertActive();
+          currentRetentionCandidate = this.writeRecoverySession(
+            currentRetentionCandidate,
+            options?.wakeClaim,
+            options,
+          );
           freshPhase.provisionalWritten = true;
           await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
             agent: session.agent,
+            ...(operation ? { operation } : {}),
           });
+          assertActive();
           if (
             !(await agentProcessAlive(
               {
@@ -17998,22 +19345,33 @@ export class SessionService {
             throw new Error(`Agent ${session.agent} exited before recovery became ready`);
           }
           const agentSessionId = await waitForNewOpenCodeSessionId(baseline);
+          assertActive();
           currentRetentionCandidate = {
             ...currentRetentionCandidate,
             agentSessionId,
             updatedAt: nowIso(),
           };
-          writeSession(this.config.dataDir, currentRetentionCandidate);
+          currentRetentionCandidate = this.writeRecoverySession(
+            currentRetentionCandidate,
+            options?.wakeClaim,
+            options,
+          );
           recoveredAgentSessionId = agentSessionId;
         });
       } catch (error) {
+        assertActive();
         if (
           freshPhase.provisionalWritten ||
           (await this.launchResourcesMayRemain(currentRetentionCandidate))
         ) {
+          assertActive();
           if (!freshPhase.provisionalWritten)
-            writeSession(this.config.dataDir, currentRetentionCandidate);
-          await this.retainLaunchedError(currentRetentionCandidate, error);
+            currentRetentionCandidate = this.writeRecoverySession(
+              currentRetentionCandidate,
+              options?.wakeClaim,
+              options,
+            );
+          await this.retainLaunchedError(currentRetentionCandidate, error, operation);
         }
         throw error;
       }
@@ -18025,8 +19383,10 @@ export class SessionService {
         ) {
           throw new Error("OpenCode did not persist the launch prompt");
         }
+        assertActive();
       } catch (error) {
-        await this.retainLaunchedError(currentRetentionCandidate, error);
+        assertActive();
+        await this.retainLaunchedError(currentRetentionCandidate, error, operation);
         throw error;
       }
       freshOpenCodeRecord = currentRetentionCandidate;
@@ -18036,16 +19396,19 @@ export class SessionService {
       await launchFreshOpenCode();
     } else {
       try {
+        assertActive();
         await createTmuxSession({
           sessionName: session.tmuxSession,
           cwd: session.worktreePath,
           launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
           launchScriptDir: sessionToolDir,
           env,
+          beforeLaunch,
+          ...(operation ? { operation } : {}),
         });
+        assertActive();
         launched = true;
-        writeSession(
-          this.config.dataDir,
+        this.writeRecoverySession(
           this.applyReservedSidecars(
             {
               ...sessionWithAgentId,
@@ -18055,13 +19418,16 @@ export class SessionService {
             },
             mcpSidecarUpdate,
           ),
+          options?.wakeClaim,
+          options,
         );
         await waitForTmuxReady(
           session.tmuxSession,
           recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
           undefined,
-          { agent: session.agent },
+          { agent: session.agent, ...(operation ? { operation } : {}) },
         );
+        assertActive();
         if (
           !(await agentProcessAlive(
             {
@@ -18075,6 +19441,7 @@ export class SessionService {
           throw new Error(`Agent ${session.agent} exited before recovery became ready`);
         }
       } catch (error) {
+        assertActive();
         const failedAttempt = this.applyReservedSidecars(
           {
             ...sessionWithAgentId,
@@ -18089,8 +19456,10 @@ export class SessionService {
               ? await this.agentLaunchResourcesMayRemain(failedAttempt)
               : await this.launchResourcesMayRemain(failedAttempt);
         }
+        assertActive();
         if (launched) {
-          await this.retainLaunchedError(failedAttempt, error);
+          assertActive();
+          await this.retainLaunchedError(failedAttempt, error, operation);
           throw error;
         }
         if (!recoveryPlan) throw error;
@@ -18108,7 +19477,12 @@ export class SessionService {
             failure,
           },
         });
-        await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: true });
+        assertActive();
+        await this.killAgentPaneAndConfirmExit(failedAttempt, {
+          failOnSurvivors: true,
+          ...(operation ? { operation } : {}),
+        });
+        assertActive();
         usedFreshLaunch = true;
         agentLaunchId = newAgentLaunchId();
         env = buildLaunchEnv(agentLaunchId);
@@ -18126,15 +19500,18 @@ export class SessionService {
           const freshLaunchCommand = freshPlan.launchCommand;
           recoveredAgentSessionId = freshClaudeId;
           persistedLaunchCommand = freshLaunchCommand;
+          assertActive();
           await createTmuxSession({
             sessionName: session.tmuxSession,
             cwd: session.worktreePath,
             launchCommand: freshLaunchCommand,
             launchScriptDir: sessionToolDir,
             env,
+            beforeLaunch,
+            ...(operation ? { operation } : {}),
           });
-          writeSession(
-            this.config.dataDir,
+          assertActive();
+          this.writeRecoverySession(
             this.applyReservedSidecars(
               {
                 ...sessionWithAgentId,
@@ -18146,10 +19523,14 @@ export class SessionService {
               },
               mcpSidecarUpdate,
             ),
+            options?.wakeClaim,
+            options,
           );
           await waitForTmuxReady(session.tmuxSession, freshPlan.readyMarkers, undefined, {
             agent: session.agent,
+            ...(operation ? { operation } : {}),
           });
+          assertActive();
           if (
             !(await agentProcessAlive(
               {
@@ -18168,6 +19549,7 @@ export class SessionService {
       }
     }
 
+    assertActive();
     let recoveryMessage: PlannedAgentMessage | null = null;
     if (usedFreshLaunch) {
       // Pane confirmed alive by the checks above; deliver task context before
@@ -18227,6 +19609,7 @@ export class SessionService {
     // the old prompt was pending in.
     const {
       error: _ignoredError,
+      errorSource: _ignoredErrorSource,
       submitUnconfirmedAt: _replacedLaunch,
       queuedMessageTyped: _replacedTyped,
       submitRequeuedMessage: _replacedRequeue,
@@ -18253,51 +19636,87 @@ export class SessionService {
           mcpSidecarUpdate,
         ),
         project,
+        operation,
       ),
       recoveryMessage,
     };
   }
 
-  async restore(sessionId: string, request: RestoreSessionRequest = {}): Promise<SessionView> {
-    return this.runLifecycle("restore", [sessionId], request.operationId, () =>
-      this.restoreWithPaneLock(sessionId, request),
-    );
+  async restore(
+    sessionId: string,
+    request: RestoreSessionRequest = {},
+    options?: { signal?: AbortSignal },
+  ): Promise<SessionView> {
+    if (!readSession(this.config.dataDir, sessionId)) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const owner = this.lifecycle.begin("restore", [sessionId], request.operationId);
+    const operation = createRestoreOperation(options?.signal, () => this.lifecycle.owns(owner));
+    try {
+      const result = await operation.wait(this.restoreWithPaneLock(sessionId, request, operation));
+      operation.assertActive();
+      const settled = this.settleLifecycle(owner, true);
+      return { ...result, lifecycle: settled };
+    } catch (error) {
+      const settled = this.settleLifecycle(owner, false);
+      annotateLifecycleError(error, settled);
+      throw error;
+    } finally {
+      operation.dispose();
+    }
   }
 
   private async restoreWithPaneLock(
     sessionId: string,
     request: RestoreSessionRequest,
+    operation?: RestoreOperationContext,
   ): Promise<SessionView> {
     const hint = readSession(this.config.dataDir, sessionId);
     if (!hint) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
-    return this.withPaneWriteLock(hint.tmuxSession, async () => {
-      const claim = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(hint), async () => {
-        const current = readSession(this.config.dataDir, sessionId);
-        if (!current || current.tmuxSession !== hint.tmuxSession) {
-          throw new Error(`Session ${sessionId} changed before restore`);
-        }
-        return this.lifecycleStamp(current);
-      });
-      return this.restoreLocked(sessionId, request, claim);
-    });
+    return this.withPaneWriteLock(
+      hint.tmuxSession,
+      async () => {
+        const claim = await this.withSessionLifecycleLocks(
+          this.lifecycleIdsFor(hint),
+          async () => {
+            const current = readSession(this.config.dataDir, sessionId);
+            if (!current || current.tmuxSession !== hint.tmuxSession) {
+              throw new Error(`Session ${sessionId} changed before restore`);
+            }
+            return this.lifecycleStamp(current);
+          },
+          operation,
+        );
+        return this.restoreLocked(sessionId, request, claim, operation);
+      },
+      operation,
+    );
   }
 
   private async restoreLocked(
     sessionId: string,
     request: RestoreSessionRequest,
     claim: SessionLifecycleStamp,
+    operation?: RestoreOperationContext,
   ): Promise<SessionView> {
+    operation?.assertActive();
+    const wait = <T>(pending: Promise<T>): Promise<T> => operation?.wait(pending) ?? pending;
     let session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const reopenInvalidated = (): boolean =>
-      this.reopensInFlight.get(sessionId)?.invalidated === true;
+    const reopenInvalidated = (): boolean => {
+      operation?.assertActive();
+      return this.reopensInFlight.get(sessionId)?.invalidated === true;
+    };
+    const lifecycleIds = this.lifecycleIdsFor(session);
+    const withLocks = <T>(task: () => Promise<T>): Promise<T> =>
+      this.withSessionLifecycleLocks(lifecycleIds, task, operation);
     if (reopenInvalidated() || !this.lifecycleStateMatches(session, claim)) {
       throw new Error(`Session ${sessionId} changed before restore`);
     }
     if (request.overrideTokenBudget === true) {
-      session = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+      session = await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (!latest || reopenInvalidated() || !this.lifecycleStampMatches(latest, claim)) {
           throw new Error(`Session ${sessionId} changed before token-budget override`);
@@ -18320,24 +19739,20 @@ export class SessionService {
     }
     this.assertTokenBudgetAllowsActivation(session);
     if (session.status === "running" || session.status === "spawning") {
-      const pane = await this.lookupPanePidQuietly(session.tmuxSession, { fresh: true });
+      const pane = await wait(this.lookupPanePidQuietly(session.tmuxSession, { fresh: true }));
+      operation?.assertActive();
       if (pane.status === "ok" && pane.panePid === null) {
-        await this.reconcileOwnedOrphanAgent(session);
+        await this.reconcileOwnedOrphanAgent(session, operation);
         const previousStatus = session.status;
-        session = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+        session = await withLocks(async () => {
           const latest = readSession(this.config.dataDir, sessionId);
           if (!latest || reopenInvalidated() || !this.lifecycleStampMatches(latest, claim)) {
             throw new Error(`Session ${sessionId} changed before restore reconciliation`);
           }
-          const latestNoPorts = this.sessionWithReleasedSidecarPorts(latest);
-          const {
-            error: _ignoredError,
-            stopReason: _ignoredStopReason,
-            ...stoppedBase
-          } = latestNoPorts;
           const stopped: SessionRecord = {
-            ...stoppedBase,
+            ...latest,
             status: "stopped",
+            stopReason: "runtime_lost",
             updatedAt: nowIso(),
           };
           writeSession(this.config.dataDir, stopped);
@@ -18345,7 +19760,6 @@ export class SessionService {
           claim = this.lifecycleStamp(stopped);
           return stopped;
         });
-        await this.teardownSessionSidecars(session).catch(() => {});
         this.logEvent("session.runtime.stopped", {
           level: "warn",
           sessionId,
@@ -18390,11 +19804,12 @@ export class SessionService {
       ensureShepherdWorkspace(this.config.dataDir);
     }
 
-    let current = { ...session, ...(await this.enrich(session)) };
-    const accepted = await this.withSessionLifecycleLocks<{
+    let current = { ...session, ...(await wait(this.enrich(session))) };
+    operation?.assertActive();
+    const accepted = await withLocks<{
       claim: SessionLifecycleStamp;
       latest?: SessionRecord;
-    }>(this.lifecycleIdsFor(session), async () => {
+    }>(async () => {
       const latest = readSession(this.config.dataDir, sessionId);
       if (!latest || reopenInvalidated()) {
         throw new Error(`Session ${sessionId} changed before restore`);
@@ -18411,8 +19826,9 @@ export class SessionService {
     });
     claim = accepted.claim;
     if (accepted.latest) {
-      current = { ...accepted.latest, ...(await this.enrich(accepted.latest)) };
+      current = { ...accepted.latest, ...(await wait(this.enrich(accepted.latest))) };
     }
+    operation?.assertActive();
     if (!isRestorableSession(current)) {
       this.logEvent("session.restore.unrestorable", {
         level: "warn",
@@ -18435,19 +19851,22 @@ export class SessionService {
 
     this.assertAdmissible(current.project, "restore");
     const restoreProjectConfig = this.getProject(current.project);
-    const launchSelection = await resolveSpawnRequestLaunchSelection(
-      {
-        project: current.project,
-        ...(current.model !== undefined ? { model: current.model } : {}),
-        ...(current.reasoningEffort !== undefined
-          ? { reasoningEffort: current.reasoningEffort }
-          : {}),
-      },
-      restoreProjectConfig,
-      current.agent,
-      this.config.models.codexHome,
-      true,
+    const launchSelection = await wait(
+      resolveSpawnRequestLaunchSelection(
+        {
+          project: current.project,
+          ...(current.model !== undefined ? { model: current.model } : {}),
+          ...(current.reasoningEffort !== undefined
+            ? { reasoningEffort: current.reasoningEffort }
+            : {}),
+        },
+        restoreProjectConfig,
+        current.agent,
+        this.config.models.codexHome,
+        true,
+      ),
     );
+    operation?.assertActive();
 
     this.logEvent("session.restore.started", {
       level: "info",
@@ -18464,6 +19883,7 @@ export class SessionService {
       await this.lookupPanePidQuietly(current.tmuxSession),
       request.force === true,
     );
+    operation?.assertActive();
     // Past both gates above (restorability, foreign-process): this restore is
     // actually going to proceed, so clear the GitHub poll-disable registry for this
     // session now, not earlier — a rejected restore (not restorable, or refused over
@@ -18489,6 +19909,7 @@ export class SessionService {
       current.agent === "cursor"
         ? await captureCursorRestoreBoundary(current.worktreePath, current.agentSessionId)
         : null;
+    operation?.assertActive();
     if (current.agent === "cursor") this.cursorJsonlReaders.delete(sessionId);
     const codexRestoreStartedAt = current.agent === "codex" ? nowIso() : null;
     // Set before startMcpSidecars below: the on-disk status stays
@@ -18496,7 +19917,8 @@ export class SessionService {
     // sidecar reaper's normal running|spawning filter would not protect the
     // MCP sidecar tmux pane this starts. The reaper additionally checks this
     // warmup window (see reapDeadSessionSidecars) for exactly this gap.
-    this.restoreWarmupUntil.set(sessionId, Date.now() + RESTORE_WARMUP_MS);
+    const warmupUntil = Date.now() + RESTORE_WARMUP_MS;
+    this.restoreWarmupUntil.set(sessionId, warmupUntil);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
     let restoreGeneration: PaneGeneration | null = null;
@@ -18505,7 +19927,9 @@ export class SessionService {
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent, current.project);
-      const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig);
+      operation?.assertActive();
+      const mcpStart = await this.startMcpSidecars(current, restoreProjectConfig, operation);
+      operation?.assertActive();
       mcpSidecarUpdate = mcpStart.session;
       const mcpBindings = mcpStart.mcpBindings;
       const hookSetup = await setupSessionAgentHooks({
@@ -18522,6 +19946,7 @@ export class SessionService {
           ? { mcpExclude: restoreProjectConfig.mcp.exclude }
           : {}),
       });
+      operation?.assertActive();
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
       const restrictWrites = resolveRestrictWrites(current);
@@ -18576,7 +20001,7 @@ export class SessionService {
           ? { agentSessionId: current.agentSessionId }
           : {}),
       };
-      claim = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+      claim = await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (!latest || reopenInvalidated() || !this.lifecycleStateMatches(latest, claim)) {
           throw new Error(`Session ${sessionId} changed before restore planning`);
@@ -18587,20 +20012,27 @@ export class SessionService {
         current.agent === "codex" && current.agentSessionId ? current.agentSessionId : undefined;
       const launchPlan = pinnedCodexId
         ? null
-        : await waitForRestorePlan(
-            current.agent,
-            current.worktreePath,
-            restorePrompt,
-            launchPlanOptions,
+        : await wait(
+            waitForRestorePlan(
+              current.agent,
+              current.worktreePath,
+              restorePrompt,
+              launchPlanOptions,
+            ),
           );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, launchPlanOptions);
-      await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+      operation?.assertActive();
+      await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (!latest || reopenInvalidated() || !this.lifecycleStampMatches(latest, claim)) {
           throw new Error(`Session ${sessionId} changed during restore`);
         }
-        await this.killAgentPaneAndConfirmExit(current, { failOnSurvivors: true });
+        await this.killAgentPaneAndConfirmExit(current, {
+          failOnSurvivors: true,
+          ...(operation ? { operation } : {}),
+        });
+        operation?.assertActive();
       });
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
@@ -18620,15 +20052,13 @@ export class SessionService {
                 "sessions",
               )
             : undefined;
-        const discoveredAgentSessionId = await findAgentSessionId(
-          current.agent,
-          current.worktreePath,
-          {
+        const discoveredAgentSessionId = await wait(
+          findAgentSessionId(current.agent, current.worktreePath, {
             ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
             ...(sessionAgentConfig.planOptions?.cursorConfigDir
               ? { cursorConfigDir: sessionAgentConfig.planOptions.cursorConfigDir }
               : {}),
-          },
+          }),
         );
         if (discoveredAgentSessionId) {
           restoredAgentSessionId = discoveredAgentSessionId;
@@ -18659,6 +20089,7 @@ export class SessionService {
         restoreReadyMarkers = resumePlan.readyMarkers;
       }
       restoredLaunchCommand = restoreLaunchCommand;
+      operation?.assertActive();
       const restoreProject = this.config.projects[current.project];
       const restoreSidecarNames = manualSidecarNames(
         resolveSessionSidecars(current, restoreProject),
@@ -18683,16 +20114,19 @@ export class SessionService {
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
         launchScriptDir: sessionToolDir,
+        ...(operation ? { operation } : {}),
         env,
       });
+      operation?.assertActive();
       launched = true;
-      restoreGeneration = await this.capturePaneGeneration(current);
-      claim = await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+      restoreGeneration = await wait(this.capturePaneGeneration(current));
+      operation?.assertActive();
+      claim = await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (
           !latest ||
           reopenInvalidated() ||
-          !this.lifecycleStampMatches(latest, claim) ||
+          !this.lifecycleStateMatches(latest, claim) ||
           !restoreGeneration ||
           !(await this.paneGenerationMatches(latest, restoreGeneration))
         ) {
@@ -18708,13 +20142,17 @@ export class SessionService {
           },
           mcpSidecarUpdate,
         );
+        operation?.assertActive();
         writeSession(this.config.dataDir, provisional);
         return this.lifecycleStamp(provisional);
       });
       try {
-        await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
-          agent: current.agent,
-        });
+        await wait(
+          waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
+            agent: current.agent,
+            ...(operation ? { operation } : {}),
+          }),
+        );
       } catch (error) {
         if (!(error instanceof PromptReadyTimeoutError)) {
           throw error;
@@ -18745,6 +20183,7 @@ export class SessionService {
           },
         });
       }
+      operation?.assertActive();
       // fresh:true — this pane was just created by createTmuxSession above
       // and may postdate the last fleet-pane snapshot.
       if (
@@ -18763,6 +20202,7 @@ export class SessionService {
       if (!(await this.paneGenerationMatches(generationTarget, restoreGeneration))) {
         throw new Error(`Session ${sessionId} changed during restore readiness`);
       }
+      operation?.assertActive();
       if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
         const restoreInitialMessage = buildInitialMessage(
           effectivePlan.initialMessage,
@@ -18774,60 +20214,73 @@ export class SessionService {
             restoreProject,
             readTelegramReplyTarget(this.config.dataDir, current.id)?.lastInboundAt !== undefined,
           ),
+          githubPostInstructions(restoreProject, current.id),
         );
         // The fallback relaunched the agent instead of resuming it, so this is a
         // launch send with no transcript behind it, same as a spawn's. Binding
         // discovery can touch the filesystem and therefore runs without lifecycle
         // ownership; the exact restored generation is revalidated around input.
-        const restoreSubmission = await this.beginAgentMessage(
-          { ...current, launchCommand: restoreLaunchCommand },
-          restoreInitialMessage,
-          {
-            freshLaunch: freshLaunchFallback,
-            ...(current.agent === "codex" ? { skipSubmitAck: true } : {}),
-            authorizeInput: (send) =>
-              this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+        const restoreSubmission = await wait(
+          this.beginAgentMessage(
+            { ...current, launchCommand: restoreLaunchCommand },
+            restoreInitialMessage,
+            {
+              freshLaunch: freshLaunchFallback,
+              ...(operation ? { operation } : {}),
+              ...(current.agent === "codex" ? { skipSubmitAck: true } : {}),
+              authorizeInput: (send) =>
+                withLocks(async () => {
+                  operation?.assertActive();
+                  const latest = readSession(this.config.dataDir, sessionId);
+                  if (
+                    !latest ||
+                    reopenInvalidated() ||
+                    !restoreGeneration ||
+                    !this.lifecycleStampMatches(latest, claim) ||
+                    !(await this.paneGenerationMatches(latest, restoreGeneration))
+                  ) {
+                    return false;
+                  }
+                  operation?.assertActive();
+                  await send();
+                  return true;
+                }),
+            },
+          ),
+        );
+        const restoreSendOutcome = await wait(
+          this.completeAgentMessage(restoreSubmission, {
+            ...(operation ? { operation } : {}),
+            authorizeResend: (send) =>
+              withLocks(async () => {
+                operation?.assertActive();
                 const latest = readSession(this.config.dataDir, sessionId);
                 if (
                   !latest ||
                   reopenInvalidated() ||
                   !restoreGeneration ||
-                  !this.lifecycleStampMatches(latest, claim) ||
                   !(await this.paneGenerationMatches(latest, restoreGeneration))
                 ) {
                   return false;
                 }
+                operation?.assertActive();
                 await send();
                 return true;
               }),
-          },
+            recoveryGenerationMatches: () =>
+              withLocks(async () => {
+                operation?.assertActive();
+                const latest = readSession(this.config.dataDir, sessionId);
+                return Boolean(
+                  latest &&
+                  !reopenInvalidated() &&
+                  restoreGeneration &&
+                  (await this.paneGenerationMatches(latest, restoreGeneration)),
+                );
+              }),
+          }),
         );
-        const restoreSendOutcome = await this.completeAgentMessage(restoreSubmission, {
-          authorizeResend: (send) =>
-            this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-              const latest = readSession(this.config.dataDir, sessionId);
-              if (
-                !latest ||
-                reopenInvalidated() ||
-                !restoreGeneration ||
-                !(await this.paneGenerationMatches(latest, restoreGeneration))
-              ) {
-                return false;
-              }
-              await send();
-              return true;
-            }),
-          recoveryGenerationMatches: () =>
-            this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
-              const latest = readSession(this.config.dataDir, sessionId);
-              return Boolean(
-                latest &&
-                !reopenInvalidated() &&
-                restoreGeneration &&
-                (await this.paneGenerationMatches(latest, restoreGeneration)),
-              );
-            }),
-        });
+        operation?.assertActive();
         if (restoreSendOutcome === "stale") {
           throw new Error(`Session ${sessionId} changed during restore`);
         }
@@ -18858,9 +20311,12 @@ export class SessionService {
       // (live process proven, returns a running session), kill-and-throw
       // (pane killed), and ambiguous (probe unresponsive: pane left alive,
       // status untouched, stale error cleared, throws).
-      this.restoreWarmupUntil.delete(sessionId);
+      if (this.restoreWarmupUntil.get(sessionId) === warmupUntil) {
+        this.restoreWarmupUntil.delete(sessionId);
+      }
+      if (operation?.signal.aborted) throw operation.signal.reason;
       if (error instanceof SubmitAckTimeoutError && error.processAlive) {
-        return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+        return withLocks(async () => {
           const latest = readSession(this.config.dataDir, sessionId);
           if (
             !latest ||
@@ -18871,7 +20327,11 @@ export class SessionService {
           ) {
             throw error;
           }
-          const { error: _ignoredError, ...recoveredBase } = latest;
+          const {
+            error: _ignoredError,
+            errorSource: _ignoredErrorSource,
+            ...recoveredBase
+          } = latest;
           const recovered: SessionRecord = this.applyReservedSidecars(
             {
               ...recoveredBase,
@@ -18894,9 +20354,12 @@ export class SessionService {
           const persistedRecovered = await this.captureAgentSessionId(
             recovered,
             AGENT_SESSION_ID_REFRESH_WAIT_MS,
+            operation,
           );
+          operation?.assertActive();
           writeSession(this.config.dataDir, persistedRecovered);
           await this.refreshDashboardCacheEntry(persistedRecovered);
+          operation?.assertActive();
           requestGitHubMergeConflictRestoreReplays(
             this.config,
             persistedRecovered.project,
@@ -18931,7 +20394,7 @@ export class SessionService {
         mcpSidecarUpdate,
       );
       if (!launched) launched = await this.launchResourcesMayRemain(launchCandidate);
-      await this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+      await withLocks(async () => {
         const latest = readSession(this.config.dataDir, sessionId);
         if (
           !latest ||
@@ -18953,7 +20416,7 @@ export class SessionService {
         if (launched) {
           await this.retainLaunchedError(launchCandidate, error);
         } else if (cleanupGeneration) {
-          await this.killAgentPaneAndConfirmExit(latest, { failOnSurvivors: false });
+          await this.killAgentPaneAndConfirmExit(launchCandidate, { failOnSurvivors: false });
           await this.cleanupSessionServices(latest);
         }
       });
@@ -18978,7 +20441,8 @@ export class SessionService {
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
 
-    return this.withSessionLifecycleLocks(this.lifecycleIdsFor(session), async () => {
+    return withLocks(async () => {
+      operation?.assertActive();
       const latestBeforeCommit = readSession(this.config.dataDir, sessionId);
       if (
         !latestBeforeCommit ||
@@ -18988,7 +20452,11 @@ export class SessionService {
       ) {
         throw new Error(`Session ${sessionId} changed during restore`);
       }
-      const { error: _ignoredError, ...restoredBase } = latestBeforeCommit;
+      const {
+        error: _ignoredError,
+        errorSource: _ignoredErrorSource,
+        ...restoredBase
+      } = latestBeforeCommit;
       let restored: SessionRecord = this.applyReservedSidecars(
         {
           ...restoredBase,
@@ -19003,7 +20471,8 @@ export class SessionService {
         },
         mcpSidecarUpdate,
       );
-      restored = await this.finishStaleWake(restored, this.getProject(current.project));
+      restored = await this.finishStaleWake(restored, this.getProject(current.project), operation);
+      operation?.assertActive();
       delete restored.stopReason;
       delete restored.submitUnconfirmedAt;
       delete restored.queuedMessageTyped;
@@ -19012,13 +20481,19 @@ export class SessionService {
       const persistedRestored = await this.captureAgentSessionId(
         restored,
         AGENT_SESSION_ID_REFRESH_WAIT_MS,
+        operation,
       );
+      operation?.assertActive();
       writeSession(this.config.dataDir, persistedRestored);
       const restoredWithSidecars = await this.startAutoStartSidecars(
         persistedRestored,
         this.getProject(current.project),
+        undefined,
+        operation,
       );
+      operation?.assertActive();
       await this.refreshDashboardCacheEntry(restoredWithSidecars);
+      operation?.assertActive();
       requestGitHubMergeConflictRestoreReplays(
         this.config,
         restoredWithSidecars.project,
@@ -19184,6 +20659,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     delete record.error;
+    delete record.errorSource;
     delete record.queuedMessages;
     if (record.pipeline) {
       record.pipeline = { ...record.pipeline, status: "completed" };
@@ -20062,6 +21538,7 @@ export class SessionService {
     if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
       return false;
     }
+    const probeRevision = this.lifecycle.snapshot(sessionId).revision;
     // While the memory hold is engaged, defer this attempt for cold or
     // stale-parked sessions: it would otherwise call ensureSessionReadyForSend,
     // which can relaunch the session in place and write to its pane — real
@@ -20080,12 +21557,20 @@ export class SessionService {
     // `opencode export`), and remove/flush must not 409 while nothing is
     // being typed.
     let claimed = false;
+    const preparedObservation: PreparedSessionObservation = { session, revision: probeRevision };
+    const observePreparedSession = (prepared: SessionRecord) => {
+      preparedObservation.session = prepared;
+    };
     try {
       let nextMessage: string | undefined;
       try {
-        await this.ensureReadyForQueuedSend(sessionId, this.lifecycleStamp(session));
+        await this.ensureReadyForQueuedSend(sessionId, this.lifecycleStamp(session), {
+          preparedObservation,
+          observePreparedSession,
+        });
         const readySession = readSession(this.config.dataDir, sessionId);
         if (!readySession) return false;
+        let settleObservation = readySession;
         // A live claude server-error wedge behaves like "waiting" for delivery
         // purposes: typing the queued message is exactly what un-wedges Claude
         // (the same mechanism as the reactivation nudge in processScheduledWakes),
@@ -20099,7 +21584,14 @@ export class SessionService {
         // delay it by another full window. The agent's transcript is inherently
         // scoped to the agent and is untouched by both.
         const settleRemainingMs = async (): Promise<number | null> => {
-          const classified = await this.classifySessionRecord(readySession);
+          const classified = await this.classifySessionRecord(
+            settleObservation,
+            undefined,
+            (prepared) => {
+              settleObservation = prepared;
+              observePreparedSession(prepared);
+            },
+          );
           if (this.queuedDeliveryState(classified) !== "waiting" && !classified.serverError) {
             return null;
           }
@@ -20155,7 +21647,12 @@ export class SessionService {
         // attempt, not only the send itself). The message stays queued; the
         // loop's own sleep-and-continue retries it on the next poll.
         if (error instanceof TmuxProbeUnknownError) {
-          this.retainDetectionError(session, error.message);
+          this.retainDetectionError(
+            preparedObservation.session,
+            error.message,
+            "runtime_probe",
+            probeRevision,
+          );
         }
         const failure = error instanceof Error ? error.message : String(error);
         // Log-once-per-transition: a permanently broken session (e.g. a
@@ -21552,7 +23049,12 @@ export class SessionService {
   // reached it, so its pane is stopped; the caller then reconciles the record
   // to "stopped" like a dead orphan, queue kept, and restore or the next send
   // relaunches it with the task prompt.
-  private async stopOrphanedSpawnPane(session: SessionRecord): Promise<SessionRuntimeSnapshot> {
+  private async stopOrphanedSpawnPane(
+    session: SessionRecord,
+    assertCurrent: () => void,
+  ): Promise<SessionRuntimeSnapshot> {
+    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false, assertCurrent });
+    assertCurrent();
     this.logEvent("session.spawn.orphan_stopped", {
       level: "warn",
       sessionId: session.id,
@@ -21563,7 +23065,6 @@ export class SessionService {
         queuedCount: queuedMessages(session).length,
       },
     });
-    await this.killAgentPaneAndConfirmExit(session, { failOnSurvivors: false });
     return this.readRuntimeSnapshot(session, { fresh: true });
   }
 
@@ -21572,37 +23073,35 @@ export class SessionService {
     runtime: SessionRuntimeSnapshot,
     reason: "boot" | "runtime_check",
     workspaceMissing: boolean,
+    probeRevision = this.lifecycle.snapshot(session.id).revision,
   ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
     if (this.isDeliveryStopped()) return { session, runtime };
     if (session.status !== "running" && session.status !== "spawning") {
       return { session, runtime };
     }
+    const protectedRuntime = (ownedPane?: Promise<void>) =>
+      this.spawnsInFlight.has(session.id) ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision ||
+      (this.paneWriteLocks.has(session.tmuxSession) &&
+        this.paneWriteLocks.get(session.tmuxSession) !== ownedPane) ||
+      this.lifecycle.snapshot(session.id).operation?.phase === "pending" ||
+      (this.restoreWarmupUntil.get(session.id) ?? 0) > Date.now();
+    const runtimeOwnerMatches = (current: SessionRecord) =>
+      current.status === session.status &&
+      sameSessionRuntimeOwner(current, session) &&
+      current.agentLaunchId === session.agentLaunchId &&
+      current.updatedAt === session.updatedAt;
+    if (protectedRuntime()) return { session, runtime };
     if (runtime.probeUnresponsive) {
       return {
         session: this.retainDetectionError(
           session,
           runtime.diagnostic ?? "runtime probe (tmux or ps) timed out; runtime state unknown",
+          "runtime_probe",
+          probeRevision,
         ),
         runtime,
       };
-    }
-    if (
-      hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) ||
-      session.serverErrorAt
-    )
-      return { session, runtime };
-    if (session.status === "spawning") {
-      // At boot we cannot tell an in-progress spawn from a stuck one and tmux
-      // may not exist yet, so never reconcile a spawning session on boot.
-      // During live runtime checks, a spawn still running in this process has no
-      // stable runtime yet — skip it regardless of how long setup takes. Only a
-      // spawning session with no active pipeline (finished, failed, or lost to a
-      // daemon restart) and a dead runtime is reconciled like a dropped running
-      // one — otherwise it hangs on "working" forever with no terminal state.
-      // One with a live agent has its pane stopped first (stopOrphanedSpawnPane).
-      if (reason === "boot" || this.spawnsInFlight.has(session.id)) {
-        return { session, runtime };
-      }
     }
     const workspaceGone = workspaceMissing;
     let confirmedRuntime = runtime;
@@ -21615,16 +23114,63 @@ export class SessionService {
         // ~2s-TTL cached snapshot the first check above just read. Otherwise a
         // single transient tmux/list-windows blip would agree with itself on
         // both reads and mark a genuinely live session stopped.
-        confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+        try {
+          confirmedRuntime = await this.readRuntimeSnapshot(session, { fresh: true });
+        } catch (error) {
+          const diagnostic = error instanceof Error ? error.message : String(error);
+          const retained = this.retainDetectionError(
+            session,
+            diagnostic,
+            "runtime_probe",
+            probeRevision,
+          );
+          return {
+            session: retained,
+            runtime: {
+              runtimeAlive: false,
+              paneUsable: false,
+              processAlive: false,
+              tmuxActivityAt: null,
+              probeUnresponsive: true,
+              diagnostic,
+            },
+          };
+        }
         if (this.isDeliveryStopped()) return { session, runtime: confirmedRuntime };
       }
       if (
         live(confirmedRuntime) &&
         session.status === "spawning" &&
-        readSession(this.config.dataDir, session.id)?.status === "spawning" &&
-        !this.spawnsInFlight.has(session.id)
+        reason !== "boot" &&
+        !hasRetainedSessionError(session, this.lastClassifiedLogStates.get(session.id)) &&
+        !session.serverErrorAt
       ) {
-        confirmedRuntime = await this.stopOrphanedSpawnPane(session);
+        const current = readSession(this.config.dataDir, session.id);
+        if (!current || protectedRuntime() || !runtimeOwnerMatches(current)) {
+          return { session: current ?? session, runtime: confirmedRuntime };
+        }
+        const superseded = new Error("Orphan runtime ownership changed");
+        try {
+          confirmedRuntime = await this.withPaneWriteLock(
+            session.tmuxSession,
+            async (ownedPane) => {
+              const assertCurrent = () => {
+                const latest = readSession(this.config.dataDir, session.id);
+                if (!latest || protectedRuntime(ownedPane) || !runtimeOwnerMatches(latest)) {
+                  throw superseded;
+                }
+              };
+              assertCurrent();
+              return this.stopOrphanedSpawnPane(session, assertCurrent);
+            },
+          );
+        } catch (error) {
+          if (error !== superseded) throw error;
+          return {
+            session: readSession(this.config.dataDir, session.id) ?? session,
+            runtime: confirmedRuntime,
+          };
+        }
       }
       if (live(confirmedRuntime)) {
         return { session, runtime: confirmedRuntime };
@@ -21639,6 +23185,8 @@ export class SessionService {
           session,
           confirmedRuntime.diagnostic ??
             "runtime probe (tmux or ps) timed out; runtime state unknown",
+          "runtime_probe",
+          probeRevision,
         );
         this.logEvent("session.runtime.probe_unresponsive", {
           level: "warn",
@@ -21658,41 +23206,40 @@ export class SessionService {
     if (!latest) {
       return { session, runtime };
     }
-    if (latest.status !== session.status) {
+    if (protectedRuntime() || !runtimeOwnerMatches(latest)) {
       return { session: latest, runtime };
     }
-    if (hasRetainedSessionError(latest)) return { session: latest, runtime: confirmedRuntime };
 
     const terminalUnavailable =
       !workspaceGone && (!confirmedRuntime.runtimeAlive || !confirmedRuntime.paneUsable);
     const updatedAt = nowIso();
-    // Clean stopped records release ports; inferred errors retain ownership.
-    const latestNoPorts = terminalUnavailable
-      ? this.sessionWithReleasedSidecarPorts(latest)
-      : latest;
+    // Runtime absence does not prove sidecar absence. Keep ownership evidence
+    // for the existing sidecar reaper; reconciliation performs no teardown.
     let updated: SessionRecord;
     if (terminalUnavailable) {
-      const {
-        error: _ignoredError,
-        stopReason: _ignoredStopReason,
-        ...stoppedBase
-      } = latestNoPorts;
       updated = {
-        ...stoppedBase,
+        ...latest,
         status: "stopped",
+        stopReason: "runtime_lost",
         updatedAt,
       };
     } else {
       updated = {
-        ...latestNoPorts,
+        ...latest,
         status: "errored",
-        error: workspaceGone ? "Agent worktree is missing." : "Agent runtime exited unexpectedly.",
+        ...(workspaceGone
+          ? { error: "Agent worktree is missing.", errorSource: "other" as const }
+          : hasSessionErrorEvidence(latest)
+            ? {}
+            : {
+                error: INFERRED_RUNTIME_EXIT_ERROR,
+                errorSource: "inferred_runtime_exit" as const,
+              }),
         updatedAt,
       };
     }
     writeSession(this.config.dataDir, updated);
     this.stateCache.delete(session.id);
-    if (terminalUnavailable) await this.teardownSessionSidecars(updated).catch(() => {});
     this.logEvent(
       reason === "boot" ? "session.reconcile.drift" : `session.runtime.${updated.status}`,
       {
@@ -21763,7 +23310,7 @@ export class SessionService {
       return latest;
     }
 
-    const { error: _ignoredError, ...runningBase } = latest;
+    const { error: _ignoredError, errorSource: _ignoredErrorSource, ...runningBase } = latest;
     const updated: SessionRecord = {
       ...runningBase,
       status: "running",
@@ -21793,14 +23340,16 @@ export class SessionService {
   private reconcileStaleErroredSession(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
-    workspaceMissing: boolean,
+    workspacePresent: boolean,
+    probeRevision: number,
+    observePromotion?: (session: SessionRecord) => void,
   ): SessionRecord {
     // Shepherd included, for the reason spelled out in
     // reconcileStaleStoppedSession above.
     if (
       session.status !== "errored" ||
       runtime.probeUnresponsive ||
-      workspaceMissing ||
+      !workspacePresent ||
       !runtime.runtimeAlive ||
       !runtime.paneUsable ||
       !runtime.processAlive
@@ -21812,15 +23361,29 @@ export class SessionService {
     if (!latest || latest.status !== "errored") {
       return latest ?? session;
     }
+    if (
+      !sameSessionRuntimeOwner(latest, session) ||
+      latest.agentLaunchId !== session.agentLaunchId ||
+      latest.error !== session.error ||
+      latest.errorSource !== session.errorSource ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision
+    )
+      return latest;
 
-    const runningBase = latest;
+    const shouldClear = !latest.serverErrorAt && recoverableRuntimeError(latest);
+    if (shouldClear && this.restoreOwnsRuntimeRecovery(session.id)) return latest;
     const updated: SessionRecord = {
-      ...runningBase,
+      ...latest,
       status: "running",
       updatedAt: nowIso(),
     };
+    if (shouldClear) {
+      delete updated.error;
+      delete updated.errorSource;
+    }
     delete updated.stopReason;
     writeSession(this.config.dataDir, updated);
+    observePromotion?.(updated);
     this.stateCache.delete(session.id);
     this.logEvent("session.reconcile.running", {
       level: "warn",
@@ -21837,7 +23400,16 @@ export class SessionService {
       },
     });
     this.scheduleHealedSidecarRestart(updated);
+    if (shouldClear && this.shouldRunDelivery(updated)) this.scheduleDeliveryRunner(updated.id);
     return updated;
+  }
+
+  private restoreOwnsRuntimeRecovery(sessionId: string): boolean {
+    const operation = this.lifecycle.snapshot(sessionId).operation;
+    return (
+      operation?.phase === "pending" &&
+      (operation.action === "restore" || operation.action === "reopen")
+    );
   }
 
   private async readFinalTokenUsage(
@@ -21881,9 +23453,15 @@ export class SessionService {
   private async classifySessionRecord(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
+    const probeRevision = this.lifecycle.snapshot(session.id).revision;
+    let observation = session;
     try {
-      return await this.classifySessionRecordKnown(session, options);
+      return await this.classifySessionRecordKnown(session, options, (prepared) => {
+        observation = prepared;
+        observePreparation?.(prepared);
+      });
     } catch (error) {
       if (
         error instanceof SessionResourceNotFoundError &&
@@ -21891,37 +23469,62 @@ export class SessionService {
       ) {
         throw error;
       }
-      const diagnostic = error instanceof Error ? error.message : String(error);
-      const retained = this.retainDetectionError(session, diagnostic);
-      return {
-        session: retained,
-        runtime: {
-          runtimeAlive: false,
-          paneUsable: false,
-          processAlive: false,
-          tmuxActivityAt: null,
-          probeUnresponsive: true,
-          diagnostic,
-        },
-        state: "error",
-        source: "status",
-        workspacePresent: false,
-        serverError: false,
-        agentActivityAt: null,
-      };
+      return this.classificationErrorResult(observation, error, "other", probeRevision);
     }
   }
 
-  private retainDetectionError(session: SessionRecord, diagnostic: string): SessionRecord {
+  private classificationErrorResult(
+    session: SessionRecord,
+    error: unknown,
+    errorSource: "runtime_probe" | "other",
+    probeRevision: number,
+  ): SessionStateResult {
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const retained = this.retainDetectionError(session, diagnostic, errorSource, probeRevision);
+    return {
+      session: retained,
+      runtime: {
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        tmuxActivityAt: null,
+        probeUnresponsive: true,
+        diagnostic,
+      },
+      state: "error",
+      source: "status",
+      workspacePresent: false,
+      serverError: false,
+      agentActivityAt: null,
+    };
+  }
+
+  private retainDetectionError(
+    session: SessionRecord,
+    diagnostic: string,
+    errorSource: "runtime_probe" | "other",
+    probeRevision: number,
+  ): SessionRecord {
     const latest = readSession(this.config.dataDir, session.id);
     if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     if (isTerminalSessionStatus(latest.status)) return latest;
+    if (
+      !sameSessionRuntimeOwner(latest, session) ||
+      latest.agentLaunchId !== session.agentLaunchId ||
+      latest.error !== session.error ||
+      latest.errorSource !== session.errorSource ||
+      !this.lifecycleStateMatches(latest, this.lifecycleStamp(session)) ||
+      this.lifecycle.snapshot(session.id).revision !== probeRevision
+    )
+      return latest;
     const message = STATUS_DETECTION_ERROR_PREFIX + diagnostic;
     if (latest.error?.startsWith(REPORTING_DETECTION_ERROR_PREFIX)) return latest;
+    if (latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) && !recoverableRuntimeError(latest))
+      return latest;
     if (hasSessionErrorEvidence(latest) && !latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX))
       return latest;
     if (latest.error === message) return latest;
-    const retained = { ...latest, error: message, updatedAt: nowIso() };
+    const retained = { ...latest, error: message, errorSource, updatedAt: nowIso() };
     writeSession(this.config.dataDir, retained);
     this.stateCache.delete(session.id);
     this.logEvent("session.runtime.probe_unresponsive", {
@@ -21936,9 +23539,12 @@ export class SessionService {
   private async retainLaunchedError(
     session: SessionRecord,
     error: unknown,
+    operation?: RestoreOperationContext,
   ): Promise<SessionRecord> {
+    operation?.assertActive();
     const message = error instanceof Error ? error.message : String(error);
     const runtime = await this.readRuntimeSnapshot(session).catch(() => null);
+    operation?.assertActive();
     const latest = readSession(this.config.dataDir, session.id);
     if (latest?.status === "killed") return latest;
     const retained: SessionRecord = {
@@ -21950,6 +23556,7 @@ export class SessionService {
       status:
         runtime && !runtime.probeUnresponsive && !runtime.processAlive ? "errored" : "running",
       error: message,
+      errorSource: "other",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, retained);
@@ -21981,7 +23588,29 @@ export class SessionService {
   private async classifySessionRecordKnown(
     session: SessionRecord,
     options?: { scanPane?: boolean; reconcileRuntime?: boolean },
+    observePreparation?: (session: SessionRecord) => void,
   ): Promise<SessionStateResult> {
+    const probeLifecycle = this.lifecycle.snapshot(session.id);
+    const probeRevision = probeLifecycle.revision;
+    const ackEntry = { ...session };
+    const entryTyped = structuredClone(session.queuedMessageTyped);
+    const matchesAckEntry = (current: SessionRecord | null): boolean => {
+      const lifecycle = this.lifecycle.snapshot(session.id);
+      return (
+        current !== null &&
+        sameSessionRuntimeOwner(current, ackEntry) &&
+        current.status === ackEntry.status &&
+        current.workspaceId === ackEntry.workspaceId &&
+        current.deskId === ackEntry.deskId &&
+        current.agentLaunchId === ackEntry.agentLaunchId &&
+        current.submitUnconfirmedAt === ackEntry.submitUnconfirmedAt &&
+        isDeepStrictEqual(current.queuedMessageTyped, entryTyped) &&
+        lifecycle.instanceId === probeLifecycle.instanceId &&
+        lifecycle.revision === probeLifecycle.revision &&
+        lifecycle.operation === probeLifecycle.operation &&
+        lifecycle.operation?.phase !== "pending"
+      );
+    };
     const scanPane = options?.scanPane ?? true;
     if (
       (session.status === "running" || session.status === "spawning") &&
@@ -22006,15 +23635,33 @@ export class SessionService {
         agentActivityAt: null,
       };
     }
-    let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
-      ? {
-          runtimeAlive: false,
-          paneUsable: false,
-          processAlive: false,
-          tmuxActivityAt: null,
-          probeUnresponsive: false,
-        }
-      : await this.readRuntimeSnapshot(session);
+    let runtime: SessionRuntimeSnapshot = {
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      tmuxActivityAt: null,
+      probeUnresponsive: false,
+    };
+    if (!isTerminalSessionStatus(session.status)) {
+      try {
+        runtime = await this.readRuntimeSnapshot(session);
+      } catch (error) {
+        const result = this.classificationErrorResult(
+          session,
+          error,
+          "runtime_probe",
+          probeRevision,
+        );
+        return {
+          ...result,
+          session:
+            matchesAckEntry(result.session) &&
+            matchesAckEntry(readSession(this.config.dataDir, session.id))
+              ? await this.settleSubmitHold(result.session, result.state, null, "ack-only")
+              : result.session,
+        };
+      }
+    }
     if (this.isDeliveryStopped())
       return {
         session,
@@ -22027,34 +23674,80 @@ export class SessionService {
         agentActivityAt: null,
       };
     const workspace = probeWorkspace(session.worktreePath);
+    const observed = readSession(this.config.dataDir, session.id);
+    if (
+      observed &&
+      (this.lifecycle.snapshot(session.id).revision !== probeRevision ||
+        !this.lifecycleStateMatches(observed, this.lifecycleStamp(session)) ||
+        !sameSessionRuntimeOwner(observed, session) ||
+        observed.agentLaunchId !== session.agentLaunchId)
+    ) {
+      const protectedSnapshot =
+        isTerminalSessionStatus(session.status) ||
+        session.stopReason === "manual_pause" ||
+        session.stopReason === "token_budget" ||
+        isStaleParked(session);
+      const current = protectedSnapshot ? session : observed;
+      this.lastClassifiedLogStates.delete(session.id);
+      return {
+        session: current,
+        runtime: {
+          runtimeAlive: false,
+          paneUsable: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+          probeUnresponsive: true,
+        },
+        state: hasRetainedSessionError(current) ? "error" : statusFallbackState(current),
+        source: "status",
+        historySourcePath: null,
+        workspacePresent: workspace.exists,
+        serverError: false,
+        agentActivityAt: null,
+      };
+    }
     let effectiveSession = session;
+    let runtimeOwnerChanged = false;
     if (runtime.probeUnresponsive || workspace.diagnostic) {
       effectiveSession = this.retainDetectionError(
         session,
         runtime.diagnostic ??
           workspace.diagnostic ??
           "runtime probe (tmux or ps) timed out; runtime state unknown",
+        runtime.diagnostic !== undefined || workspace.diagnostic === undefined
+          ? "runtime_probe"
+          : "other",
+        probeRevision,
       );
     } else if (
+      session.status !== "errored" &&
       workspace.exists &&
       runtime.runtimeAlive &&
       runtime.paneUsable &&
       runtime.processAlive &&
-      session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
-      !session.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+      !session.serverErrorAt &&
+      recoverableRuntimeError(session)
     ) {
       const latest = readSession(this.config.dataDir, session.id);
       if (!latest) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
       effectiveSession = latest;
+      runtimeOwnerChanged =
+        !sameSessionRuntimeOwner(latest, session) || latest.agentLaunchId !== session.agentLaunchId;
       if (
         !isTerminalSessionStatus(latest.status) &&
-        sameSessionRuntimeOwner(latest, session) &&
-        latest.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX) &&
-        !latest.error.startsWith(REPORTING_DETECTION_ERROR_PREFIX)
+        !runtimeOwnerChanged &&
+        latest.error === session.error &&
+        latest.errorSource === session.errorSource &&
+        !latest.serverErrorAt &&
+        recoverableRuntimeError(latest) &&
+        !this.restoreOwnsRuntimeRecovery(session.id)
       ) {
-        const { error: _ignoredError, ...recovered } = latest;
+        const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = latest;
         effectiveSession = { ...recovered, updatedAt: nowIso() };
         writeSession(this.config.dataDir, effectiveSession);
+        observePreparation?.(effectiveSession);
+        this.stateCache.delete(session.id);
+        if (this.shouldRunDelivery(effectiveSession)) this.scheduleDeliveryRunner(session.id);
       }
     }
     let state: SessionState;
@@ -22088,6 +23781,7 @@ export class SessionService {
         runtime,
         "runtime_check",
         workspace.missing,
+        probeRevision,
       );
       effectiveSession = reconciled.session;
       runtime = reconciled.runtime;
@@ -22097,11 +23791,15 @@ export class SessionService {
       runtime,
       workspace.missing,
     );
-    effectiveSession = this.reconcileStaleErroredSession(
-      effectiveSession,
-      runtime,
-      workspace.missing,
-    );
+    if (!runtimeOwnerChanged) {
+      effectiveSession = this.reconcileStaleErroredSession(
+        effectiveSession,
+        runtime,
+        workspace.exists,
+        probeRevision,
+        observePreparation,
+      );
+    }
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
@@ -22109,6 +23807,34 @@ export class SessionService {
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
     let agentActivityAt: Date | null = null;
+    // Final accounting uses the incoming record: reconciliation may just have
+    // added an inferred exit error to a previously clean running generation.
+    if (
+      !runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      !hasRetainedSessionError(session) &&
+      !session.serverErrorAt
+    ) {
+      if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
+        const usage = await this.readFinalTokenUsage(session, runtime);
+        tokenUsage = usage.tokenUsage;
+        tokenUsages = usage.tokenUsages;
+      } else if (
+        session.agent === "cursor" &&
+        session.agentSessionId &&
+        runtime.paneUsable &&
+        runtime.processAlive
+      ) {
+        const usage = await readCursorTokenUsage(
+          cursorConfigDirForSession(this.config.dataDir, session.id),
+          session.agentSessionId,
+        ).catch(() => undefined);
+        if (usage) {
+          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
+        }
+      }
+    }
     if (
       runtime.probeUnresponsive ||
       workspace.diagnostic ||
@@ -22117,19 +23843,6 @@ export class SessionService {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
     } else {
-      if (session.agent === "cursor" && session.agentSessionId) {
-        const usage = await readCursorTokenUsage(
-          cursorConfigDirForSession(this.config.dataDir, session.id),
-          session.agentSessionId,
-        ).catch(() => undefined);
-        if (usage) {
-          tokenUsage = { ...usage, provider: "cursor", generationId: session.agentSessionId };
-        }
-      } else if (session.status === "running" && (!runtime.paneUsable || !runtime.processAlive)) {
-        const usage = await this.readFinalTokenUsage(session, runtime);
-        tokenUsage = usage.tokenUsage;
-        tokenUsages = usage.tokenUsages;
-      }
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
       } else if (!runtime.paneUsable || !runtime.processAlive) {
@@ -22560,7 +24273,17 @@ export class SessionService {
       }
       this.lastClassifiedLogStates.set(session.id, state);
     }
-    effectiveSession = await this.settleSubmitHold(effectiveSession, state, agentActivityAt);
+    if (
+      !runtime.probeUnresponsive ||
+      (matchesAckEntry(effectiveSession) &&
+        matchesAckEntry(readSession(this.config.dataDir, session.id)))
+    )
+      effectiveSession = await this.settleSubmitHold(
+        effectiveSession,
+        state,
+        agentActivityAt,
+        runtime.probeUnresponsive ? "ack-only" : "normal",
+      );
 
     return {
       session: effectiveSession,
@@ -22588,7 +24311,9 @@ export class SessionService {
 
   private async assembleDashboard(
     session: SessionRecord,
-  ): Promise<{ view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord } | undefined> {
+  ): Promise<
+    { view: Omit<DashboardSessionView, "lifecycle">; source: SessionRecord | null } | undefined
+  > {
     // The 2s dashboard-cache tick skips the per-session capture-pane scan (the
     // last un-batched fork): jsonl/hook-sourced rate limits still show up
     // immediately, and the 5s attention monitor (full enrich) plus on-demand
@@ -22597,7 +24322,6 @@ export class SessionService {
     const persisted = this.persistClassifiedTokenUsage(classified.session, classified);
     if (persisted.status === "missing") return undefined;
     session = persisted.session;
-    const source = this.lifecycleSource(session);
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
     const displaySlots = this.projectSidecarSlots(
@@ -22608,7 +24332,9 @@ export class SessionService {
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
     const hasServiceIssues = await this.hasServiceIssues(session);
+    const persistedSession = session;
     session = this.withReportingError(session);
+    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
     const {
       queuedMessages: _queuedMessages,
       pipeline: _pipeline,
@@ -22623,8 +24349,12 @@ export class SessionService {
       allowedTriggers: _allowedTriggers,
       agentSessionId: _agentSessionId,
       agentLaunchId: _agentLaunchId,
+      triggerBirthKey: _triggerBirthKey,
+      triggerBirthRequest: _triggerBirthRequest,
+      sidecarLaunches: _sidecarLaunches,
       branchSource: _branchSource,
       error: _error,
+      errorSource: _errorSource,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -22686,9 +24416,10 @@ export class SessionService {
     if (!tokenUsage || JSON.stringify(tokenUsage) === JSON.stringify(current.tokenUsage)) {
       return { status: "present", session: current };
     }
-    const updated = { ...current, tokenUsage };
-    writeSession(this.config.dataDir, updated);
-    return { status: "present", session: updated };
+    writeSession(this.config.dataDir, { ...current, tokenUsage });
+    // Re-read so downstream sources deep-equal the stored (normalized) record.
+    const written = readSession(this.config.dataDir, session.id);
+    return written ? { status: "present", session: written } : { status: "missing" };
   }
 
   private reconcileClassifiedTokenUsage(
@@ -22777,6 +24508,7 @@ export class SessionService {
     session?: SessionRecord,
     readExists: () => Promise<boolean> = () => tmuxSessionExists(tmuxSession),
   ): Promise<{ exists: boolean; paneDead: boolean; diagnostic?: string }> {
+    const probeRevision = session && this.lifecycle.snapshot(session.id).revision;
     try {
       const exists = await readExists();
       if (session && !readSession(this.config.dataDir, session.id)) {
@@ -22793,7 +24525,7 @@ export class SessionService {
           sameSessionRuntimeOwner(latest, session) &&
           latest.error?.startsWith(`${REPORTING_DETECTION_ERROR_PREFIX}${tmuxSession}: `)
         ) {
-          const { error: _error, ...recovered } = latest;
+          const { error: _error, errorSource: _errorSource, ...recovered } = latest;
           writeSession(this.config.dataDir, { ...recovered, updatedAt: nowIso() });
           this.stateCache.delete(session.id);
         }
@@ -22801,8 +24533,13 @@ export class SessionService {
       return { exists, paneDead };
     } catch (error) {
       if (!(error instanceof TmuxProbeUnknownError)) throw error;
-      if (session)
-        this.retainDetectionError(session, `Resource readout ${tmuxSession}: ${error.message}`);
+      if (session && probeRevision !== undefined)
+        this.retainDetectionError(
+          session,
+          `Resource readout ${tmuxSession}: ${error.message}`,
+          "other",
+          probeRevision,
+        );
       return { exists: false, paneDead: false, diagnostic: error.message };
     }
   }
@@ -22848,6 +24585,7 @@ export class SessionService {
           source: rebuilt.source,
         };
       },
+      { includePending: false },
     );
     const result = rows[0];
     if (!result) throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
@@ -22899,7 +24637,7 @@ export class SessionService {
   ): Promise<{
     view: Omit<SessionListItemView, "lifecycle">;
     classified: SessionStateResult;
-    source: SessionRecord;
+    source: SessionRecord | null;
     detectionOnlyError: boolean;
   }> {
     const hasIndependentError = (record: SessionRecord): boolean =>
@@ -22913,7 +24651,6 @@ export class SessionService {
       throw new SessionResourceNotFoundError(`Session not found: ${session.id}`);
     }
     session = persisted.session;
-    const source = this.lifecycleSource(session);
     const preReportHasIndependentError =
       hasIndependentError(session) ||
       (classified.state === "error" && !session.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)) ||
@@ -22937,7 +24674,9 @@ export class SessionService {
     // workspace file yet.
     const anchorRecord = this.deskAnchorRecord(session);
     const sidecars = await this.sidecarViews(session, project);
+    const persistedSession = session;
     session = this.withReportingError(session);
+    const source = isDeepStrictEqual(session, persistedSession) ? session : null;
     classified.session = session;
     if (hasRetainedSessionError(session)) classified.state = "error";
     const state = this.stabilizeState(session.id, classified.state);
@@ -22970,12 +24709,16 @@ export class SessionService {
       prompt: _prompt,
       originalTaskPrompt: _originalTaskPrompt,
       agentLaunchId: _agentLaunchId,
+      triggerBirthKey: _triggerBirthKey,
+      triggerBirthRequest: _triggerBirthRequest,
+      sidecarLaunches: _sidecarLaunches,
       tokenUsage: _tokenUsage,
       preflightTokenUsage: _preflightTokenUsage,
       cursorRestoreBoundary: _cursorRestoreBoundary,
       codexRestoreStartedAt: _codexRestoreStartedAt,
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
+      errorSource: _errorSource,
       ...sessionWithoutDetailFields
     } = session;
 

@@ -50,7 +50,7 @@ async function fixture(status: SessionRecord["status"] = "running") {
 }
 
 describe("Spur ToDo ledger", () => {
-  it.each(["cli", "ui", "telegram"] as const)("persists human %s actor", async (origin) => {
+  it.each(["cli", "ui", "mcp", "telegram"] as const)("persists human %s actor", async (origin) => {
     const { dataDir, session } = await fixture();
     const human: TodoActor = { kind: "human", origin };
     mutateTodo(dataDir, session, { action: "add", text: "Task", reason: "Human request" }, human);

@@ -2,9 +2,12 @@
 
 > Scope: config layers, fields, sources, triggers, events — names and defaults only. Schema/validation, merge order, and every behavioral rule not stated here: `v2/src/config.ts`. Any config or interface change updates this file in the same change.
 
-Instance config: `~/.spur/config.yaml` by default (daemon host/port, data dirs, tmux socket, default agent, UI port, `voice:` — see [voice.md](voice.md)). Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only. Merge order and per-session resolution: `v2/src/config.ts`.
+Instance selection: `--config` > `SPUR_CONFIG` > private `~/.spur/installed-instance.json` (`0600`, `{configPath}`) > `~/.spur/config.yaml`; `v2/src/config.ts`, `v2/src/installed-instance.ts`.
+Project config: nearest `spur.yaml`/`spur.yml`, `projects:` only; merge/per-session resolution: `v2/src/config.ts`; voice: [voice.md](voice.md).
 
 Spur ToDo is always on, no config field. See [todo](commands.md#todo).
+`mcp.port` (instance-only, `1..65535`, loopback, default first port from `4311` distinct from daemon/UI): `v2/src/config.ts`, `v2/src/ports.ts`; [MCP](mcp.md).
+`SPUR_MCP_TUNNEL_PROFILE`, `CONTROL_PLANE_API_KEY`, `SPUR_MCP_TUNNEL_ENV_FILE`: `v2/src/mcp-tunnel.ts`; [tunnel setup](mcp.md#connect-openai-products).
 Reviewer App JSON `repositories`, `receiptRoot`, `code|browser.{appId,keyPath}`: caller-owned `--app-config` file; `v2/src/review-app.ts`.
 `SPUR_REVIEW_APP_CONFIG`: reviewer App config with private `consent.approverUserId`; `v2/src/review-interface-consent.ts`.
 Approval Gate policy JSON requires CI run-name provenance from `.github/workflows/ci.yml`: `v2/src/review-gate.ts`.
@@ -105,6 +108,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 - `projects.<id>.preflight`/`.preflight.prompt`: branch or sentinel `NO_PROJECT_RULES`; retains structured preview/retry usage. Preflight batches expire after 30 days; spawn claims each batch once.
 - `projects.<id>.modes.<name>.{skill,default}`. See [Modes](#modes).
 - `projects.<id>.sources.<sourceId>.type` (required, `cron|github|github-ci|gitlab|jira|sentry|service|telegram|webhook`), `.runOnStart` (`false`, unsupported by jira and webhook), `.schedule` (`cron`), `.intervalMs` (`60000` github/jira, `2000` service), `.query` (github/jira), `.draft` (`false`, github, poll drafts only), `.emitExisting` (`false`), `.maxResults` (`100`, jira, clamped), `.adaptivePoll.{slowIntervalMs,activeGraceMs 600000}`, `.maxReviewBatchTargets`, `.pollDisabledRecheckMs` (`86400000`, github), `.service`, `.tailLines` (`200`), `.rules.<ruleId>.{match,clear,cooldownMs 60000}`, `.token`, `.baseUrl`, `.email` (jira, `${VAR}`-resolvable), `.allowedUsers`, `.allowedChats` (telegram, integer array or `${VAR}` comma-separated list), `.chatId` (telegram, agent-send fallback destination, must be in `allowedChats` when set), `.autoSpawn.{enabled true,project spur-shepherd,agent opencode,model,selfDestruct}`. Full per-type shape: `v2/src/config.ts`, event names: [Events](#events).
+- `projects.<id>.sources.<sourceId>.selfMarker` (github, optional): nonempty template requiring `{session}`; replace each placeholder with the session ID, then filter inline comments, review bodies, and issue comments with a case-sensitive match in contiguous unquoted body text (`>` quote lines excluded), regardless of author login. Unset: filter new feedback by polling login; previously filtered feedback stays filtered after config changes. `v2/src/config.ts`, `v2/src/review-providers/github.ts`.
+- `projects.<id>.sources.<sourceId>.signPosts` (`false`, github): requires `selfMarker` with no line break, leading `>` or backtick, equal to every other github `selfMarker` in the project; adds a `GitHub posts:` block to session launch prompts project-wide. `v2/src/config.ts`, `v2/src/session-service.ts`.
 - Webhook `.host` (IP literal, `127.0.0.1`; no hostname or zone id), `.port` (required integer `1..65535`; same-port bind cannot overlap another webhook, server, or UI bind; a server hostname overlaps every webhook host), `.path` (required exact path, 1..2048 visible ASCII bytes; one leading `/`; no query, fragment, whitespace, or control byte), `.secret` (required 16..512 visible ASCII bytes; `${VAR}`-resolvable).
 - `projects.<id>.triggers.<triggerId>.{source,event,spawn|send}`.
 - `spawn[].{prompt,steps,agent,model,reasoningEffort,mode,selfDestruct,branch,overrides.worktree,overrides.defaultBranch,restrictWrites,autoComplete}`, `spawnDeskGroup`: effort overrides project default; `v2/src/config.ts`; see [Desk groups](#desk-groups), [selfDestruct](#selfdestruct-steps).
@@ -115,6 +120,8 @@ Type/constraint/default per key; full validation source `v2/src/config.ts`.
 ## Admission control
 
 Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-parked or memory-shed session. Over cap: `429` naming stop candidates. Reporting route: [`GET /headroom`](daemon-api.md). CLI: [`spur doctor`](commands.md#doctor). Schema `v2/src/config.ts`, enforcement `v2/src/session-service.ts`.
+
+`stopReason: "runtime_lost"`: confirmed runtime loss becomes restorable `stopped`, retains error evidence, releases capacity; unknown probes retain capacity (`v2/src/session-service.ts`).
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
@@ -147,6 +154,8 @@ A session bound to a PR GitHub reports as nonexistent stops signal polling after
 ## Events
 
 Sources emit events; triggers `spawn` or `send`. Auto-ping scopes: [commands.md#auto-ping](commands.md#auto-ping). `--thread` targets: `github` (review threads), `gitlab` (discussions), `telegram` (forum topics) — no other source has a thread target. `cron`, `github-ci`, `sentry`, `jira` carry no auto-ping controls at all (spawn-only sources). Retry/backoff and poll-cost mechanics: `v2/src/event-sources/*.ts`.
+
+Trigger spawn retry: cap/memory denials persist across restarts, preserve successful desk members; source-type/trigger changes or removal discard pending work (`v2/src/triggers.ts`).
 
 Event names by source:
 

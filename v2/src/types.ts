@@ -229,6 +229,7 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
   (
     | {
         state: "pending";
+        spawnWorkId?: string;
       }
     | {
         state: "running";
@@ -244,6 +245,31 @@ export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
         completedAt: string;
       }
   );
+
+export type PersistedSpawnBlock =
+  | { birthKey: string; state: "pending" }
+  | { birthKey: string; state: "succeeded"; sessionId: string }
+  | { birthKey: string; state: "failed"; error: string; sessionId?: string };
+
+export interface PersistedSpawnWork {
+  workId: string;
+  revision: number;
+  projectId: string;
+  triggerId: string;
+  sourceId: string;
+  eventName: string;
+  occurrenceId: string;
+  routeFingerprint: string;
+  eventData: unknown;
+  createdAt: string;
+  nextBlockIndex: number;
+  blocks: PersistedSpawnBlock[];
+  anchorSessionId?: string;
+  lastSessionId?: string;
+  failures: string[];
+  admissionDenials: number;
+  notBeforeAt: number;
+}
 
 interface BaseSourceConfig {
   runOnStart: boolean;
@@ -268,17 +294,22 @@ export interface GitHubAdaptivePollConfig {
   activeGraceMs: number;
 }
 
-export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> & {
-  adaptivePoll?: GitHubAdaptivePollConfig;
-  // Caps how many sessions one review poll batches into a single GraphQL call.
-  // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
-  // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
-  maxReviewBatchTargets?: number;
-  // How often a durably poll-disabled session (bound PR permanently not found) gets
-  // one bounded recheck request. Default 86400000 (24h, see
-  // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
-  pollDisabledRecheckMs?: number;
-};
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github"> &
+  (
+    | { selfMarker?: string; signPosts?: never }
+    // signPosts: the launch prompt tells the agent to sign its posts with selfMarker.
+    | { selfMarker: string; signPosts: true }
+  ) & {
+    adaptivePoll?: GitHubAdaptivePollConfig;
+    // Caps how many sessions one review poll batches into a single GraphQL call.
+    // Clamped by the query's node budget (48 bound / 9 unbound targets per call, see
+    // review-providers/github.ts reviewBatchTargetLimit), so it can only lower it.
+    maxReviewBatchTargets?: number;
+    // How often a durably poll-disabled session (bound PR permanently not found) gets
+    // one bounded recheck request. Default 86400000 (24h, see
+    // event-sources/github.ts POLL_DISABLED_RECHECK_INTERVAL_MS).
+    pollDisabledRecheckMs?: number;
+  };
 export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
 export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
@@ -924,6 +955,9 @@ export interface AppConfig {
   ui: {
     port: number;
   };
+  mcp: {
+    port: number;
+  };
   models: {
     codexHome: string;
   };
@@ -1111,6 +1145,9 @@ export interface CursorRestoreBoundary {
 export interface SessionRecord {
   id: string;
   project: string;
+  /** Internal durable trigger birth identity and original request. */
+  triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
   // The id of the workspace (shared git worktree) this session lives in.
   // Equals the session's own id for a session that does not share a
   // workspace; otherwise the id of the session whose workspace it joined
@@ -1154,7 +1191,7 @@ export interface SessionRecord {
   agentLaunchId?: string;
   status: SessionStatus;
   /** "memory_shed" is written only by the critical memory shed's session stop. */
-  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget";
+  stopReason?: "manual_pause" | "stale_timeout" | "memory_shed" | "token_budget" | "runtime_lost";
   tokenBudgetOverride?: boolean;
   tokenUsage?: SessionTokenUsageRecord;
   preflightTokenUsage?: PreflightTokenUsageRecord;
@@ -1175,6 +1212,8 @@ export interface SessionRecord {
    * desk-shared sidecar, the session itself for an mcp sidecar).
    */
   sidecarProcs?: Record<string, SidecarProcessIdentity>;
+  /** Restore-owned sidecar launches not yet acknowledged as configured commands. */
+  sidecarLaunches?: Record<string, string>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   /**
@@ -1213,6 +1252,8 @@ export interface SessionRecord {
   todoNudge?: { fingerprint: string; attempts: number };
   stateSubscriptions?: SessionStateSubscription[];
   error?: string;
+  /** Internal provenance for a retained session error; absent on legacy records. */
+  errorSource?: "inferred_runtime_exit" | "runtime_probe" | "other";
   /** Presence distinguishes initialized ledgers from pre-ToDo records. */
   todoLedgerVersion?: 1;
 }
@@ -1318,10 +1359,14 @@ export interface SessionView extends Omit<
   SessionRecord,
   | "queuedMessages"
   | "agentLaunchId"
+  | "triggerBirthKey"
+  | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "tokenUsage"
   | "preflightTokenUsage"
   | "cursorRestoreBoundary"
   | "codexRestoreStartedAt"
+  | "errorSource"
 > {
   lifecycle: SessionLifecycleSnapshot;
   runtimeAlive: boolean;
@@ -1369,9 +1414,13 @@ export type DashboardOmittedField =
   | "allowedTriggers"
   | "agentSessionId"
   | "agentLaunchId"
+  | "triggerBirthKey"
+  | "triggerBirthRequest"
+  | "sidecarLaunches"
   | "branchSource"
   | "tokenUsage"
-  | "preflightTokenUsage";
+  | "preflightTokenUsage"
+  | "errorSource";
 
 export interface DashboardSessionView extends Omit<SessionRecord, DashboardOmittedField> {
   lifecycle: SessionLifecycleSnapshot;
@@ -1596,7 +1645,7 @@ export interface CompleteSessionRequest {
 
 export type TodoActor =
   | { kind: "agent"; agent: AgentName; sessionId: string }
-  | { kind: "human"; origin: "cli" | "ui" | "telegram" }
+  | { kind: "human"; origin: "cli" | "ui" | "mcp" | "telegram" }
   | { kind: "system"; source: "spawn" | "legacy_migration" | "handoff" };
 
 export type TodoBlocker = { kind: "external" } | { kind: "human"; requiredAction: string };
@@ -1850,6 +1899,7 @@ export interface ProjectConfigMutationResponse {
 }
 
 export interface RuntimeInfo {
+  buildId: string;
   lifecycleInstanceId: string;
   ok: true;
   apiVersion: number;
@@ -1928,6 +1978,23 @@ export type TranscriptEntry =
       multiSelect?: boolean;
       timestampMs?: number;
     };
+
+export interface ConversationPage {
+  sessionId: string;
+  state: SessionState;
+  messages: {
+    index: number;
+    role: "user" | "assistant";
+    text: string;
+    timestampMs?: number;
+    textTruncated?: boolean;
+  }[];
+  startIndex: number;
+  totalEntries: number;
+  nextFrom: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+}
 
 export interface ConversationResponse {
   messages: ConversationMessage[];
