@@ -12,9 +12,15 @@ import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
 import type * as InstalledInstance from "../../src/installed-instance.js";
 import type * as PortProbe from "../../src/port-probe.js";
+import type * as CacheRetention from "../../src/cache-retention.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const execFileSyncMock = vi.hoisted(() => vi.fn());
+const planCachePruneMock = vi.hoisted(() => vi.fn<typeof CacheRetention.planCachePrune>());
+vi.mock("../../src/cache-retention.js", async (original) => ({
+  ...(await original<typeof CacheRetention>()),
+  planCachePrune: planCachePruneMock,
+}));
 vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof ChildProcess>()),
   execFileSync: execFileSyncMock,
@@ -30,6 +36,16 @@ beforeEach(async () => {
   vi.stubEnv("HOME", directory);
   vi.stubEnv("SPUR_CONFIG", "");
   execFileSyncMock.mockReset();
+  // Config selection must not measure the host's caches or process table.
+  planCachePruneMock.mockReset();
+  planCachePruneMock.mockResolvedValue({
+    generatedAt: new Date(0).toISOString(),
+    roots: [],
+    candidates: [],
+    reclaimableKb: 0,
+    processTreeReadable: true,
+    pinSourceCount: 0,
+  });
   vi.resetModules();
   api = await import("../../src/installed-instance.js");
 });
@@ -128,6 +144,9 @@ describe("installed instance selection", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("fixture has no services")));
     const { collectHostInstallChecks } = await import("../../src/host-install.js");
     const checks = await collectHostInstallChecks(directory);
+    expect(planCachePruneMock).toHaveBeenCalledWith(
+      expect.objectContaining({ home: directory, instanceConfig: { status: "absent" } }),
+    );
     expect(checks.find((check) => check.id === "systemd-units")).toMatchObject({ ok: false });
     expect(existsSync(path)).toBe(false);
     expect(api.prepareInstallationConfig(path, 4311).mcp.port).toBe(4312);
