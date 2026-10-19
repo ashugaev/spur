@@ -1790,6 +1790,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setError(null);
     setConversation(null);
     setFromIndex(null);
+    setIsLoadingOlder(false);
     dismissLoadErrorToast();
     return () => {
       loadRequestIdRef.current += 1;
@@ -1976,6 +1977,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (!signal.aborted) setConversation(payload);
       } catch {
         if (!signal.aborted) setConversation(null);
+      } finally {
+        if (!signal.aborted && fromIndex !== null) setIsLoadingOlder(false);
       }
     },
     [session?.agent, sessionId, fromIndex],
@@ -1991,14 +1994,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const handleResumeTail = useCallback(() => {
     setFromIndex(null);
-  }, []);
-
-  useEffect(() => {
     setIsLoadingOlder(false);
-    // Only a freshly loaded conversation should clear the older-page spinner;
-    // isLoadingOlder is intentionally excluded so setting it true doesn't
-    // immediately re-run this effect and clear it before the fetch resolves.
-  }, [conversation]);
+  }, []);
 
   const handleAnswer = useCallback(
     async (optionIndex: number) => {
