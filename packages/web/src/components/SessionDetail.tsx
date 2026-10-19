@@ -25,6 +25,7 @@ import {
   type ReasoningIntent,
 } from "@/lib/reasoning-effort";
 import { TokenCount } from "@/components/TokenCount";
+import { SessionLoadState, type SessionLoadFailure } from "@/components/SessionLoadState";
 import { useResolvedSpawnDefaults } from "@/lib/spawn-defaults";
 import { buildDeskSpawnPayload, buildRespawnSessionPayload } from "@/lib/spawn-payload";
 import { FileAttachmentTextarea } from "@/components/FileAttachmentTextarea";
@@ -397,6 +398,18 @@ function ArtifactZoomResetIcon() {
 }
 
 const POLL_INTERVAL_MS = 4_000;
+
+// Daemon answers 503 while starting; the Next route answers 502 when it can't reach it.
+const TRANSIENT_LOAD_STATUSES: ReadonlySet<number> = new Set([502, 503]);
+
+class SessionLoadHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 // Page size for a scroll-back fetch. Must match the daemon's
 // CONVERSATION_PAGE_ENTRIES (v2/src/claude-jsonl-state.ts).
 const CONVERSATION_SCROLL_PAGE_ENTRIES = 100;
@@ -1615,7 +1628,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<SessionLoadFailure | null>(null);
   const [busyRequestAction, setBusyAction] = useState<string | null>(null);
   const lifecycleRef = useRef(new SessionLifecycleConsumer());
   const rawSessionRef = useRef<SpurSessionView | null>(null);
@@ -1858,7 +1871,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             }
           }
-          throw new Error(await readApiErrorMessage(response, "Failed to load session"));
+          throw new SessionLoadHttpError(
+            await readApiErrorMessage(response, "Failed to load session"),
+            response.status,
+          );
         }
         const payload = (await response.json()) as SpurSessionView;
         if (
@@ -1890,7 +1906,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         const message = errorMessage(loadError, "Failed to load session");
         if (sessionRef.current?.id !== requestedSessionId) {
           setSession(null);
-          setError(message);
+          setError({
+            message,
+            transient:
+              loadError instanceof SessionLoadHttpError &&
+              TRANSIENT_LOAD_STATUSES.has(loadError.status),
+          });
           return;
         }
         if (lastLoadErrorToastRef.current?.message === message) return;
@@ -4562,17 +4583,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           />
         </>
       ) : error ? (
-        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
-          <p>Unable to load this session.</p>
-          <p className="mt-2 whitespace-pre-wrap break-words">{error}</p>
-          <button
-            type="button"
-            onClick={() => void loadSession()}
-            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
-          >
-            Retry
-          </button>
-        </div>
+        <SessionLoadState failure={error} onRetry={loadSession} />
       ) : (
         <CenteredLoader className="flex-1" label="Loading session" />
       )}
