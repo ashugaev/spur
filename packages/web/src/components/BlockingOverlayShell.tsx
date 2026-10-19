@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { STATUS_CARD_CLASS } from "@/design/classes";
 
 interface BlockingOverlayShellProps {
   testId: string;
@@ -31,9 +32,7 @@ export function BlockingOverlayShell({
       data-testid={testId}
       role="alertdialog"
     >
-      <div className="w-[min(24rem,calc(100vw-2rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4 shadow-[0_8px_24px_var(--color-shadow-modal-sm)]">
-        {children}
-      </div>
+      <div className={`w-[min(24rem,calc(100vw-2rem))] ${STATUS_CARD_CLASS}`}>{children}</div>
     </div>
   );
 }
