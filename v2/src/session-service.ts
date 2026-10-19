@@ -3069,6 +3069,7 @@ interface HandoffAdmission {
 
 interface BackgroundSpawnOptions {
   triggerBirthKey?: string;
+  triggerBirthRequest?: SpawnSessionRequest;
   modeResolution?: "strict" | "carried";
   telegramOrigin?: TelegramSpawnOrigin;
   promptKind?: UserInputKind;
@@ -12564,6 +12565,7 @@ export class SessionService {
         if (admissionReservation === undefined) {
           const accepted = await this.acceptBackgroundSpawn(request, {
             ...options,
+            ...(triggerBirthRequest ? { triggerBirthRequest } : {}),
             validatedLaunchSelection: launchSelection,
           });
           if (options?.acceptQueued) return accepted.session;
@@ -13653,7 +13655,7 @@ export class SessionService {
     request: SpawnSessionRequest,
     options: BackgroundSpawnOptions = {},
   ): Promise<PreparedSpawn> {
-    const triggerBirthRequest = options.triggerBirthKey ? structuredClone(request) : undefined;
+    const triggerBirthRequest = options.triggerBirthRequest;
     request = normalizeShepherdSpawnRequest(request);
     let stage = "validating";
     let sessionId: string | undefined;

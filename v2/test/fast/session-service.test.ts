@@ -23387,43 +23387,52 @@ describe("SessionService", () => {
       readCgroupPressureMock.mockReturnValue({ someAvg10: 1, someAvg60: 1, fullAvg10: 0 });
     }
 
-    it("coalesces accepted queued trigger births and retains their persisted identity", async () => {
-      const config = queueConfig();
-      loadConfigMock.mockReturnValue(config);
-      readHostMemoryMock.mockReturnValue({
-        totalBytes: 65_000_000 * 1024,
-        availableBytes: 1,
-        swapTotalBytes: 4_000_000_000,
-        swapFreeBytes: 4_000_000_000,
-      });
-      const sessions = createSessionStore();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const request = { project: "api", prompt: "one durable birth" };
-      const options = { triggerBirthKey: "queued-birth:0", acceptQueued: true };
-      try {
-        const [first, concurrent] = await Promise.all([
-          service.spawn(request, options),
-          service.spawn(request, options),
-        ]);
-        expect(concurrent.id).toBe(first.id);
-        expect(first.status).toBe("spawning");
-        expect(sessions.get(first.id)).toMatchObject({
-          triggerBirthKey: options.triggerBirthKey,
-          triggerBirthRequest: request,
-          spawnIntent: { phase: "queued" },
+    it.each(["api", "spur-shepherd"])(
+      "coalesces accepted queued trigger births for %s and retains their original request",
+      async (project) => {
+        const config = queueConfig();
+        loadConfigMock.mockReturnValue(config);
+        readHostMemoryMock.mockReturnValue({
+          totalBytes: 65_000_000 * 1024,
+          availableBytes: 1,
+          swapTotalBytes: 4_000_000_000,
+          swapFreeBytes: 4_000_000_000,
         });
-        expect((await service.spawn(request, options)).id).toBe(first.id);
-        await expect(service.spawn({ ...request, prompt: "different" }, options)).rejects.toThrow(
-          "different spawn request",
-        );
-        expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
-        expect(createTmuxSessionMock).not.toHaveBeenCalled();
-      } finally {
-        service.dispose();
-        await service.settleBackgroundSpawns();
-      }
-    });
+        const sessions = createSessionStore();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        const request = { project, prompt: "one durable birth" };
+        const options = { triggerBirthKey: "queued-birth:0", acceptQueued: true };
+        try {
+          const [first, concurrent] = await Promise.all([
+            service.spawn(request, options),
+            service.spawn(request, options),
+          ]);
+          expect(concurrent.id).toBe(first.id);
+          expect(first.status).toBe("spawning");
+          expect(sessions.get(first.id)).toMatchObject({
+            triggerBirthKey: options.triggerBirthKey,
+            triggerBirthRequest: request,
+            spawnIntent: { phase: "queued" },
+          });
+          expect(sessions.get(first.id)?.triggerBirthRequest).toEqual(request);
+          if (project === "spur-shepherd") {
+            expect(sessions.get(first.id)?.spawnIntent?.request.overrides).toMatchObject({
+              worktree: false,
+            });
+          }
+          expect((await service.spawn(request, options)).id).toBe(first.id);
+          await expect(service.spawn({ ...request, prompt: "different" }, options)).rejects.toThrow(
+            "different spawn request",
+          );
+          expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+          expect(createTmuxSessionMock).not.toHaveBeenCalled();
+        } finally {
+          service.dispose();
+          await service.settleBackgroundSpawns();
+        }
+      },
+    );
 
     it.each(["ram", "swap", "psi"] as const)(
       "accepts %s pressure, retains queued messages, and launches once below the wake floor",
