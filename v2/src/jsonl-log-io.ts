@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import {
   closeSync,
   existsSync,
@@ -13,6 +14,26 @@ import { StringDecoder } from "node:string_decoder";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 const READ_CHUNK = 1 << 16; // 64 KiB — keeps peak memory bounded regardless of file size.
+
+// Native input identity uses persisted bytes, never replacement-decoded text.
+// Reject the source if a row is malformed or the final row is incomplete.
+export async function* iterNativeJsonlLines(input: AsyncIterable<Buffer>): AsyncGenerator<Buffer> {
+  let carry: Buffer = Buffer.alloc(0);
+  for await (const chunk of input) {
+    const bytes = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+    let start = 0;
+    let end = bytes.indexOf(10);
+    while (end !== -1) {
+      const row = bytes.subarray(start, end);
+      if (row.includes(13) || !isUtf8(row)) throw new Error("Malformed native JSONL row");
+      yield row;
+      start = end + 1;
+      end = bytes.indexOf(10, start);
+    }
+    carry = bytes.subarray(start);
+  }
+  if (carry.length > 0) throw new Error("Incomplete native JSONL row");
+}
 
 export function archivePath(path: string, index: number): string {
   return `${path}.${index}.gz`;

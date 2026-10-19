@@ -480,6 +480,7 @@ vi.mock("../../src/agents/index.js", async (importOriginal) => ({
 }));
 
 vi.mock("../../src/config.js", () => ({
+  carryProjectConfigSource: <T>(_source: unknown, target: T): T => target,
   buildSidecarLinkUrl: (template: string, reservedPort: number) =>
     template.includes("{port}")
       ? template.replaceAll("{port}", String(reservedPort))
@@ -948,7 +949,8 @@ function createSessionStore() {
   // every call (clone() always allocates a new object), which contradicts
   // the real listSessions() and would make the tick's record-change
   // detection untestable. readSessionMock/writeSessionMock stay a raw clone
-  // per call, mirroring production where only listSessions is stat-gated.
+  // per call: production readSession shares the same cache, but no caller
+  // relies on its identity.
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,8 @@ import {
   loadConfig,
   loadInstanceConfigReadOnly,
   loadProjectConfig,
+  projectConfigSource,
+  carryProjectConfigSource,
   resolveConfigPath,
   writeProjectConfigScaffold,
 } from "../../src/config.js";
@@ -33,6 +36,23 @@ const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+
+it("retains the parsed source bytes without trusting a later config reread or copied object", async () => {
+  const file = await writeConfig("projects:\n  app:\n    path: $REPO_PATH\n");
+  await writeFile(file, Buffer.concat([await readFile(file), Buffer.from([35, 32, 255, 10])]));
+  const bytes = await readFile(file);
+  const project = loadConfig(file).projects["app"];
+  if (!project) throw new Error("missing project");
+  await writeFile(file, "projects: {}\n");
+  expect(projectConfigSource(project)).toEqual({
+    file: await realpath(file),
+    digest: createHash("sha256").update(bytes).digest("hex"),
+  });
+  const copied = { ...project };
+  expect(projectConfigSource(copied)).toBeNull();
+  carryProjectConfigSource(project, copied);
+  expect(projectConfigSource(copied)).toEqual(projectConfigSource(project));
+});
 
 it("parses caller-pinned release continuation and rejects invalid interval/digest", async () => {
   const configPath = await writeConfig(
@@ -87,6 +107,34 @@ afterEach(async () => {
 });
 
 describe("loadConfig", () => {
+  it.each([
+    [4310, 5555, 4311],
+    [4311, 5555, 4312],
+    [4310, 4311, 4312],
+    [4311, 4312, 4313],
+  ])("derives MCP port excluding daemon %i and UI %i", async (daemon, ui, expected) => {
+    const path = await writeNamedConfig(
+      "config.yaml",
+      `server:\n  port: ${daemon}\nui:\n  port: ${ui}\n`,
+    );
+    expect(loadConfig(path).mcp.port).toBe(expected);
+  });
+  it("loads instance MCP port and rejects collisions or invalid ports", async () => {
+    const configPath = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    expect(loadConfig(configPath).mcp.port).toBe(4321);
+    for (const port of [0, 65536, 1.5, 4310, 5555]) {
+      await writeFile(configPath, `mcp:\n  port: ${port}\n`);
+      expect(() => loadConfig(configPath)).toThrow("mcp.port");
+    }
+  });
+
+  it("inherits instance MCP port instead of project override", async () => {
+    const instance = await writeNamedConfig("config.yaml", "mcp:\n  port: 4321\n");
+    const project = await writeConfig(
+      "mcp:\n  port: 9\nprojects:\n  test:\n    path: $REPO_PATH\n",
+    );
+    expect(loadProjectConfig(project, loadConfig(instance)).mcp.port).toBe(4321);
+  });
   it("normalizes webhook sources and resolves their secret", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -2604,6 +2652,141 @@ projects:
         ],
         autoComplete: true,
       },
+    });
+  });
+
+  it("accepts a GitHub session marker and rejects unusable templates", async () => {
+    const source = (value: string) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        selfMarker: ${value}
+`;
+    const configured = loadConfig(
+      await writeConfig(source('"[AI-generated, session: {session}]"')),
+    );
+    expect(configured.projects.backend?.sources["pr-watch"]).toMatchObject({
+      type: "github",
+      selfMarker: "[AI-generated, session: {session}]",
+    });
+    for (const value of ['"static"', '""', "42"]) {
+      const path = await writeConfig(source(value));
+      expect(() => loadConfig(path)).toThrow();
+    }
+  });
+
+  describe("signPosts", () => {
+    const marker = "[AI-generated, session: {session}]";
+    const otherMarker = "[bot {session}]";
+    const yaml = (value: string) => JSON.stringify(value);
+    const project = (...sources: string[]) => `
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+${sources.join("")}`;
+    const githubSource = (id: string, ...fields: string[]) =>
+      `      ${id}:\n        type: github\n${fields.map((field) => `        ${field}\n`).join("")}`;
+    const shapes: [name: string, template: string, message: string][] = [
+      ["line break", "a\n{session}", "one line"],
+      ["leading >", "> {session}", 'must not start with ">"'],
+      ["leading spaces then >", "  > {session}", 'must not start with ">"'],
+      ["backtick", "`{session}`", "backtick"],
+    ];
+
+    it("loads with a one-line selfMarker", async () => {
+      const config = loadConfig(
+        await writeConfig(
+          project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, "signPosts: true")),
+        ),
+      );
+      expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+        type: "github",
+        selfMarker: marker,
+        signPosts: true,
+      });
+    });
+
+    it("rejects a missing selfMarker", async () => {
+      const path = await writeConfig(project(githubSource("pr-watch", "signPosts: true")));
+      expect(() => loadConfig(path)).toThrow(/signPosts requires/);
+    });
+
+    it("rejects a non-boolean value", async () => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(marker)}`, 'signPosts: "yes"')),
+      );
+      expect(() => loadConfig(path)).toThrow(/signPosts must be a boolean/);
+    });
+
+    it("false stores nothing", async () => {
+      const config = loadConfig(
+        await writeConfig(project(githubSource("pr-watch", "signPosts: false"))),
+      );
+      const parsed = config.projects.backend?.sources["pr-watch"];
+      expect(parsed).toMatchObject({ type: "github" });
+      expect("signPosts" in (parsed ?? {})).toBe(false);
+    });
+
+    it.each(shapes)("rejects selfMarker shape: %s", async (_name, template, message) => {
+      const path = await writeConfig(
+        project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`, "signPosts: true")),
+      );
+      expect(() => loadConfig(path)).toThrow(message);
+    });
+
+    it("leaves unsigned selfMarker shapes valid", async () => {
+      for (const [, template] of shapes) {
+        const config = loadConfig(
+          await writeConfig(project(githubSource("pr-watch", `selfMarker: ${yaml(template)}`))),
+        );
+        expect(config.projects.backend?.sources["pr-watch"]).toMatchObject({
+          selfMarker: template.trim(),
+        });
+      }
+    });
+
+    it("rejects a different selfMarker", async () => {
+      const cases = [
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`, "signPosts: true"),
+        ),
+        project(
+          githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+          githubSource("second", `selfMarker: ${yaml(otherMarker)}`),
+        ),
+      ];
+      for (const content of cases) {
+        const path = await writeConfig(content);
+        expect(() => loadConfig(path)).toThrow(
+          /sources\.second\.selfMarker must match projects\.backend\.sources\.first\.selfMarker because first sets signPosts/,
+        );
+      }
+    });
+
+    it("accepts a shared or absent selfMarker", async () => {
+      const shared = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("second", `selfMarker: ${yaml(marker)}`),
+          ),
+        ),
+      );
+      expect(shared.projects.backend?.sources["second"]).toMatchObject({ selfMarker: marker });
+      const absent = loadConfig(
+        await writeConfig(
+          project(
+            githubSource("first", `selfMarker: ${yaml(marker)}`, "signPosts: true"),
+            githubSource("third"),
+          ),
+        ),
+      );
+      expect(absent.projects.backend?.sources["third"]).toMatchObject({ type: "github" });
     });
   });
 

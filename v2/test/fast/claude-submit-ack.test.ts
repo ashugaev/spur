@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ vi.mock("../../src/agents/claude.js", () => ({
 
 import {
   captureClaudeSubmitBaseline,
+  observeClaudeNativeUsers,
   scanClaudeJsonlForMessage,
 } from "../../src/agents/claude-submit-ack.js";
 
@@ -54,6 +56,156 @@ async function appendJsonl(filePath: string, lines: Array<Record<string, unknown
   const body = lines.map((line) => JSON.stringify(line)).join("\n") + "\n";
   await writeFile(filePath, body, { encoding: "utf8", flag: "a" });
 }
+
+describe("native accepted input", () => {
+  const body = "task\n\nSession metadata:\ncaller exact suffix";
+  const digest = createHash("sha256").update(body).digest("hex");
+
+  it("retains the post-baseline USER occurrence without treating enqueue as USER", async () => {
+    const file = await makeJsonl("current.jsonl", [
+      { type: "user", sessionId: "native", message: { role: "user", content: body } },
+    ]);
+    const baseline = { file, size: (await captureClaudeSubmitBaselineForFile(file)).size };
+    await appendJsonl(file, [{ type: "queue-operation", operation: "enqueue", content: body }]);
+    expect(await scanClaudeJsonlForMessage(baseline, body, "/tmp/worktree", "native")).toBe(true);
+    expect(await observeClaudeNativeUsers(baseline, digest, "native")).toEqual([]);
+    await appendJsonl(file, [
+      {
+        type: "user",
+        uuid: "new-user",
+        sessionId: "native",
+        message: { role: "user", content: body },
+      },
+    ]);
+    const observations = await observeClaudeNativeUsers(baseline, digest, "native");
+    expect(observations).toEqual([
+      expect.objectContaining({
+        nativeSessionId: "native",
+        source: file,
+        recordId: "new-user",
+        bodyDigest: digest,
+        recordDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+    expect(await observeClaudeNativeUsers(baseline, digest, "native")).toEqual(observations);
+  });
+
+  it("rejects wrong native identity and a different full caller suffix", async () => {
+    const file = await makeJsonl("current.jsonl", [
+      { type: "user", sessionId: "old", message: { role: "user", content: body } },
+      {
+        type: "user",
+        sessionId: "native",
+        message: { role: "user", content: `${body} changed` },
+      },
+    ]);
+    expect(await observeClaudeNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+
+  it("keeps repeated identical USER occurrences distinct for journal arbitration", async () => {
+    const row = { type: "user", sessionId: "native", message: { role: "user", content: body } };
+    const file = await makeJsonl("current.jsonl", [row, row]);
+    const observations = await observeClaudeNativeUsers({ file, size: 0 }, digest, "native");
+    expect(observations).toHaveLength(2);
+    expect(observations[0]?.recordId).not.toBe(observations[1]?.recordId);
+  });
+
+  it("uses UTF-8 byte identities and refuses baselines inside a record or character", async () => {
+    const text = "Задача 🧪\n\nпользователь: точный суффикс";
+    const textDigest = createHash("sha256").update(text).digest("hex");
+    const prior = { type: "user", sessionId: "native", message: { role: "user", content: text } };
+    const priorBytes = Buffer.byteLength(JSON.stringify(prior) + "\n");
+    const file = await makeJsonl("current.jsonl", [prior, prior]);
+    const observations = await observeClaudeNativeUsers(
+      { file, size: priorBytes },
+      textDigest,
+      "native",
+    );
+    expect(observations).toEqual([
+      expect.objectContaining({ recordId: `bytes:${priorBytes}:${priorBytes - 1}` }),
+    ]);
+    expect(observations[0]?.recordDigest).toBe(
+      createHash("sha256")
+        .update(Buffer.from(JSON.stringify(prior)))
+        .digest("hex"),
+    );
+    const emojiByteOffset = Buffer.byteLength(JSON.stringify(prior).split("🧪")[0] ?? "");
+    for (const size of [5, emojiByteOffset + 1, priorBytes - 1]) {
+      expect(await observeClaudeNativeUsers({ file, size }, textDigest, "native")).toEqual([]);
+    }
+  });
+
+  it.each([false, true])(
+    "rejects malformed raw UTF-8 with a later valid USER=%s",
+    async (later) => {
+      const file = await makeJsonl("current.jsonl", []);
+      const row = Buffer.from(
+        JSON.stringify({
+          type: "user",
+          sessionId: "native",
+          message: { role: "user", content: "SENT" },
+        }),
+      );
+      const at = row.indexOf("SENT");
+      const malformed = Buffer.concat([
+        row.subarray(0, at),
+        Buffer.from([0xff]),
+        row.subarray(at + 4),
+        Buffer.from("\n"),
+      ]);
+      const valid = Buffer.from(
+        JSON.stringify({
+          type: "user",
+          sessionId: "native",
+          message: { role: "user", content: body },
+        }) + "\n",
+      );
+      await writeFile(file, later ? Buffer.concat([malformed, valid]) : malformed);
+      const target = later ? body : "\ufffd";
+      const hash = createHash("sha256").update(target).digest("hex");
+      expect(await observeClaudeNativeUsers({ file, size: 0 }, hash, "native")).toEqual([]);
+      expect(
+        await scanClaudeJsonlForMessage({ file, size: 0 }, "\ufffd", "/tmp/worktree", "native"),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["isMeta", "isCompactSummary", "isSidechain"])(
+    "does not promote copied %s USER text into a submitted occurrence",
+    async (flag) => {
+      const file = await makeJsonl("current.jsonl", [
+        {
+          type: "user",
+          sessionId: "native",
+          [flag]: true,
+          message: { role: "user", content: body },
+        },
+      ]);
+      expect(await observeClaudeNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+      expect(await scanClaudeJsonlForMessage({ file, size: 0 }, body, "/tmp/worktree")).toBe(true);
+    },
+  );
+
+  it.each(["", "\r\n"])("rejects incomplete or unsupported record framing %j", async (ending) => {
+    const file = await makeJsonl("current.jsonl", []);
+    await writeFile(
+      file,
+      JSON.stringify({
+        type: "user",
+        sessionId: "native",
+        message: { role: "user", content: body },
+      }) + ending,
+    );
+    expect(await observeClaudeNativeUsers({ file, size: 0 }, digest, "native")).toEqual([]);
+  });
+
+  async function captureClaudeSubmitBaselineForFile(file: string): Promise<{ size: number }> {
+    findLatestSessionFileMock.mockResolvedValue(file);
+    const baseline = await captureClaudeSubmitBaseline("/tmp/worktree");
+    if (!baseline) throw new Error("Missing fixture baseline");
+    return baseline;
+  }
+});
 
 describe("captureClaudeSubmitBaseline", () => {
   it("returns null when no JSONL file exists", async () => {
