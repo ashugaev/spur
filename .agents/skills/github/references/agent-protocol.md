@@ -24,14 +24,15 @@ GITHUB PUBLICATION
   Read actual SPUR_SESSION; missing value blocks publication. Never invent actor identity.
   Preserve review fields; exclude commit messages and PR titles from footer rule.
   Treat footer as provenance text, never signature, approval or protected proof.
-  Follow review-contract.md for scenarios, independent coverage challenge, delta evidence and pinned native publication.
+  Follow review-contract.md for changed-boundary scenarios, delta evidence and pinned native publication.
 
 MERGE AUTHORITY
 
   Keep human merge default; leave auto-merge OFF without live activation proof.
   Require two distinct designated eligible non-author native APPROVED identities for target automated flow: code and browser/manual.
   Reject generic vote count, same-login lanes and local verdicts as target gate substitutes.
-  Permit native auto-merge only after separate user authorization, admin configuration and sandbox activation proof of default-branch Approval Gate with designated consent/exact-identity/strict-CI enforcement.
+  Permit native auto-merge only after explicit operator consent, both required native APPROVED reviews, green required checks, admin configuration and sandbox activation proof of default-branch Approval Gate with designated consent/exact-identity/strict-CI enforcement.
   Block strict success for pending/failing/missing/canceled/skipped/neutral required execution; no bypass.
   Reject footer, PR-owned receipt, prompt affirmation or replayed consent as protected approval proof.
   Require producer provenance, revision/lifecycle invalidation and privileged runner isolation before activation.
+  Never disable auto-merge.

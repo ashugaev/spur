@@ -2,9 +2,10 @@
 
 > Scope: CLI usage index, names and syntax only. Full behavior: `v2/src/cli.ts`, the command's own source file, or `spur <cmd> --help`. Config fields: [configuration.md](configuration.md). Daemon routes: [daemon-api.md](daemon-api.md). CI scheduling: [ci-admission.md](ci-admission.md).
 
-Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance config.
-`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; `v2/src/review-app.ts`.
+Hidden from `--help`: `daemon start|stop|restart`, `slots`, `sidecar start|stop|ports|sweep`, `self-destruct`, `branch`, `reinit`, `update-monitor`. Global `--config <path>` (or `SPUR_CONFIG`) selects the instance; fallback: [configuration.md](configuration.md).
+`review-app prepare|block|status|publish`: daemon-free lane lifecycle, App access and pinned reviews; row evidence required, legacy coverage optional; `v2/src/review-app.ts`.
 `review-gate evaluate`: approval aggregation with `GITHUB_TOKEN` and `--policy`; `v2/src/review-gate.ts`.
+`mcp [--http]`, `mcp-tunnel`: full-access daemon MCP over stdio/loopback HTTP, optional supervised tunnel; `v2/src/mcp.ts`, `v2/src/mcp-tunnel.ts`; [client setup](mcp.md).
 
 ## Session tools and environment
 
@@ -17,7 +18,7 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## gc
 
-`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
+`spur gc [--execute] [--older-than <days>] [--statuses <list>] [--project <id>] [--limit <n>] [--no-sizes] [--json]` reclaims stale worktrees, archives terminal session records. `--limit` caps groups that act and listed blocked groups; execution probes at most 2x `--limit` groups. Group actions: `reclaim`, `archive`, `partial`, `blocked`. `--older-than` is the minimum age of a record; worktree removal needs every group member eligible; otherwise `partial` archives only eligible records (`archiveSessionIds` in `--json`) and keeps ineligible records, desk anchors they reference, and one record per existing worktree. A dirty, unpushed or open-PR worktree degrades `reclaim` to `partial` with a keeper record. Defaults: `sessionGc.*` ([configuration.md#field-reference](configuration.md#field-reference)).
 
 ## disk
 
@@ -37,11 +38,11 @@ Read-only host/config/daemon health check. `--scaffold` writes a minimal local `
 
 ## daemon
 
-`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry).
+`daemon start|stop|restart`: `v2/src/cli.ts`; default instances with a systemd unit refuse detached auto-start/restart: `v2/src/client.ts`; registry: [config registry](configuration.md#config-registry). CLI daemon requests are deadline-bounded per method and an unresponsive `/info` fails without auto-start; a timed-out mutation may still be applied (values in `v2/src/client.ts`).
 
 ## init
 
-`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs the `spur-daemon`/`spur-web` systemd user units and starts them. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
+`spur init [--no-start] [--expose-web] [--web-port <port>] [--no-tailscale]` installs and starts the `spur-daemon`/`spur-web`/`spur-mcp` systemd user units plus configured `spur-mcp-tunnel`. `--expose-web` binds the web UI to `0.0.0.0` instead of `127.0.0.1` (default port `5555`, `--web-port` overrides). `--no-tailscale` skips the Tailscale private-access setup. `init`, `update`, and `reinit` install Cursor's Spur token collector; malformed or unwritable hook config skips metering without blocking setup; the collector runs only in Spur sessions; Claude, Codex, and OpenCode use native structured usage.
 
 ## update
 
@@ -104,8 +105,7 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 
 ## service, memory, agent-issue, comment-seen, subscribe
 
-`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` returns nothing today — no code path emits the `service.output`/`sidecar.output` events it filters on; read the tmux pane directly instead. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
-
+`spur service run <id> --port <n> -- <command>` / `status <id>` — session-bound tmux sidecar wrapper. `spur service logs [sessionId] [name] [--sidecar] [--limit <n>] [--json]` — retained pane and archived rows, default runtime scope and global 200-row limit; route 404/502 errors exit nonzero; `v2/src/cli.ts`. `spur memory set|get|list|rm [key] [body] --scope task|project|global [--session <id>] [--file <path>] [--json]` — one `.md` file per key. `spur session-memory <sessionId> list|get|set|resolve [key] [body] [--json]` — [daemon-api.md#session-routes](daemon-api.md#session-routes).
 `spur agent-issue log <text...>` / `list [--project <id>] [--session <id>] [--limit <n>] [--json]` — friction operating Spur itself, never a repo code defect.
 `spur comment-seen record <id...>` — marks GitHub review-comment ids seen, needs `SPUR_PROJECT`.
 
@@ -113,7 +113,7 @@ Telegram `/work`: daemon-wide Attention/Working/Recent; inspection leaves routin
 
 ## Sidecars
 
-Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
+Start `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name> [--clear-port <port>]`, stop `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>`. Incomplete launch with live tmux: start/restore fails; stop sidecar, retry; confirmed absent tmux permits start (`v2/src/session-service.ts`). Ports: `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports [--name <name>] [--json]` — `<sidecar> <portId> <env> <port> alive|dead` per line. Sweep: `spur sidecar sweep [--reap]`. Idle-reap: [Sidecar reaping](configuration.md#sidecar-reaping). Outcomes: [daemon-api.md#session-routes](daemon-api.md#session-routes).
 Open: configured reserved TCP listener + live recorded launcher; `v2/src/session-service.ts`. Dev stand: start `isolated-ui` (daemon dependency); `isolated-daemon` alone is backend-only. Seed dedicated TEST JSON once through stdin: `node v2/bin/write-isolated-project-config.mjs --input spur.yaml --output <private-project.yaml> --worktree <checkout> --project <id> --telegram-env-stdin`; unknown project rejects seed; `scripts/spur-isolated-daemon.sh` reuses it, source-free outcomes: `Telegram NOT_CONNECTED/missing-fixture`, `Telegram NOT_CONNECTED/unknown-project`, `Telegram NOT_CONNECTED/owner-busy`.
 Commands run through `sh -lc` (`dash` on Debian/Ubuntu, no `nvm`); use `bash -lc '. "$SPUR_REAL_HOME/.nvm/nvm.sh" && nvm use <v> && ...'`. A long-lived server must `exec` its process, or pid-based reaping misses it.
 Slot links: omit exact normalized matches of sidecar name and configured reserved URL, including manual duplicates; retain other targets; `v2/src/session-service.ts`.
