@@ -20,9 +20,9 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
-  "server.ts": "7e8baa0798e7b355f4262400a726a033861187b352115231e7a8f82beb2afae9",
-  "types.ts": "63cfaedf4fc40424a0edbdb5e704a9b94c4bf7621dfa3107deaf17f071650173",
-  "session-service.ts": "803aa525df56fed84b83d1d9da03435996d787bdf1ab9fc3b9defefc206ad925",
+  "server.ts": "b9c9962a2b8417696538d6c50f1cbf459a9f7fae9fd16a6d7a8ab10aad68cf16",
+  "types.ts": "719acf5790a6bd3fb75b94e27628b96e5abf17b6d2682146902ca4f2720538d5",
+  "session-service.ts": "d2f049111bda44ebd8a98941375b9b78fa1a084dec558c7b7a7142f705c6c3eb",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
@@ -85,6 +85,17 @@ describe("daemon MCP operation contracts", () => {
     expect(parserMutation).not.toBe(server);
     expect(contractFingerprint(parserMutation)).not.toBe(contractFingerprint(server));
     expect(contractFingerprint(`// comment\n${server}`)).toBe(contractFingerprint(server));
+  });
+
+  it("describes accepted spawn identities without changing the 201 response contract", () => {
+    const foreground = getDaemonOperation("spawn_session");
+    const background = getDaemonOperation("spawn_background_session");
+    expect(foreground?.responses[0]).toMatchObject({ status: 201 });
+    expect(foreground?.responses[0]?.description).toContain("spawning identity before launch");
+    expect(foreground?.responses[0]?.description).toContain("Healthy foreground");
+    expect(background?.responses[0]).toMatchObject({ status: 201 });
+    expect(background?.responses[0]?.description).toContain("across daemon restart");
+    expect(background?.responses[0]?.description).toContain("ownership remains held");
   });
 
   it("fails closed on unfamiliar dispatch/matcher syntax", async () => {
