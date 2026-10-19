@@ -57223,6 +57223,161 @@ describe("SessionService", () => {
       });
     }
 
+    it.each([
+      { name: "new owned busy status", state: "working", expected: "working" },
+      { name: "new owned dialog", state: "needs_input", expected: "needs_input" },
+      { name: "idle", state: "waiting", expected: "error" },
+      { name: "unknown ownership", paneOwned: false, expected: "error" },
+      { name: "wrong UUID", sessionId: "another-native", expected: "error" },
+      { name: "stale status", age: 60_001, expected: "error" },
+      { name: "future status", age: -1, expected: "error" },
+      { name: "newer error", errorAge: 0, expected: "error" },
+      { name: "missing error timestamp", errorAge: null, expected: "error" },
+      { name: "generic update without state timestamp", noStatusTime: true, expected: "error" },
+      { name: "metadata update after current error", statusAge: 3_000, age: 0, expected: "error" },
+      { name: "missing launch identity", noLaunch: true, expected: "error" },
+      { name: "independent failure", retainedError: true, expected: "error" },
+      { name: "absent native status", absent: true, expected: "error" },
+      { name: "quota", quota: true, expected: "rate_limited" },
+      { name: "quota at dialog", quota: true, state: "needs_input", expected: "rate_limited" },
+      { name: "launch replaced during read", change: "launch", expected: "error" },
+      { name: "UUID replaced during read", change: "uuid", expected: "error" },
+      { name: "failure recorded during read", change: "error", expected: "error" },
+      { name: "new error episode during read", change: "marker", expected: "error" },
+      { name: "lifecycle pending during read", change: "pending", expected: "error" },
+      { name: "lifecycle settled during read", change: "settled", expected: "error" },
+    ])("compares server errors with $name", async (scenario) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        agentSessionId: "native-1",
+        serverErrorAt: "2026-03-18T10:04:00.000Z",
+        ...(scenario.noLaunch ? {} : { agentLaunchId: "launch-1" }),
+        ...(scenario.retainedError
+          ? { error: "Provider request failed", errorSource: "other" as const }
+          : {}),
+      });
+      sessions.set(record.id, record);
+      const errorAt = Date.now() - (scenario.errorAge ?? 2_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        serverError: true,
+        ...(scenario.quota ? { rateLimit: { limited: true, reason: "quota" } } : {}),
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
+          tailRecords: [
+            {
+              type: "assistant",
+              serverError: true,
+              timestampMs: errorAt,
+              ...(scenario.errorAge === null ? {} : { ownTimestampMs: errorAt }),
+            },
+          ],
+        },
+      });
+      const nativeStatus = {
+        state: scenario.state ?? "working",
+        status: "busy",
+        sessionId: scenario.sessionId ?? "native-1",
+        paneOwned: scenario.paneOwned ?? true,
+        pid: 200,
+        filePath: "status.json",
+        updatedMs: Date.now() - (scenario.age ?? 1_000),
+        ...(scenario.noStatusTime
+          ? {}
+          : { statusUpdatedMs: Date.now() - (scenario.statusAge ?? scenario.age ?? 1_000) }),
+      };
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      readClaudeSessionStatusMock.mockImplementation(async () => {
+        if (scenario.change === "launch")
+          sessions.set(record.id, { ...record, agentLaunchId: "launch-2" });
+        if (scenario.change === "uuid")
+          sessions.set(record.id, { ...record, agentSessionId: "native-2" });
+        if (scenario.change === "error")
+          sessions.set(record.id, { ...record, error: "Launch failed", errorSource: "other" });
+        if (scenario.change === "marker")
+          sessions.set(record.id, { ...record, serverErrorAt: new Date().toISOString() });
+        if (scenario.change === "pending" || scenario.change === "settled") {
+          const owner = lifecycle.begin("restore", [record.id]);
+          if (scenario.change === "settled")
+            lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+        }
+        return scenario.absent ? null : nativeStatus;
+      });
+      writeSessionMock.mockClear();
+      const result = await sessionServiceInternals(service).classifySessionRecord(record);
+
+      expect(result.state).toBe(scenario.expected);
+      if (scenario.change !== "marker")
+        expect(sessions.get(record.id)?.serverErrorAt).toBe(record.serverErrorAt);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      if (scenario.change) expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["working", "needs_input"] as const)(
+      "projects a fresh native %s after a public error",
+      async (state) => {
+        const sessions = createSessionStore();
+        const record = runningSession({
+          agentSessionId: "native-1",
+          agentLaunchId: "launch-1",
+          serverErrorAt: "2026-03-18T10:04:00.000Z",
+          serverErrorReactivationAttempts: 2,
+        });
+        sessions.set(record.id, record);
+        mockServerError();
+        const service = await createDisposedSessionService();
+        expect((await service.get(record.id)).state).toBe("error");
+        vi.setSystemTime(Date.now() + 5_000);
+        readClaudeJsonlStateMock.mockResolvedValue({
+          state: "error",
+          serverError: true,
+          reader: {
+            filePath: "test.jsonl",
+            lastOffset: 0,
+            lastMtimeMs: Date.now(),
+            tailRecords: [
+              {
+                type: "assistant",
+                serverError: true,
+                timestampMs: Date.now() - 2_000,
+                ownTimestampMs: Date.now() - 2_000,
+              },
+            ],
+          },
+        });
+        readClaudeSessionStatusMock.mockResolvedValue({
+          state,
+          status: state === "working" ? "busy" : "waiting",
+          waitingFor: "permission prompt",
+          sessionId: record.agentSessionId,
+          paneOwned: true,
+          pid: 200,
+          filePath: "status.json",
+          updatedMs: Date.now(),
+          statusUpdatedMs: Date.now(),
+        });
+        const view = await service.get(record.id);
+        expect(view.state).toBe(state);
+        expect(view.stateHistory.at(-1)?.source).toBe("claude_status");
+        const dashboard = service as unknown as {
+          refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+        };
+        await dashboard.refreshDashboardCacheEntry(sessions.get(record.id) ?? record);
+        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe(state);
+        expect(sessions.get(record.id)?.serverErrorAt).toBe(record.serverErrorAt);
+        expect(sessions.get(record.id)?.serverErrorReactivationAttempts).toBe(2);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(["readiness", "binding"] as const)(
       "restores runtime_lost server errors without a scheduled reminder during %s",
       async (seam) => {

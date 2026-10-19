@@ -143,6 +143,7 @@ import {
 } from "./rate-limit-detect.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
+  ACTIVITY_WINDOW_MS,
   CONVERSATION_PAGE_ENTRIES,
   readClaudeConversationTail,
   readClaudeJsonlState,
@@ -23899,6 +23900,39 @@ export class SessionService {
           stateSource = "claude_status";
           historySourcePath = statusResult.filePath;
           classifiedDetail = `State: ${state} (claude status=${statusResult.status})`;
+          // A native retry/dialog can precede the next transcript append.
+          // Supersede only an older error, with a fresh observation from this
+          // UUID's process in the pane. Keep the error episode until the
+          // transcript supplies its existing positive recovery evidence.
+          const errorAt = jsonlResult?.reader.tailRecords
+            .slice()
+            .reverse()
+            .find((record) => record.serverError)?.ownTimestampMs;
+          const statusAt = statusResult.statusUpdatedMs;
+          const current = readSession(this.config.dataDir, session.id);
+          if (
+            hasServerErrorRecord &&
+            errorAt !== undefined &&
+            statusAt !== undefined &&
+            (state === "working" || state === "needs_input") &&
+            statusResult.paneOwned &&
+            session.agentSessionId !== undefined &&
+            statusResult.sessionId === session.agentSessionId &&
+            session.agentLaunchId !== undefined &&
+            statusAt > errorAt &&
+            statusAt <= nowMs &&
+            nowMs - statusAt <= ACTIVITY_WINDOW_MS &&
+            current &&
+            !hasRetainedSessionError(current) &&
+            current.serverErrorAt === session.serverErrorAt &&
+            sameSessionRuntimeOwner(current, session) &&
+            current.agentLaunchId === session.agentLaunchId &&
+            this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+            this.lifecycle.snapshot(session.id).revision === probeRevision &&
+            this.lifecycle.snapshot(session.id).operation?.phase !== "pending"
+          ) {
+            hasServerErrorRecord = false;
+          }
         } else if (jsonlResult) {
           state = jsonlResult.state;
           stateSource = "jsonl";
