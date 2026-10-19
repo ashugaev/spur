@@ -10,14 +10,26 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as ChildProcess from "node:child_process";
+import type * as CacheRetention from "../../src/cache-retention.js";
 import type * as InstalledInstance from "../../src/installed-instance.js";
 import type * as PortProbe from "../../src/port-probe.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const execFileSyncMock = vi.hoisted(() => vi.fn());
+const { execFileSyncMock, execFileMock, planCachePruneMock } = vi.hoisted(() => ({
+  execFileSyncMock: vi.fn(),
+  execFileMock: vi.fn(() => {
+    throw new Error("Unexpected process execution in installed-instance fixture");
+  }),
+  planCachePruneMock: vi.fn(),
+}));
 vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof ChildProcess>()),
   execFileSync: execFileSyncMock,
+  execFile: execFileMock,
+}));
+vi.mock("../../src/cache-retention.js", async (original) => ({
+  ...(await original<typeof CacheRetention>()),
+  planCachePrune: planCachePruneMock,
 }));
 vi.mock("../../src/port-probe.js", async (original) => ({
   ...(await original<typeof PortProbe>()),
@@ -30,6 +42,16 @@ beforeEach(async () => {
   vi.stubEnv("HOME", directory);
   vi.stubEnv("SPUR_CONFIG", "");
   execFileSyncMock.mockReset();
+  execFileMock.mockClear();
+  planCachePruneMock.mockReset();
+  planCachePruneMock.mockResolvedValue({
+    generatedAt: new Date(0).toISOString(),
+    roots: [],
+    candidates: [],
+    reclaimableKb: 0,
+    processTreeReadable: true,
+    pinSourceCount: 0,
+  } satisfies CacheRetention.CachePlan);
   vi.resetModules();
   api = await import("../../src/installed-instance.js");
 });
@@ -129,6 +151,14 @@ describe("installed instance selection", () => {
     const { collectHostInstallChecks } = await import("../../src/host-install.js");
     const checks = await collectHostInstallChecks(directory);
     expect(checks.find((check) => check.id === "systemd-units")).toMatchObject({ ok: false });
+    expect(planCachePruneMock).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ home: directory, signal: expect.any(AbortSignal) }),
+    );
+    expect(checks.find((check) => check.id === "reclaimable-caches")).toMatchObject({
+      ok: true,
+      detail: expect.stringContaining("no reclaimable caches found"),
+    });
+    expect(execFileMock).not.toHaveBeenCalled();
     expect(existsSync(path)).toBe(false);
     expect(api.prepareInstallationConfig(path, 4311).mcp.port).toBe(4312);
     expect(readFileSync(path, "utf8")).toContain("mcp:");
