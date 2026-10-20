@@ -57674,7 +57674,7 @@ describe("SessionService", () => {
         });
         const view = await service.get(record.id);
         expect(view.state).toBe(state);
-        expect(view.stateHistory.at(-1)).toEqual(
+        expect(view.stateHistory?.at(-1)).toEqual(
           expect.objectContaining({ source: "claude_status" }),
         );
         const dashboard = service as unknown as {
