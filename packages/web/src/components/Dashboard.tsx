@@ -1341,6 +1341,16 @@ export function Dashboard() {
   const { phase: versionSwitchPhase } = useVersionSwitch();
   const { phase: backendPhase } = useBackendConnection();
 
+  // Outage polls back off up to 8x; a recovered backend must not wait that
+  // out. The refetch succeeds, which also resets the failure baseline.
+  const previousBackendPhaseRef = useRef(backendPhase);
+  useEffect(() => {
+    const recovered =
+      previousBackendPhaseRef.current === "disconnected" && backendPhase === "connected";
+    previousBackendPhaseRef.current = backendPhase;
+    if (recovered) void queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+  }, [backendPhase, queryClient, sessionsQueryKey]);
+
   useEffect(() => {
     if (!sessionsError) {
       const current = sessionsErrorToastRef.current;

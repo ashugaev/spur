@@ -12,6 +12,12 @@ vi.mock("@/components/SessionLinkBadge", () => ({
   SessionLinkBadge: () => null,
 }));
 
+const backend = vi.hoisted(() => ({ phase: "connected" as "connected" | "disconnected" }));
+vi.mock("@/lib/backend-connection-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend-connection-context")>()),
+  useBackendConnection: () => ({ phase: backend.phase, attempts: 0, version: null }),
+}));
+
 const BASE_MS = 5_000;
 
 function setVisibility(state: "visible" | "hidden") {
@@ -38,6 +44,7 @@ describe("Dashboard sessions poll", () => {
     localStorage.clear();
     window.history.replaceState(null, "", "/");
     setVisibility("visible");
+    backend.phase = "connected";
     sessionsOk = true;
     sessionsReadMs = 0;
     sessionsCalls = [];
@@ -68,6 +75,14 @@ describe("Dashboard sessions poll", () => {
     setVisibility("visible");
     vi.useRealTimers();
   });
+
+  function tree(client: QueryClient) {
+    return (
+      <QueryClientProvider client={client}>
+        <Dashboard />
+      </QueryClientProvider>
+    );
+  }
 
   function mount() {
     // Mirrors the app defaults (providers.tsx): staleTime 5s, retry once.
@@ -151,6 +166,35 @@ describe("Dashboard sessions poll", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(sessionsCalls).toHaveLength(afterFailure);
+    view.unmount();
+  });
+
+  it("refetches at once on backend reconnect and returns to the base delay", async () => {
+    sessionsOk = false;
+    const client = new QueryClient({
+      defaultOptions: { queries: { staleTime: 5_000, retry: 1, retryDelay: 10 } },
+    });
+    const view = render(tree(client));
+    // Fail until the delay has backed off to 8x.
+    await advance(100_000);
+    const failedCalls = sessionsCalls.length;
+
+    backend.phase = "disconnected";
+    view.rerender(tree(client));
+    await advance(1);
+    expect(sessionsCalls).toHaveLength(failedCalls);
+
+    sessionsOk = true;
+    backend.phase = "connected";
+    view.rerender(tree(client));
+    await advance(0);
+    expect(sessionsCalls).toHaveLength(failedCalls + 1);
+
+    const reconnectAt = sessionsCalls.at(-1) ?? 0;
+    await advance(reconnectAt + BASE_MS - (Date.now() - t0) - 1);
+    expect(sessionsCalls).toHaveLength(failedCalls + 1);
+    await advance(1);
+    expect(sessionsCalls).toHaveLength(failedCalls + 2);
     view.unmount();
   });
 });
