@@ -14357,7 +14357,7 @@ export class SessionService {
   async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
     const prepared = await this.prepareBackgroundSpawn(request);
     this.spawnsInFlight.add(prepared.placeholder.id);
-    const placeholder = await this.enrich(prepared.placeholder);
+    const placeholder = this.enrich(prepared.placeholder);
     const run = new Promise<void>((resolve) => {
       queueMicrotask(() => {
         void (async () => {
