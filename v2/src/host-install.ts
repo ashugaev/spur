@@ -303,6 +303,51 @@ export function isActive(ctl: string[], unit: string): boolean {
   return tryExec(bin, [...args, "is-active", unit]) === "active";
 }
 
+function checkServicePersistence(
+  scope: SystemdScope,
+  id: keyof typeof SERVICE_UNITS,
+): HostInstallCheck {
+  const unit = SERVICE_UNITS[id];
+  const [bin, ...args] = scope.ctl;
+  const state = bin
+    ? tryExec(bin, [...args, "show", unit, "--property=UnitFileState", "--value"], {
+        timeoutMs: 2000,
+      })
+    : undefined;
+  const ctl = scope.kind === "system" ? "sudo systemctl" : "systemctl --user";
+  const enable = `${ctl} enable ${unit}`;
+  let fix: string | undefined;
+  let verifiedState = true;
+  if (state === "masked" || state === "masked-runtime") {
+    fix = `${ctl} unmask ${unit}, then ${enable}`;
+  } else if (["disabled", "enabled-runtime", "linked", "linked-runtime"].includes(state ?? "")) {
+    fix = enable;
+  } else if (
+    ["static", "indirect", "alias", "generated", "transient", "bad", "not-found"].includes(
+      state ?? "",
+    )
+  ) {
+    fix = `repair ${unit} with ${scope.kind === "system" ? "the source installer" : "spur reinit"}, then ${enable}`;
+  } else if (state !== "enabled") {
+    verifiedState = false;
+    fix = `${ctl} show ${unit} --property=UnitFileState --value; ${ctl} status ${unit}`;
+  }
+  return {
+    id: `spur-${id}-persistence`,
+    ok: state === "enabled",
+    severity: "error",
+    detail:
+      state === "enabled"
+        ? `${unit} persistently enabled`
+        : !state
+          ? `${unit} persistence unverified: UnitFileState unavailable`
+          : !verifiedState
+            ? `${unit} persistence unverified: UnitFileState=${state}`
+            : `${unit} not persistently enabled: UnitFileState=${state}`,
+    ...(fix ? { fix } : {}),
+  };
+}
+
 export function resolveSystemdScope(home: string): SystemdScope {
   const userUnitDir = join(
     process.env["XDG_CONFIG_HOME"] || join(home, ".config"),
@@ -1560,7 +1605,15 @@ export async function collectHostInstallChecks(
       web: instanceConfig.config.ui.port,
       mcp: instanceConfig.config.mcp.port,
     });
-    for (const id of requiredServices(scope).filter((id) => id === "mcp" || id === "tunnel")) {
+    const services = requiredServices(scope);
+    if (platform() === "linux") {
+      for (const id of services) {
+        if (existsSync(join(scope.unitDir, SERVICE_UNITS[id]))) {
+          checks.push(checkServicePersistence(scope, id));
+        }
+      }
+    }
+    for (const id of services.filter((id) => id === "mcp" || id === "tunnel")) {
       const unit = SERVICE_UNITS[id];
       const installed = existsSync(join(scope.unitDir, unit));
       const active = installed && isActive(scope.ctl, unit);

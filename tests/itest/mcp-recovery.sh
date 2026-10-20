@@ -170,12 +170,22 @@ NODE
     trap 'rm -f -- "$ITEST_REGISTRY_FAULT_FILE"' EXIT
     # Force actual artifact requests; a cached package cannot activate the fault.
     npm cache clean --force > "$ITEST_MCP_EVIDENCE_DIR/rollback.cache" 2>&1
-    node --input-type=module - "$url" "$daemon_url" <<'NODE'
+    node --input-type=module - "$url" "$daemon_url" "$script_root/npm-fixture.mjs" <<'NODE'
 import { readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
+import { performance } from 'node:perf_hooks';
+import { pathToFileURL } from 'node:url';
 const env = process.env;
-const [mcpUrl, base] = process.argv.slice(2);
+const [mcpUrl, base, fixturePath] = process.argv.slice(2);
+const { ROLLBACK_WAIT_MS } = await import(pathToFileURL(fixturePath).href);
+function now() {
+  const value = performance.now();
+  if (!Number.isFinite(value)) throw new Error('monotonic rollback clock unavailable');
+  return value;
+}
+const deadline = now() + ROLLBACK_WAIT_MS;
+const remaining = () => Math.max(0, deadline - now());
 const endpoint = new URL(base);
 if (endpoint.hostname !== '127.0.0.1' || endpoint.protocol !== 'http:') throw new Error('itest loopback daemon required');
 async function jsonFile(path) { try { return JSON.parse(await readFile(path, 'utf8')); } catch { throw new Error('invalid rollback evidence JSON'); } }
@@ -187,19 +197,23 @@ if (!previous || !target || manifest.runtimeBuildId !== env.ITEST_MCP_BUILD_ID) 
 const nonce = randomUUID();
 const logBefore = (await readFile(env.ITEST_REGISTRY_LOG, 'utf8')).length;
 await writeFile(env.ITEST_REGISTRY_FAULT_FILE, JSON.stringify({ nonce, targetVersion: target.version, previousVersion, mcpPort: Number(new URL(mcpUrl).port) }), { mode: 0o600 });
-const response = await fetch(new URL('/deploy/switch', endpoint), { method: 'POST', headers: { 'content-type': 'application/json', 'x-spur-origin': 'cli' }, body: JSON.stringify({ version: target.version }), signal: AbortSignal.timeout(30000) });
+const dispatchBudget = Math.floor(Math.min(30000, remaining()));
+if (dispatchBudget <= 0) throw new Error('rollback observation deadline expired before dispatch');
+const response = await fetch(new URL('/deploy/switch', endpoint), { method: 'POST', headers: { 'content-type': 'application/json', 'x-spur-origin': 'cli' }, body: JSON.stringify({ version: target.version }), signal: AbortSignal.timeout(dispatchBudget) });
 if (!response.ok) throw new Error(`rollback switch rejected: ${response.status}`);
 let state;
-for (let attempt = 0; attempt < 300; attempt += 1) {
-  await setTimeout(2000);
+while (remaining() > 0) {
+  await setTimeout(Math.min(2000, remaining()));
+  const requestBudget = Math.floor(Math.min(3000, remaining()));
+  if (requestBudget <= 0) break;
   try {
-    const status = await fetch(new URL('/deploy/switch/status', endpoint), { signal: AbortSignal.timeout(3000) });
+    const status = await fetch(new URL('/deploy/switch/status', endpoint), { signal: AbortSignal.timeout(requestBudget) });
     if (!status.ok) continue;
     state = await status.json();
     if (state?.phase === 'failed' && state.version === target.version) break;
   } catch { /* Daemon replacement closes connections during the switch. */ }
 }
-if (state?.phase !== 'failed' || state.failureKind !== 'rolled_back') throw new Error(`actual rollback not proven: ${JSON.stringify(state)}`);
+if (remaining() <= 0 || state?.phase !== 'failed' || state.version !== target.version || state.failureKind !== 'rolled_back') throw new Error(`actual rollback not proven: ${JSON.stringify(state)}`);
 const installed = await jsonFile(`${env.ITEST_MCP_PACKAGE_ROOT}/package.json`);
 if (installed.version !== previousVersion) throw new Error('prior candidate not restored');
 const events = await jsonFile(env.ITEST_REGISTRY_FAULT_EVIDENCE);
