@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyClaudeJsonlState,
   hasTrailingClaudeServerError,
+  hasTrailingClaudeAuthenticationFailure,
   hasClaudeRecoveryAfter,
   MAX_RETAINED_CONVERSATION_ENTRIES,
   parseConversationBatch,
@@ -259,6 +260,100 @@ describe("classifyClaudeJsonlState", () => {
 });
 
 // ── parseJsonlRecord: interrupt marker ───────────────────────────────
+
+describe("Claude authentication", () => {
+  const authLine = JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-03-18T10:05:00.000Z",
+    error: "authentication_failed",
+    isApiErrorMessage: true,
+    message: {
+      role: "assistant",
+      model: "<synthetic>",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "Login expired · Please run /login" }],
+    },
+  });
+
+  function authenticationRecord(): ParsedRecord {
+    const record = parseJsonlRecord(authLine, NOW);
+    if (!record) throw new Error("expected authentication record");
+    return record;
+  }
+
+  it("recognizes the structured synthetic error despite trailing turn duration", () => {
+    const record = authenticationRecord();
+    expect(record).toMatchObject({ authenticationFailed: true, stopReason: "stop_sequence" });
+    expect(record.serverError).toBeUndefined();
+    expect(classifyClaudeJsonlState([record, rec({ type: "system" })], NOW)).toBe("needs_input");
+  });
+
+  it.each([
+    { role: "user", error: "authentication_failed" },
+    { role: "tool", error: "authentication_failed" },
+    { role: "assistant", error: "server_error" },
+    { role: "assistant", error: "rate_limit" },
+    { role: "assistant" },
+  ])("ignores prose and errors outside the assistant auth shape: %j", ({ role, ...fields }) => {
+    const record = parseJsonlRecord(
+      JSON.stringify({
+        type: role,
+        ...fields,
+        message: { role, content: "Login expired · Please run /login" },
+      }),
+      NOW,
+    );
+    expect(record?.authenticationFailed).toBeUndefined();
+  });
+
+  it.each(["user", "system", "progress", "stop_hook_summary", "file-history-snapshot"])(
+    "keeps the block after a %s record",
+    (type) => {
+      const records = [authenticationRecord(), rec({ type, role: type === "user" ? "user" : undefined })];
+      expect(hasTrailingClaudeAuthenticationFailure(records)).toBe(true);
+      expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
+    },
+  );
+
+  it.each([
+    { stopReason: "end_turn", expected: "waiting" },
+    { hasToolUse: true, expected: "working" },
+    { serverError: true, expected: "error" },
+    { rateLimited: true, stopReason: "stop_sequence", expected: "waiting" },
+  ])("clears on a later assistant record: %j", ({ expected, ...fields }) => {
+    const records = [authenticationRecord(), rec({ type: "assistant", role: "assistant", ...fields })];
+    expect(hasTrailingClaudeAuthenticationFailure(records)).toBe(false);
+    expect(classifyClaudeJsonlState(records, NOW)).toBe(expected);
+  });
+
+  it("replays failure, user retry, cached read and assistant recovery incrementally", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-auth-"));
+    const filePath = join(tempDir, "transcript.jsonl");
+    try {
+      await writeFile(filePath, `${authLine}\n${JSON.stringify({ type: "system", subtype: "turn_duration" })}\n`);
+      const failed = await readClaudeJsonlState(tempDir, {
+        filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [],
+      });
+      expect(failed?.state).toBe("needs_input");
+      expect(failed?.serverError).toBe(false);
+      const retryLine = JSON.stringify({ type: "user", message: { role: "user", content: "Continue" } });
+      await appendFile(filePath, `${retryLine}\n`);
+      const later = new Date(Date.now() + 5000);
+      await utimes(filePath, later, later);
+      const retry = await readClaudeJsonlState(tempDir, failed?.reader);
+      expect(retry?.state).toBe("needs_input");
+      expect((await readClaudeJsonlState(tempDir, retry?.reader))?.state).toBe("needs_input");
+      const success = JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: "Done" } });
+      await appendFile(filePath, `${success}\n`);
+      const recoveredAt = new Date(Date.now() + 10_000);
+      await utimes(filePath, recoveredAt, recoveredAt);
+      const recovered = await readClaudeJsonlState(tempDir, retry?.reader);
+      expect(recovered?.state).toBe("waiting");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("parseJsonlRecord interrupt detection", () => {
   const TS = 1_700_000_000_000;

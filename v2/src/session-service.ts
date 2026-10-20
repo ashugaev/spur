@@ -147,6 +147,7 @@ import {
   readClaudeConversationTail,
   readClaudeJsonlState,
   hasClaudeRecoveryAfter,
+  hasTrailingClaudeAuthenticationFailure,
   type ClaudeConversationReaderState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
@@ -23803,6 +23804,7 @@ export class SessionService {
 
     let rateLimit: RateLimitDetection | null = null;
     let hasServerErrorRecord = false;
+    let hasAuthenticationFailure = false;
     let serverErrorEvidence: "error" | "recovered" | undefined;
     let serverErrorJsonlPath: string | null = null;
     // Set from whichever structured artifact the branches below already read.
@@ -23873,6 +23875,9 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           rateLimit = jsonlResult.rateLimit;
           hasServerErrorRecord = jsonlResult.serverError;
+          hasAuthenticationFailure = hasTrailingClaudeAuthenticationFailure(
+            jsonlResult.reader.tailRecords,
+          );
           if (jsonlResult.serverError) serverErrorEvidence = "error";
           else if (
             session.agentSessionId &&
@@ -24257,6 +24262,12 @@ export class SessionService {
         stateSource = "jsonl";
         historySourcePath = serverErrorJsonlPath;
         classifiedDetail = "State: error (claude server error)";
+      }
+      if (hasAuthenticationFailure) {
+        state = "needs_input";
+        stateSource = "jsonl";
+        historySourcePath = serverErrorJsonlPath;
+        classifiedDetail = "State: needs_input (claude authentication failed)";
       }
     }
 

@@ -57185,6 +57185,96 @@ describe("SessionService", () => {
     });
   });
 
+  describe("Claude authentication", () => {
+    function mockAuthenticationFailure() {
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "needs_input",
+        serverError: false,
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
+          tailRecords: [
+            {
+              type: "assistant", role: "assistant", stopReason: "stop_sequence",
+              authenticationFailed: true, timestampMs: Date.now(),
+            },
+            { type: "system", timestampMs: Date.now() },
+            { type: "user", role: "user", timestampMs: Date.now() },
+          ],
+        },
+      });
+    }
+
+    it.each([
+      ["waiting", "idle"],
+      ["working", "busy"],
+    ])("overrides native %s status without server-error markers", async (state, status) => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockAuthenticationFailure();
+      mockClaudeSessionStatus(state, status);
+      const service = await createDisposedSessionService();
+      const view = await service.get("api-1");
+      expect(view.state).toBe("needs_input");
+      expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
+      expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBeUndefined();
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["Compacting conversation…", "You've hit your limit · resets 11am (UTC)"])(
+      "overrides stale pane evidence: %s",
+      async (pane) => {
+        const sessions = createSessionStore();
+        const record = runningSession();
+        sessions.set(record.id, record);
+        mockAuthenticationFailure();
+        mockClaudeSessionStatus("waiting", "idle");
+        captureTmuxPaneMock.mockResolvedValue(pane);
+        const service = await createDisposedSessionService();
+        const classified = await sessionServiceInternals(service).classifySessionRecord(record);
+        expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl", serverError: false });
+      },
+    );
+
+    it("classifies dashboard without capture despite a retained compaction override", async () => {
+      const sessions = createSessionStore();
+      const record = runningSession();
+      sessions.set(record.id, record);
+      mockAuthenticationFailure();
+      mockClaudeSessionStatus("working", "busy");
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      internals.claudeCompactingOverrides.set(record.id, Date.now() + 10_000);
+      captureTmuxPaneMock.mockClear();
+      const classified = await internals.classifySessionRecord(record, { scanPane: false });
+      expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl" });
+      expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+    });
+
+    it("recovers after later assistant output and the existing hold", async () => {
+      const sessions = createSessionStore();
+      sessions.set("api-1", runningSession());
+      mockAuthenticationFailure();
+      mockClaudeSessionStatus("waiting", "idle");
+      const service = await createDisposedSessionService();
+      expect((await service.get("api-1")).state).toBe("needs_input");
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "waiting", serverError: false,
+        reader: {
+          filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: Date.now(),
+          tailRecords: [
+            { type: "assistant", role: "assistant", authenticationFailed: true, timestampMs: Date.now() },
+            { type: "assistant", role: "assistant", stopReason: "end_turn", timestampMs: Date.now() + 1 },
+          ],
+        },
+      });
+      captureTmuxPaneMock.mockResolvedValue("Login expired · Please run /login");
+      vi.setSystemTime(Date.now() + 5_000);
+      expect((await service.get("api-1")).state).toBe("waiting");
+    });
+  });
+
   describe("Claude server-error reactivation", () => {
     const SERVER_ERROR_REACTIVATION_PROMPT =
       "Claude hit a temporary server error earlier. Please try to continue the task now.";

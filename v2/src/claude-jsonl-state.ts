@@ -47,6 +47,8 @@ export interface ParsedRecord {
   rateLimitResetAtMs?: number;
   /** True when the record is a synthetic `error: "server_error"` API error. */
   serverError?: boolean;
+  /** True for Claude's structured authentication_failed assistant error. */
+  authenticationFailed?: boolean;
   /** Real model id reported by the assistant message. Never the `<synthetic>` placeholder. */
   model?: string;
   messageId?: string;
@@ -125,6 +127,16 @@ export function hasTrailingClaudeServerError(records: readonly ParsedRecord[]): 
   return false;
 }
 
+export function hasTrailingClaudeAuthenticationFailure(records: readonly ParsedRecord[]): boolean {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i];
+    // Prompts and bookkeeping cannot establish that login recovered.
+    if (!record || record.role !== "assistant") continue;
+    return record.authenticationFailed === true;
+  }
+  return false;
+}
+
 export function hasClaudeRecoveryAfter(records: readonly ParsedRecord[], errorAt: string): boolean {
   for (let index = records.length - 1; index >= 0; index--) {
     const record = records[index];
@@ -152,6 +164,9 @@ export function classifyClaudeJsonlState(
    */
   fileMtimeMs?: number,
 ): SessionState {
+  if (hasTrailingClaudeAuthenticationFailure(records)) {
+    return "needs_input";
+  }
   if (hasTrailingClaudeServerError(records)) {
     return "error";
   }
@@ -491,6 +506,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       ...(isRateLimit ? { rateLimited: true } : {}),
       ...(rateLimitResetAtMs !== undefined ? { rateLimitResetAtMs } : {}),
       ...(parsed["error"] === "server_error" ? { serverError: true } : {}),
+      ...(parsed["error"] === "authentication_failed" ? { authenticationFailed: true } : {}),
       ...(typeof message["model"] === "string" && message["model"] !== SYNTHETIC_MODEL
         ? { model: message["model"] }
         : {}),
