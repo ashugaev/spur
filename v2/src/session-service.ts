@@ -22354,6 +22354,7 @@ export class SessionService {
     rolloutState: CodexRolloutStateRecord | null;
     rateLimit: RateLimitDetection | null;
     activityMs: number;
+    threadId?: string;
     model?: string;
     tokenUsage?: ProviderTokenUsageSample;
     tokenUsages?: ProviderTokenUsageSample[];
@@ -22414,6 +22415,7 @@ export class SessionService {
       rolloutState,
       rateLimit: rolloutRead.rateLimit,
       activityMs,
+      ...(rolloutRead.threadId ? { threadId: rolloutRead.threadId } : {}),
       ...(rolloutRead.model ? { model: rolloutRead.model } : {}),
       ...(rolloutRead.tokenUsage ? { tokenUsage: rolloutRead.tokenUsage } : {}),
       ...(rolloutRead.tokenUsages ? { tokenUsages: rolloutRead.tokenUsages } : {}),
@@ -23773,6 +23775,7 @@ export class SessionService {
     let liveModel: string | undefined;
     let tokenUsage: ProviderTokenUsageSample | undefined;
     let tokenUsages: ProviderTokenUsageSample[] | undefined;
+    let codexProbeRecovery: Awaited<ReturnType<typeof this.classifyCodexState>> | undefined;
     if (
       options?.reconcileRuntime !== false &&
       (effectiveSession.status === "running" || effectiveSession.status === "spawning")
@@ -23837,12 +23840,86 @@ export class SessionService {
       }
     }
     if (
-      runtime.probeUnresponsive ||
+      runtime.probeUnresponsive &&
+      !workspace.diagnostic &&
+      workspace.exists &&
+      session.agent === "codex" &&
+      session.status === "running" &&
+      !session.serverErrorAt &&
+      effectiveSession.errorSource === "runtime_probe" &&
+      effectiveSession.error?.startsWith(STATUS_DETECTION_ERROR_PREFIX)
+    ) {
+      const native = await this.classifyCodexState(session).catch(() => null);
+      const observedAt = Date.now();
+      const current = readSession(this.config.dataDir, session.id);
+      const lifecycle = this.lifecycle.snapshot(session.id);
+      const rolloutState = native?.rolloutState;
+      const nativeStateIsAuthoritative =
+        (native?.state === "waiting" && rolloutState?.reason === "task_complete") ||
+        (native?.state === "needs_input" &&
+          (rolloutState?.reason === "input_required" ||
+            rolloutState?.reason === "request_user_input")) ||
+        (native?.state === "working" &&
+          (rolloutState?.reason === "function_call" ||
+            rolloutState?.reason === "custom_tool_call") &&
+          typeof rolloutState.turnId === "string" &&
+          native.hookState?.hookEvent === "PreToolUse" &&
+          native.hookState.turnId === rolloutState.turnId &&
+          Date.parse(native.hookState.updatedAt) <= observedAt &&
+          observedAt - Date.parse(native.hookState.updatedAt) <= ACTIVITY_WINDOW_MS);
+      const hookMatchesRollout =
+        !native?.hookState ||
+        (typeof rolloutState?.turnId === "string" &&
+          native.hookState.turnId === rolloutState.turnId);
+      if (
+        native !== null &&
+        rolloutState !== null &&
+        rolloutState !== undefined &&
+        session.agentSessionId !== undefined &&
+        native.threadId === session.agentSessionId &&
+        native.rateLimit === null &&
+        nativeStateIsAuthoritative &&
+        native.state === rolloutState.state &&
+        hookMatchesRollout &&
+        rolloutState.timestampMs > 0 &&
+        rolloutState.timestampMs <= observedAt &&
+        observedAt - rolloutState.timestampMs <= ACTIVITY_WINDOW_MS &&
+        current &&
+        current.status === "running" &&
+        current.error === effectiveSession.error &&
+        current.errorSource === "runtime_probe" &&
+        !current.serverErrorAt &&
+        current.agentSessionId === session.agentSessionId &&
+        current.agentLaunchId === session.agentLaunchId &&
+        sameSessionRuntimeOwner(current, session) &&
+        this.lifecycleStateMatches(current, this.lifecycleStamp(session)) &&
+        lifecycle.revision === probeRevision &&
+        lifecycle.operation?.phase !== "pending"
+      ) {
+        const { error: _ignoredError, errorSource: _ignoredErrorSource, ...recovered } = current;
+        effectiveSession = { ...recovered, updatedAt: nowIso() };
+        writeSession(this.config.dataDir, effectiveSession);
+        this.stateCache.delete(session.id);
+        codexProbeRecovery = native;
+      }
+    }
+    if (
+      (runtime.probeUnresponsive && codexProbeRecovery === undefined) ||
       workspace.diagnostic ||
-      hasRetainedSessionError(effectiveSession)
+      (hasRetainedSessionError(effectiveSession) && codexProbeRecovery === undefined)
     ) {
       state = "error";
       classifiedDetail = effectiveSession.error ?? "State: error";
+    } else if (codexProbeRecovery) {
+      state = codexProbeRecovery.state;
+      stateSource = codexProbeRecovery.source;
+      rateLimit = codexProbeRecovery.rateLimit;
+      agentActivityAt = activityAtFromMs(codexProbeRecovery.activityMs);
+      liveModel = codexProbeRecovery.model;
+      tokenUsage = codexProbeRecovery.tokenUsage;
+      tokenUsages = codexProbeRecovery.tokenUsages;
+      historySourcePath = codexProbeRecovery.rolloutState?.filePath ?? null;
+      classifiedDetail = `State: ${state} (codex ${stateSource}, recovered from runtime probe error)`;
     } else {
       if (effectiveSession.status !== "running") {
         state = statusFallbackState(effectiveSession);
