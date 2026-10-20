@@ -31,23 +31,34 @@ command -v codex    >/dev/null || npm install -g --prefix ~/.local @openai/codex
 command -v opencode >/dev/null || npm install -g --prefix ~/.local opencode-ai
 mkdir -p ~/.claude/skills ~/.codex/skills   # Spur links its skills here, never creates the dirs
 
-spur init                           # installs + starts the systemd user units, links host skills
+spur init                           # installs + starts the systemd user units, links host skills, installs Tailscale
+                                    # never add --no-tailscale unless the user asked for it — no auth key is fine
 ```
 
 Four non-obvious points:
 
-- Node must live at `/usr/bin/node`. Both units ship `ExecStart=/usr/bin/node ...`; nothing rewrites that path. A node under `nvm`, `fnm`, or `~/.local` crash-loops both units on `status=203/EXEC` with a correct npm prefix. Only the npm prefix moves to `~/.local` — the runtime stays system-wide. nvm host: `sudo ln -s "$(command -v node)" /usr/bin/node`.
+- Node must live at `/usr/bin/node`. The units ship `ExecStart=/usr/bin/node ...`; nothing rewrites that path. A node under `nvm`, `fnm`, or `~/.local` crash-loops the units on `status=203/EXEC` with a correct npm prefix. Only the npm prefix moves to `~/.local` — the runtime stays system-wide. nvm host: `sudo ln -s "$(command -v node)" /usr/bin/node`.
 
 - Prefix must be `~/.local` — a system prefix (`/usr`) fails install with `EACCES` and makes the units exec the wrong path. Put `~/.local/bin` on PATH, persisted for new logins. The `npm config set prefix ~/.local` above writes into `~/.npmrc`, needed once to land the very first `npm install -g @shugaev/spur` before Spur exists to pin anything. After the daemon's first boot (`spur init`/`update`/`reinit`, a reboot, or `systemctl restart`), the pin moves to Spur's own `~/.spur/npmrc` as npm's `--globalconfig` — never `~/.npmrc`, which `nvm` refuses to load once it carries a `prefix=`/`globalconfig=` line. `spur init`/`update`/`reinit` strip that line back out of `~/.npmrc` only on hosts with nvm installed — on a host without nvm the line stays, since it's what makes a bare `npm install -g` (outside any agent session) land in `~/.local` at all, and nothing there conflicts with it. A plain daemon boot leaves `~/.npmrc` alone either way. `spur doctor`'s `npmrc-nvm-conflict` check applies the same nvm gate and gives the one-liner to remove a leftover line (system-unit hosts, see below, can't run `spur reinit`).
 - `npm install` only unpacks — it starts nothing and won't survive reboot. `spur init` installs the units, starts them, and enables linger. `spur init` also links the packaged Spur agent skills into `~/.claude/skills` and `~/.codex/skills` when that `skills` directory already exists — never creating an absent one — replacing its own links (including a dangling one under any `.../skills/<name>` path) on every release, and leaving a real file, directory, or foreign symlink untouched. An absent dir is skipped with a warning naming the path and the fix (`mkdir -p <path> && spur reinit`). See [Doctor](commands.md#doctor)'s `skills-symlinks` check.
 - Every agent session carries `NPM_CONFIG_GLOBALCONFIG=~/.spur/npmrc` (both env casings) in its env, so `claude`/`codex` self-update (`npm install -g ...`) resolves `~/.local` even mid-session. That only holds as long as `~/.npmrc` carries no `prefix=` line pointing anywhere other than `~/.local` — a Spur-authored `prefix=~/.local` line left there (non-nvm hosts, see above) is harmless since it resolves to the same value; an operator-set line to any other value outranks this pin and self-update would follow that instead. Sidecars, project services, and the Claude OAuth login pane do NOT inherit this pin — Spur strips it (along with `NPM_CONFIG_PREFIX`/`PREFIX`) so those panes can source `~/.nvm/nvm.sh` without tripping nvm's own incompatibility guards; a bare `npm install -g` in one of those panes falls back to npm's system prefix. A bare `npm install -g` in a plain login shell (not an agent session) needs an explicit `--prefix ~/.local`, or use `spur update` (below), which derives it automatically.
 
+For a nondefault instance, run `spur --config <instance-config> init`.
+Installed units, reinit, updates and reboot retain that config; [selection precedence](configuration.md).
+An invalid or nonprivate receipt fails; repair with `spur --config <existing-instance-config> reinit`.
+
 Units installed:
 
-| Unit                  | Role                                                                            |
-| --------------------- | ------------------------------------------------------------------------------- |
-| `spur-daemon.service` | HTTP API `:4310`, tmux sessions                                                 |
-| `spur-web.service`    | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit) |
+| Unit                      | Role                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `spur-daemon.service`     | HTTP API `:4310`, tmux sessions                                                                                     |
+| `spur-web.service`        | Web UI `:5555`; terminal WebSocket in-process on `/ws` (same port, no own unit)                                     |
+| `spur-mcp.service`        | Full-access MCP on loopback `:4311/mcp`; [client setup](mcp.md)                                                     |
+| `spur-mcp-tunnel.service` | Optional OpenAI transport; enabled when the private tunnel env file exists; [setup](mcp.md#connect-openai-products) |
+
+Mandatory units are enabled under `default.target`; linger keeps them running after logout and starts them on boot.
+MCP uses `Restart=always`, follows daemon ordering, and reconnects after daemon restart.
+OpenAI credentials are unnecessary for the generic MCP service.
 
 Daemon unit bounds the shared fleet cgroup with `MemoryHigh=75%`, `MemoryMax=85%`, and `MemorySwapMax=2G`. On a 62 GiB host, reclaim starts near 46.5 GiB and the hard cap lands near 52.7 GiB, leaving about 15.5 GiB and 9.3 GiB for the host. The daemon shares this cgroup, so sustained pressure can throttle its guard; the gap preserves control-path room. Set `MemorySwapMax=0` in a systemd drop-in for no fleet swap. Package templates have no live effect until `spur init` or `spur update` reinstalls units.
 
@@ -63,12 +74,12 @@ Claude and Codex still need a login under your own account (`claude`, or `codex 
 
 ### init flags
 
-| Flag                | Effect                                      |
-| ------------------- | ------------------------------------------- |
-| `--no-start`        | install units + linger, don't start         |
-| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`) |
-| `--web-port <port>` | web port (default `5555`)                   |
-| `--no-tailscale`    | skip Tailscale (on by default)              |
+| Flag                | Effect                                            |
+| ------------------- | ------------------------------------------------- |
+| `--no-start`        | install units + linger, don't start               |
+| `--expose-web`      | bind web to `0.0.0.0` (default `127.0.0.1`)       |
+| `--web-port <port>` | web port (default `5555`)                         |
+| `--no-tailscale`    | skip Tailscale (on by default); user request only |
 
 ## Private access (Tailscale, default on)
 
@@ -105,9 +116,16 @@ Spur installs and its services start without these; until the first two are done
 ```bash
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4310/sessions   # 200
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5555/           # 200
+curl -fsS http://127.0.0.1:4311/healthz                                 # matching MCP/daemon build IDs
+systemctl --user is-enabled spur-daemon spur-web spur-mcp
+systemctl --user is-active spur-daemon spur-web spur-mcp
+loginctl show-user "$USER" -p Linger                                   # Linger=yes
 ```
 
 Terminal rides `/ws` on the web port — no separate port or check.
+Use the selected config's MCP port when it differs from `4311`; [port selection](mcp.md#connect-http).
+MCP client verification: initialize, then call `list_projects` through the installed `/mcp` service; [MCP](mcp.md).
+Logs: `journalctl --user -u spur-mcp -n 100 --no-pager`; configured tunnel: replace the unit with `spur-mcp-tunnel`.
 
 After a start/restart the units can take up to ~2 min to answer on a ~1 GB host — poll, don't fail on the first refusal.
 
@@ -122,10 +140,12 @@ spur connect spur.yaml
 Claude only, operator action: `cd <repo> && claude`, answer "Yes, I trust this folder" — covers every Spur worktree of that repo; once per connected repo. A setup agent never answers it: list it in the operator TODO, skip the smoke spawn until done.
 
 ```bash
+# after agent login + trust only; a setup agent puts this line in the operator TODO, never runs it —
+# before trust it times out on submit acknowledgment and leaves an errored session
 spur spawn <project-id> --branch <new-branch> "smoke test" --json
 ```
 
-`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
+`<repo>`: a git repo of yours with at least one commit. None on the host: `git init` a throwaway one and commit a file — no git identity on the host: `git -c user.name=spur -c user.email=spur@localhost commit ...`. Never a Spur checkout — its `spur.yaml` is the maintainers' own.
 
 `<project-id>`: printed by `spur doctor --scaffold` as `project <id>`.
 
@@ -141,7 +161,10 @@ For reviews requiring QA output, verify a command runs and a disposable artifact
 spur update
 ```
 
-`spur update` runs `npm install -g` itself with the correct `--prefix` derived from the current install (not a bare `npm install -g`, which would need its own explicit `--prefix ~/.local` now that `~/.npmrc` no longer carries the prefix — see the setup gotchas), then reinstalls units and makes up to 60 daemon and web readiness polls. A failed reinit exits the command; after a successful reinit, the detached health monitor owns auto-rollback. Not a bare `systemctl restart`: restart reuses the old unit files, and unit contracts change across versions (e.g. the `/ws` move rewrote `spur-web`'s `ExecStart` and dropped a now-removed terminal unit). Deploy switch route behavior lives in [daemon-api.md](daemon-api.md#daemon-http-api).
+`spur update` derives the install prefix, installs the package and reinstalls the units.
+Readiness includes daemon, web, an MCP SDK round trip with matching runtime identities, and the configured tunnel.
+A failed reinit exits the command; after successful reinit, the detached health monitor owns auto-rollback.
+A bare `systemctl restart` keeps old unit files. Deploy switch: [daemon-api.md](daemon-api.md#daemon-http-api).
 
 With [`autoUpdate: true`](configuration.md#auto-update) the daemon self-updates once a newer version publishes, through the same deploy-switch path. Pin a version by hand in this order:
 
@@ -173,7 +196,9 @@ Pin first and the flag is still armed: within the next 5-minute tick the daemon 
 
 ## System-wide units (advanced)
 
-`spur init` installs user units. For system scope (`/etc/systemd/system/`, `User=`), adapt `deploy/spur-daemon.service` / `deploy/spur-web.service` and set `SYSTEMCTL="sudo systemctl"` in the daemon env. Don't run `spur update` / `spur reinit` on a system-unit host — both take the user-scope path and spin up a conflicting `:4310` daemon. When a version changes the unit contract, re-copy the adapted templates, run `systemctl daemon-reload`, then restart the system units in a maintenance window. The `~/.spur/npmrc` pin file itself still gets created here — every `daemon start` writes it, regardless of scope. Only the `~/.npmrc` heal is `spur init`/`update`/`reinit`-only (unsupported on this scope): if `spur doctor`'s `npmrc-nvm-conflict` check fires, remove the reported `prefix=`/`globalconfig=` line from `~/.npmrc` by hand — the check's `fix` field spells out the exact line to look for.
+`spur init` installs user units. System scope: [source install](install-from-source.md).
+Don't run `spur update` / `spur reinit` on a system-unit host: they take the user-scope path and create conflicting services.
+The npm pin still gets created on daemon boot; an nvm `npmrc-nvm-conflict` requires the manual fix printed by `spur doctor`.
 
 ## Reference
 

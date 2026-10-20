@@ -115,6 +115,60 @@ export interface GateSnapshot {
   jobs: Record<string, unknown>[];
   ciAnchors: { runId: number; merge: string; parents: string[] }[];
 }
+function comparisonSnapshot(snapshot: GateSnapshot): GateSnapshot {
+  const pr: unknown = snapshot.pr;
+  if (!pr || typeof pr !== "object" || Array.isArray(pr)) return snapshot;
+  const comparedPr = pr as Record<string, unknown>;
+  const base = comparedPr.base;
+  if (!base || typeof base !== "object" || Array.isArray(base)) return snapshot;
+  const repo = (base as Record<string, unknown>).repo;
+  if (!repo || typeof repo !== "object" || Array.isArray(repo)) return snapshot;
+  // Repository-wide pushes do not change this PR's pinned base evidence.
+  const comparedRepo: Record<string, unknown> = { ...repo };
+  delete comparedRepo.pushed_at;
+  const result = { ...snapshot, pr: { ...comparedPr, base: { ...base, repo: comparedRepo } } };
+  const head = comparedPr.head;
+  if (!head || typeof head !== "object" || Array.isArray(head)) return result;
+  const headRepo = (head as Record<string, unknown>).repo;
+  if (!headRepo || typeof headRepo !== "object" || Array.isArray(headRepo)) return result;
+  const originalRepo = repo as Record<string, unknown>,
+    originalHeadRepo = headRepo as Record<string, unknown>;
+  if (
+    typeof originalRepo.id !== "number" ||
+    !Number.isSafeInteger(originalRepo.id) ||
+    originalRepo.id <= 0 ||
+    typeof originalHeadRepo.id !== "number" ||
+    !Number.isSafeInteger(originalHeadRepo.id) ||
+    originalHeadRepo.id <= 0 ||
+    originalHeadRepo.id !== originalRepo.id ||
+    typeof originalRepo.full_name !== "string" ||
+    !/^[\w.-]+\/[\w.-]+$/.test(originalRepo.full_name) ||
+    originalHeadRepo.full_name !== originalRepo.full_name
+  )
+    return result;
+  // Same-repository PRs repeat the repository-wide timestamp in head metadata.
+  const comparedHeadRepo: Record<string, unknown> = { ...originalHeadRepo };
+  delete comparedHeadRepo.pushed_at;
+  return { ...result, pr: { ...result.pr, head: { ...head, repo: comparedHeadRepo } } };
+}
+export function changedEvidenceCategories(before: GateSnapshot, after: GateSnapshot): string {
+  const first = comparisonSnapshot(before),
+    second = comparisonSnapshot(after);
+  const categories = [
+    ["pr", "pr"],
+    ["reviews", "reviews"],
+    ["comments", "comments"],
+    ["files", "files"],
+    ["unresolved", "threads"],
+    ["runs", "ci"],
+    ["ciAnchors", "anchors"],
+    ["jobs", "jobs"],
+  ] as const;
+  const changed = categories
+    .filter(([key]) => digest(first[key]) !== digest(second[key]))
+    .map(([, label]) => label);
+  return changed.length ? changed.join(", ") : "other evidence";
+}
 function ciRef(run: Record<string, unknown>) {
   if (typeof run.display_title !== "string") return null;
   const match = /^Spur CI v1 REF=refs\/pull\/([1-9]\d*)\/merge M=([a-f0-9]{40})$/.exec(
@@ -130,37 +184,9 @@ function ciIdentity(policy: GatePolicy, run: Record<string, unknown>) {
     run.event === "pull_request"
   );
 }
-function ciCandidate(number: number, snapshot: GateSnapshot, run: Record<string, unknown>) {
-  const head = object(snapshot.pr.head);
-  if (run.head_sha === head.sha) return true;
-  const anchor = snapshot.ciAnchors.find((value) => value.runId === run.id);
-  if (
-    anchor?.parents.length === 2 &&
-    anchor.parents.every((sha) => /^[a-f0-9]{40}$/.test(sha)) &&
-    (run.head_sha === anchor.merge || run.head_sha === anchor.parents[1]) &&
-    run.head_branch === head.ref &&
-    Array.isArray(run.pull_requests) &&
-    run.pull_requests.every((value) => {
-      const associated = object(value);
-      return (
-        associated.number === number &&
-        object(associated.head).sha === anchor.parents[1] &&
-        object(associated.base).sha === anchor.parents[0]
-      );
-    })
-  )
-    return anchor.parents[1] === head.sha;
-  if (ciRef(run)?.number === number) return true;
-  return (
-    run.head_branch === head.ref &&
-    (string(run.path).endsWith(`@refs/pull/${number}/merge`) ||
-      (Array.isArray(run.pull_requests) &&
-        run.pull_requests.some((value) => object(value).number === number)))
-  );
-}
-function ciCandidates(policy: GatePolicy, number: number, snapshot: GateSnapshot) {
+function ciCandidates(policy: GatePolicy, snapshot: GateSnapshot) {
   return snapshot.runs.filter(
-    (run) => ciIdentity(policy, run) && ciCandidate(number, snapshot, run),
+    (run) => ciIdentity(policy, run) && run.head_sha === object(snapshot.pr.head).sha,
   );
 }
 function selectCiRun(candidates: GateSnapshot["runs"]) {
@@ -206,7 +232,7 @@ function ciProvenance(
     anchor.parents.length === 2 &&
     anchor.parents[0] === B &&
     anchor.parents[1] === H &&
-    (run.head_sha === H || run.head_sha === ref.merge) &&
+    run.head_sha === H &&
     run.head_branch === object(snapshot.pr.head).ref &&
     Array.isArray(run.pull_requests) &&
     run.pull_requests.every((value) => {
@@ -225,7 +251,12 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     reason,
     H: string(object(snapshot.pr.head).sha),
     B: string(object(snapshot.pr.base).sha),
-    fingerprint: digest({ domain: "gate-blocked-v1", snapshot }),
+    fingerprint: digest({
+      domain: "gate-blocked-v1",
+      reason,
+      H: string(object(snapshot.pr.head).sha),
+      B: string(object(snapshot.pr.base).sha),
+    }),
   });
   try {
     const pr = snapshot.pr,
@@ -376,7 +407,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
         consent,
       };
     }
-    const candidates = ciCandidates(policy, number, snapshot);
+    const candidates = ciCandidates(policy, snapshot);
     const run = selectCiRun(candidates);
     if (
       !run ||
@@ -386,10 +417,20 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
     )
       return blocked("ci-not-success");
     if (
-      snapshot.jobs.length !== policy.ciJobs.length ||
+      snapshot.jobs.some(
+        (job) =>
+          !string(job.name) ||
+          integer(job.run_id) !== run.id ||
+          integer(job.run_attempt) !== run.run_attempt,
+      )
+    )
+      return blocked("ci-jobs-not-success");
+    const requiredJobs = snapshot.jobs.filter((job) => policy.ciJobs.includes(string(job.name)));
+    if (
+      requiredJobs.length !== policy.ciJobs.length ||
       policy.ciJobs.some(
         (name) =>
-          snapshot.jobs.filter(
+          requiredJobs.filter(
             (job) =>
               job.name === name &&
               job.run_id === run.id &&
@@ -456,7 +497,7 @@ export function evaluateSnapshot(policy: GatePolicy, number: number, snapshot: G
           anchors: snapshot.ciAnchors.filter((anchor) =>
             candidates.some((candidate) => candidate.id === anchor.runId),
           ),
-          jobs: snapshot.jobs
+          jobs: requiredJobs
             .map((job) => ({
               id: job.id,
               name: job.name,
@@ -481,11 +522,16 @@ export async function readGateSnapshot(
 ): Promise<GateSnapshot> {
   const path = `/repos/${policy.repository}`;
   const pr = object(await api.request(`${path}/pulls/${number}`));
+  const H = string(object(pr.head).sha);
+  if (!/^[a-f0-9]{40}$/.test(H)) throw new ReviewAppError("gate-response");
   const [reviews, comments, files, listedRuns] = await Promise.all([
     api.pages(`${path}/pulls/${number}/reviews`),
     api.pages(`${path}/issues/${number}/comments`),
     api.pages(`${path}/pulls/${number}/files`),
-    api.pages(`${path}/actions/workflows/${policy.ciWorkflowId}/runs`, "workflow_runs"),
+    api.pages(
+      `${path}/actions/workflows/${policy.ciWorkflowId}/runs?head_sha=${H}`,
+      "workflow_runs",
+    ),
   ]);
   let unresolved = 0,
     cursor: string | null = null;
@@ -519,19 +565,7 @@ export async function readGateSnapshot(
     ciAnchors: GateSnapshot["ciAnchors"] = [];
   for (const listed of listedRuns) {
     if (!ciIdentity(policy, listed)) continue;
-    const ref = ciRef(listed);
-    if (
-      listed.head_sha !== object(pr.head).sha &&
-      ref?.number !== number &&
-      !(
-        listed.head_branch === object(pr.head).ref &&
-        (ref ||
-          string(listed.path).endsWith(`@refs/pull/${number}/merge`) ||
-          (Array.isArray(listed.pull_requests) &&
-            listed.pull_requests.some((value) => object(value).number === number)))
-      )
-    )
-      continue;
+    if (listed.head_sha !== H) continue;
     const run = object(await api.request(`${path}/actions/runs/${integer(listed.id)}`));
     const attempt = object(
       await api.request(
@@ -560,25 +594,21 @@ export async function readGateSnapshot(
     )
       throw new ReviewAppError("ci-attempt-mismatch");
     runs.push(attempt);
-    const actualRef = ciRef(attempt);
-    const historicalMerge =
-      actualRef?.merge ??
-      (attempt.head_sha === object(pr.head).sha ? null : string(attempt.head_sha));
-    if (historicalMerge) {
-      if (!/^[a-f0-9]{40}$/.test(historicalMerge)) throw new ReviewAppError("invalid-ci-head");
+    const merge = ciRef(attempt)?.merge;
+    if (merge) {
       let parents: string[] = [];
       try {
-        const commit = object(await api.request(`${path}/commits/${historicalMerge}`));
-        if (commit.sha === historicalMerge && Array.isArray(commit.parents))
+        const commit = object(await api.request(`${path}/commits/${merge}`));
+        if (commit.sha === merge && Array.isArray(commit.parents))
           parents = commit.parents.map((value) => string(object(value).sha));
       } catch {
-        /* Missing historical lineage remains ineligible, never inferred from current merge state. */
+        /* Missing CI merge lineage remains ineligible, never inferred from current merge state. */
       }
-      ciAnchors.push({ runId: integer(attempt.id), merge: historicalMerge, parents });
+      ciAnchors.push({ runId: integer(attempt.id), merge, parents });
     }
   }
   const snapshot = { pr, reviews, comments, files, unresolved, runs, jobs: [], ciAnchors };
-  const run = selectCiRun(ciCandidates(policy, number, snapshot));
+  const run = selectCiRun(ciCandidates(policy, snapshot));
   const jobs = run
     ? await api.pages(
         `${path}/actions/runs/${integer(run.id)}/attempts/${integer(run.run_attempt)}/jobs`,
