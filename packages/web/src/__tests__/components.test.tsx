@@ -303,6 +303,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url === "/api/spawn") {
@@ -313,6 +315,7 @@ describe("Dashboard", () => {
           agent: "claude",
           model: "opus",
           overrides: { worktree: true },
+          preflightBatchId: "test-batch",
           slots: { links: [{ label: "tracker", url: "https://jira.example.com/browse/WEB-17" }] },
         });
         return new Response(
@@ -1401,6 +1404,8 @@ describe("Dashboard", () => {
         );
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({
@@ -1409,6 +1414,7 @@ describe("Dashboard", () => {
           agent: "cursor",
           model: "composer-1.5",
           overrides: { worktree: true },
+          preflightBatchId: "test-batch",
         });
         return new Response(
           JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-cursor-1", agent: "cursor" }),
@@ -1453,6 +1459,7 @@ describe("Dashboard", () => {
       agent: "cursor",
       model: "composer-1.5",
       overrides: { worktree: true },
+      preflightBatchId: "test-batch",
     });
   });
 
@@ -1471,6 +1478,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         expect(JSON.parse(String(init?.body))).toEqual({
@@ -1479,6 +1488,7 @@ describe("Dashboard", () => {
           agent: "claude",
           model: "opus",
           overrides: { worktree: true },
+          preflightBatchId: "test-batch",
         });
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
@@ -1522,12 +1532,15 @@ describe("Dashboard", () => {
       agent: "claude",
       model: "opus",
       overrides: { worktree: true },
+      preflightBatchId: "test-batch",
     });
   });
 
   it("sends self-destruct settings from the spawn modal and resets them after success", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
@@ -1585,6 +1598,7 @@ describe("Dashboard", () => {
       agent: "claude",
       model: "opus",
       overrides: { worktree: true },
+      preflightBatchId: "test-batch",
       selfDestruct: {
         enabled: true,
         conditions: "tests pass",
@@ -1599,6 +1613,8 @@ describe("Dashboard", () => {
   it("shows the default self-destruct condition as a placeholder and omits conditions when left blank", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
@@ -1661,6 +1677,7 @@ describe("Dashboard", () => {
       agent: "claude",
       model: "opus",
       overrides: { worktree: true },
+      preflightBatchId: "test-batch",
       selfDestruct: { enabled: true },
     });
   });
@@ -1668,6 +1685,8 @@ describe("Dashboard", () => {
   it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
@@ -1943,6 +1962,8 @@ describe("Dashboard", () => {
           return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
         if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
           return new Response(JSON.stringify({ model: null, worktree: true }));
+        if (url.endsWith("/preflight-batches"))
+          return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
         if (url === "/api/spawn")
           return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
         throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1985,6 +2006,7 @@ describe("Dashboard", () => {
         agent: "claude",
         model: "opus",
         overrides: { worktree: true },
+        preflightBatchId: "test-batch",
       });
     },
   );
@@ -2039,6 +2061,8 @@ describe("Dashboard", () => {
       if (url.startsWith("/api/models")) return new Response(JSON.stringify({ models: [] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/spawn") {
         spawnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
@@ -2830,6 +2854,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url.startsWith("/api/models"))
@@ -2918,6 +2944,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url.startsWith("/api/models"))
@@ -2987,6 +3015,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/preflight")
         return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url.startsWith("/api/models"))
@@ -3049,6 +3079,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/spawn")
         return new Response(JSON.stringify({ error: "Daemon down" }), { status: 502 });
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -3108,6 +3140,8 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
       if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
         return new Response(JSON.stringify({ model: null, worktree: true }));
+      if (url.endsWith("/preflight-batches"))
+        return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
       if (url === "/api/spawn") {
         spawnCalls += 1;
         return pendingSpawn;
@@ -3444,6 +3478,8 @@ describe("Dashboard", () => {
           return new Response(JSON.stringify({ models: [{ id: "opus", label: "Opus" }] }));
         if (url.startsWith("/api/projects/") && url.includes("/spawn-defaults"))
           return new Response(JSON.stringify({ model: null, worktree: true }));
+        if (url.endsWith("/preflight-batches"))
+          return new Response(JSON.stringify({ preflightBatchId: "test-batch" }));
         if (url === "/api/spawn") {
           return onSpawn(init?.body ? JSON.parse(String(init.body)) : null);
         }

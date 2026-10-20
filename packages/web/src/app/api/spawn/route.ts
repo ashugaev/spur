@@ -1,8 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import { isSpurDaemonError, spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 import { spurErrorResponse } from "@/lib/spur-error-response";
 import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
+
+const SPAWN_BATCH_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "spawn_in_progress",
+  "spawn_committed",
+  "spawn_failed",
+]);
 
 interface SpawnBody {
   projectId?: string;
@@ -76,6 +82,23 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
+    if (isSpurDaemonError(error) && error.status === 409) {
+      const conflict = error.payload;
+      if (
+        typeof conflict === "object" &&
+        conflict !== null &&
+        "code" in conflict &&
+        typeof conflict.code === "string" &&
+        SPAWN_BATCH_CONFLICT_CODES.has(conflict.code) &&
+        "sessionId" in conflict &&
+        typeof conflict.sessionId === "string"
+      ) {
+        return NextResponse.json(
+          { error: error.message, code: conflict.code, sessionId: conflict.sessionId },
+          { status: 409 },
+        );
+      }
+    }
     return spurErrorResponse(error, "Failed to spawn Spur session");
   }
 }

@@ -242,6 +242,24 @@ function sameDeskActiveSessions(
   );
 }
 
+async function allocatePreflightBatch(project: string): Promise<string> {
+  const allocation = await fetch(`/api/projects/${encodeURIComponent(project)}/preflight-batches`, {
+    method: "POST",
+  });
+  const result: unknown = await allocation.json();
+  if (
+    !allocation.ok ||
+    typeof result !== "object" ||
+    result === null ||
+    !("preflightBatchId" in result) ||
+    typeof result.preflightBatchId !== "string" ||
+    !result.preflightBatchId
+  ) {
+    throw new Error("Failed to allocate pre-flight usage batch");
+  }
+  return result.preflightBatchId;
+}
+
 function BacklogZone({
   items,
   projectNameMap,
@@ -1665,16 +1683,30 @@ export function Dashboard() {
     }
   }, [projectId, spawnProjectId, spawnPinnedProjectId, configuredProjectOptions]);
 
+  const resetSpawnPreflightBatch = (projectId: string) => {
+    spawnPreflightOwnerRef.current = { project: projectId, queue: Promise.resolve() };
+    spawnPreflightBatchIdRef.current = null;
+    setSpawnPreflightBatchId(null);
+    setSpawnPreflightUsage(null);
+    setSpawnPreflightStatus("idle");
+  };
+
+  const persistSpawnPreflightBatch = (project: string, id: string) => {
+    spawnPreflightBatchIdRef.current = id;
+    setSpawnPreflightBatchId(id);
+    writeSpawnDraft({
+      ...spawnDraftRef.current,
+      preflightBatchId: id,
+      preflightBatchProjectId: project,
+    });
+  };
+
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnPinnedProjectId(null);
     setSpawnProjectId(normalizedProjectId);
     if (normalizedProjectId !== spawnProjectId) {
-      spawnPreflightOwnerRef.current = { project: normalizedProjectId, queue: Promise.resolve() };
-      spawnPreflightBatchIdRef.current = null;
-      setSpawnPreflightBatchId(null);
-      setSpawnPreflightUsage(null);
-      setSpawnPreflightStatus("idle");
+      resetSpawnPreflightBatch(normalizedProjectId);
     }
     // No explicit reset needed here: spawnWorkspaceModeAuto is derived from
     // spawnWorkspaceModeConfirmedFor !== spawnProjectId, so switching the
@@ -1860,38 +1892,15 @@ export function Dashboard() {
     let cancelled = false;
     const timer = setTimeout(() => {
       const owner = spawnPreflightOwnerRef.current;
-      const persistBatchId = (id: string) => {
-        spawnPreflightBatchIdRef.current = id;
-        setSpawnPreflightBatchId(id);
-        writeSpawnDraft({
-          ...spawnDraftRef.current,
-          preflightBatchId: id,
-          preflightBatchProjectId: project,
-        });
-      };
       owner.queue = owner.queue.then(async () => {
         if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
         try {
           let batchId = spawnPreflightBatchIdRef.current;
           if (!batchId) {
-            const allocation = await fetch(
-              `/api/projects/${encodeURIComponent(project)}/preflight-batches`,
-              { method: "POST" },
-            );
-            const result: unknown = await allocation.json();
-            if (
-              !allocation.ok ||
-              typeof result !== "object" ||
-              result === null ||
-              !("preflightBatchId" in result) ||
-              typeof result.preflightBatchId !== "string" ||
-              !result.preflightBatchId
-            ) {
-              throw new Error("Failed to allocate pre-flight usage batch");
-            }
+            const allocated = await allocatePreflightBatch(project);
             if (owner !== spawnPreflightOwnerRef.current) return;
-            batchId = result.preflightBatchId;
-            persistBatchId(batchId);
+            batchId = allocated;
+            persistSpawnPreflightBatch(project, batchId);
           }
           if (cancelled || owner !== spawnPreflightOwnerRef.current || spawningRef.current) return;
           const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
@@ -1926,7 +1935,8 @@ export function Dashboard() {
               const batchChanged =
                 result.preflightBatchId !== undefined &&
                 result.preflightBatchId !== spawnPreflightBatchIdRef.current;
-              if (result.preflightBatchId) persistBatchId(result.preflightBatchId);
+              if (result.preflightBatchId)
+                persistSpawnPreflightBatch(project, result.preflightBatchId);
               const usage = result.preflightTokenUsageView;
               if (batchChanged) {
                 setSpawnPreflightUsage(usage ?? null);
@@ -2001,6 +2011,9 @@ export function Dashboard() {
     setSpawnError(null);
     try {
       await spawnPreflightOwnerRef.current.queue;
+      if (!spawnPreflightBatchIdRef.current) {
+        persistSpawnPreflightBatch(nextProjectId, await allocatePreflightBatch(nextProjectId));
+      }
       const payload = buildSpawnSessionPayload({
         projectId: nextProjectId,
         prompt: nextPrompt,
@@ -2027,7 +2040,17 @@ export function Dashboard() {
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, "Failed to spawn Spur session"));
+        const failure = await readResponsePayload(response);
+        if (
+          response.status === 409 &&
+          typeof failure === "object" &&
+          failure !== null &&
+          "code" in failure &&
+          (failure.code === "spawn_committed" || failure.code === "spawn_failed")
+        ) {
+          resetSpawnPreflightBatch(nextProjectId);
+        }
+        throw new Error(responseErrorMessage(failure, "Failed to spawn Spur session"));
       }
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
@@ -2050,11 +2073,7 @@ export function Dashboard() {
       setSpawnReasoningIntent(initialReasoningIntent(false));
       setSpawnSessionMode(null);
       setSpawnBranch("");
-      spawnPreflightOwnerRef.current = { project: nextProjectId, queue: Promise.resolve() };
-      spawnPreflightBatchIdRef.current = null;
-      setSpawnPreflightBatchId(null);
-      setSpawnPreflightUsage(null);
-      setSpawnPreflightStatus("idle");
+      resetSpawnPreflightBatch(nextProjectId);
       spawnBranchExplicitRef.current = false;
       setSpawnPlanMode(false);
       setSpawnSelfDestruct(false);
