@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,8 @@ import {
   readClaudeConversationTail,
   readClaudeJsonlState,
   readClaudeTranscriptEntries,
+  type ClaudeConversationReaderState,
+  type ClaudeJsonlReaderState,
   type ParsedRecord,
 } from "../../src/claude-jsonl-state.js";
 import type { TranscriptEntry } from "../../src/types.js";
@@ -280,6 +282,139 @@ describe("Claude authentication", () => {
     if (!record) throw new Error("expected authentication record");
     return record;
   }
+
+  const reminders = Array.from({ length: 75 }, (_, index) =>
+    JSON.stringify(
+      index % 3 === 0
+        ? { type: "user", message: { role: "user", content: `Reminder ${index}` } }
+        : { type: index % 3 === 1 ? "system" : "progress" },
+    ),
+  ).join("\n") + "\n";
+
+  async function withReaders(
+    run: (
+      filePath: string,
+      readBoth: (cold?: boolean) => Promise<[
+        NonNullable<Awaited<ReturnType<typeof readClaudeJsonlState>>>,
+        NonNullable<Awaited<ReturnType<typeof readClaudeConversationTail>>>,
+      ]>,
+    ) => Promise<void>,
+  ): Promise<void> {
+    const tempDir = await mkdtemp(join(tmpdir(), "claude-auth-tail-"));
+    const filePath = join(tempDir, "transcript.jsonl");
+    findLatestSessionFileMock.mockResolvedValue(filePath);
+    let stateReader: ClaudeJsonlReaderState | undefined;
+    let conversationReader: ClaudeConversationReaderState | undefined;
+    try {
+      await writeFile(filePath, `${authLine}\n`);
+      await run(filePath, async (cold = false) => {
+        const state = await readClaudeJsonlState(tempDir, cold ? undefined : stateReader);
+        const conversation = await readClaudeConversationTail(
+          tempDir, cold ? undefined : conversationReader,
+        );
+        if (!state || !conversation) throw new Error("expected both readers");
+        stateReader = state.reader;
+        conversationReader = conversation.reader;
+        return [state, conversation];
+      });
+    } finally {
+      findLatestSessionFileMock.mockReset();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  it("retains auth through incremental, cached and cold reminder tails in both readers", async () => {
+    await withReaders(async (filePath, readBoth) => {
+      const initial = await readBoth();
+      await appendFile(filePath, reminders);
+      const incremental = await readBoth();
+      const cached = await readBoth();
+      const cold = await readBoth(true);
+      for (const pair of [incremental, cached, cold]) {
+        for (const result of pair) {
+          expect(result.state).toBe("needs_input");
+          expect(result.reader.tailRecords).toHaveLength(50);
+          expect(result.reader.tailRecords[0]?.authenticationFailed).toBe(true);
+          expect(result.reader.tailRecords.slice(1).map((record) => record.type)).toEqual(
+            Array.from({ length: 49 }, (_, index) => ["user", "system", "progress"][(index + 26) % 3]),
+          );
+        }
+        expect(pair[1].totalEntries).toBe(26);
+        expect(pair[1].entries).toHaveLength(26);
+        expect(pair[1].startIndex).toBe(0);
+        expect(pair[1].hasMore).toBe(false);
+      }
+      for (const index of [0, 1] as const) {
+        expect(incremental[index].reader.tailRecords[0]).toBe(initial[index].reader.tailRecords[0]);
+      }
+      await appendFile(filePath, reminders);
+      for (const result of await readBoth()) {
+        expect(result.state).toBe("needs_input");
+        expect(result.reader.tailRecords).toHaveLength(50);
+      }
+    });
+  });
+
+  it.each([
+    { error: undefined, stop_reason: "end_turn" },
+    { error: undefined, stop_reason: "tool_use", content: [{ type: "tool_use", name: "Read", input: {} }] },
+    { error: "server_error", stop_reason: "stop_sequence" },
+    { error: "rate_limit", stop_reason: "stop_sequence" },
+  ])("clears old auth before slicing a large assistant append batch: %j", async ({ error, ...message }) => {
+    await withReaders(async (filePath, readBoth) => {
+      await readBoth();
+      const response = JSON.stringify({ type: "assistant", error, message: { role: "assistant", ...message } });
+      await appendFile(filePath, `${response}\n${reminders}`);
+      for (const pair of [await readBoth(), await readBoth(true)]) {
+        for (const result of pair) {
+          expect(hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)).toBe(false);
+          expect(result.state).not.toBe("needs_input");
+          expect(result.reader.tailRecords).toHaveLength(50);
+        }
+      }
+    });
+  });
+
+  it("retains the newest repeated authentication record once, in original order", async () => {
+    await withReaders(async (filePath, readBoth) => {
+      await readBoth();
+      const newerAuth = authLine.replace("10:05:00", "10:06:00");
+      await appendFile(filePath, `${newerAuth}\n${reminders}`);
+      for (const result of await readBoth()) {
+        expect(result.state).toBe("needs_input");
+        expect(result.reader.tailRecords).toHaveLength(50);
+        expect(result.reader.tailRecords.filter((record) => record.authenticationFailed)).toHaveLength(1);
+        expect(result.reader.tailRecords[0]?.ownTimestampMs).toBe(Date.parse("2026-03-18T10:06:00.000Z"));
+      }
+    });
+  });
+
+  it.each(["truncate", "replace", "backwards-mtime"])(
+    "clears retained auth after transcript %s in both readers",
+    async (reset) => {
+      await withReaders(async (filePath, readBoth) => {
+        await appendFile(filePath, reminders);
+        await readBoth();
+        const successful = JSON.stringify({
+          type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: "Done".repeat(200) },
+        }) + "\n";
+        if (reset === "replace") {
+          await writeFile(`${filePath}.new`, successful + reminders);
+          await rename(`${filePath}.new`, filePath);
+        } else {
+          await writeFile(filePath, successful + (reset === "backwards-mtime" ? reminders : ""));
+          if (reset === "backwards-mtime") {
+            const earlier = new Date(Date.now() - 60_000);
+            await utimes(filePath, earlier, earlier);
+          }
+        }
+        for (const result of await readBoth()) {
+          expect(result.state).not.toBe("needs_input");
+          expect(hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)).toBe(false);
+        }
+      });
+    },
+  );
 
   it("recognizes the structured synthetic error despite trailing turn duration", () => {
     const record = authenticationRecord();

@@ -57199,8 +57199,9 @@ describe("SessionService", () => {
               type: "assistant", role: "assistant", stopReason: "stop_sequence",
               authenticationFailed: true, timestampMs: Date.now(),
             },
-            { type: "system", timestampMs: Date.now() },
-            { type: "user", role: "user", timestampMs: Date.now() },
+            ...Array.from({ length: 49 }, () => ({
+              type: "user", role: "user", timestampMs: Date.now(),
+            })),
           ],
         },
       });
@@ -57217,6 +57218,12 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       const view = await service.get("api-1");
       expect(view.state).toBe("needs_input");
+      captureTmuxPaneMock.mockClear();
+      const dashboard = await sessionServiceInternals(service).classifySessionRecord(
+        runningSession(), { scanPane: false },
+      );
+      expect(dashboard.state).toBe("needs_input");
+      expect(captureTmuxPaneMock).not.toHaveBeenCalled();
       expect(sessions.get("api-1")?.serverErrorAt).toBeUndefined();
       expect(sessions.get("api-1")?.serverErrorReactivationAttempts).toBeUndefined();
       expect(sendMessageToTmuxMock).not.toHaveBeenCalled();

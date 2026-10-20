@@ -76,6 +76,7 @@ export interface ClaudeJsonlReaderState {
  */
 export interface ClaudeConversationReaderState {
   filePath: string;
+  fileIno?: number;
   lastOffset: number;
   lastMtimeMs: number;
   tailEntries: TranscriptEntry[];
@@ -84,6 +85,20 @@ export interface ClaudeConversationReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
+
+function retainStateTail(records: ParsedRecord[]): ParsedRecord[] {
+  const tailStart = Math.max(0, records.length - TAIL_RECORD_LIMIT);
+  for (let index = records.length - 1; index >= 0; index--) {
+    const record = records[index];
+    if (!record || record.role !== "assistant") continue;
+    // Keep unresolved login evidence even after reminders fill the tail.
+    if (record.authenticationFailed && index < tailStart) {
+      return [record, ...records.slice(-(TAIL_RECORD_LIMIT - 1))];
+    }
+    break;
+  }
+  return records.slice(tailStart);
+}
 // Claude stamps locally-generated placeholder assistant records (API errors,
 // stop-sequence stubs) with this instead of a model id.
 const SYNTHETIC_MODEL = "<synthetic>";
@@ -703,10 +718,7 @@ export async function readClaudeJsonlState(
     };
   }
 
-  // Incremental reads always consume the full delta from lastOffset. The
-  // cold-read ceiling applies only when unreadFrom is 0 — a reader with no
-  // prior offset would otherwise Buffer.alloc the whole transcript. The window
-  // may start mid-file; the partial line that opens it is handled below.
+  // Scan the full delta; a cold reader starts at offset zero.
   const unreadFrom = Math.min(currentReader.lastOffset, fileStat.size);
   const readOffset = unreadFrom;
   const nowMs = Date.now();
@@ -718,9 +730,6 @@ export async function readClaudeJsonlState(
   }
 
   const newRecords: ParsedRecord[] = [];
-  // A truncated window can open mid-record; that fragment is not valid JSON,
-  // so parseJsonlRecord drops it. Discarding the first line unconditionally
-  // would instead lose a whole record whenever the cut lands on a boundary.
   for (const record of chunk.records) {
     newRecords.push(record);
     if (record.messageId && record.sessionId && (record.tokenUsage || record.advisorTokenUsages)) {
@@ -787,7 +796,7 @@ export async function readClaudeJsonlState(
     }
   }
 
-  const combined = [...currentReader.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+  const combined = retainStateTail([...currentReader.tailRecords, ...newRecords]);
   const nextReader: ClaudeJsonlReaderState = {
     filePath,
     lastOffset: readOffset + chunk.consumedBytes,
@@ -969,7 +978,7 @@ export async function readClaudeConversationTail(
     : await findLatestSessionFile(worktreePath);
   if (!filePath) return null;
 
-  let fileStat: { size: number; mtimeMs: number };
+  let fileStat: { size: number; mtimeMs: number; ino: number };
   try {
     fileStat = await stat(filePath);
   } catch {
@@ -986,6 +995,7 @@ export async function readClaudeConversationTail(
   const reuse =
     reader !== undefined &&
     reader.filePath === filePath &&
+    reader.fileIno === fileStat.ino &&
     fileStat.size >= reader.lastOffset &&
     fileStat.mtimeMs >= reader.lastMtimeMs;
   const base: ClaudeConversationReaderState = reuse
@@ -997,6 +1007,7 @@ export async function readClaudeConversationTail(
         tailEntries: [],
         tailRecords: [],
         totalEntries: 0,
+        fileIno: fileStat.ino,
       };
 
   // Nothing appended (same mtime and size) and we already have content → skip
@@ -1033,10 +1044,11 @@ export async function readClaudeConversationTail(
   const tailEntries = [...base.tailEntries, ...newEntries].slice(
     -MAX_RETAINED_CONVERSATION_ENTRIES,
   );
-  const tailRecords = [...base.tailRecords, ...newRecords].slice(-TAIL_RECORD_LIMIT);
+  const tailRecords = retainStateTail([...base.tailRecords, ...newRecords]);
 
   const nextReader: ClaudeConversationReaderState = {
     filePath,
+    fileIno: fileStat.ino,
     lastOffset: readOffset + chunk.consumedBytes,
     lastMtimeMs: fileStat.mtimeMs,
     tailEntries,
