@@ -1767,6 +1767,12 @@ export interface SessionNotRestorablePayload {
   availableActions: ("force_kill" | "respawn")[];
 }
 
+export interface SpawnBatchConflictPayload {
+  code: "spawn_in_progress" | "spawn_committed" | "spawn_failed";
+  sessionId: string;
+  error: string;
+}
+
 export interface RespawnSessionRequest {
   prompt?: string;
   attachments?: SendMessageAttachment[];

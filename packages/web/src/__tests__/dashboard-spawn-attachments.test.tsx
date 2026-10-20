@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { fileAttachmentsFromFiles, type FileAttachment } from "@/lib/file-attachments";
 import type * as FileAttachmentsModule from "@/lib/file-attachments";
+import { SPAWN_DRAFT_STORAGE_KEY } from "@/lib/spawn-draft";
 import type { SpurSessionView } from "@/lib/types";
 
 vi.mock("@/lib/file-attachments", async (importOriginal) => ({
@@ -56,6 +57,9 @@ describe("Dashboard spawn photo preparation", () => {
   let requests: RequestInit[];
   let spawnFails: boolean;
   let spawnResponse: Promise<Response> | undefined;
+  let previewResponse: Promise<Response> | undefined;
+  let spawnConflict: "spawn_in_progress" | "spawn_committed" | "spawn_failed" | undefined;
+  let batchRequests: number;
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
@@ -63,6 +67,9 @@ describe("Dashboard spawn photo preparation", () => {
     requests = [];
     spawnFails = false;
     spawnResponse = undefined;
+    previewResponse = undefined;
+    spawnConflict = undefined;
+    batchRequests = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions")
@@ -76,12 +83,28 @@ describe("Dashboard spawn photo preparation", () => {
       if (url.startsWith("/api/models"))
         return Response.json({ models: [{ id: "sonnet", label: "Sonnet" }] });
       if (url.includes("spawn-defaults")) return Response.json({ model: null, worktree: false });
-      if (url === "/api/projects/demo/preflight-batches")
-        return Response.json({ preflightBatchId: "photo-test-batch" });
-      if (url === "/api/preflight") return Response.json({ branch: null });
+      if (url === "/api/projects/demo/preflight-batches") {
+        batchRequests += 1;
+        return Response.json({ preflightBatchId: `batch-${batchRequests}` });
+      }
+      if (url === "/api/preflight") {
+        if (previewResponse) return previewResponse;
+        return Response.json({ branch: null });
+      }
       if (url === "/api/spawn") {
         requests.push(init ?? {});
         if (spawnResponse) return spawnResponse;
+        if (spawnConflict) {
+          const conflict = spawnConflict;
+          return Response.json(
+            {
+              error: `Session demo-7 conflict ${conflict}`,
+              code: conflict,
+              sessionId: "demo-7",
+            },
+            { status: 409 },
+          );
+        }
         return spawnFails
           ? Response.json({ error: "Spawn failed" }, { status: 502 })
           : Response.json(spawnedSession, { status: 201 });
@@ -168,6 +191,110 @@ describe("Dashboard spawn photo preparation", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
   }
+
+  function sentBatchId(index: number): unknown {
+    return (JSON.parse(String(requests[index]?.body)) as { preflightBatchId?: unknown })
+      .preflightBatchId;
+  }
+
+  it("allocates a preflight batch before spawn when the preview has not run", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Fast submit" } });
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(batchRequests).toBe(1);
+    expect(sentBatchId(0)).toBe("batch-1");
+  });
+
+  it("keeps Close locked through a delayed preview and sends one spawn request", async () => {
+    await mount();
+    let resolvePreview!: (response: Response) => void;
+    previewResponse = new Promise<Response>((accept) => {
+      resolvePreview = accept;
+    });
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Slow preview" } });
+    const read = pendingRead();
+    attach();
+    await act(async () => read.resolve([photo()]));
+    await waitFor(() => expect(batchRequests).toBe(1));
+    fireEvent.click(submit());
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close", exact: true }));
+    fireEvent.click(dialog);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(requests).toHaveLength(0);
+    await act(async () => resolvePreview(Response.json({ branch: null })));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(JSON.parse(String(requests[0].body))).toMatchObject({
+      preflightBatchId: "batch-1",
+      attachments: [{ name: "photo.png" }],
+    });
+  });
+
+  it("keeps prompt, photo and batch after spawn_in_progress", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Keep all" } });
+    const read = pendingRead();
+    attach();
+    await act(async () => read.resolve([photo()]));
+    spawnConflict = "spawn_in_progress";
+    fireEvent.click(submit());
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+    );
+    expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
+    expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+    spawnConflict = undefined;
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(sentBatchId(1)).toBe(sentBatchId(0));
+    expect(batchRequests).toBe(1);
+  });
+
+  it.each(["spawn_committed", "spawn_failed"] as const)(
+    "keeps prompt and photo and rotates the batch after %s",
+    async (code) => {
+      await mount();
+      fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Keep all" } });
+      const read = pendingRead();
+      attach();
+      await act(async () => read.resolve([photo()]));
+      spawnConflict = code;
+      fireEvent.click(submit());
+      await waitFor(() =>
+        expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("demo-7"),
+      );
+      expect(screen.getByLabelText("Prompt...")).toHaveValue("Keep all");
+      expect(screen.getByRole("button", { name: "Remove photo.png" })).toBeVisible();
+      spawnConflict = undefined;
+      fireEvent.click(submit());
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(sentBatchId(0)).toBe("batch-1");
+      expect(sentBatchId(1)).toBe("batch-2");
+      expect(JSON.parse(String(requests[1].body))).toMatchObject({
+        prompt: "Keep all",
+        attachments: [{ name: "photo.png" }],
+      });
+    },
+  );
+
+  it("persists the allocated batch to the draft before the spawn request settles", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Prompt..."), { target: { value: "Persist batch" } });
+    let resolve!: (response: Response) => void;
+    spawnResponse = new Promise<Response>((accept) => {
+      resolve = accept;
+    });
+    fireEvent.click(submit());
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(JSON.parse(String(window.localStorage.getItem(SPAWN_DRAFT_STORAGE_KEY)))).toMatchObject({
+      preflightBatchId: "batch-1",
+      preflightBatchProjectId: "demo",
+    });
+    await act(async () => resolve(Response.json(spawnedSession, { status: 201 })));
+  });
 
   it("closes and resets after an in-flight spawn succeeds", async () => {
     await mount();

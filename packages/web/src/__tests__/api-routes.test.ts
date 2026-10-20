@@ -665,6 +665,33 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("branch name is invalid");
   });
 
+  it.each(["spawn_in_progress", "spawn_committed", "spawn_failed"])(
+    "POST /api/spawn forwards spawn batch conflict code and sessionId for %s",
+    async (code) => {
+      mockedSpurRequestJson.mockRejectedValue(
+        new SpurDaemonError("Session api-3 was already created", 409, {
+          code,
+          sessionId: "api-3",
+          error: "Session api-3 was already created",
+        }),
+      );
+
+      const response = await spawnSession(
+        new NextRequest("http://localhost:3000/api/spawn", {
+          method: "POST",
+          body: JSON.stringify({ projectId: "api", prompt: "x" }),
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "Session api-3 was already created",
+        code,
+        sessionId: "api-3",
+      });
+    },
+  );
+
   // ── POST /api/diagnose-update ────────────────────────────────────────────
 
   it("POST /api/diagnose-update returns 400 when target is missing", async () => {

@@ -52,6 +52,12 @@ class UnavailableBatchError extends Error {
   }
 }
 
+export class PreflightBatchClaimedError extends Error {
+  constructor(readonly claimedBy: string) {
+    super("preflight batch was claimed by another session");
+  }
+}
+
 function isProvider(value: unknown): value is PreflightUsageProvider {
   return value === "claude" || value === "codex" || value === "cursor" || value === "opencode";
 }
@@ -432,7 +438,7 @@ export class PreflightUsageStore {
       const batch = await this.read(id);
       if (batch.project !== project) throw new Error("preflight batch project mismatch");
       if (batch.claimedBy && batch.claimedBy !== sessionId) {
-        throw new Error("preflight batch was claimed by another session");
+        throw new PreflightBatchClaimedError(batch.claimedBy);
       }
       if (!batch.claimedBy) {
         batch.claimedBy = sessionId;
@@ -441,6 +447,18 @@ export class PreflightUsageStore {
         await this.write(batch);
       }
       return batchUsage(batch);
+    });
+  }
+
+  async release(id: string, project: string, sessionId: string): Promise<void> {
+    await this.withBatchLock(id, async () => {
+      const batch = await this.read(id);
+      if (batch.project !== project) throw new Error("preflight batch project mismatch");
+      if (batch.claimedBy !== sessionId) return;
+      delete batch.claimedBy;
+      delete batch.claimedAt;
+      batch.updatedAt = new Date().toISOString();
+      await this.write(batch);
     });
   }
 

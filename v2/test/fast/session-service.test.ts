@@ -68513,4 +68513,195 @@ describe("SessionService", () => {
       },
     );
   });
+
+  describe("background spawn preflight batch conflicts", () => {
+    async function setupBatchService() {
+      mockClaudeJsonlState("waiting");
+      const sessions = createSessionStore();
+      tmuxSessionExistsMock.mockResolvedValue(false);
+      let nextId = 1;
+      reserveNextSessionIdMock.mockReset().mockImplementation(async () => `api-${nextId++}`);
+      const { SessionService, SpawnBatchConflictError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const store = (
+        service as unknown as {
+          preflightUsageStore: {
+            claim(id: string, project: string, sessionId: string): Promise<unknown>;
+            runAttempt(
+              id: string,
+              project: string,
+              provider: "claude",
+              execute: () => Promise<{ usage: Record<string, number> }>,
+            ): Promise<unknown>;
+          };
+        }
+      ).preflightUsageStore;
+      const { preflightBatchId } = await service.createPreflightBatch("api");
+      return { sessions, service, store, preflightBatchId, SpawnBatchConflictError };
+    }
+
+    function failPlaceholderWrite(mode: "before" | "after") {
+      const original = writeSessionMock.getMockImplementation();
+      let failed = false;
+      writeSessionMock.mockImplementation((dataDir: string, session: SessionRecord) => {
+        if (!failed && session.status === "spawning") {
+          failed = true;
+          if (mode === "after") original?.(dataDir, session);
+          throw new Error("disk full");
+        }
+        original?.(dataDir, session);
+      });
+    }
+
+    it("rejects a retry of a committed batch with spawn_committed and the owner id", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      const first = await service.spawnInBackground(request);
+
+      const retry = service.spawnInBackground(request);
+      await expect(retry).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(retry).rejects.toMatchObject({
+        statusCode: 409,
+        payload: {
+          code: "spawn_committed",
+          sessionId: first.id,
+          error: `Session ${first.id} was already created from this submission; submit again to start another session`,
+        },
+      });
+      expect([...sessions.keys()]).toEqual([first.id]);
+    });
+
+    it("rejects a retry of an errored batch owner with spawn_failed", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      await store.claim(preflightBatchId, "api", "api-9");
+      sessions.set("api-9", {
+        id: "api-9",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-9",
+        worktree: false,
+        worktreePath: "/repo/api",
+        tmuxSession: "api-9",
+        launchCommand: "",
+        status: "errored",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+
+      await expect(
+        service.spawnInBackground({ project: "api", prompt: "hello", preflightBatchId }),
+      ).rejects.toMatchObject({ payload: { code: "spawn_failed", sessionId: "api-9" } });
+    });
+
+    it("rejects a batch claimed by a missing session with spawn_failed and keeps the claim", async () => {
+      const { service, store, preflightBatchId } = await setupBatchService();
+      await store.claim(preflightBatchId, "api", "api-9");
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+
+      await expect(service.spawnInBackground(request)).rejects.toMatchObject({
+        payload: { code: "spawn_failed", sessionId: "api-9" },
+      });
+      await expect(service.spawnInBackground(request)).rejects.toMatchObject({
+        payload: { code: "spawn_failed", sessionId: "api-9" },
+      });
+    });
+
+    it("reports spawn_in_progress while the owner is still preparing", async () => {
+      const { service, store, preflightBatchId } = await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      const realClaim = store.claim.bind(store);
+      let concurrent: Promise<unknown> | undefined;
+      vi.spyOn(store, "claim").mockImplementationOnce(async (id, project, sessionId) => {
+        const usage = await realClaim(id, project, sessionId);
+        concurrent = service.spawnInBackground(request).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        await concurrent;
+        return usage;
+      });
+
+      const first = await service.spawnInBackground(request);
+
+      expect(await concurrent).toMatchObject({
+        payload: { code: "spawn_in_progress", sessionId: first.id },
+      });
+    });
+
+    it("creates one placeholder for two concurrent background spawns of one batch", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+
+      const results = await Promise.allSettled([
+        service.spawnInBackground(request),
+        service.spawnInBackground(request),
+      ]);
+
+      const fulfilled = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result] : [],
+      );
+      const rejected = results.flatMap((result) => (result.status === "rejected" ? [result] : []));
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      const winnerId = fulfilled[0]?.value.id;
+      expect(rejected[0]?.reason).toBeInstanceOf(SpawnBatchConflictError);
+      expect(rejected[0]?.reason).toMatchObject({ payload: { sessionId: winnerId } });
+      expect(
+        (rejected[0]?.reason as InstanceType<typeof SpawnBatchConflictError>).payload.code,
+      ).not.toBe("spawn_failed");
+      expect([...sessions.keys()]).toEqual([winnerId]);
+    });
+
+    it("releases the claim when the placeholder write fails", async () => {
+      const { sessions, service, store, preflightBatchId } = await setupBatchService();
+      await store.runAttempt(preflightBatchId, "api", "claude", async () => ({
+        usage: { inputTokens: 4, outputTokens: 1, totalTokens: 5 },
+      }));
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      failPlaceholderWrite("before");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = await service.spawnInBackground(request);
+
+      expect(retry.id).toBe("api-2");
+      expect(sessions.get("api-2")?.preflightTokenUsage).toMatchObject({
+        status: "measured",
+        totalTokens: 5,
+      });
+    });
+
+    it("keeps the claim when writeSession persists the placeholder then throws", async () => {
+      const { sessions, service, preflightBatchId, SpawnBatchConflictError } =
+        await setupBatchService();
+      const request = { project: "api", prompt: "hello", preflightBatchId };
+      failPlaceholderWrite("after");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = service.spawnInBackground(request);
+
+      await expect(retry).rejects.toBeInstanceOf(SpawnBatchConflictError);
+      await expect(retry).rejects.toMatchObject({
+        payload: { code: "spawn_committed", sessionId: "api-1" },
+      });
+      expect([...sessions.keys()]).toEqual(["api-1"]);
+    });
+
+    it("releases the claim of a replaced batch under the resolved id", async () => {
+      const { sessions, service } = await setupBatchService();
+      const requested = "00000000-0000-4000-8000-0000000000aa";
+      mkdirSync(join(TEST_DATA_DIR, "preflight-batches"), { recursive: true });
+      writeFileSync(join(TEST_DATA_DIR, "preflight-batches", `${requested}.json`), "{corrupt");
+      const request = { project: "api", prompt: "hello", preflightBatchId: requested };
+      failPlaceholderWrite("before");
+
+      await expect(service.spawnInBackground(request)).rejects.toThrow("disk full");
+      const retry = await service.spawnInBackground(request);
+
+      expect(retry.id).toBe("api-2");
+      expect([...sessions.keys()]).toEqual(["api-2"]);
+    });
+  });
 });
