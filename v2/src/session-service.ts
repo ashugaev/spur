@@ -23358,6 +23358,8 @@ export class SessionService {
           }),
       };
     };
+    // An unpersisted record has nothing to reconcile.
+    if (readSession(this.config.dataDir, observed.id) === null) return { session, runtime };
     const initial = readObservation();
     if (!initial.valid) return { session: initial.latest, runtime };
     if (this.isDeliveryStopped()) return { session, runtime };
