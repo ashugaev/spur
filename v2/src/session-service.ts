@@ -428,6 +428,7 @@ import {
 import { normalizeDailyWakeTimes, resolveNextDailyWakeAt } from "./wake-schedule.js";
 import { reconcileTokenUsage, type ProviderTokenUsageSample } from "./token-usage.js";
 import {
+  PreflightBatchClaimedError,
   PreflightUsageStore,
   aggregatePreflightAttempts,
   preflightUsageView,
@@ -463,6 +464,8 @@ import {
   type OpenPrAction,
   type OpenPrActionRequiredPayload,
   type SessionNotRestorablePayload,
+  type PreflightTokenUsageRecord,
+  type SpawnBatchConflictPayload,
   type SessionPrBinding,
   type ProjectListEntry,
   type SpawnDefaultsResponse,
@@ -1043,6 +1046,25 @@ export class SessionNotRestorableError extends Error {
       reason,
       availableActions,
     };
+  }
+}
+
+const SPAWN_BATCH_CONFLICT_MESSAGES: Record<SpawnBatchConflictPayload["code"], string> = {
+  spawn_in_progress:
+    "is still being created from this submission; wait, then check the session list",
+  spawn_committed:
+    "was already created from this submission; submit again to start another session",
+  spawn_failed: "from this submission did not start; submit again to start a new session",
+};
+
+export class SpawnBatchConflictError extends Error {
+  readonly statusCode = 409;
+  readonly payload: SpawnBatchConflictPayload;
+
+  constructor(code: SpawnBatchConflictPayload["code"], sessionId: string) {
+    const message = `Session ${sessionId} ${SPAWN_BATCH_CONFLICT_MESSAGES[code]}`;
+    super(message);
+    this.payload = { code, sessionId, error: message };
   }
 }
 
@@ -3599,6 +3621,7 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  private readonly spawnsPreparing = new Set<string>();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -13562,6 +13585,26 @@ export class SessionService {
     );
   }
 
+  private async claimSpawnPreflightBatch(
+    batchId: string,
+    projectId: string,
+    sessionId: string,
+  ): Promise<PreflightTokenUsageRecord> {
+    try {
+      return await this.preflightUsageStore.claim(batchId, projectId, sessionId);
+    } catch (error) {
+      if (!(error instanceof PreflightBatchClaimedError)) throw error;
+      const owner = error.claimedBy;
+      if (this.spawnsPreparing.has(owner))
+        throw new SpawnBatchConflictError("spawn_in_progress", owner);
+      const ownerRecord = readSession(this.config.dataDir, owner);
+      throw new SpawnBatchConflictError(
+        ownerRecord && ownerRecord.status !== "errored" ? "spawn_committed" : "spawn_failed",
+        owner,
+      );
+    }
+  }
+
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
     request = normalizeShepherdSpawnRequest(request);
     const admissionReservation = this.reserveAdmission(request.project, "spawn");
@@ -13573,6 +13616,7 @@ export class SessionService {
     let worktree = false;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let ownedClaimBatchId: string | undefined;
     let prompt = "";
     let steps: string[] | undefined;
     let mode: ResolvedSessionMode | undefined;
@@ -13617,14 +13661,10 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      this.spawnsPreparing.add(sessionId);
       const preflightBatchId = await this.preflightUsageStore.resolve(
         request.project,
         request.preflightBatchId,
-      );
-      const preflightTokenUsage = await this.preflightUsageStore.claim(
-        preflightBatchId,
-        request.project,
-        sessionId,
       );
       if (reuseCtx) {
         resolvedBranch = reuseCtx.resolvedBranch;
@@ -13654,6 +13694,12 @@ export class SessionService {
         worktree,
         reusesWorkspace: reuseCtx !== null,
       });
+      const preflightTokenUsage = await this.claimSpawnPreflightBatch(
+        preflightBatchId,
+        request.project,
+        sessionId,
+      );
+      ownedClaimBatchId = preflightBatchId;
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -13690,6 +13736,7 @@ export class SessionService {
       };
       this.assertReuseAnchorPresent(reuseCtx);
       writeSession(this.config.dataDir, placeholder);
+      ownedClaimBatchId = undefined;
       ensureTodoLedger(this.config.dataDir, placeholder);
       placeholder.todoLedgerVersion = 1;
       placeholderWritten = true;
@@ -13784,6 +13831,15 @@ export class SessionService {
           errorSource: "other",
         });
       }
+      if (ownedClaimBatchId !== undefined && sessionId) {
+        try {
+          if (readSession(this.config.dataDir, sessionId) === null) {
+            await this.preflightUsageStore.release(ownedClaimBatchId, request.project, sessionId);
+          }
+        } catch {
+          // Cleanup must not mask the spawn failure; an unreadable record keeps the claim.
+        }
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         ...(sessionId ? { sessionId } : {}),
@@ -13798,6 +13854,7 @@ export class SessionService {
       });
       throw error;
     } finally {
+      if (sessionId) this.spawnsPreparing.delete(sessionId);
       if (admissionReserved) {
         this.admissionReservations.delete(admissionReservation);
       }
