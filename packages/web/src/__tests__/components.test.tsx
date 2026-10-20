@@ -3604,6 +3604,10 @@ describe("StatusBar", () => {
     vi.restoreAllMocks();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   function mockStatusBarFetch({
     resources,
     github,
@@ -3782,6 +3786,49 @@ describe("StatusBar", () => {
     fireEvent.click(tooltipHeader!);
 
     expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  describe.each([
+    ["clicking the tooltip content", "click"],
+    ["focus leaving the trigger", "focusout"],
+  ] as const)("hover then pin then close by %s", (_label, closer) => {
+    it("stays closed, and a later mouseenter waits for the hover delay", async () => {
+      mockStatusBarFetch({
+        resources: { available: true, cpuPercent: 86, memoryPercent: 48, diskPercent: 41 },
+      });
+      renderStatusBar();
+      const trigger = await screen.findByRole("button", {
+        name: "Show aggregated system status",
+      });
+      await waitFor(() => expect(trigger).toHaveAttribute("data-status", "attention"));
+      const container = trigger.parentElement!;
+
+      vi.useFakeTimers();
+      fireEvent.mouseEnter(container);
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      fireEvent.click(trigger);
+      expect(screen.getByText("System")).toBeInTheDocument();
+
+      if (closer === "click") {
+        fireEvent.click(screen.getByText("System").closest("div")!);
+      } else {
+        fireEvent.blur(trigger, { relatedTarget: null });
+      }
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+
+      fireEvent.mouseEnter(container);
+      expect(screen.queryByText("System")).not.toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(screen.getByText("System")).toBeInTheDocument();
+    });
   });
 
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {

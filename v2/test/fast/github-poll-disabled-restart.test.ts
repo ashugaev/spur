@@ -13,20 +13,11 @@ import { createTempDir } from "../helpers/common.js";
 
 const ghTransportMock = vi.fn();
 const logSpurEventMock = vi.fn();
-const cycles: Promise<unknown>[] = [];
 
-vi.mock("../../src/gh.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof ghModule>();
-  return {
-    ...actual,
-    gh: ghTransportMock,
-    runGhPollCycle: (...args: Parameters<typeof ghModule.runGhPollCycle>) => {
-      const cycle = actual.runGhPollCycle(...args);
-      cycles.push(cycle);
-      return cycle;
-    },
-  };
-});
+vi.mock("../../src/gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ghModule>()),
+  gh: ghTransportMock,
+}));
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
 }));
@@ -35,19 +26,7 @@ const { githubSourceModule } = await import("../../src/event-sources/github.js")
 const { writeSession, recordGitHubPollDisabledSession } = await import("../../src/metadata.js");
 const { rmSync, existsSync } = await import("node:fs");
 
-// A poll cycle is a detached promise chain with real fs work, so a fixed number of
-// event-loop ticks races it. runGhPollCycle wraps every cycle (gated or not), so the
-// wrapper below hands the test that exact promise to await.
-async function runOneCycle(handle: {
-  runOnStart?: () => void;
-  stop: () => void | Promise<void>;
-}): Promise<void> {
-  cycles.length = 0;
-  handle.runOnStart?.();
-  await vi.waitFor(() => expect(cycles).toHaveLength(1));
-  await cycles[0];
-  await handle.stop();
-}
+const flushPollCycle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 const tempDirs: string[] = [];
 
@@ -132,9 +111,12 @@ describe("github poll-disabled registry survives a real restart", () => {
     ghTransportMock.mockResolvedValue(openPrEnvelope(42));
 
     const handle = await startHandle(dataDir);
-    await runOneCycle(handle);
+    handle.runOnStart?.();
+    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
+
+    await handle.stop();
   });
 
   it("case 2: a registry entry recorded before a fresh handle start survives it", async () => {
@@ -144,7 +126,9 @@ describe("github poll-disabled registry survives a real restart", () => {
     ghTransportMock.mockResolvedValue(openPrEnvelope(42));
 
     const handle = await startHandle(dataDir);
-    await runOneCycle(handle);
+    handle.runOnStart?.();
+    await flushPollCycle();
+    await handle.stop();
 
     expect(ghTransportMock).toHaveBeenCalledTimes(0);
     const disabledEvents = logSpurEventMock.mock.calls
@@ -170,9 +154,12 @@ describe("github poll-disabled registry survives a real restart", () => {
     rmSync(registryPath, { force: true });
 
     const handle = await startHandle(dataDir);
-    await runOneCycle(handle);
+    handle.runOnStart?.();
+    await flushPollCycle();
 
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
+
+    await handle.stop();
   });
 
   // A8: the recheck deadline is stamped onto the disk entry (lastCheckedAtMs), so a
@@ -186,7 +173,9 @@ describe("github poll-disabled registry survives a real restart", () => {
     ghTransportMock.mockResolvedValue(openPrEnvelope(42));
 
     const handleBeforeWindow = await startHandle(dataDir);
-    await runOneCycle(handleBeforeWindow);
+    handleBeforeWindow.runOnStart?.();
+    await flushPollCycle();
+    await handleBeforeWindow.stop();
     expect(ghTransportMock).toHaveBeenCalledTimes(0);
 
     const registryPath = join(
@@ -211,7 +200,10 @@ describe("github poll-disabled registry survives a real restart", () => {
     writeFileSync(registryPath, JSON.stringify(stored));
 
     const handleAfterWindow = await startHandle(dataDir);
-    await runOneCycle(handleAfterWindow);
-    expect(ghTransportMock).toHaveBeenCalledTimes(1);
+    handleAfterWindow.runOnStart?.();
+    await flushPollCycle();
+    await vi.waitFor(() => expect(ghTransportMock).toHaveBeenCalledTimes(1));
+
+    await handleAfterWindow.stop();
   });
 });

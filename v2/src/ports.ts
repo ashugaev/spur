@@ -19,6 +19,13 @@ const SIDECAR_PORTS_TIMEOUT_MS = 30_000;
 // that env is absent. Same number in both places or `spur doctor` reports
 // `web-ui-port-drift`.
 export const DEFAULT_UI_PORT = 5555;
+export const DEFAULT_MCP_PORT = 4311;
+
+export function defaultMcpPort(...occupied: number[]): number {
+  let port = DEFAULT_MCP_PORT;
+  while (occupied.includes(port)) port += 1;
+  return port;
+}
 
 interface SidecarPortRow {
   sidecar?: unknown;

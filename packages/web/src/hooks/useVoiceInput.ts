@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { startRealtimeTranscription, type RealtimeSession } from "@/lib/realtime-voice-client";
 import { readApiErrorMessage } from "@/lib/json-payload";
+import { useScreenWakeLock } from "@/hooks/useScreenWakeLock";
 
 interface RealtimeTokenResponse {
   value: string;
@@ -317,6 +318,7 @@ export function useVoiceInput(options: {
   contextKeyRef.current = options.contextKey;
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [recording, setRecording] = useState(false);
+  useScreenWakeLock(recording);
   const [hasRetainedTake, setHasRetainedTake] = useState(false);
   const [retainedTakePlaying, setRetainedTakePlaying] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | "sending" | null>(null);

@@ -12,25 +12,30 @@ const PROCESS_LIST_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 // (dead process, proc race, or no procfs on this platform).
 export type PpidReader = (pid: number) => Promise<number | null>;
 
-// Parses ppid from /proc/<pid>/stat. The comm field is wrapped in parentheses
-// and may contain spaces, so anchor parsing to the last ')': the fields after
-// it are `state ppid ...`.
-async function readPpidFromProc(pid: number): Promise<number | null> {
+// Reads the fields of /proc/<pid>/stat after the comm field. The comm field is
+// wrapped in parentheses and may contain spaces, so anchor parsing to the last
+// ')': the fields after it are `state ppid pgrp session ...`. Null when the
+// file is unreadable or malformed.
+async function readProcStatFields(pid: number): Promise<string[] | null> {
   try {
     const content = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = content.lastIndexOf(")");
     if (close === -1) {
       return null;
     }
-    const fields = content
+    return content
       .slice(close + 2)
       .trim()
       .split(/\s+/);
-    const ppid = Number.parseInt(fields[1] ?? "", 10);
-    return Number.isFinite(ppid) ? ppid : null;
   } catch {
     return null;
   }
+}
+
+async function readPpidFromProc(pid: number): Promise<number | null> {
+  const fields = await readProcStatFields(pid);
+  const ppid = Number.parseInt(fields?.[1] ?? "", 10);
+  return Number.isFinite(ppid) ? ppid : null;
 }
 
 export type ProcessOwnership = "owned" | "foreign" | "unknown";
@@ -123,7 +128,14 @@ export type ProcessListRunner = (
 ) => Promise<{ stdout: string }>;
 
 const runProcessList: ProcessListRunner = async (file, args, options) => {
-  const { stdout } = await execFileAsync(file, args, options);
+  // Deadline via AbortSignal, not execFile `timeout`: `timeout` destroys stdout
+  // before SIGTERM and still resolves success when the child exits 0, returning
+  // truncated or empty output (#1194). The signal always rejects instead.
+  const { stdout } = await execFileAsync(file, args, {
+    encoding: options.encoding,
+    maxBuffer: options.maxBuffer,
+    signal: AbortSignal.timeout(options.timeout),
+  });
   return { stdout };
 };
 
@@ -156,7 +168,12 @@ export async function snapshotProcesses(
   } catch {
     return { status: "unavailable" };
   }
-  return { status: "ok", processes: parseProcessRows(stdout) };
+  const processes = parseProcessRows(stdout);
+  // `ps -e` always lists at least itself: zero rows is a cut or empty read.
+  if (processes.length === 0) {
+    return { status: "unavailable" };
+  }
+  return { status: "ok", processes };
 }
 
 // Degrade-quietly wrapper for callers that legitimately treat a failed `ps` as
@@ -237,9 +254,10 @@ export type ProcessLivenessSnapshot =
 // relaunch/switchAuth and both spawn-failure teardowns).
 //
 // "unavailable" on ANY exec failure (spawn error, EAGAIN/EMFILE under fork
-// pressure, timeout) — never on "ps ran and found nothing", since `-eo`
-// with no `-p` filter has no "no such pid" failure mode of its own to
-// confuse with a real exec failure. A snapshot that could not be taken must
+// pressure, timeout) and on a zero-row table (`ps -e` always lists itself, so
+// zero rows is a cut or empty read) — never on a table that lists processes
+// but not the tracked pid, since `-eo` with no `-p` filter has no "no such
+// pid" failure mode of its own to confuse with a real exec failure. A snapshot that could not be taken must
 // never be read as "found nobody, so everyone is dead": the caller MUST
 // treat every pid it was tracking as still alive. A captured agent falsely
 // read as dead lets a failOnSurvivors:true caller (restore/relaunch/
@@ -268,6 +286,7 @@ export async function snapshotProcessLiveness(
     return { status: "unavailable" };
   }
   const alivePids = new Set<number>();
+  let rowCount = 0;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -276,9 +295,14 @@ export async function snapshotProcessLiveness(
     const pid = Number(match[1]);
     const state = match[2] ?? "";
     if (!Number.isInteger(pid)) continue;
+    rowCount += 1;
     if (!isZombieProcessState(state)) {
       alivePids.add(pid);
     }
+  }
+  // Counted before zombie filtering: a zombie-only table is a real table.
+  if (rowCount === 0) {
+    return { status: "unavailable" };
   }
   return { status: "ok", alivePids };
 }
@@ -369,18 +393,56 @@ export type ProcessSignaler = (pid: number, signal: NodeJS.Signals) => void;
 // Linux-only (/proc): returns null off Linux, which callers must read as
 // "identity unverifiable here", never as "not my process".
 export async function readProcessIdentity(pid: number): Promise<string | null> {
-  try {
-    const content = await readFile(`/proc/${pid}/stat`, "utf8");
-    const close = content.lastIndexOf(")");
-    if (close === -1) return null;
-    const fields = content
-      .slice(close + 2)
-      .trim()
-      .split(/\s+/);
-    return fields[19] ?? null;
-  } catch {
+  return (await readProcStatFields(pid))?.[19] ?? null;
+}
+
+// Kernel session id (field[3]) and identity (field[19]) from ONE stat read, so
+// a process that exits between two reads can never yield a sid with a null
+// identity. Null when unreadable or either field is not a finite positive int.
+export async function readProcessStat(
+  pid: number,
+): Promise<{ sid: number; identity: string } | null> {
+  const fields = await readProcStatFields(pid);
+  const sid = Number.parseInt(fields?.[3] ?? "", 10);
+  const identity = fields?.[19];
+  if (!Number.isInteger(sid) || sid <= 0 || identity === undefined) {
     return null;
   }
+  if (!/^\d+$/.test(identity) || Number.parseInt(identity, 10) <= 0) {
+    return null;
+  }
+  return { sid, identity };
+}
+
+// Pids whose kernel session id is `sid`, from one `ps -o pid= -s <sid>` fork
+// (execFile, no shell). Linux only. Any failure (nonzero exit, timeout, spawn
+// error) reads as no members, never "unavailable": a missed session pass is
+// the pre-existing behavior, not a reason to refuse a relaunch.
+export async function listSessionMemberPids(
+  sid: number,
+  run: ProcessListRunner = runProcessList,
+): Promise<number[]> {
+  if (process.platform !== "linux") {
+    return [];
+  }
+  let stdout: string;
+  try {
+    ({ stdout } = await run("ps", ["-o", "pid=", "-s", String(sid)], {
+      encoding: "utf8",
+      timeout: PROCESS_LIST_TIMEOUT_MS,
+      maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
+    }));
+  } catch {
+    return [];
+  }
+  const pids: number[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (/^\d+$/.test(trimmed)) {
+      pids.push(Number.parseInt(trimmed, 10));
+    }
+  }
+  return pids;
 }
 
 function signalProcess(pid: number, signal: NodeJS.Signals): void {
