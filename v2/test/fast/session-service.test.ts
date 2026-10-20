@@ -21983,6 +21983,31 @@ describe("SessionService", () => {
       expect(restoreSpy).not.toHaveBeenCalledWith("api-1");
     });
 
+    it("records final usage for a probe-error record healed at boot", async () => {
+      const sessions = seedRestoreAfterRebootFleet();
+      getTmuxSessionPresenceMock.mockResolvedValue({ present: false, unresponsive: false });
+      mockClaudeJsonlState("waiting", {
+        tokenUsage: {
+          provider: "claude",
+          generationId: "final-message",
+          inputTokens: 7,
+          outputTokens: 3,
+          totalTokens: 10,
+        },
+      });
+      const service = await createDisposedSessionService();
+
+      const pending = service.reconcileStoppedSessions();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+
+      expect(sessions.get("api-1")).toMatchObject({
+        status: "stopped",
+        tokenUsage: { totalTokens: 10 },
+      });
+      expect(sessions.get("api-1")).not.toHaveProperty("error");
+    });
+
     it("keeps a record healed between list and read out of reboot restore", async () => {
       const sessions = seedRestoreAfterRebootFleet();
       getTmuxSessionPresenceMock.mockImplementation(async (name: string) => {

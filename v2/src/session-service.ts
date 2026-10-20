@@ -11899,7 +11899,7 @@ export class SessionService {
       if (!reconciled) continue;
       const usage =
         (reconciled.session.status === "stopped" || reconciled.session.status === "errored") &&
-        !hasRetainedSessionError(current) &&
+        (healedProbeError || !hasRetainedSessionError(current)) &&
         !current.serverErrorAt &&
         !reconciled.runtime.probeUnresponsive &&
         !reconciled.runtime.diagnostic &&
