@@ -2733,14 +2733,17 @@ describe("github source", () => {
 
     const handle = await startLifecycle(emit);
 
-    const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
-    expect(graphqlArgs.some((args) => args.includes("n0=3963"))).toBe(true);
-    expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
-    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
-    expect(snapshot.prNumber).toBe(3963);
-    expect(snapshot.signals.has("changes_requested")).toBe(true);
-    expect(emit).not.toHaveBeenCalled();
-    handle.stop();
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("n0=3963"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.prNumber).toBe(3963);
+      expect(snapshot.signals.has("changes_requested")).toBe(true);
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      handle.stop();
+    }
   });
 
   it("polls a member as unbound when the workspace has no pr, ignoring a stale record pr", async () => {
@@ -2752,10 +2755,13 @@ describe("github source", () => {
 
     const handle = await startLifecycle(emit);
 
-    const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
-    expect(graphqlArgs.some((args) => args.includes("b0=feature/native-pr-binding"))).toBe(true);
-    expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
-    handle.stop();
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("b0=feature/native-pr-binding"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+    } finally {
+      handle.stop();
+    }
   });
 
   it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
@@ -3503,30 +3509,32 @@ describe("github source", () => {
         resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
       });
 
-      // Startup poll is ungated: silent baseline of #3963.
-      const c0 = ghMock.mock.calls.length;
-      expect(c0).toBeGreaterThan(0);
-      expect(emit).not.toHaveBeenCalled();
+      try {
+        // Startup poll is ungated: silent baseline of #3963.
+        const c0 = ghMock.mock.calls.length;
+        expect(c0).toBeGreaterThan(0);
+        expect(emit).not.toHaveBeenCalled();
 
-      // Tick 2 stays inside the slow window; only the terminal gate could skip it.
-      hasRecentSessionUserActionMock.mockReturnValue(true);
-      queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
-      await waitForGhCallCount(c0 + 5);
-      expect(emit).toHaveBeenCalledTimes(1);
-      expect(emit).toHaveBeenCalledWith(
-        "github:comment",
-        expect.objectContaining({ signals: [expect.objectContaining({ key: "comment:9300" })] }),
-      );
+        // Tick 2 stays inside the slow window; only the terminal gate could skip it.
+        hasRecentSessionUserActionMock.mockReturnValue(true);
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 5);
+        expect(emit).toHaveBeenCalledTimes(1);
+        expect(emit).toHaveBeenCalledWith(
+          "github:comment",
+          expect.objectContaining({ signals: [expect.objectContaining({ key: "comment:9300" })] }),
+        );
 
-      // Tick 3: identical data, nothing new.
-      queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
-      await waitForGhCallCount(c0 + 10);
-      expect(emit).toHaveBeenCalledTimes(1);
+        // Tick 3: identical data, nothing new.
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 10);
+        expect(emit).toHaveBeenCalledTimes(1);
 
-      hasRecentSessionUserActionMock.mockReturnValue(false);
-      await assertGhCallCountStable(c0 + 10);
-
-      handle.stop();
+        hasRecentSessionUserActionMock.mockReturnValue(false);
+        await assertGhCallCountStable(c0 + 10);
+      } finally {
+        handle.stop();
+      }
     });
 
     it("forces a poll for a brand-new session mid-window even when the tracked session is quiet", async () => {
