@@ -39174,6 +39174,57 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("reports the workspace PR binding for a desk sibling with a stale record pr", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const stalePr = {
+      number: 3960,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/3960",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", {
+      ...base,
+      id: "api-2",
+      tmuxSession: "api-2",
+      workspaceId: "api-1",
+      pr: stalePr,
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-2", {
+      links: [{ label: "pr", url: "https://github.com/acme/api/pull/3963" }],
+    });
+
+    expect(result.pr?.number).toBe(3963);
+    expect((await service.get("api-2")).pr?.number).toBe(3963);
+    const internals = service as unknown as {
+      enrichDashboard(record: SessionRecord): Promise<DashboardSessionView>;
+    };
+    const member = store.get("api-2");
+    if (!member) throw new Error("Missing member fixture");
+    expect((await internals.enrichDashboard(member)).pr?.number).toBe(3963);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.pr?.number).toBe(3963);
+    expect(store.get("api-2")?.pr?.number).toBe(3960);
+    service.dispose();
+  });
+
   it("seeds the workspace state file from the anchor's legacy slots on its first write", async () => {
     const store = createSessionStore();
     const base = {
