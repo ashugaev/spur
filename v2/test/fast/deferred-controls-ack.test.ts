@@ -900,13 +900,33 @@ function baseConfig() {
   };
 }
 
-async function loadSessionServiceModule() {
+async function loadSessionServiceModule(options?: { realPaneGeneration?: boolean }) {
   vi.resetModules();
   const module = await import("../../src/session-service.js");
   const BaseSessionService = module.SessionService;
   class TrackedSessionService extends BaseSessionService {
     constructor(...args: ConstructorParameters<typeof BaseSessionService>) {
       super(...args);
+      const internals = this as unknown as {
+        capturePaneGeneration?: (session: SessionRecord) => Promise<{
+          tmuxSession: string;
+          panePid: number;
+          processStarttime: number;
+        }>;
+        paneGenerationMatches?: () => Promise<boolean>;
+      };
+      if (
+        !options?.realPaneGeneration &&
+        internals.capturePaneGeneration &&
+        internals.paneGenerationMatches
+      ) {
+        vi.spyOn(internals, "capturePaneGeneration").mockImplementation(async (session) => ({
+          tmuxSession: session.tmuxSession,
+          panePid: 4242,
+          processStarttime: 1,
+        }));
+        vi.spyOn(internals, "paneGenerationMatches").mockResolvedValue(true);
+      }
       activeSessionServices.push(this);
     }
   }
@@ -928,7 +948,8 @@ function createSessionStore() {
   // every call (clone() always allocates a new object), which contradicts
   // the real listSessions() and would make the tick's record-change
   // detection untestable. readSessionMock/writeSessionMock stay a raw clone
-  // per call, mirroring production where only listSessions is stat-gated.
+  // per call: production readSession shares the same cache, but no caller
+  // relies on its identity.
   const published = new Map<string, { json: string; record: SessionRecord }>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);

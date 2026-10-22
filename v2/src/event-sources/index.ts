@@ -10,6 +10,7 @@ import { githubSourceModule } from "./github.js";
 import { gitlabSourceModule } from "./gitlab.js";
 import { jiraSourceModule } from "./jira.js";
 import { sentrySourceModule } from "./sentry.js";
+import { scriptSourceModule } from "./script.js";
 import { serviceSourceModule } from "./service.js";
 import { telegramSourceModule } from "./telegram.js";
 import { webhookSourceModule } from "./webhook.js";
@@ -29,6 +30,7 @@ interface StartConfiguredSourcesDeps {
   bus: EventBus;
   logger?: SourceLogger;
   listSessions(): Promise<SourceSessionListItem[]>;
+  getSession(sessionId: string): Promise<SourceSessionListItem | null>;
   spawnSession?(request: SourceSpawnSessionRequest): Promise<SourceSessionListItem>;
   listProjects?(): Promise<SourceProjectListItem[]>;
   workbench?: SourceWorkbench;
@@ -55,6 +57,7 @@ interface StartedSource {
 
 const SOURCE_MODULES = {
   cron: cronSourceModule,
+  script: scriptSourceModule,
   github: githubSourceModule,
   "github-ci": githubCiSourceModule,
   gitlab: gitlabSourceModule,
@@ -134,6 +137,7 @@ export async function startConfiguredSources(
           config: source,
           deferInitialSync: true,
           listSessions: deps.listSessions,
+          getSession: deps.getSession,
           ...(deps.workbench ? { workbench: deps.workbench } : {}),
           ...(deps.spawnSession ? { spawnSession: deps.spawnSession } : {}),
           ...(deps.listProjects ? { listProjects: deps.listProjects } : {}),

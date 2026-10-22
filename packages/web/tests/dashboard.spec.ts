@@ -481,10 +481,13 @@ test("loads local JetBrains Mono faces in both dashboard themes", async ({ page 
     if (request.resourceType() === "font") failedFonts.push(request.url());
   });
   await mockSessions(page, []);
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
   for (const theme of ["dark", "light"] as const) {
-    if (theme === "light")
-      await page.getByRole("button", { name: "Switch to light theme" }).click();
+    if (theme === "light") {
+      await page.getByRole("button", { name: "Theme" }).click();
+      await page.getByRole("radio", { name: "Light" }).click();
+    }
     const typography = await page.evaluate(async () => {
       const variable = getComputedStyle(document.documentElement)
         .getPropertyValue("--font-jetbrains-mono")
@@ -868,11 +871,13 @@ test.describe("D1: Header renders correctly", () => {
     ];
 
     await mockSessions(page, [], projects);
+    await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/");
 
     for (const theme of ["dark", "light"] as const) {
       if (theme === "light") {
-        await page.getByRole("button", { name: "Switch to light theme" }).click();
+        await page.getByRole("button", { name: "Theme" }).click();
+        await page.getByRole("radio", { name: "Light" }).click();
         await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       }
 

@@ -1,4 +1,5 @@
 import { open, readFile, stat } from "node:fs/promises";
+import { scanJsonlLines } from "./jsonl-scan.js";
 import type { SessionState, TranscriptEntry } from "./types.js";
 import type { ProviderTokenUsageSample } from "./token-usage.js";
 import { findLatestSessionFile, sessionFileForId } from "./agents/claude.js";
@@ -81,14 +82,6 @@ export interface ClaudeConversationReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-// Ceiling on a cold read's allocation. A reader with no prior offset would
-// otherwise `Buffer.alloc` the whole transcript and then copy it again into a
-// string — on this host the largest is 49.5 MB, and the state reader keeps
-// only TAIL_RECORD_LIMIT records out of it. Cold reads are not rare: every
-// daemon restart is one, and pruneSessionScopedState drops a reader whenever
-// its session leaves the live set, so a session that flips back to live pays
-// the full re-read again. Sized well above 50 records of ordinary transcript.
-const MAX_COLD_READ_BYTES = 1 << 20; // 1 MiB
 // Claude stamps locally-generated placeholder assistant records (API errors,
 // stop-sequence stubs) with this instead of a model id.
 const SYNTHETIC_MODEL = "<synthetic>";
@@ -571,52 +564,18 @@ async function scanJsonlRecords(
   offset: number,
   timestampMs: number,
 ): Promise<{ records: ParsedRecord[]; consumedBytes: number } | null> {
-  let fd: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    fd = await open(filePath, "r");
-    const records: ParsedRecord[] = [];
-    let position = offset;
-    let pending = Buffer.alloc(0);
-    while (position < size) {
-      const length = Math.min(MAX_COLD_READ_BYTES, size - position);
-      const chunk = Buffer.alloc(length);
-      const { bytesRead } = await fd.read(chunk, 0, length, position);
-      if (bytesRead === 0) break;
-      position += bytesRead;
-      const combined =
-        pending.length === 0
-          ? chunk.subarray(0, bytesRead)
-          : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
-      const lastNewline = combined.lastIndexOf(0x0a);
-      if (lastNewline < 0) {
-        pending = combined;
-        continue;
-      }
-      for (const line of combined
-        .subarray(0, lastNewline + 1)
-        .toString("utf8")
-        .split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const record = parseJsonlRecord(trimmed, timestampMs);
-        if (record) records.push(record);
-      }
-      pending = combined.subarray(lastNewline + 1);
-    }
-    const trailing = pending.toString("utf8").trim();
-    if (trailing) {
-      const record = parseJsonlRecord(trailing, timestampMs);
-      if (record) {
-        records.push(record);
-        pending = Buffer.alloc(0);
-      }
-    }
-    return { records, consumedBytes: position - offset - pending.length };
-  } catch {
-    return null;
-  } finally {
-    await fd?.close();
-  }
+  const records: ParsedRecord[] = [];
+  const scan = await scanJsonlLines(
+    filePath,
+    offset,
+    (line) => {
+      const record = parseJsonlRecord(line, timestampMs);
+      if (record) records.push(record);
+      return record !== null;
+    },
+    size,
+  );
+  return scan ? { records, consumedBytes: scan.consumedBytes } : null;
 }
 
 export async function readClaudeJsonlState(

@@ -156,11 +156,14 @@ export interface AgentSubmitAckContext {
   freshLaunch?: boolean;
   /** Session-private cursor config dir, used to re-resolve a rotated chat id. */
   cursorConfigDir?: string;
+  /** Opt-in historical Codex receipt from its original persisted native file. */
+  codexAckScope?: "current-native-baseline";
 }
 
 export interface SubmitAckScanResult {
   found: boolean;
   lastScannedFile: string | null;
+  qualifiedNoMatch?: true;
 }
 
 export interface SubmitAckPacing {
@@ -593,6 +596,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     busyQueuedSendAwaitsPrompt: false,
     queuedSendPromptGraceMs: 15_000,
     submitAck: async (ctx, persisted) => {
+      if (ctx.codexAckScope && (!ctx.agentSessionId?.trim() || persisted?.agent !== "codex"))
+        return null;
       const baseline =
         persisted?.agent === "codex"
           ? new Map(Object.entries(persisted.offsets))
@@ -600,6 +605,11 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       return {
         baseline: { agent: "codex", offsets: Object.fromEntries(baseline) },
         async scan(text) {
+          if (ctx.codexAckScope && ctx.agentSessionId)
+            return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline, {
+              nativeSessionId: ctx.agentSessionId,
+              worktreePath: ctx.worktreePath,
+            });
           return scanCodexRolloutForMessage(ctx.codexSessionsDir, text, baseline);
         },
       };

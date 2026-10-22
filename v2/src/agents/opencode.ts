@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "./shell-escape.js";
+import { createConcurrencyGate } from "../concurrency-gate.js";
 import { resolveTempDir } from "../temp-dir.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 import type {
@@ -187,6 +188,7 @@ export async function assertOpenCodeCompatibility(): Promise<void> {
     ({ stdout } = await execFileAsync(opencodeCommand(), ["--version"], {
       encoding: "utf8",
       timeout: 5_000,
+      killSignal: "SIGKILL",
     }));
   } catch (error) {
     throw new Error(`OpenCode ${MIN_OPENCODE_VERSION}+ is required`, { cause: error });
@@ -540,38 +542,15 @@ export function parseOpenCodeTokenUsage(value: unknown): ProviderTokenUsageSampl
 // mean of 4 and a peak of 17 concurrent exports, 3.7 GB resident at the peak.
 // The limit sits at that mean; over it, callers queue rather than fan out.
 export const OPENCODE_EXPORT_MAX_CONCURRENCY = 4;
-let openCodeExportActive = 0;
-const openCodeExportQueue: Array<() => void> = [];
-
-async function acquireOpenCodeExportSlot(): Promise<void> {
-  if (openCodeExportActive < OPENCODE_EXPORT_MAX_CONCURRENCY) {
-    openCodeExportActive += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => openCodeExportQueue.push(resolve));
-}
-
-function releaseOpenCodeExportSlot(): void {
-  // Hand the slot straight to the next waiter; the count only drops when the
-  // queue is empty, so a burst never opens a gap above the limit.
-  const next = openCodeExportQueue.shift();
-  if (next) next();
-  // Clamped for the test seam only: it zeroes the counter under waiters that
-  // release afterwards. The export path releases exactly once, in `finally`,
-  // so nothing here is guarding against a double release in production.
-  else openCodeExportActive = Math.max(0, openCodeExportActive - 1);
-}
+const openCodeExportGate = createConcurrencyGate(OPENCODE_EXPORT_MAX_CONCURRENCY);
 
 export async function exportOpenCodeSession(sessionId: string): Promise<unknown> {
-  await acquireOpenCodeExportSlot();
-  try {
+  return openCodeExportGate.run(async () => {
     const stdout = await readOpenCodeJson(["export", sessionId], {
       timeoutMs: OPENCODE_EXPORT_TIMEOUT_MS,
     });
     return JSON.parse(stdout) as unknown;
-  } finally {
-    releaseOpenCodeExportSlot();
-  }
+  });
 }
 
 export async function deleteOpenCodeSession(sessionId: string): Promise<void> {
@@ -863,8 +842,7 @@ export function resetOpenCodeExportState(): void {
   // ends shifts the peak concurrency every later test observes, so clear them
   // here as well — resuming queued waiters rather than dropping them, so a
   // caller left mid-acquire cannot hang.
-  for (const resume of openCodeExportQueue.splice(0)) resume();
-  openCodeExportActive = 0;
+  openCodeExportGate.reset();
 }
 
 function shouldServeCachedOpenCodeState(

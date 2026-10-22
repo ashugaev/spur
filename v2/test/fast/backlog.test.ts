@@ -50,6 +50,7 @@ function appConfig(backlog: Record<string, BacklogConfig>): AppConfig {
     defaultAgent: "claude",
     tmux: { socketName: "spur-test" },
     ui: { port: 5555 },
+    mcp: { port: 4311 },
     models: { codexHome: "/tmp/codex" },
     voice: { provider: "whisper_cpp", language: "auto", model: "base" },
     rateLimitReactivation: { afterHours: 0 },
