@@ -38,7 +38,7 @@ async function setup() {
 it("initializes stateless SDK, retains handles across wrappers/clients, and probes installed identity", async () => {
   const { fixture, url, connect } = await setup();
   const client = await connect();
-  expect((await client.listTools()).tools).toHaveLength(13);
+  expect((await client.listTools()).tools).toHaveLength(17);
   const raw = JSON.stringify({ tool: "🙂".repeat(2_500_000) });
   fixture.state.override = (path) =>
     path === `/sessions/${session.id}/conversation` ? { raw } : undefined;
@@ -93,7 +93,7 @@ it("keeps protocol alive through daemon identity failure and recovers without mu
   const { fixture, url, connect } = await setup();
   const client = await connect();
   fixture.state.info.apiVersion = -1;
-  expect((await client.listTools()).tools).toHaveLength(13);
+  expect((await client.listTools()).tools).toHaveLength(17);
   expect((await client.callTool({ name: "list_projects", arguments: {} })).isError).toBe(true);
   expect((await fetch(url.replace("/mcp", "/healthz"))).status).toBe(503);
   fixture.state.info.apiVersion = 3;

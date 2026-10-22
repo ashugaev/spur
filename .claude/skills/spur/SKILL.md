@@ -49,7 +49,7 @@ DOCS
   GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
-  Full-access daemon MCP over stdio, SSH or installed loopback HTTP; optional OpenAI tunnel: docs/mcp.md
+  Full-access daemon MCP, backend controls, logs and cached attached PR status; connection/setup: docs/mcp.md
 
 EDITING THIS FILE
 

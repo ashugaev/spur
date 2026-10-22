@@ -465,10 +465,16 @@ export interface RestartDaemonResult {
   runtime?: RuntimeInfo;
 }
 
-export async function stopDaemonIfRunning(configPath?: string): Promise<StopDaemonResult> {
+export async function stopDaemonIfRunning(
+  configPath?: string,
+  expectedPid?: number,
+): Promise<StopDaemonResult> {
   const { baseUrl } = createBaseUrl(configPath);
   const probe = await waitForStableDaemonProbe(baseUrl);
   const pid = daemonPidFromProbe(probe);
+  if (expectedPid !== undefined && pid !== expectedPid) {
+    throw new Error("Daemon identity changed before restart; no signal sent");
+  }
   if (typeof pid !== "number") {
     return { baseUrl, stopped: false };
   }
@@ -483,9 +489,10 @@ export async function stopDaemonIfRunning(configPath?: string): Promise<StopDaem
 export async function restartDaemonIfRunning(
   cliEntrypoint: string,
   configPath?: string,
+  expectedPid?: number,
 ): Promise<RestartDaemonResult> {
   const { baseUrl, configPath: resolvedConfigPath } = createBaseUrl(configPath);
-  const stopped = await stopDaemonIfRunning(configPath);
+  const stopped = await stopDaemonIfRunning(configPath, expectedPid);
   if (!stopped.stopped || typeof stopped.pid !== "number") {
     return { baseUrl, restarted: false };
   }

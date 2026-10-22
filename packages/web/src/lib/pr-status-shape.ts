@@ -71,6 +71,19 @@ export function isPrReady(info: PrInfo): boolean {
   );
 }
 
+export function prStatusIndicator(
+  info: PrInfo,
+):
+  | { kind: "review"; decision: "approved" | "changes_requested" }
+  | { kind: "ci"; status: CiStatus } {
+  if (
+    info.ciStatus === "success" &&
+    (info.reviewDecision === "approved" || info.reviewDecision === "changes_requested")
+  )
+    return { kind: "review", decision: info.reviewDecision };
+  return { kind: "ci", status: info.ciStatus };
+}
+
 export function prInfosEqual(a: PrInfo, b: PrInfo): boolean {
   return (
     a.state === b.state &&

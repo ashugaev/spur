@@ -1,10 +1,12 @@
 import { realpathSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { loadInstanceConnectionConfigReadOnly } from "./config.js";
 import { getDaemonOperation } from "./daemon-contracts.js";
 import { SPUR_DAEMON_API_VERSION } from "./types.js";
 import { McpResults } from "./mcp-results.js";
 import { getBuildId } from "./build-identity.js";
+import { McpDaemonControl, type DaemonIdentity } from "./mcp-daemon-control.js";
+import { readDaemonLogs } from "./mcp-daemon-logs.js";
 
 export interface DaemonRequest {
   operationId: string;
@@ -59,6 +61,7 @@ function matchesFollowup(
 export class McpGateway {
   readonly lifetime = new AbortController();
   private readonly cursors = new Map<string, WaitCursor>();
+  private control: McpDaemonControl | undefined;
   private constructor(
     readonly config: ReturnType<typeof loadInstanceConnectionConfigReadOnly> & { status: "ok" },
     readonly results: McpResults,
@@ -250,6 +253,147 @@ export class McpGateway {
         ...(started
           ? { recovery: "Inspect daemon state before resubmitting; no automatic retry was made" }
           : {}),
+      };
+    }
+  }
+
+  private daemonControl(): McpDaemonControl {
+    return (this.control ??= new McpDaemonControl(this.config.config.dataDir, this.configIdentity));
+  }
+
+  private async daemonIdentity(signal: AbortSignal): Promise<DaemonIdentity> {
+    const info = await this.info(signal);
+    if (
+      typeof info.pid !== "number" ||
+      !Number.isInteger(info.pid) ||
+      info.pid <= 0 ||
+      typeof info.lifecycleInstanceId !== "string" ||
+      !info.lifecycleInstanceId
+    )
+      throw new Error("Daemon lifecycle identity unavailable");
+    return { pid: info.pid, lifecycleInstanceId: info.lifecycleInstanceId };
+  }
+
+  async restartDaemon(operationId: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+    // Resolve an original receipt even while the daemon is down. Never resubmit.
+    const existing = this.daemonControl().get(operationId);
+    if (existing) return { receipt: existing, duplicate: true, resolver: "get_daemon_restart" };
+    const identity = await this.daemonIdentity(signal);
+    return {
+      ...this.daemonControl().accept(operationId, identity),
+      resolver: "get_daemon_restart",
+    };
+  }
+
+  async getDaemonRestart(
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    let current: DaemonIdentity | undefined;
+    try {
+      current = await this.daemonIdentity(AbortSignal.any([signal, AbortSignal.timeout(1000)]));
+    } catch {
+      // Receipt remains readable during outage.
+    }
+    const receipt = this.daemonControl().get(operationId, current);
+    return {
+      receipt: receipt ?? null,
+      status: receipt?.status ?? "unknown",
+      daemonAvailable: current !== undefined,
+    };
+  }
+
+  async daemonLogs(
+    input: {
+      cursor?: string | undefined;
+      limit?: number | undefined;
+      maxBytes?: number | undefined;
+      source?: "events" | "runtime" | undefined;
+    },
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    signal.throwIfAborted();
+    return readDaemonLogs(this.config.config.dataDir, input);
+  }
+
+  async sessionPrStatus(sessionId: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+    await this.info(signal);
+    const session = await this.json(`/sessions/${encodeURIComponent(sessionId)}`, signal);
+    const pr = session.pr && typeof session.pr === "object" ? object(session.pr) : undefined;
+    const slots =
+      session.slots && typeof session.slots === "object" ? object(session.slots) : undefined;
+    const links = Array.isArray(slots?.links) ? slots.links : [];
+    const attached = links.find(
+      (link: unknown) =>
+        link !== null &&
+        typeof link === "object" &&
+        "label" in link &&
+        ["pr", "github-pr", "github_pr", "gitlab-pr"].includes(String(link.label)),
+    );
+    const url =
+      typeof pr?.url === "string"
+        ? pr.url
+        : attached &&
+            typeof attached === "object" &&
+            "url" in attached &&
+            typeof attached.url === "string"
+          ? attached.url
+          : undefined;
+    if (!url)
+      return {
+        sessionId,
+        status: "missing",
+        source: "session-attached-pr",
+        refreshed: false,
+        observedAt: Date.now(),
+      };
+    const instance = createHash("sha256").update(this.configIdentity).digest("hex");
+    const query = new URLSearchParams({ instance, url, cacheOnly: "1" });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${this.config.config.ui.port}/api/pr-status?${query}`,
+        { signal, redirect: "manual" },
+      );
+      // Cache responses are small; refuse unexpected services/large output before parsing.
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Empty cache response");
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const part = await reader.read();
+          if (part.done) break;
+          size += part.value.byteLength;
+          if (size > 16384) throw new Error("Cache response exceeds bound");
+          chunks.push(part.value);
+        }
+      } finally {
+        await reader.cancel();
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        throw new Error("Invalid cache response");
+      }
+      const cached = object(parsed);
+      if (
+        !response.ok ||
+        cached.instance !== instance ||
+        cached.source !== "spur-web-pr-status-cache" ||
+        cached.refreshed !== false
+      )
+        throw new Error("Selected web cache unavailable");
+      return { ...cached, sessionId, url };
+    } catch {
+      return {
+        sessionId,
+        url,
+        status: "unavailable",
+        source: "spur-web-pr-status-cache",
+        reason: "selected_web_cache_unavailable",
+        refreshed: false,
+        observedAt: Date.now(),
       };
     }
   }

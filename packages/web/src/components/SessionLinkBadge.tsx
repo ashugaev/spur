@@ -18,6 +18,7 @@ import {
   usePrInfo,
 } from "@/lib/link-icons";
 import type { SpurSessionLink } from "@/lib/types";
+import { prStatusIndicator } from "@/lib/pr-status-shape";
 
 interface SessionLinkBadgeProps {
   link: SpurSessionLink;
@@ -40,6 +41,7 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
   const reviewProvider = isPr ? reviewProviderFromUrl(link.url) : null;
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
+  const indicator = prStatusIndicator(prInfo);
   const labelStyle: CSSProperties | undefined = isPr
     ? (() => {
         const color = prStateColor(prInfo.state);
@@ -67,12 +69,10 @@ export function SessionLinkBadge({ link, prInfo: providedPrInfo }: SessionLinkBa
       </span>
       {isPr ? (
         <>
-          {prInfo.ciStatus === "success" &&
-          (prInfo.reviewDecision === "approved" ||
-            prInfo.reviewDecision === "changes_requested") ? (
-            <ReviewDecisionDot decision={prInfo.reviewDecision} />
+          {indicator.kind === "review" ? (
+            <ReviewDecisionDot decision={indicator.decision} />
           ) : (
-            <CiStatusDot status={prInfo.ciStatus} />
+            <CiStatusDot status={indicator.status} />
           )}
           {prInfo.mergeConflict ? <MergeConflictBadge /> : null}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />

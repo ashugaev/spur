@@ -20,7 +20,7 @@ const { execFileSyncMock, execFileMock, planCachePruneMock } = vi.hoisted(() => 
   execFileMock: vi.fn(() => {
     throw new Error("Unexpected process execution in installed-instance fixture");
   }),
-  planCachePruneMock: vi.fn(),
+  planCachePruneMock: vi.fn<typeof CacheRetention.planCachePrune>(),
 }));
 vi.mock("node:child_process", async (original) => ({
   ...(await original<typeof ChildProcess>()),
@@ -42,6 +42,7 @@ beforeEach(async () => {
   vi.stubEnv("HOME", directory);
   vi.stubEnv("SPUR_CONFIG", "");
   execFileSyncMock.mockReset();
+  // Config selection must not measure the host's caches or process table.
   execFileMock.mockClear();
   planCachePruneMock.mockReset();
   planCachePruneMock.mockResolvedValue({
@@ -152,7 +153,11 @@ describe("installed instance selection", () => {
     const checks = await collectHostInstallChecks(directory);
     expect(checks.find((check) => check.id === "systemd-units")).toMatchObject({ ok: false });
     expect(planCachePruneMock).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ home: directory, signal: expect.any(AbortSignal) }),
+      expect.objectContaining({
+        home: directory,
+        instanceConfig: { status: "absent" },
+        signal: expect.any(AbortSignal),
+      }),
     );
     expect(checks.find((check) => check.id === "reclaimable-caches")).toMatchObject({
       ok: true,

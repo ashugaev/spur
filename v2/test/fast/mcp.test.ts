@@ -27,7 +27,7 @@ async function setup() {
 }
 it("exposes all projects, raw conversation and complete operator requests without inherited identity", async () => {
   const { fixture, call, client } = await setup();
-  expect((await client.listTools()).tools).toHaveLength(13);
+  expect((await client.listTools()).tools).toHaveLength(17);
   const projects = (await call("list_projects")).structuredContent;
   expect(projects).toMatchObject({ ok: true, status: 200, body: fixture.state.projects });
   expect((await call("get_session", { sessionId: "loose-one" })).isError).toBeUndefined();
