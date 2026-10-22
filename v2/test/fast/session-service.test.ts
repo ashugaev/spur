@@ -1483,7 +1483,9 @@ type SessionServiceInternals = {
     paneUsable: boolean;
     processAlive: boolean;
     probeUnresponsive: boolean;
+    diagnostic?: string;
   }>;
+  lifecycle: SessionLifecycleRegister;
   runAttentionMonitor(baseline: boolean): Promise<void>;
   pollAttentionStates(baseline: boolean): Promise<void>;
   attentionMonitorRunning: boolean;
@@ -20773,7 +20775,7 @@ describe("SessionService", () => {
           internals.lifecycle.settle(
             lifecycleOwner,
             false,
-            () => "cancelled",
+            () => "failed",
             () => true,
           );
         }
