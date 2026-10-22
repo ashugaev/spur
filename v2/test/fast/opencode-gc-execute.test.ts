@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { open, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -192,10 +193,14 @@ describe("createOpenCodeGcDeps recheckDirectory statuses", () => {
     const dataDir = join(root, "data");
     const worktree = join(root, "w", "a");
     await mkdir(worktree, { recursive: true });
+    // Real deps, so recheckDirectory snapshots the host's real `ps`. A shared id
+    // like "ses_a" matches any unrelated argv carrying it — including a parallel
+    // vitest worker's stub — and the entry comes back live_process_holds_session.
+    const sessionId = `ses_${randomUUID()}`;
     writeSession(dataDir, {
       ...freshRecord("spur-a", "stopped"),
       worktreePath: worktree,
-      agentSessionId: "ses_a",
+      agentSessionId: sessionId,
     });
     const config = {
       worktreeDir: root,
@@ -204,7 +209,7 @@ describe("createOpenCodeGcDeps recheckDirectory statuses", () => {
     };
     const deps = createOpenCodeGcDeps(config as never);
     const entry = {
-      id: "ses_a",
+      id: sessionId,
       directory: worktree,
       canonicalDirectory: worktree,
       directoryState: "resolved" as const,
