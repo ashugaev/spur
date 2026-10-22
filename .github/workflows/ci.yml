@@ -9,8 +9,8 @@ on:
     branches: [main, feature/release-continuation]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -112,7 +112,7 @@ jobs:
       - run: pnpm --dir packages/web exec playwright test
 
   runtime-integration-admission:
-    needs: playwright
+    needs: quality
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-ready-admission.yml
     with:
@@ -121,8 +121,8 @@ jobs:
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
-    needs: [playwright, runtime-integration-admission]
-    if: ${{ !cancelled() && needs.playwright.result == 'success' && (github.event_name != 'pull_request' || needs.runtime-integration-admission.result == 'success') }}
+    needs: [quality, runtime-integration-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.runtime-integration-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
@@ -138,7 +138,7 @@ jobs:
       - run: pnpm --dir v2 exec vitest run --config vitest.runtime.config.ts --reporter=verbose
 
   real-agent-smoke-admission:
-    needs: runtime-integration
+    needs: quality
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/ci-ready-admission.yml
     with:
@@ -147,8 +147,8 @@ jobs:
   real-agent-smoke:
     name: Real-Agent Smoke
     runs-on: self-hosted
-    needs: [runtime-integration, real-agent-smoke-admission]
-    if: ${{ !cancelled() && needs.runtime-integration.result == 'success' && (github.event_name != 'pull_request' || needs.real-agent-smoke-admission.result == 'success') }}
+    needs: [quality, real-agent-smoke-admission]
+    if: ${{ !cancelled() && needs.quality.result == 'success' && (github.event_name != 'pull_request' || needs.real-agent-smoke-admission.result == 'success') }}
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
