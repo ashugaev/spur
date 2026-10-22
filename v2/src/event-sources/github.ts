@@ -47,6 +47,7 @@ import {
   GitHubReviewBatchError,
   hasTerminalSignal,
 } from "../review-providers/github.js";
+import { resolveWorkspaceState } from "../workspace-store.js";
 import { emitWorkItemBacklog } from "./work-item-backlog.js";
 
 export {
@@ -560,8 +561,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     return count <= CI_HYSTERESIS_ERROR_TOLERANCE;
   };
 
+  // The workspace file owns the PR binding; a member record's own `pr` can be a
+  // stale handoff copy.
   const listPollableSessions = (allSessions: ReturnType<typeof listSessions>) =>
-    allSessions.filter((session) => isEligibleForSourcePoll(session, deps.projectId));
+    allSessions
+      .filter((session) => isEligibleForSourcePoll(session, deps.projectId))
+      .map((record): SessionRecord => {
+        const { pr: _recordPr, ...session } = record;
+        const { pr } = resolveWorkspaceState(deps.dataDir, record);
+        return pr ? { ...session, pr } : session;
+      });
 
   const shouldPollThisTick = (): boolean => {
     refreshPollDisabled();
