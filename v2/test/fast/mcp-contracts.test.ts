@@ -21,8 +21,8 @@ const source = (name: string) => readFile(new URL(`../../src/${name}`, import.me
 // Review contract metadata when these parser/DTO implementations change; never regenerate blindly.
 const reviewedFingerprints = {
   "server.ts": "7e8baa0798e7b355f4262400a726a033861187b352115231e7a8f82beb2afae9",
-  "types.ts": "a96521a96d446ca7b60e30618e8e2e054deeb417ce110f30bb784378d3c4803d",
-  "session-service.ts": "ff3c4459ec9a8a31358d0edc181f3aa54824caff0363129180752825d3d823ea",
+  "types.ts": "b3507ef3f9045a5b98ec8b89303424c295bc4343403e31980bf2da522a2f7609",
+  "session-service.ts": "bf12b5b8e4600b33ebc9e6079c970140bc1e6a0488025b58fffcb2169c8db594",
   "session-lifecycle.ts": "11ed4e84c26d589f92627e9d09fc89141f273ae99199a0263d6c2a3b49acb72c",
   "session-memory.ts": "837a7052b62b977b59f117e344b83b0f507298ce0d716c1ab637ead711060c42",
   "shared-memory.ts": "f5804ebc0592f40c37cf30a1545d88b37075cd6e7e63b3c9e1817bf42c93de67",
