@@ -481,7 +481,7 @@ describe("Claude authentication", () => {
     (type) => {
       const records = [
         authenticationRecord(),
-        rec({ type, role: type === "user" ? "user" : undefined }),
+        rec({ type, ...(type === "user" ? { role: "user" } : {}) }),
       ];
       expect(hasTrailingClaudeAuthenticationFailure(records)).toBe(true);
       expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
