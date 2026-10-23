@@ -4,7 +4,7 @@ import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 
 const CRON_GUARD_SAMPLE_RUNS = 64;
 
-function deriveMinimumIntervalMs(cronJob: Cron, schedule: string): number {
+export function deriveMinimumIntervalMs(cronJob: Cron, schedule: string): number {
   const runs = cronJob.nextRuns(CRON_GUARD_SAMPLE_RUNS);
   if (runs.length < 2) {
     throw new Error(`Unable to derive a minimum interval from cron schedule "${schedule}"`);

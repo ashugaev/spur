@@ -144,10 +144,15 @@ it("returns uncertain transport writes once and preserves large mutation respons
   cleanups.push(fixture.close);
   const gateway = await McpGateway.create(fixture.configPath);
   cleanups.push(() => gateway.close());
-  fixture.state.override = (path, method) => (method === "POST" ? { hold: true } : undefined);
+  const controller = new AbortController();
+  fixture.state.override = (_path, method) => {
+    if (method !== "POST") return undefined;
+    controller.abort(new Error("Caller cancelled after mutation receipt"));
+    return { hold: true };
+  };
   const uncertain = await gateway.dispatch(
     { operationId: "spawn_background_session", body: { project: "test", prompt: "x" } },
-    AbortSignal.timeout(30),
+    controller.signal,
   );
   expect(uncertain).toMatchObject({ ok: false, transportError: true, uncertainWrite: true });
   expect(fixture.calls.filter((call) => call.method === "POST")).toHaveLength(1);
