@@ -13,6 +13,7 @@ import {
   makeSpawningSession,
   makeStoppedSession,
   mockAgentModels,
+  mockPrStatusFor,
   mockSpawnDefaults,
   installApiRouteGuardsOnContext,
 } from "./fixtures.js";
@@ -3148,20 +3149,14 @@ test.describe("S4: Links section", () => {
       },
     });
     await mockSessionDetail(page, session);
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: "approved",
-          ciStatus: "success",
-          totalThreads: 0,
-          unresolvedThreads: 0,
-          canMerge: false,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      canMerge: false,
+    }));
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
@@ -3197,19 +3192,13 @@ test.describe("S4: Links section", () => {
         links: [{ label: "pr", url: prUrl }],
       },
     });
-    await page.route(/\/api\/pr-status/, (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "open",
-          reviewDecision: "approved",
-          ciStatus: "success",
-          totalThreads: 2,
-          unresolvedThreads: 0,
-        }),
-      });
-    });
+    await mockPrStatusFor(page, () => ({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "success",
+      totalThreads: 2,
+      unresolvedThreads: 0,
+    }));
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
