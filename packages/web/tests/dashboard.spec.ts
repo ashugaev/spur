@@ -4637,7 +4637,12 @@ test.describe("D7d: Sessions list cache on revisit", () => {
       await route.fallback();
     });
 
-    await page.getByRole("link", { name: session.prompt }).first().click();
+    // A dev server compiles /sessions/[id] on demand, so the first click can
+    // outlast the 5s expect window; wait for the navigation to commit first.
+    await Promise.all([
+      page.waitForURL((url) => url.pathname === `/sessions/${session.id}`),
+      page.getByRole("link", { name: session.prompt }).first().click(),
+    ]);
     await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
 
     await Promise.all([page.waitForURL("/"), page.getByRole("link", { name: /back/i }).click()]);
