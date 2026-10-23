@@ -45,7 +45,7 @@ Capabilities loaded by description match. Source: .claude/skills/
   github              .claude/skills/github/SKILL.md              Use gh CLI for PRs, issues, checks, or releases
   shallow-scoring     .claude/skills/shallow-scoring/SKILL.md     Route a task to a deliberation tier by ambiguity × blast radius
   self-verify         .claude/skills/self-verify/SKILL.md         Final close-out gate validation
-  telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification or fetch updates
+  telegram            .claude/skills/telegram/SKILL.md            Send Telegram notification
   telegram-e2e        .claude/skills/telegram-e2e/SKILL.md        Live test the Telegram source on a test bot before close-out of any Telegram change
   pr-comments-fix     .claude/skills/pr-comments-fix/SKILL.md     Fix and resolve PR review comments
   docs                .claude/skills/docs/SKILL.md                Task touches published docs under docs/ or the root doc files
