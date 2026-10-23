@@ -3545,48 +3545,56 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("blocks agent completion on an empty ledger, but allows human completion without override", async () => {
-      const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
-      await useRealTodoLedger();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    it.each(["ui", "telegram"] as const)(
+      "blocks agent completion on an empty ledger, but allows human completion without override (%s)",
+      async (origin) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
-      await service.complete(
-        "api-1",
-        { skipPrCheck: true },
-        { todoActor: { kind: "human", origin: "ui" } },
-      );
+        await expect(service.complete("api-1")).rejects.toMatchObject({
+          code: "todo_ledger_empty",
+        });
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin } },
+        );
 
-      expect(sessions.get("api-1")?.status).toBe("completed");
-      service.dispose();
-    });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      },
+    );
 
-    it("blocks agent completion on open work, but allows human completion without override", async () => {
-      const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
-      await useRealTodoLedger();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await service.mutateTodo(
-        "api-1",
-        { action: "add", text: "Ship it", reason: "Session objective" },
-        { kind: "agent", agent: "claude", sessionId: "api-1" },
-      );
+    it.each(["ui", "telegram"] as const)(
+      "blocks agent completion on open work, but allows human completion without override (%s)",
+      async (origin) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: "api-1" },
+        );
 
-      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
-      await service.complete(
-        "api-1",
-        { skipPrCheck: true },
-        { todoActor: { kind: "human", origin: "ui" } },
-      );
+        await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin } },
+        );
 
-      expect(sessions.get("api-1")?.status).toBe("completed");
-      const projection = await service.readTodo("api-1");
-      expect(projection.items[0]?.status).toBe("open");
-      service.dispose();
-    });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        const projection = await service.readTodo("api-1");
+        expect(projection.items[0]?.status).toBe("open");
+        service.dispose();
+      },
+    );
 
     it("self-destruct refuses open work, then completes once the items resolve", async () => {
       const sessions = createSessionStore();
@@ -57729,11 +57737,16 @@ describe("SessionService", () => {
           lastMtimeMs: Date.now(),
           tailRecords: [
             {
-              type: "assistant", role: "assistant", stopReason: "stop_sequence",
-              authenticationFailed: true, timestampMs: Date.now(),
+              type: "assistant",
+              role: "assistant",
+              stopReason: "stop_sequence",
+              authenticationFailed: true,
+              timestampMs: Date.now(),
             },
             ...Array.from({ length: 49 }, () => ({
-              type: "user", role: "user", timestampMs: Date.now(),
+              type: "user",
+              role: "user",
+              timestampMs: Date.now(),
             })),
           ],
         },
@@ -57753,7 +57766,8 @@ describe("SessionService", () => {
       expect(view.state).toBe("needs_input");
       captureTmuxPaneMock.mockClear();
       const dashboard = await sessionServiceInternals(service).classifySessionRecord(
-        runningSession(), { scanPane: false },
+        runningSession(),
+        { scanPane: false },
       );
       expect(dashboard.state).toBe("needs_input");
       expect(captureTmuxPaneMock).not.toHaveBeenCalled();
@@ -57773,7 +57787,12 @@ describe("SessionService", () => {
         captureTmuxPaneMock.mockResolvedValue(pane);
         const service = await createDisposedSessionService();
         const classified = await sessionServiceInternals(service).classifySessionRecord(record);
-        expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl", serverError: false });
+        expect(classified).toMatchObject({
+          state: "needs_input",
+          source: "jsonl",
+          historySourcePath: "test.jsonl",
+          serverError: false,
+        });
       },
     );
 
@@ -57788,7 +57807,11 @@ describe("SessionService", () => {
       internals.claudeCompactingOverrides.set(record.id, Date.now() + 10_000);
       captureTmuxPaneMock.mockClear();
       const classified = await internals.classifySessionRecord(record, { scanPane: false });
-      expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl" });
+      expect(classified).toMatchObject({
+        state: "needs_input",
+        source: "jsonl",
+        historySourcePath: "test.jsonl",
+      });
       expect(captureTmuxPaneMock).not.toHaveBeenCalled();
     });
 
@@ -57800,12 +57823,25 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       expect((await service.get("api-1")).state).toBe("needs_input");
       readClaudeJsonlStateMock.mockResolvedValue({
-        state: "waiting", serverError: false,
+        state: "waiting",
+        serverError: false,
         reader: {
-          filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: Date.now(),
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
           tailRecords: [
-            { type: "assistant", role: "assistant", authenticationFailed: true, timestampMs: Date.now() },
-            { type: "assistant", role: "assistant", stopReason: "end_turn", timestampMs: Date.now() + 1 },
+            {
+              type: "assistant",
+              role: "assistant",
+              authenticationFailed: true,
+              timestampMs: Date.now(),
+            },
+            {
+              type: "assistant",
+              role: "assistant",
+              stopReason: "end_turn",
+              timestampMs: Date.now() + 1,
+            },
           ],
         },
       });

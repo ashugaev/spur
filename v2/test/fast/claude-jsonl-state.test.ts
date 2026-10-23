@@ -1,4 +1,13 @@
-import { appendFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -283,21 +292,26 @@ describe("Claude authentication", () => {
     return record;
   }
 
-  const reminders = Array.from({ length: 75 }, (_, index) =>
-    JSON.stringify(
-      index % 3 === 0
-        ? { type: "user", message: { role: "user", content: `Reminder ${index}` } }
-        : { type: index % 3 === 1 ? "system" : "progress" },
-    ),
-  ).join("\n") + "\n";
+  const reminders =
+    Array.from({ length: 75 }, (_, index) =>
+      JSON.stringify(
+        index % 3 === 0
+          ? { type: "user", message: { role: "user", content: `Reminder ${index}` } }
+          : { type: index % 3 === 1 ? "system" : "progress" },
+      ),
+    ).join("\n") + "\n";
 
   async function withReaders(
     run: (
       filePath: string,
-      readBoth: (cold?: boolean) => Promise<[
-        NonNullable<Awaited<ReturnType<typeof readClaudeJsonlState>>>,
-        NonNullable<Awaited<ReturnType<typeof readClaudeConversationTail>>>,
-      ]>,
+      readBoth: (
+        cold?: boolean,
+      ) => Promise<
+        [
+          NonNullable<Awaited<ReturnType<typeof readClaudeJsonlState>>>,
+          NonNullable<Awaited<ReturnType<typeof readClaudeConversationTail>>>,
+        ]
+      >,
     ) => Promise<void>,
   ): Promise<void> {
     const tempDir = await mkdtemp(join(tmpdir(), "claude-auth-tail-"));
@@ -310,7 +324,8 @@ describe("Claude authentication", () => {
       await run(filePath, async (cold = false) => {
         const state = await readClaudeJsonlState(tempDir, cold ? undefined : stateReader);
         const conversation = await readClaudeConversationTail(
-          tempDir, cold ? undefined : conversationReader,
+          tempDir,
+          cold ? undefined : conversationReader,
         );
         if (!state || !conversation) throw new Error("expected both readers");
         stateReader = state.reader;
@@ -336,7 +351,10 @@ describe("Claude authentication", () => {
           expect(result.reader.tailRecords).toHaveLength(50);
           expect(result.reader.tailRecords[0]?.authenticationFailed).toBe(true);
           expect(result.reader.tailRecords.slice(1).map((record) => record.type)).toEqual(
-            Array.from({ length: 49 }, (_, index) => ["user", "system", "progress"][(index + 26) % 3]),
+            Array.from(
+              { length: 49 },
+              (_, index) => ["user", "system", "progress"][(index + 26) % 3],
+            ),
           );
         }
         expect(pair[1].totalEntries).toBe(26);
@@ -357,23 +375,34 @@ describe("Claude authentication", () => {
 
   it.each([
     { error: undefined, stop_reason: "end_turn" },
-    { error: undefined, stop_reason: "tool_use", content: [{ type: "tool_use", name: "Read", input: {} }] },
+    {
+      error: undefined,
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", name: "Read", input: {} }],
+    },
     { error: "server_error", stop_reason: "stop_sequence" },
     { error: "rate_limit", stop_reason: "stop_sequence" },
-  ])("clears old auth before slicing a large assistant append batch: %j", async ({ error, ...message }) => {
-    await withReaders(async (filePath, readBoth) => {
-      await readBoth();
-      const response = JSON.stringify({ type: "assistant", error, message: { role: "assistant", ...message } });
-      await appendFile(filePath, `${response}\n${reminders}`);
-      for (const pair of [await readBoth(), await readBoth(true)]) {
-        for (const result of pair) {
-          expect(hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)).toBe(false);
-          expect(result.state).not.toBe("needs_input");
-          expect(result.reader.tailRecords).toHaveLength(50);
+  ])(
+    "clears old auth before slicing a large assistant append batch: %j",
+    async ({ error, ...message }) => {
+      await withReaders(async (filePath, readBoth) => {
+        await readBoth();
+        const response = JSON.stringify({
+          type: "assistant",
+          error,
+          message: { role: "assistant", ...message },
+        });
+        await appendFile(filePath, `${response}\n${reminders}`);
+        for (const pair of [await readBoth(), await readBoth(true)]) {
+          for (const result of pair) {
+            expect(hasTrailingClaudeAuthenticationFailure(result.reader.tailRecords)).toBe(false);
+            expect(result.state).not.toBe("needs_input");
+            expect(result.reader.tailRecords).toHaveLength(50);
+          }
         }
-      }
-    });
-  });
+      });
+    },
+  );
 
   it("retains the newest repeated authentication record once, in original order", async () => {
     await withReaders(async (filePath, readBoth) => {
@@ -383,8 +412,12 @@ describe("Claude authentication", () => {
       for (const result of await readBoth()) {
         expect(result.state).toBe("needs_input");
         expect(result.reader.tailRecords).toHaveLength(50);
-        expect(result.reader.tailRecords.filter((record) => record.authenticationFailed)).toHaveLength(1);
-        expect(result.reader.tailRecords[0]?.ownTimestampMs).toBe(Date.parse("2026-03-18T10:06:00.000Z"));
+        expect(
+          result.reader.tailRecords.filter((record) => record.authenticationFailed),
+        ).toHaveLength(1);
+        expect(result.reader.tailRecords[0]?.ownTimestampMs).toBe(
+          Date.parse("2026-03-18T10:06:00.000Z"),
+        );
       }
     });
   });
@@ -395,9 +428,11 @@ describe("Claude authentication", () => {
       await withReaders(async (filePath, readBoth) => {
         await appendFile(filePath, reminders);
         await readBoth();
-        const successful = JSON.stringify({
-          type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: "Done".repeat(200) },
-        }) + "\n";
+        const successful =
+          JSON.stringify({
+            type: "assistant",
+            message: { role: "assistant", stop_reason: "end_turn", content: "Done".repeat(200) },
+          }) + "\n";
         if (reset === "replace") {
           await writeFile(`${filePath}.new`, successful + reminders);
           await rename(`${filePath}.new`, filePath);
@@ -444,7 +479,10 @@ describe("Claude authentication", () => {
   it.each(["user", "system", "progress", "stop_hook_summary", "file-history-snapshot"])(
     "keeps the block after a %s record",
     (type) => {
-      const records = [authenticationRecord(), rec({ type, role: type === "user" ? "user" : undefined })];
+      const records = [
+        authenticationRecord(),
+        rec(type === "user" ? { type, role: "user" } : { type }),
+      ];
       expect(hasTrailingClaudeAuthenticationFailure(records)).toBe(true);
       expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
     },
@@ -456,7 +494,10 @@ describe("Claude authentication", () => {
     { serverError: true, expected: "error" },
     { rateLimited: true, stopReason: "stop_sequence", expected: "waiting" },
   ])("clears on a later assistant record: %j", ({ expected, ...fields }) => {
-    const records = [authenticationRecord(), rec({ type: "assistant", role: "assistant", ...fields })];
+    const records = [
+      authenticationRecord(),
+      rec({ type: "assistant", role: "assistant", ...fields }),
+    ];
     expect(hasTrailingClaudeAuthenticationFailure(records)).toBe(false);
     expect(classifyClaudeJsonlState(records, NOW)).toBe(expected);
   });
@@ -465,20 +506,32 @@ describe("Claude authentication", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "claude-auth-"));
     const filePath = join(tempDir, "transcript.jsonl");
     try {
-      await writeFile(filePath, `${authLine}\n${JSON.stringify({ type: "system", subtype: "turn_duration" })}\n`);
+      await writeFile(
+        filePath,
+        `${authLine}\n${JSON.stringify({ type: "system", subtype: "turn_duration" })}\n`,
+      );
       const failed = await readClaudeJsonlState(tempDir, {
-        filePath, lastOffset: 0, lastMtimeMs: 0, tailRecords: [],
+        filePath,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
       });
       expect(failed?.state).toBe("needs_input");
       expect(failed?.serverError).toBe(false);
-      const retryLine = JSON.stringify({ type: "user", message: { role: "user", content: "Continue" } });
+      const retryLine = JSON.stringify({
+        type: "user",
+        message: { role: "user", content: "Continue" },
+      });
       await appendFile(filePath, `${retryLine}\n`);
       const later = new Date(Date.now() + 5000);
       await utimes(filePath, later, later);
       const retry = await readClaudeJsonlState(tempDir, failed?.reader);
       expect(retry?.state).toBe("needs_input");
       expect((await readClaudeJsonlState(tempDir, retry?.reader))?.state).toBe("needs_input");
-      const success = JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: "Done" } });
+      const success = JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", stop_reason: "end_turn", content: "Done" },
+      });
       await appendFile(filePath, `${success}\n`);
       const recoveredAt = new Date(Date.now() + 10_000);
       await utimes(filePath, recoveredAt, recoveredAt);
