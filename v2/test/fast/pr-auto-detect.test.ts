@@ -49,6 +49,7 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
+  hasTrailingClaudeAuthenticationFailure: () => false,
 }));
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
@@ -263,6 +264,16 @@ function baseConfig(): AppConfig {
       intervalMinutes: 360,
       maxGroupsPerSweep: 20,
       statuses: ["completed", "killed", "stopped"],
+    },
+    opencodeGc: {
+      enabled: false,
+      olderThanDays: 14,
+      intervalMinutes: 360,
+      maxSessionsPerSweep: 20,
+      statuses: ["completed", "killed"],
+      logLevel: "WARN",
+      logMaxBytes: 134_217_728,
+      logTailBytes: 16_777_216,
     },
     artifactRetention: {
       enabled: false,
