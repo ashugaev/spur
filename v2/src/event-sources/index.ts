@@ -203,6 +203,12 @@ export async function startConfiguredSources(
   }
 
   return {
+    telegramBotIdentity(projectId, sourceId) {
+      return (
+        startedSources.find((entry) => entry.projectId === projectId && entry.sourceId === sourceId)
+          ?.handle.telegramBotIdentity ?? null
+      );
+    },
     async stop(): Promise<void> {
       await stopAll(startedSources);
     },

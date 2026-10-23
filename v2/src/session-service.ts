@@ -494,6 +494,8 @@ import {
   type SidecarPortConflictPayload,
   type SidecarProcessIdentity,
   type SourcePollEnableResponse,
+  type SourceInfoResponse,
+  type TelegramBotIdentity,
   type SourceReplyButton,
   type SourceReplyRequest,
   type SourceReplyResponse,
@@ -2249,6 +2251,7 @@ function buildInitialMessage(
   }
   const todoInstructions = `Spur ToDo:\n- Spur ToDo is authoritative and always on. Provider or local lists may coexist but do not replace it.\n- The ledger starts empty. You own every item; nothing is added for you.\n- One step, one item: add it with \`"$SPUR_TODO_COMMAND" add --text <step> --reason <why>\` before you do the step, then complete or cancel it right after. \`--text\` is the concrete imperative step; \`--reason\` is why it exists, what triggered it, or the acceptance signal.\n- Hold an item with a reason when blocked; name the required human action for a human hold. Resume held work before continuing.\n- Cannot finish, hand off, or self-destruct with an empty ledger or open/held work.`;
   base = base ? `${base}\n\n${todoInstructions}` : todoInstructions;
+  base = `${base}\n\nRead associated chat and bot with \`"$SPUR_SESSION_TOOL_DIR/spur" source info --json\`.`;
   if (telegramInstructions) {
     base = `${base}\n\n${telegramInstructions}`;
   }
@@ -3747,6 +3750,9 @@ export class SessionService {
   private pollDisabledOverrideClearer:
     | ((projectId: string, sourceId: string, sessionId: string) => number | null)
     | undefined;
+  private telegramBotIdentityReader:
+    | ((projectId: string, sourceId: string) => TelegramBotIdentity | null)
+    | undefined;
 
   constructor(
     configPath?: string,
@@ -3821,6 +3827,12 @@ export class SessionService {
     clearer: (projectId: string, sourceId: string, sessionId: string) => number | null,
   ): void {
     this.pollDisabledOverrideClearer = clearer;
+  }
+
+  setTelegramBotIdentityReader(
+    reader: (projectId: string, sourceId: string) => TelegramBotIdentity | null,
+  ): void {
+    this.telegramBotIdentityReader = reader;
   }
 
   startBackgroundLoops(): void {
@@ -14920,6 +14932,35 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  sourceInfo(sessionId: string): SourceInfoResponse {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    const target = this.telegramReplyTarget(session);
+    if (!target) return { sessionId, source: null };
+    const source = this.config.projects[target.projectId]?.sources[target.sourceId];
+    if (!source || source.type !== "telegram") {
+      throw new InvalidSourceReplyInputError(
+        `Telegram source is not configured for ${target.projectId}/${target.sourceId}`,
+      );
+    }
+    return {
+      sessionId,
+      source: "telegram",
+      projectId: target.projectId,
+      sourceId: target.sourceId,
+      chatId: target.chatId,
+      ...(target.messageThreadId !== undefined ? { messageThreadId: target.messageThreadId } : {}),
+      bot: this.telegramBotIdentityReader?.(target.projectId, target.sourceId) ?? null,
+    };
+  }
+
+  private telegramReplyTarget(
+    session: SessionRecord,
+    storedTarget = readTelegramReplyTarget(this.config.dataDir, session.id),
+  ): TelegramReplyTarget | null {
+    return storedTarget ?? this.configuredTelegramReplyTarget(session);
+  }
+
   async replyToSource(
     sessionId: string,
     request: SourceReplyRequest,
@@ -14943,7 +14984,7 @@ export class SessionService {
     });
 
     const storedTarget = readTelegramReplyTarget(this.config.dataDir, sessionId);
-    const target = storedTarget ?? this.configuredTelegramReplyTarget(session);
+    const target = this.telegramReplyTarget(session, storedTarget);
     if (!target) {
       throw new InvalidSourceReplyInputError(`No Telegram reply target for ${sessionId}`);
     }

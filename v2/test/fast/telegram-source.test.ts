@@ -27,7 +27,7 @@ import { createTempDir } from "../helpers/common.js";
 
 const botInstances: FakeBot[] = [];
 const runMock = vi.fn();
-const getMeMock = vi.fn().mockResolvedValue({ username: "SpurProjectsBot" });
+const getMeMock = vi.fn().mockResolvedValue({ id: 44, username: "SpurProjectsBot" });
 
 class FakeBot {
   readonly handlers = new Map<string, (ctx: unknown) => Promise<void>>();
@@ -4303,6 +4303,17 @@ describe("telegramSourceModule", () => {
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("telegram runner failed"));
   });
 
+  it("exposes cached bot identity without another getMe", async () => {
+    const dataDir = await createTempDir("spur-telegram-source-");
+    tempDirs.push(dataDir);
+    const calls = getMeMock.mock.calls.length;
+    const { handle } = await startSource(dataDir, vi.fn(), vi.fn());
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(handle.telegramBotIdentity).toEqual({ id: 44, username: "SpurProjectsBot" });
+    expect(getMeMock.mock.calls.length).toBe(calls + 1);
+    expect(JSON.stringify(handle.telegramBotIdentity)).not.toContain("token");
+  });
+
   it("logs auth_failed and still starts when getMe fails", async () => {
     const dataDir = await createTempDir("spur-telegram-source-");
     tempDirs.push(dataDir);
@@ -4312,6 +4323,7 @@ describe("telegramSourceModule", () => {
     });
 
     expect(handle).toBeDefined();
+    expect(handle.telegramBotIdentity).toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("telegram commands setup failed"),
     );
