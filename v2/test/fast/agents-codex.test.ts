@@ -50,6 +50,7 @@ import {
 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
+import { buildAgentResumePlan } from "../../src/agents/index.js";
 import {
   codexCommand,
   buildCodexPlan,
@@ -243,8 +244,29 @@ describe("buildCodexPlan", () => {
 });
 
 describe("buildCodexResumePlan model", () => {
-  it("does not add --model", () => {
-    const plan = buildCodexResumePlan("thread-123");
+  it.each(["gpt-6.1-sol", "selected-model"])(
+    "preserves the selected model through generic Codex resume: %s",
+    (model) => {
+      const plan = buildAgentResumePlan("codex", "thread-123", "/custom/codex", {
+        model,
+        codexHomePath: "/home/codex-dir",
+        codexArgs: ["--enable", "fast_mode"],
+        reasoningEffort: "high",
+        restrictWrites: true,
+      });
+      expect(plan.launchCommand).toContain(`--model '${model}'`);
+      expect(plan.launchCommand).toContain("'/custom/codex' resume");
+      expect(plan.launchCommand).toContain("'thread-123'");
+      expect(plan.launchCommand).toContain("CODEX_HOME='/home/codex-dir'");
+      expect(plan.launchCommand).toContain("'--enable' 'fast_mode'");
+      expect(plan.launchCommand).toContain('model_reasoning_effort="high"');
+      expect(plan.launchCommand).toContain("--sandbox read-only");
+      expect(plan.launchCommand).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    },
+  );
+
+  it("does not add --model when generic resume has no selected model", () => {
+    const plan = buildAgentResumePlan("codex", "thread-123");
     expect(plan.launchCommand).not.toContain("--model");
   });
 });

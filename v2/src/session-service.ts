@@ -3600,6 +3600,11 @@ export class SessionService {
   // here still has its spawn pipeline running (worktree/tools/tmux setup), so
   // its dead runtime is expected and must not be reconciled to stopped.
   private readonly spawnsInFlight = new Set<string>();
+  // Session ids this process is launching in place: dead-agent recovery
+  // (relaunchSessionInPlace) and restore()/reopen(). Each writes `running`
+  // before the agent reaches its prompt and settles the record itself, so a
+  // not-yet-started agent must not be reconciled to errored meanwhile.
+  private readonly launchesInFlight = new Set<string>();
   private readonly triggerBirthsInFlight = new Map<
     string,
     { request: SpawnSessionRequest; result: Promise<SessionView> }
@@ -19051,6 +19056,7 @@ export class SessionService {
     // state right after this returns and must not have that forced to
     // "working" the way a genuine post-restore warmup intentionally does.
     this.restoreWarmupUntil.set(session.id, Date.now() + RESTORE_WARMUP_MS);
+    this.launchesInFlight.add(session.id);
     let recovered: ReadySessionForSend;
     try {
       recovered = await this.relaunchSessionInPlace(session, project, {
@@ -19073,6 +19079,7 @@ export class SessionService {
       throw error;
     } finally {
       this.restoreWarmupUntil.delete(session.id);
+      this.launchesInFlight.delete(session.id);
     }
     operation?.assertActive();
     recovered.session = this.writeRecoverySession(recovered.session, options?.wakeClaim, options);
@@ -19688,7 +19695,12 @@ export class SessionService {
           },
           operation,
         );
-        return this.restoreLocked(sessionId, request, claim, operation);
+        try {
+          this.launchesInFlight.add(sessionId);
+          return await this.restoreLocked(sessionId, request, claim, operation);
+        } finally {
+          this.launchesInFlight.delete(sessionId);
+        }
       },
       operation,
     );
@@ -19920,6 +19932,10 @@ export class SessionService {
     // warmup window (see reapDeadSessionSidecars) for exactly this gap.
     const warmupUntil = Date.now() + RESTORE_WARMUP_MS;
     this.restoreWarmupUntil.set(sessionId, warmupUntil);
+    // Released by restoreWithPaneLock once this frame settles, after the final
+    // status write on every exit: the provisional `running` write precedes a
+    // ready wait longer than the warmup.
+    this.launchesInFlight.add(sessionId);
     let restoredLaunchCommand = current.launchCommand;
     let mcpSidecarUpdate: SessionRecord = current;
     let restoreGeneration: PaneGeneration | null = null;
@@ -23084,6 +23100,7 @@ export class SessionService {
     }
     const protectedRuntime = (ownedPane?: Promise<void>) =>
       this.spawnsInFlight.has(session.id) ||
+      this.launchesInFlight.has(session.id) ||
       this.lifecycle.snapshot(session.id).revision !== probeRevision ||
       (this.paneWriteLocks.has(session.tmuxSession) &&
         this.paneWriteLocks.get(session.tmuxSession) !== ownedPane) ||
@@ -24435,10 +24452,8 @@ export class SessionService {
     session = persisted.session;
     const workspacePresent = classified.workspacePresent;
     const lastActivityAt = buildLastActivityAt(session, classified);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, session)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, session);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const sidecars = await this.sidecarViews(session, this.resolveProjectForSession(session));
     const runningSidecarNames = sidecars.filter((view) => view.alive).map((view) => view.name);
 
@@ -24466,6 +24481,7 @@ export class SessionService {
       branchSource: _branchSource,
       error: _error,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...dashboardSession
     } = session;
     const state = this.stabilizeState(
@@ -24493,6 +24509,7 @@ export class SessionService {
         deskId: workspaceIdOf(dashboardSession),
         planMode: resolvePlanMode(dashboardSession),
         restrictWrites: resolveRestrictWrites(dashboardSession),
+        ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
         ...(displaySlots ? { slots: displaySlots } : {}),
         runtimeAlive: classified.runtime.runtimeAlive,
         workspaceExists: workspacePresent,
@@ -24801,10 +24818,8 @@ export class SessionService {
     );
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
-    const displaySlots = this.projectSidecarSlots(
-      session,
-      deriveSessionSlots(resolveWorkspaceState(this.config.dataDir, anchorRecord)),
-    );
+    const workspaceState = resolveWorkspaceState(this.config.dataDir, anchorRecord);
+    const displaySlots = this.projectSidecarSlots(session, deriveSessionSlots(workspaceState));
     const deskGroupMembers = await this.buildDeskGroupMembers(
       session,
       {
@@ -24830,6 +24845,7 @@ export class SessionService {
       // The record's queue state is internal; the view carries queuedMessagesView.
       queuedMessages: _queuedMessages,
       errorSource: _errorSource,
+      pr: _recordPr,
       ...sessionWithoutDetailFields
     } = session;
 
@@ -24841,6 +24857,7 @@ export class SessionService {
       deskId: workspaceIdOf(session),
       planMode: resolvePlanMode(session),
       restrictWrites: resolveRestrictWrites(session),
+      ...(workspaceState.pr ? { pr: workspaceState.pr } : {}),
       ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,

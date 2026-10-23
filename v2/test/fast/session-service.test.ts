@@ -8,9 +8,12 @@ import { spawn as spawnChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -22064,6 +22067,178 @@ describe("SessionService", () => {
     );
   });
 
+  // Shifts Date.now (restore warmup clock) only; real timers keep the
+  // reconcile's 1s confirmation sleep and the waitFor polls working.
+  function skewDateNow(): { advance(ms: number): void } {
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    return {
+      advance(ms: number) {
+        skewMs += ms;
+      },
+    };
+  }
+  // RESTORE_WARMUP_MS (30s) plus margin.
+  const PAST_RESTORE_WARMUP_MS = 31_000;
+
+  function holdAgentReady(): {
+    agent: { started: boolean };
+    release(): void;
+    fail(error: Error): void;
+    held(): boolean;
+  } {
+    const agent = { started: false };
+    isProcessRunningInTmuxMock.mockImplementation(async () => agent.started);
+    let releaseReady: (() => void) | undefined;
+    let failReady: ((error: Error) => void) | undefined;
+    waitForTmuxReadyMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolveReady, rejectReady) => {
+          releaseReady = resolveReady;
+          failReady = rejectReady;
+        }),
+    );
+    return {
+      agent,
+      release() {
+        agent.started = true;
+        releaseReady?.();
+      },
+      fail(error: Error) {
+        failReady?.(error);
+      },
+      held: () => releaseReady !== undefined,
+    };
+  }
+
+  async function expectNotErroredMidLaunch(
+    service: { get(id: string): Promise<SessionView> },
+    sessions: ReturnType<typeof createSessionStore>,
+  ): Promise<void> {
+    const midLaunch = await service.get("api-1");
+    expect(midLaunch.status).toBe("running");
+    expect(sessions.get("api-1")?.status).toBe("running");
+    expect(sessions.get("api-1")?.error).toBeUndefined();
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      TEST_DATA_DIR,
+      expect.objectContaining({ id: "api-1", status: "errored" }),
+    );
+  }
+
+  async function expectReconciledAfterExit(
+    service: { get(id: string): Promise<SessionView> },
+    sessions: ReturnType<typeof createSessionStore>,
+    agent: { started: boolean },
+  ): Promise<void> {
+    // Settled launch releases the guard: a later agent exit reconciles.
+    agent.started = false;
+    const afterExit = await service.get("api-1");
+    expect(afterExit.status).toBe("errored");
+    expect(sessions.get("api-1")?.status).toBe("errored");
+  }
+
+  it("leaves a relaunching session running while its agent has not reached the prompt yet", async () => {
+    // Recovery writes `running` right after creating the pane, then waits for
+    // the agent prompt. An rc-file prompt (oh-my-zsh "update? [Y/n]") holds
+    // the agent off past the 30s warmup; the live pane with no agent process
+    // must not be reconciled to errored while the relaunch still owns it.
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+
+    const service = await createDisposedSessionService();
+    try {
+      const sending = service.send("api-1", { message: "resume work" });
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+
+      await expectNotErroredMidLaunch(service, sessions);
+
+      ready.release();
+      const result = await sending;
+      expect(result.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("leaves a restoring session running while its agent has not reached the prompt yet", async () => {
+    // restore() writes a provisional `running` record, then waits for the
+    // agent prompt longer than the 30s warmup. A reconcile to errored there
+    // breaks restore's lifecycle stamp and fails a launch that is still live.
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped", stopReason: "manual_pause" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+
+    const service = await createDisposedSessionService();
+    try {
+      const restoring = service.restore("api-1");
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+
+      await expectNotErroredMidLaunch(service, sessions);
+
+      ready.release();
+      const restored = await restoring;
+      expect(restored.status).toBe("running");
+      expect(sessions.get("api-1")?.error).toBeUndefined();
+
+      // restore() re-arms the post-launch warmup on success; let it lapse.
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("releases the launch guard when a restore fails its ready wait", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", runningSession({ status: "stopped", stopReason: "manual_pause" }));
+    const clock = skewDateNow();
+    const ready = holdAgentReady();
+    const { PromptReadyTimeoutError } = await import("../../src/runtime-tmux.js");
+
+    const service = await createDisposedSessionService();
+    try {
+      const restoring = service.restore("api-1");
+      const rejected = expect(restoring).rejects.toThrow("Failed to restore api-1");
+      await vi.waitFor(() => {
+        expect(ready.held()).toBe(true);
+        expect(sessions.get("api-1")?.status).toBe("running");
+      });
+      ready.fail(
+        new PromptReadyTimeoutError({ sessionName: "api-1", elapsedMs: 120_000, detail: "" }),
+      );
+      await rejected;
+      expect(sessions.get("api-1")?.status).toBe("errored");
+
+      // A later running record with a dead agent must reconcile again.
+      const failed = sessions.get("api-1");
+      if (!failed) throw new Error("missing api-1 record");
+      const { error: _launchError, ...runningBase } = failed;
+      sessions.set("api-1", { ...runningBase, status: "running" });
+      clock.advance(PAST_RESTORE_WARMUP_MS);
+      await expectReconciledAfterExit(service, sessions, ready.agent);
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("stops a confirmed missing runtime while retaining its error", async () => {
     let session: SessionRecord = {
       ...runningSession(),
@@ -39478,6 +39653,57 @@ describe("SessionService", () => {
     // The write is authoritative in the workspace's own state file, not just
     // mirrored onto the anchor record (Phase 2: single-writer workspace state).
     expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.slots?.title).toBe("Shared title");
+    service.dispose();
+  });
+
+  it("reports the workspace PR binding for a desk sibling with a stale record pr", async () => {
+    const store = createSessionStore();
+    const base = {
+      project: "api",
+      agent: "claude" as const,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    const stalePr = {
+      number: 3960,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/3960",
+    };
+    store.set("api-1", { ...base, id: "api-1", tmuxSession: "api-1" });
+    store.set("api-2", {
+      ...base,
+      id: "api-2",
+      tmuxSession: "api-2",
+      workspaceId: "api-1",
+      pr: stalePr,
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const { readWorkspaceState } = await loadWorkspaceStoreModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-2", {
+      links: [{ label: "pr", url: "https://github.com/acme/api/pull/3963" }],
+    });
+
+    expect(result.pr?.number).toBe(3963);
+    expect((await service.get("api-2")).pr?.number).toBe(3963);
+    const internals = service as unknown as {
+      enrichDashboard(record: SessionRecord): Promise<DashboardSessionView>;
+    };
+    const member = store.get("api-2");
+    if (!member) throw new Error("Missing member fixture");
+    expect((await internals.enrichDashboard(member)).pr?.number).toBe(3963);
+    expect(readWorkspaceState(TEST_DATA_DIR, "api-1")?.pr?.number).toBe(3963);
+    expect(store.get("api-2")?.pr?.number).toBe(3960);
     service.dispose();
   });
 
@@ -66919,75 +67145,83 @@ describe("SessionService", () => {
       if (!cached) throw new Error("Missing cached metadata hold");
       const before = structuredClone(cached);
       const path = join(dataDir, "sessions", cached.project, `${cached.id}.json`);
-      const inode = statSync(path).ino;
-      const entered = deferred<undefined>();
-      const release = deferred<undefined>();
-      probeTmuxProcessMatchMock.mockImplementation(async () => {
-        if (phase === "runtime") {
-          entered.resolve(undefined);
-          await release.promise;
-        }
-        return {
-          alive: false,
-          matchedByName: false,
-          unresponsive: false,
-          diagnostic: "ps failed: metadata boundary",
-        };
-      });
-      resumeAgentSubmitAckBindingMock.mockImplementation(
-        async (...args: Parameters<typeof fixture.realAgents.resumeAgentSubmitAckBinding>) => {
-          const binding = await fixture.realAgents.resumeAgentSubmitAckBinding(...args);
-          return binding
-            ? {
-                ...binding,
-                scan: async (text: string) => {
-                  if (phase === "scan") {
-                    entered.resolve(undefined);
-                    await release.promise;
-                  }
-                  return binding.scan(text);
-                },
-              }
-            : null;
-        },
-      );
-      const observing = sessionServiceInternals(fixture.service).classifySessionRecord(cached);
+      const metadataFd = openSync(path, "r");
       try {
-        await entered.promise;
-        const replacement =
-          owner === "replacement" ? { ...before, agentLaunchId: "replacement-launch" } : before;
-        if (owner === "replacement") {
-          actual.writeSession(dataDir, replacement);
-          expect(statSync(path).ino).not.toBe(inode);
-          expect(actual.readSession(dataDir, original.id)).not.toBe(cached);
-          expect(actual.listSessions(dataDir)[0]).toBe(actual.readSession(dataDir, original.id));
+        const inode = fstatSync(metadataFd).ino;
+        const entered = deferred<undefined>();
+        const release = deferred<undefined>();
+        probeTmuxProcessMatchMock.mockImplementation(async () => {
+          if (phase === "runtime") {
+            entered.resolve(undefined);
+            await release.promise;
+          }
+          return {
+            alive: false,
+            matchedByName: false,
+            unresponsive: false,
+            diagnostic: "ps failed: metadata boundary",
+          };
+        });
+        resumeAgentSubmitAckBindingMock.mockImplementation(
+          async (...args: Parameters<typeof fixture.realAgents.resumeAgentSubmitAckBinding>) => {
+            const binding = await fixture.realAgents.resumeAgentSubmitAckBinding(...args);
+            return binding
+              ? {
+                  ...binding,
+                  scan: async (text: string) => {
+                    if (phase === "scan") {
+                      entered.resolve(undefined);
+                      await release.promise;
+                    }
+                    return binding.scan(text);
+                  },
+                }
+              : null;
+          },
+        );
+        const observing = sessionServiceInternals(fixture.service).classifySessionRecord(cached);
+        try {
+          await entered.promise;
+          const replacement =
+            owner === "replacement" ? { ...before, agentLaunchId: "replacement-launch" } : before;
+          if (owner === "replacement") {
+            actual.writeSession(dataDir, replacement);
+            expect(statSync(path).ino).not.toBe(inode);
+            expect(actual.readSession(dataDir, original.id)).not.toBe(cached);
+            expect(actual.listSessions(dataDir)[0]).toBe(actual.readSession(dataDir, original.id));
+          }
+          release.resolve(undefined);
+          await observing;
+          const latest = actual.readSession(dataDir, original.id);
+          expect(cached).toEqual(before);
+          expect(latest?.agentLaunchId).toBe(replacement.agentLaunchId);
+          expect(latest?.queuedMessages).toEqual(before.queuedMessages);
+          expect(latest?.scheduledWake).toEqual(before.scheduledWake);
+          if (owner === "replacement") {
+            expect(latest?.queuedMessageTyped).toEqual(before.queuedMessageTyped);
+            expect(latest?.submitUnconfirmedAt).toBe(before.submitUnconfirmedAt);
+          } else {
+            expect(latest?.queuedMessageTyped).toBeUndefined();
+            expect(latest?.submitUnconfirmedAt).toBeUndefined();
+            if (!latest) throw new Error("Missing confirmed metadata record");
+            await sessionServiceInternals(fixture.service).classifySessionRecord(latest);
+          }
+          expect(eventsNamed("session.submit.confirmed")).toHaveLength(owner === "current" ? 1 : 0);
+          expect(eventsNamed("session.message.requeued")).toHaveLength(0);
+          expect(eventsNamed("session.submit.released")).toHaveLength(0);
+          expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+          expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+          expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
+        } finally {
+          release.resolve(undefined);
+          await observing;
         }
-        release.resolve(undefined);
-        await observing;
-        const latest = actual.readSession(dataDir, original.id);
-        expect(cached).toEqual(before);
-        expect(latest?.agentLaunchId).toBe(replacement.agentLaunchId);
-        expect(latest?.queuedMessages).toEqual(before.queuedMessages);
-        expect(latest?.scheduledWake).toEqual(before.scheduledWake);
-        if (owner === "replacement") {
-          expect(latest?.queuedMessageTyped).toEqual(before.queuedMessageTyped);
-          expect(latest?.submitUnconfirmedAt).toBe(before.submitUnconfirmedAt);
-        } else {
-          expect(latest?.queuedMessageTyped).toBeUndefined();
-          expect(latest?.submitUnconfirmedAt).toBeUndefined();
-          if (!latest) throw new Error("Missing confirmed metadata record");
-          await sessionServiceInternals(fixture.service).classifySessionRecord(latest);
-        }
-        expect(eventsNamed("session.submit.confirmed")).toHaveLength(owner === "current" ? 1 : 0);
-        expect(eventsNamed("session.message.requeued")).toHaveLength(0);
-        expect(eventsNamed("session.submit.released")).toHaveLength(0);
-        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
-        expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
-        expect(sendInterruptKeysToTmuxMock).not.toHaveBeenCalled();
       } finally {
-        release.resolve(undefined);
-        await observing;
-        fixture.close();
+        try {
+          closeSync(metadataFd);
+        } finally {
+          fixture.close();
+        }
       }
     });
 
