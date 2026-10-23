@@ -1486,7 +1486,9 @@ type SessionServiceInternals = {
     paneUsable: boolean;
     processAlive: boolean;
     probeUnresponsive: boolean;
+    diagnostic?: string;
   }>;
+  lifecycle: SessionLifecycleRegister;
   runAttentionMonitor(baseline: boolean): Promise<void>;
   pollAttentionStates(baseline: boolean): Promise<void>;
   attentionMonitorRunning: boolean;
@@ -20476,6 +20478,314 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("waiting");
   });
+
+  it.each(["working", "waiting", "needs_input"] as const)(
+    "clears only a runtime-probe ERROR after a fresh same-thread Codex %s rollout",
+    async (nativeState) => {
+      const now = new Date("2026-03-18T10:05:00.000Z");
+      vi.setSystemTime(now);
+      const record = runningSession({
+        agent: "codex",
+        agentSessionId: "native-codex-thread",
+        agentLaunchId: "launch-codex-1",
+        launchCommand: "codex",
+      });
+      const sessions = createSessionStore(record);
+      readAgentHookStateMock.mockReturnValue(
+        nativeState === "working"
+          ? {
+              state: "working",
+              updatedAt: new Date(now.getTime() - 5_000).toISOString(),
+              hookEvent: "PreToolUse",
+              turnId: "codex-turn-1",
+            }
+          : null,
+      );
+      readCodexRolloutStateMock.mockResolvedValue({
+        rollout: {
+          state: nativeState,
+          timestamp: new Date(now.getTime() - 61_000).toISOString(),
+          timestampMs: now.getTime() - 61_000,
+          filePath: "/tmp/native-codex-thread/rollout.jsonl",
+          reason:
+            nativeState === "working"
+              ? "function_call"
+              : nativeState === "waiting"
+                ? "task_complete"
+                : "input_required",
+          ...(nativeState === "working" ? { turnId: "codex-turn-1" } : {}),
+        },
+        rateLimit: null,
+        threadId: "native-codex-thread",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        probeUnresponsive: true,
+        diagnostic: "ps failed: The operation was aborted",
+      });
+
+      try {
+        const result = await service.get(record.id);
+        expect(result.state).toBe("error");
+        expect(sessions.get(record.id)).toMatchObject({
+          errorSource: "runtime_probe",
+          agentSessionId: "native-codex-thread",
+          agentLaunchId: "launch-codex-1",
+        });
+
+        readCodexRolloutStateMock.mockResolvedValue({
+          rollout: {
+            state: nativeState,
+            timestamp: new Date(now.getTime() - 5_000).toISOString(),
+            timestampMs: now.getTime() - 5_000,
+            filePath: "/tmp/native-codex-thread/rollout.jsonl",
+            reason:
+              nativeState === "working"
+                ? "function_call"
+                : nativeState === "waiting"
+                  ? "task_complete"
+                  : "input_required",
+            ...(nativeState === "working" ? { turnId: "codex-turn-1" } : {}),
+          },
+          rateLimit: null,
+          threadId: "native-codex-thread",
+        });
+        const recovered = await service.get(record.id);
+        expect(recovered.state).toBe(nativeState);
+        expect(sessions.get(record.id)?.error).toBeUndefined();
+        expect(sessions.get(record.id)?.errorSource).toBeUndefined();
+        expect(readCodexRolloutStateMock).toHaveBeenLastCalledWith(
+          expect.any(String),
+          expect.any(Object),
+          "native-codex-thread",
+        );
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each([
+    { name: "stale rollout", ageMs: 61_000, threadId: "native-codex-thread", limited: false },
+    { name: "wrong native thread", ageMs: 5_000, threadId: "older-codex-thread", limited: false },
+    { name: "Codex quota evidence", ageMs: 5_000, threadId: "native-codex-thread", limited: true },
+    {
+      name: "independent provider error",
+      ageMs: 5_000,
+      threadId: "native-codex-thread",
+      limited: false,
+      errorSource: "other" as const,
+    },
+  ])("keeps a Codex probe ERROR for $name", async ({ ageMs, threadId, limited, errorSource }) => {
+    const now = new Date("2026-03-18T10:05:00.000Z");
+    vi.setSystemTime(now);
+    const record = runningSession({
+      agent: "codex",
+      agentSessionId: "native-codex-thread",
+      agentLaunchId: "launch-codex-1",
+      launchCommand: "codex",
+      ...(errorSource ? { error: "Codex provider failed", errorSource } : {}),
+    });
+    const sessions = createSessionStore(record);
+    readAgentHookStateMock.mockReturnValue(null);
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "working",
+        timestamp: new Date(now.getTime() - ageMs).toISOString(),
+        timestampMs: now.getTime() - ageMs,
+        filePath: "/tmp/native-codex-thread/rollout.jsonl",
+        reason: "task_started",
+      },
+      rateLimit: limited ? { limited: true, reason: "codex out of credits" } : null,
+      threadId,
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: true,
+      diagnostic: "ps failed: The operation was aborted",
+    });
+
+    try {
+      const result = await service.get(record.id);
+      expect(result.state).toBe("error");
+      expect(sessions.get(record.id)?.errorSource).toBe(errorSource ?? "runtime_probe");
+      expect(sessions.get(record.id)?.error).toContain(
+        errorSource ? "Codex provider failed" : "The operation was aborted",
+      );
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("keeps Codex probe ERROR when a stale hook conflicts with a fresh task-complete rollout", async () => {
+    const now = new Date("2026-03-18T10:05:00.000Z");
+    vi.setSystemTime(now);
+    const record = runningSession({
+      agent: "codex",
+      agentSessionId: "native-codex-thread",
+      agentLaunchId: "launch-codex-1",
+      launchCommand: "codex",
+      error: "Session status detection failed: previous ps abort",
+      errorSource: "runtime_probe",
+    });
+    const sessions = createSessionStore(record);
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: new Date(now.getTime() - 5_000).toISOString(),
+      hookEvent: "PreToolUse",
+      turnId: "old-codex-turn",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      rollout: {
+        state: "waiting",
+        timestamp: new Date(now.getTime() - 5_000).toISOString(),
+        timestampMs: now.getTime() - 5_000,
+        filePath: "/tmp/native-codex-thread/rollout.jsonl",
+        reason: "task_complete",
+        turnId: "current-codex-turn",
+      },
+      rateLimit: null,
+      threadId: "native-codex-thread",
+    });
+
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "readRuntimeSnapshot").mockResolvedValue({
+      runtimeAlive: false,
+      paneUsable: false,
+      processAlive: false,
+      probeUnresponsive: true,
+      diagnostic: "ps failed: The operation was aborted",
+    });
+
+    try {
+      expect((await service.get(record.id)).state).toBe("error");
+      expect(sessions.get(record.id)?.errorSource).toBe("runtime_probe");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["native", "launch", "lifecycle"] as const)(
+    "does not promote Codex probe ERROR after a concurrent %s change",
+    async (changedOwner) => {
+      const record = runningSession({
+        agent: "codex",
+        agentSessionId: "native-codex-thread",
+        agentLaunchId: "launch-codex-1",
+        launchCommand: "codex",
+        error: "Session status detection failed: previous ps abort",
+        errorSource: "runtime_probe",
+      });
+      const sessions = createSessionStore(record);
+      readAgentHookStateMock.mockReturnValue({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "PreToolUse",
+        turnId: "codex-turn-1",
+      });
+      let finishNativeRead: (result: {
+        rollout: {
+          state: "working";
+          timestamp: string;
+          timestampMs: number;
+          filePath: string;
+          reason: "function_call";
+          turnId: string;
+        };
+        rateLimit: null;
+        threadId: string;
+      }) => void = () => {};
+      let nativeReadStarted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        nativeReadStarted = resolve;
+      });
+      const deferredNativeRead = new Promise<{
+        rollout: {
+          state: "working";
+          timestamp: string;
+          timestampMs: number;
+          filePath: string;
+          reason: "function_call";
+          turnId: string;
+        };
+        rateLimit: null;
+        threadId: string;
+      }>((resolve) => {
+        finishNativeRead = resolve;
+      });
+      readCodexRolloutStateMock.mockImplementationOnce(async () => {
+        nativeReadStarted();
+        return deferredNativeRead;
+      });
+
+      const service = await createDisposedSessionService();
+      const internals = sessionServiceInternals(service);
+      vi.spyOn(internals, "readRuntimeSnapshot").mockResolvedValue({
+        runtimeAlive: false,
+        paneUsable: false,
+        processAlive: false,
+        probeUnresponsive: true,
+        diagnostic: "ps failed: The operation was aborted",
+      });
+      const pending = service.get(record.id);
+      await started;
+      const current = sessions.get(record.id) ?? record;
+      const replacement: SessionRecord = {
+        ...current,
+        ...(changedOwner === "native"
+          ? { agentSessionId: "replacement-native" }
+          : changedOwner === "launch"
+            ? { agentLaunchId: "replacement-launch" }
+            : {}),
+      };
+      sessions.set(record.id, replacement);
+      let lifecycleOwner: ReturnType<typeof internals.lifecycle.begin> | undefined;
+      if (changedOwner === "lifecycle") {
+        lifecycleOwner = internals.lifecycle.begin("restore", [record.id]);
+      }
+      writeSessionMock.mockClear();
+      finishNativeRead({
+        rollout: {
+          state: "working",
+          timestamp: new Date().toISOString(),
+          timestampMs: Date.now(),
+          filePath: "/tmp/native-codex-thread/rollout.jsonl",
+          reason: "function_call",
+          turnId: "codex-turn-1",
+        },
+        rateLimit: null,
+        threadId: "native-codex-thread",
+      });
+
+      try {
+        const result = await pending;
+        expect(result.state).toBe("error");
+        expect(sessions.get(record.id)).toEqual(replacement);
+        expect(writeSessionMock).not.toHaveBeenCalled();
+      } finally {
+        if (lifecycleOwner) {
+          internals.lifecycle.settle(
+            lifecycleOwner,
+            false,
+            () => "failed",
+            () => true,
+          );
+        }
+        service.dispose();
+      }
+    },
+  );
 
   it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {
     vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
@@ -57448,6 +57758,163 @@ describe("SessionService", () => {
         },
       });
     }
+
+    it.each([
+      { name: "new owned busy status", state: "working", expected: "working" },
+      { name: "new owned dialog", state: "needs_input", expected: "needs_input" },
+      { name: "idle", state: "waiting", expected: "error" },
+      { name: "unknown ownership", paneOwned: false, expected: "error" },
+      { name: "wrong UUID", sessionId: "another-native", expected: "error" },
+      { name: "stale status", age: 60_001, expected: "error" },
+      { name: "future status", age: -1, expected: "error" },
+      { name: "newer error", errorAge: 0, expected: "error" },
+      { name: "missing error timestamp", errorAge: null, expected: "error" },
+      { name: "generic update without state timestamp", noStatusTime: true, expected: "error" },
+      { name: "metadata update after current error", statusAge: 3_000, age: 0, expected: "error" },
+      { name: "missing launch identity", noLaunch: true, expected: "error" },
+      { name: "independent failure", retainedError: true, expected: "error" },
+      { name: "absent native status", absent: true, expected: "error" },
+      { name: "quota", quota: true, expected: "rate_limited" },
+      { name: "quota at dialog", quota: true, state: "needs_input", expected: "rate_limited" },
+      { name: "launch replaced during read", change: "launch", expected: "error" },
+      { name: "UUID replaced during read", change: "uuid", expected: "error" },
+      { name: "failure recorded during read", change: "error", expected: "error" },
+      { name: "new error episode during read", change: "marker", expected: "error" },
+      { name: "lifecycle pending during read", change: "pending", expected: "error" },
+      { name: "lifecycle settled during read", change: "settled", expected: "error" },
+    ])("compares server errors with $name", async (scenario) => {
+      const sessions = createSessionStore();
+      const record = runningSession({
+        agentSessionId: "native-1",
+        serverErrorAt: "2026-03-18T10:04:00.000Z",
+        ...(scenario.noLaunch ? {} : { agentLaunchId: "launch-1" }),
+        ...(scenario.retainedError
+          ? { error: "Provider request failed", errorSource: "other" as const }
+          : {}),
+      });
+      sessions.set(record.id, record);
+      const errorAt = Date.now() - (scenario.errorAge ?? 2_000);
+      readClaudeJsonlStateMock.mockResolvedValue({
+        state: "error",
+        serverError: true,
+        ...(scenario.quota ? { rateLimit: { limited: true, reason: "quota" } } : {}),
+        reader: {
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
+          tailRecords: [
+            {
+              type: "assistant",
+              serverError: true,
+              timestampMs: errorAt,
+              ...(scenario.errorAge === null ? {} : { ownTimestampMs: errorAt }),
+            },
+          ],
+        },
+      });
+      const nativeStatus = {
+        state: scenario.state ?? "working",
+        status: "busy",
+        sessionId: scenario.sessionId ?? "native-1",
+        paneOwned: scenario.paneOwned ?? true,
+        pid: 200,
+        filePath: "status.json",
+        updatedMs: Date.now() - (scenario.age ?? 1_000),
+        ...(scenario.noStatusTime
+          ? {}
+          : { statusUpdatedMs: Date.now() - (scenario.statusAge ?? scenario.age ?? 1_000) }),
+      };
+      const service = await createDisposedSessionService();
+      const lifecycle = (service as unknown as { lifecycle: SessionLifecycleRegister }).lifecycle;
+      readClaudeSessionStatusMock.mockImplementation(async () => {
+        if (scenario.change === "launch")
+          sessions.set(record.id, { ...record, agentLaunchId: "launch-2" });
+        if (scenario.change === "uuid")
+          sessions.set(record.id, { ...record, agentSessionId: "native-2" });
+        if (scenario.change === "error")
+          sessions.set(record.id, { ...record, error: "Launch failed", errorSource: "other" });
+        if (scenario.change === "marker")
+          sessions.set(record.id, { ...record, serverErrorAt: new Date().toISOString() });
+        if (scenario.change === "pending" || scenario.change === "settled") {
+          const owner = lifecycle.begin("restore", [record.id]);
+          if (scenario.change === "settled")
+            lifecycle.settle(
+              owner,
+              true,
+              () => "succeeded",
+              () => true,
+            );
+        }
+        return scenario.absent ? null : nativeStatus;
+      });
+      writeSessionMock.mockClear();
+      const result = await sessionServiceInternals(service).classifySessionRecord(record);
+
+      expect(result.state).toBe(scenario.expected);
+      if (scenario.change !== "marker")
+        expect(sessions.get(record.id)?.serverErrorAt).toBe(record.serverErrorAt);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      if (scenario.change) expect(writeSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(["working", "needs_input"] as const)(
+      "projects a fresh native %s after a public error",
+      async (state) => {
+        const sessions = createSessionStore();
+        const record = runningSession({
+          agentSessionId: "native-1",
+          agentLaunchId: "launch-1",
+          serverErrorAt: "2026-03-18T10:04:00.000Z",
+          serverErrorReactivationAttempts: 2,
+        });
+        sessions.set(record.id, record);
+        mockServerError();
+        const service = await createDisposedSessionService();
+        expect((await service.get(record.id)).state).toBe("error");
+        vi.setSystemTime(Date.now() + 5_000);
+        readClaudeJsonlStateMock.mockResolvedValue({
+          state: "error",
+          serverError: true,
+          reader: {
+            filePath: "test.jsonl",
+            lastOffset: 0,
+            lastMtimeMs: Date.now(),
+            tailRecords: [
+              {
+                type: "assistant",
+                serverError: true,
+                timestampMs: Date.now() - 2_000,
+                ownTimestampMs: Date.now() - 2_000,
+              },
+            ],
+          },
+        });
+        readClaudeSessionStatusMock.mockResolvedValue({
+          state,
+          status: state === "working" ? "busy" : "waiting",
+          waitingFor: "permission prompt",
+          sessionId: record.agentSessionId,
+          paneOwned: true,
+          pid: 200,
+          filePath: "status.json",
+          updatedMs: Date.now(),
+          statusUpdatedMs: Date.now(),
+        });
+        const view = await service.get(record.id);
+        expect(view.state).toBe(state);
+        expect(view.stateHistory?.at(-1)).toEqual(
+          expect.objectContaining({ source: "claude_status" }),
+        );
+        const dashboard = service as unknown as {
+          refreshDashboardCacheEntry(record: SessionRecord): Promise<void>;
+        };
+        await dashboard.refreshDashboardCacheEntry(sessions.get(record.id) ?? record);
+        expect((await service.list({ view: "dashboard" }))[0]?.state).toBe(state);
+        expect(sessions.get(record.id)?.serverErrorAt).toBe(record.serverErrorAt);
+        expect(sessions.get(record.id)?.serverErrorReactivationAttempts).toBe(2);
+        expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      },
+    );
 
     it.each(["readiness", "binding"] as const)(
       "restores runtime_lost server errors without a scheduled reminder during %s",
