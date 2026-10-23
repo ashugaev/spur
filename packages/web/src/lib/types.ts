@@ -990,7 +990,8 @@ export function isRestorable(session: DashboardSession): boolean {
   if (
     session.status === "paused" ||
     session.status === "stopped" ||
-    session.status === "budget_limited"
+    session.status === "budget_limited" ||
+    (session.status === "errored" && session.state === "error")
   )
     return true;
   return !session.runtimeAlive;

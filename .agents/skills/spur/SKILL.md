@@ -34,6 +34,7 @@ SAFETY
   `--expose-web` binds `0.0.0.0`, public.
   Agents run full-access — any untrusted prompt from Telegram, GitHub, Jira, or webhook runs arbitrary commands as the daemon user.
   Token budgets, session overrides, and installed Cursor hook: docs/configuration.md. Unknown usage never blocks execution.
+  Treat project `spur.yaml` as code: `script` commands run as daemon user.
   Start dev servers with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>`, never a bare dev-server command.
   Isolated TEST seed/attachment constraints: docs/configuration.md; stand/current-generation UI readiness: docs/commands.md Sidecars and Session tools.
   Read ports with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" ports`; Open contract: docs/commands.md#sidecars. Never grep `/proc` or session state for ports.
@@ -43,10 +44,13 @@ DOCS
   Doc index: https://raw.githubusercontent.com/ashugaev/spur/main/README.md
   Any path under `docs/` resolves as https://raw.githubusercontent.com/ashugaev/spur/main/<path>
   Commands, session tools and variables: docs/commands.md
-  Daemon HTTP routes, pre-flight batches and session lifecycle receipts: docs/daemon-api.md
-  Config, reviewer App and consent policy: docs/configuration.md; events: docs/configuration.md#events
+  Reviewer publication evidence: docs/commands.md
+  Routes, bounded conversation pages, pre-flight batches, lifecycle receipts, restore cancellation: docs/daemon-api.md
+  Config, admission, trigger-spawn retry, reviewer App/consent: docs/configuration.md; events: docs/configuration.md#events
+  GitHub PR feedback ownership, quotes and post marker: docs/configuration.md#field-reference
   Select reasoning effort per agent or session: docs/commands.md, docs/configuration.md, docs/daemon-api.md.
   Automatic updates and retry policy: docs/configuration.md#auto-update
+  Full-access daemon MCP over stdio, SSH or installed loopback HTTP; optional OpenAI tunnel: docs/mcp.md
 
 EDITING THIS FILE
 

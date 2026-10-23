@@ -13,6 +13,10 @@ const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 const readCommentSeenRegistryMock = vi.fn();
+const readIgnoredGitHubFeedbackMock = vi.fn();
+const recordIgnoredGitHubFeedbackMock = vi.fn();
+const listIgnoredGitHubFeedbackSessionsMock = vi.fn();
+const deleteIgnoredGitHubFeedbackMock = vi.fn();
 const readGitHubReviewPaginationMock = vi.fn();
 const writeGitHubReviewPaginationMock = vi.fn();
 const recordCommentSeenMock = vi.fn();
@@ -28,7 +32,11 @@ const logSpurEventMock = vi.fn();
 const isGitWorktreeMock = vi.fn();
 const readBranchPushUrlMock = vi.fn().mockResolvedValue("git@github.com:acme/api.git");
 const hasRecentSessionUserActionMock = vi.fn();
+const resolveWorkspaceStateMock = vi.fn();
 
+vi.mock("../../src/workspace-store.js", () => ({
+  resolveWorkspaceState: resolveWorkspaceStateMock,
+}));
 vi.mock("../../src/gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ghModule>()),
   gh: ghTransportMock,
@@ -44,6 +52,10 @@ vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
   markGitHubPollDisabledChecked: markGitHubPollDisabledCheckedMock,
   readCommentSeenRegistry: readCommentSeenRegistryMock,
+  readIgnoredGitHubFeedback: readIgnoredGitHubFeedbackMock,
+  recordIgnoredGitHubFeedback: recordIgnoredGitHubFeedbackMock,
+  listIgnoredGitHubFeedbackSessions: listIgnoredGitHubFeedbackSessionsMock,
+  deleteIgnoredGitHubFeedback: deleteIgnoredGitHubFeedbackMock,
   readGitHubPollDisabled: readGitHubPollDisabledMock,
   readGitHubReviewPagination: readGitHubReviewPaginationMock,
   readLifecycleBaselinedSessions: readLifecycleBaselinedSessionsMock,
@@ -266,6 +278,8 @@ describe("github source", () => {
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
     readCommentSeenRegistryMock.mockReturnValue(new Set());
+    readIgnoredGitHubFeedbackMock.mockReturnValue(new Set());
+    listIgnoredGitHubFeedbackSessionsMock.mockReturnValue([]);
     readGitHubReviewPaginationMock.mockReturnValue(new Map());
     readGitHubPollDisabledMock.mockReturnValue(new Map());
     writeGitHubPollDisabledMock.mockReturnValue(undefined);
@@ -279,6 +293,10 @@ describe("github source", () => {
     // dead-worktree tests override this per case.
     isGitWorktreeMock.mockResolvedValue(true);
     hasRecentSessionUserActionMock.mockReturnValue(false);
+    // Default: the workspace binding is the record's own pr (no stale copy).
+    resolveWorkspaceStateMock.mockImplementation((_dataDir: string, record: SessionRecord) =>
+      record.pr ? { pr: record.pr } : {},
+    );
     viewerLogin = "review-bot";
   });
 
@@ -1331,12 +1349,21 @@ describe("github source", () => {
 
   // Interval ticks never fire under vitest fake timers here (node:timers), so a
   // second poll is driven explicitly through runOnStart().
-  async function startRepollable(emit: (name: string, data?: unknown) => void) {
+  async function startRepollable(
+    emit: (name: string, data?: unknown) => void,
+    selfMarker?: string,
+  ) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 3_600_000, runOnStart: true, emitExisting: false },
+      config: {
+        type: "github",
+        intervalMs: 3_600_000,
+        runOnStart: true,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
@@ -1344,18 +1371,72 @@ describe("github source", () => {
     });
   }
 
-  async function startLifecycle(emit: (name: string, data?: unknown) => void) {
+  async function startLifecycle(emit: (name: string, data?: unknown) => void, selfMarker?: string) {
     return githubSourceModule.start({
       sourceId: "pr-watch",
       projectId: "api",
       dataDir: "/tmp/spur-data",
-      config: { type: "github", intervalMs: 60_000, runOnStart: false, emitExisting: false },
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        emitExisting: false,
+        ...(selfMarker ? { selfMarker } : {}),
+      },
       emit,
       signal: new AbortController().signal,
       logger: { info: vi.fn(), warn: vi.fn() },
       resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
     });
   }
+
+  async function pollCiSignal(rollup: unknown[]): Promise<ReviewSignal | undefined> {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ statusCheckRollup: rollup }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const handle = await startLifecycle(vi.fn());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+    handle.stop();
+    return snapshot.signals.get("ci_failed");
+  }
+  const rolledRun = (
+    conclusion: string,
+    suite: { id: number; createdAt: string; app: number; workflow: number | null },
+  ): unknown => ({
+    name: "Labeler",
+    conclusion,
+    status: "COMPLETED",
+    checkSuite: {
+      databaseId: suite.id,
+      createdAt: suite.createdAt,
+      app: { databaseId: suite.app },
+      workflowRun:
+        suite.workflow === null
+          ? null
+          : { event: "pull_request", workflow: { databaseId: suite.workflow } },
+    },
+  });
+
+  it("emits no ci_failed for a cancelled run superseded by a later suite of the same workflow", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("CANCELLED", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: 7 }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 5, workflow: 7 }),
+    ]);
+    expect(signal).toBeUndefined();
+  });
+
+  it("emits ci_failed when another app publishes a later success under the same name", async () => {
+    const signal = await pollCiSignal([
+      rolledRun("FAILURE", { id: 1, createdAt: "2026-01-01T00:00:00Z", app: 5, workflow: null }),
+      rolledRun("SUCCESS", { id: 2, createdAt: "2026-01-01T00:05:00Z", app: 6, workflow: null }),
+    ]);
+    expect(signal?.text).toBe("CI is failing: Labeler.");
+  });
 
   it("emits github:ready_for_review when a draft PR becomes ready", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
@@ -1816,6 +1897,65 @@ describe("github source", () => {
       .filter(([name]) => name === "github:comment")
       .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
     expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it("passes the source marker to a shared PR batch and isolates corrupt ignored state", async () => {
+    const a = makeSession({ id: "a", workspaceId: "a" });
+    const b = makeSession({ id: "b", workspaceId: "b" });
+    listSessionsMock.mockReturnValue([a, b]);
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        ["a", storedSnapshot([])],
+        ["b", storedSnapshot([])],
+      ]),
+    );
+    readIgnoredGitHubFeedbackMock.mockImplementation(
+      (_dataDir: string, _project: string, _source: string, sessionId: string) => {
+        if (sessionId === "a") throw new Error("Invalid ignored GitHub feedback");
+        return new Set<string>();
+      },
+    );
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([{ id: 701, body: "operator feedback", user: { login: "review-bot" } }]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+    const handle = await startLifecycle(emit, "[AI-generated, session: {session}]");
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        sessionId: "b",
+        signals: [expect.objectContaining({ key: "comment:701" })],
+      }),
+    );
+    expect(emit).not.toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({ sessionId: "a" }),
+    );
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) => entry.event === "source.poll.error" && entry.sessionId === "a",
+      ),
+    ).toBe(true);
+    handle.stop();
+  });
+
+  it("removes ignored feedback for an absent session even without a snapshot", async () => {
+    listSessionsMock.mockReturnValue([]);
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listIgnoredGitHubFeedbackSessionsMock.mockReturnValue(["orphan"]);
+    const handle = await startLifecycle(vi.fn());
+    expect(deleteIgnoredGitHubFeedbackMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "orphan",
+    );
     handle.stop();
   });
 
@@ -2551,6 +2691,79 @@ describe("github source", () => {
     handle.stop();
   });
 
+  const STALE_CLOSED_3960 = (): Map<string, ReviewSnapshot> =>
+    new Map([
+      [
+        "api-a1b2",
+        storedSnapshot(
+          [
+            {
+              key: "closed:3960",
+              kind: "closed" as const,
+              text: "PR #3960 was closed without merging.",
+            },
+          ],
+          3960,
+        ),
+      ],
+    ]);
+  const staleRecordPr = {
+    number: 3960,
+    repo: "acme/api",
+    url: "https://github.com/acme/api/pull/3960",
+  };
+  const workspacePr = {
+    number: 3963,
+    repo: "acme/api",
+    url: "https://github.com/acme/api/pull/3963",
+  };
+
+  it("polls the workspace PR binding, not a stale member record pr, and baselines it silently", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(STALE_CLOSED_3960());
+    listSessionsMock.mockReturnValue([makeSession({ pr: staleRecordPr })]);
+    resolveWorkspaceStateMock.mockReturnValue({ pr: workspacePr });
+    mockLifecyclePoll(
+      prView({
+        number: 3963,
+        url: workspacePr.url,
+        reviewDecision: "CHANGES_REQUESTED",
+      }),
+    );
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("n0=3963"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+      const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as ReviewSnapshot;
+      expect(snapshot.prNumber).toBe(3963);
+      expect(snapshot.signals.has("changes_requested")).toBe(true);
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      handle.stop();
+    }
+  });
+
+  it("polls a member as unbound when the workspace has no pr, ignoring a stale record pr", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(STALE_CLOSED_3960());
+    listSessionsMock.mockReturnValue([makeSession({ pr: staleRecordPr })]);
+    resolveWorkspaceStateMock.mockReturnValue({});
+    ghMock.mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    try {
+      const graphqlArgs = ghTransportMock.mock.calls.map((call) => call.slice(1).join(" "));
+      expect(graphqlArgs.some((args) => args.includes("b0=feature/native-pr-binding"))).toBe(true);
+      expect(graphqlArgs.some((args) => args.includes("=3960"))).toBe(false);
+    } finally {
+      handle.stop();
+    }
+  });
+
   it("suppresses already-true lifecycle state on the first poll, then emits transitions after baseline", async () => {
     // First poll: pre-existing session whose persisted snapshot predates
     // lifecycle keys (only a non-lifecycle ci_failed signal) and is NOT baselined.
@@ -3235,6 +3448,93 @@ describe("github source", () => {
       await assertGhCallCountStable(10);
 
       handle.stop();
+    });
+
+    it("keeps polling a member whose record pr is a stale closed PR once the workspace rebinds", async () => {
+      readReviewSourceSnapshotsMock.mockReturnValue(
+        new Map([
+          [
+            "api-a1b2",
+            storedSnapshot(
+              [
+                {
+                  key: "closed:3960",
+                  kind: "closed" as const,
+                  text: "PR #3960 was closed without merging.",
+                },
+              ],
+              3960,
+            ),
+          ],
+        ]),
+      );
+      listSessionsMock.mockReturnValue([
+        makeSession({
+          pr: { number: 3960, repo: "acme/api", url: "https://github.com/acme/api/pull/3960" },
+        }),
+      ]);
+      resolveWorkspaceStateMock.mockReturnValue({
+        pr: { number: 3963, repo: "acme/api", url: "https://github.com/acme/api/pull/3963" },
+      });
+      const queueWorkspacePr = (issueComments: unknown[]): void => {
+        ghMock.mockResolvedValueOnce(
+          prView({
+            number: 3963,
+            url: "https://github.com/acme/api/pull/3963",
+            statusCheckRollup: [{ name: "check", state: "SUCCESS" }],
+          }),
+        );
+        ghMock.mockResolvedValueOnce("[]");
+        ghMock.mockResolvedValueOnce("[]");
+        ghMock.mockResolvedValueOnce(JSON.stringify(issueComments));
+        ghMock.mockResolvedValueOnce("[]");
+      };
+      const emit = vi.fn();
+      queueWorkspacePr([]);
+
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: "/tmp/spur-data",
+        config: {
+          type: "github",
+          intervalMs: REAL_INTERVAL_MS,
+          runOnStart: false,
+          emitExisting: false,
+          adaptivePoll: { slowIntervalMs: 600_000, activeGraceMs: 600_000 },
+        },
+        emit,
+        signal: new AbortController().signal,
+        logger: { info: vi.fn(), warn: vi.fn() },
+        resolveWebBaseUrl: () => Promise.resolve("http://127.0.0.1:5555"),
+      });
+
+      try {
+        // Startup poll is ungated: silent baseline of #3963.
+        const c0 = ghMock.mock.calls.length;
+        expect(c0).toBeGreaterThan(0);
+        expect(emit).not.toHaveBeenCalled();
+
+        // Tick 2 stays inside the slow window; only the terminal gate could skip it.
+        hasRecentSessionUserActionMock.mockReturnValue(true);
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 5);
+        expect(emit).toHaveBeenCalledTimes(1);
+        expect(emit).toHaveBeenCalledWith(
+          "github:comment",
+          expect.objectContaining({ signals: [expect.objectContaining({ key: "comment:9300" })] }),
+        );
+
+        // Tick 3: identical data, nothing new.
+        queueWorkspacePr([{ id: 9300, body: "please look", user: { login: "grace" } }]);
+        await waitForGhCallCount(c0 + 10);
+        expect(emit).toHaveBeenCalledTimes(1);
+
+        hasRecentSessionUserActionMock.mockReturnValue(false);
+        await assertGhCallCountStable(c0 + 10);
+      } finally {
+        handle.stop();
+      }
     });
 
     it("forces a poll for a brand-new session mid-window even when the tracked session is quiet", async () => {
