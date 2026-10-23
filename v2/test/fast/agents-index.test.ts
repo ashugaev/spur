@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ClaudeModule from "../../src/agents/claude.js";
 import type * as OpenCodeModule from "../../src/agents/opencode.js";
 import type * as CursorSubmitAckModule from "../../src/agents/cursor-submit-ack.js";
+import type * as CursorJsonlStateModule from "../../src/cursor-jsonl-state.js";
+import type * as CursorModule from "../../src/agents/cursor.js";
 
 vi.mock("../../src/cursor-token-usage.js", () => ({
   ensureCursorTokenUsageHook: vi.fn(() => true),
@@ -19,7 +21,11 @@ const {
   captureCursorSubmitBaselineMock,
   scanCursorJsonlForMessageMock,
   readClaudeSessionStatusMock,
+  findCursorSessionIdMock,
+  readCursorTranscriptEntriesMock,
 } = vi.hoisted(() => ({
+  findCursorSessionIdMock: vi.fn(),
+  readCursorTranscriptEntriesMock: vi.fn(),
   readClaudeSessionStatusMock: vi.fn(),
   ensureCodexHooksConfigMock: vi.fn(),
   ensureClaudeRestrictWritesSettingsMock: vi.fn(),
@@ -62,6 +68,16 @@ vi.mock("../../src/agents/codex.js", () => ({
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
+vi.mock("../../src/agents/cursor.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorModule>()),
+  findCursorSessionId: findCursorSessionIdMock,
+}));
+
+vi.mock("../../src/cursor-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof CursorJsonlStateModule>()),
+  readCursorTranscriptEntries: readCursorTranscriptEntriesMock,
+}));
+
 vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   captureClaudeSubmitBaseline: captureClaudeSubmitBaselineMock,
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
@@ -84,6 +100,7 @@ import {
   buildAgentLaunchPlan,
   buildAgentResumePlan,
   createAgentSubmitAckBinding,
+  readAgentConversation,
   resumeAgentSubmitAckBinding,
   setupAgentHooks,
 } from "../../src/agents/index.js";
@@ -101,6 +118,54 @@ beforeEach(() => {
     .mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   captureCursorSubmitBaselineMock.mockReset();
   scanCursorJsonlForMessageMock.mockReset();
+  findCursorSessionIdMock.mockReset().mockResolvedValue(null);
+  readCursorTranscriptEntriesMock.mockReset().mockResolvedValue(null);
+});
+
+describe("readAgentConversation cursor", () => {
+  const entries = [{ kind: "tool", name: "Grep" }];
+
+  it("reads the pinned id as-is without discovery", async () => {
+    readCursorTranscriptEntriesMock.mockResolvedValue(entries);
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      agentSessionId: "pinned",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toEqual(entries);
+    expect(findCursorSessionIdMock).not.toHaveBeenCalled();
+    expect(readCursorTranscriptEntriesMock).toHaveBeenCalledWith("/repo", "pinned");
+  });
+
+  it("discovers the own chat id from the private config dir when unpinned", async () => {
+    findCursorSessionIdMock.mockResolvedValue("own-chat");
+    readCursorTranscriptEntriesMock.mockResolvedValue(entries);
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toEqual(entries);
+    expect(findCursorSessionIdMock).toHaveBeenCalledWith("/repo", {
+      configDir: "/data/cursor/s1",
+    });
+    expect(readCursorTranscriptEntriesMock).toHaveBeenCalledWith("/repo", "own-chat");
+  });
+
+  it("returns null without reading when no own chat exists", async () => {
+    const result = await readAgentConversation("cursor", {
+      worktreePath: "/repo",
+      cursorConfigDir: "/data/cursor/s1",
+    });
+    expect(result).toBeNull();
+    expect(readCursorTranscriptEntriesMock).not.toHaveBeenCalled();
+  });
+
+  it("returns null without discovery or read when no config dir is given", async () => {
+    const result = await readAgentConversation("cursor", { worktreePath: "/repo" });
+    expect(result).toBeNull();
+    expect(findCursorSessionIdMock).not.toHaveBeenCalled();
+    expect(readCursorTranscriptEntriesMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("setupAgentHooks", () => {

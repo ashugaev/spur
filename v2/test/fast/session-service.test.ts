@@ -50463,6 +50463,26 @@ describe("SessionService", () => {
       expect(result.messages).toEqual([{ role: "user", text: "fix the bug", timestampMs: 0 }]);
       expect(result.entries.map((entry) => entry.kind)).toEqual(["message", "tool", "question"]);
     });
+
+    it("passes the session-private cursor config dir and no agentSessionId for an unpinned cursor session", async () => {
+      readSessionMock.mockReturnValue(baseSession({ agent: "cursor", status: "running" }));
+      readAgentConversationMock.mockResolvedValue(null);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.getConversation("api-1");
+
+      expect(readAgentConversationMock).toHaveBeenCalledWith(
+        "cursor",
+        expect.objectContaining({
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+          cursorConfigDir: `${TEST_DATA_DIR}/cursor/api-1`,
+        }),
+      );
+      expect(readAgentConversationMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("agentSessionId");
+      expect(result.entries).toEqual([]);
+    });
   });
 
   describe("missing session lookups", () => {
