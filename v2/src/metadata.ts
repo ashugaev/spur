@@ -841,6 +841,9 @@ function normalizeSubmitAckBaseline(value: unknown): SubmitAckBaseline | undefin
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const { agent } = record;
+  if (agent === "cursor" && record["file"] === null && typeof record["size"] === "number") {
+    return { agent, file: null, size: record["size"] };
+  }
   if (
     (agent === "claude" || agent === "cursor") &&
     typeof record["file"] === "string" &&

@@ -2171,6 +2171,7 @@ describe("session metadata PR migration", () => {
     const baselines: SubmitAckBaseline[] = [
       { agent: "claude", file: "/c.jsonl", size: 7 },
       { agent: "cursor", file: "/k.jsonl", size: 9 },
+      { agent: "cursor", file: null, size: 0 },
       { agent: "cursor", file: "/k.jsonl", size: 9, rotated: { file: "/r.jsonl", size: 40 } },
       { agent: "opencode", sessionId: "ses_1", after: { createdMs: 200, id: "msg_2" } },
       { agent: "opencode", sessionId: "ses_1", after: null },
@@ -2194,6 +2195,13 @@ describe("session metadata PR migration", () => {
     writeSession(dataDir, {
       ...base,
       queuedMessageTyped: { message: "m", typedAt, ackBaseline: malformed },
+    });
+    expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
+    // Only cursor may carry a pending (null) file.
+    const claudeNullFile = { agent: "claude", file: null, size: 0 } as unknown as SubmitAckBaseline;
+    writeSession(dataDir, {
+      ...base,
+      queuedMessageTyped: { message: "m", typedAt, ackBaseline: claudeNullFile },
     });
     expect(readSession(dataDir, "api-1")?.queuedMessageTyped).toEqual({ message: "m", typedAt });
     // A malformed rotation entry drops alone; the pinned offset survives.
