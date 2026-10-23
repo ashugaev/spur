@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as claudeJsonlStateModule from "../../src/claude-jsonl-state.js";
 import type * as ghModule from "../../src/gh.js";
 import type * as prLookupModule from "../../src/pr-lookup.js";
 import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
@@ -47,7 +48,8 @@ vi.mock("../../src/gh.js", async (importOriginal) => ({
 vi.mock("../../src/glab.js", () => ({
   glab: glabMock,
 }));
-vi.mock("../../src/claude-jsonl-state.js", () => ({
+vi.mock("../../src/claude-jsonl-state.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof claudeJsonlStateModule>()),
   readClaudeJsonlState: readClaudeJsonlStateMock,
 }));
 vi.mock("../../src/claude-session-status.js", () => ({

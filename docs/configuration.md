@@ -126,6 +126,8 @@ Cap limits concurrent live sessions at spawn, restore, and the wake of a stale-p
 
 The shed's session stop writes `status: "stopped"`, `stopReason: "memory_shed"`. Queued trigger batches for such a session are held, not dropped, and its wake passes the admission gate.
 
+Memory guard floors (`enforceFloors`) also deny spawn, restore, and wake while the daemon cgroup's `memory.max` headroom is within the shed's emergency threshold, or its release band while the shed is latched. Unreadable cgroup or unlimited `memory.max` adds no denial.
+
 Events: `daemon.memory.shed`(`.failed`), `session.admission.denied`, `session.admission.memory_guard`, `daemon.memory.unbounded`, `daemon.memory.hold.engaged`(`.cleared`/`.failed`), `trigger.send.suppressed_memory_guard`.
 
 ## Artifact retention
