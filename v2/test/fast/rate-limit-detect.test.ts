@@ -931,16 +931,90 @@ describe("parseRateLimitResetAtMs", () => {
     ).toBeUndefined();
   });
 
-  it("returns undefined for a weekly-limit banner carrying a resets clause", () => {
+  it("parses a dated weekly-limit banner days ahead of the anchor", () => {
+    const anchorMs = Date.parse("2026-09-20T11:51:02.493Z");
     expect(
-      parseRateLimitResetAtMs("You've hit your weekly limit · resets 7pm (UTC)", 0),
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Sep 23, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-23T08:00:00.000Z"));
+  });
+
+  it("parses a time-only weekly-limit banner as the next occurrence within a day", () => {
+    const anchorMs = Date.parse("2026-09-15T09:00:09.991Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-16T08:00:00.000Z"));
+  });
+
+  it("parses a dated opus-limit banner with minutes", () => {
+    const anchorMs = Date.parse("2026-09-20T11:51:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your opus limit · resets Sep 22, 7:30pm (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-22T19:30:00.000Z"));
+  });
+
+  it("rolls a dated banner into the next year across the year boundary", () => {
+    const anchorMs = Date.parse("2026-12-30T10:00:00.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Jan 2, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2027-01-02T08:00:00.000Z"));
+  });
+
+  it("clamps a dated banner to the end of its truncated minute", () => {
+    const anchorMs = Date.parse("2026-09-23T08:00:30.000Z");
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Sep 23, 8am (UTC)", anchorMs),
+    ).toBe(Date.parse("2026-09-23T08:01:00.000Z"));
+  });
+
+  it("returns undefined for an unknown month or an impossible day", () => {
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Foo 3, 8am (UTC)", 0),
+    ).toBeUndefined();
+    expect(
+      parseRateLimitResetAtMs("You've hit your weekly limit · resets Feb 31, 8am (UTC)", 0),
     ).toBeUndefined();
   });
 
-  it("returns undefined for an opus-limit banner carrying a resets clause", () => {
+  it("returns undefined for an unrecognized banner carrying a resets clause", () => {
     expect(
-      parseRateLimitResetAtMs("You've hit your opus limit · resets 7pm (UTC)", 0),
+      parseRateLimitResetAtMs("You've hit your usage limit · resets 7pm (UTC)", 0),
     ).toBeUndefined();
+  });
+});
+
+describe("claude weekly limit followed by session-meta records", () => {
+  const weeklyLimitLine = JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    error: "rate_limit",
+    timestamp: "2026-09-20T11:51:02.493Z",
+    message: {
+      model: "<synthetic>",
+      role: "assistant",
+      stop_reason: "stop_sequence",
+      content: [{ type: "text", text: "You've hit your weekly limit · resets Sep 23, 8am (UTC)" }],
+    },
+  });
+  const tail = [
+    weeklyLimitLine,
+    JSON.stringify({ type: "last-prompt", lastPrompt: "continue", sessionId: "s" }),
+    JSON.stringify({ type: "cost-state", sessionId: "s", totalCostUSD: 1 }),
+  ].map((line, index) => parseJsonlRecord(line, index));
+  const records = tail.filter((record) => record !== null);
+  const resetAtMs = Date.parse("2026-09-23T08:00:00.000Z");
+
+  it("stays limited before the weekly reset", () => {
+    expect(records).toHaveLength(3);
+    const detection = detectClaudeRateLimit(records);
+    expect(detection).toEqual({ limited: true, reason: "claude rate_limit", resetAtMs });
+    expect(detection && rateLimitExpired(detection, resetAtMs - 1)).toBe(false);
+  });
+
+  it("is expired after the weekly reset", () => {
+    const detection = detectClaudeRateLimit(records);
+    expect(detection && rateLimitExpired(detection, Date.parse("2026-10-04T00:00:00.000Z"))).toBe(
+      true,
+    );
   });
 });
 
