@@ -16842,9 +16842,11 @@ export class SessionService {
 
   private async earlySubmitResendAllowed(
     session: Pick<SessionRecord, "agent" | "tmuxSession" | "worktreePath" | "agentSessionId">,
+    message: string,
   ): Promise<boolean> {
     const panePid = await getTmuxPanePid(session.tmuxSession);
     return agentEarlySubmitResendAllowed(session.agent, {
+      slashCommand: message.trimStart().startsWith("/"),
       worktreePath: session.worktreePath,
       ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
       ...(panePid !== null ? { panePid } : {}),
@@ -17051,7 +17053,10 @@ export class SessionService {
             break;
           }
         }
-        if (earlyWindow && !(await this.earlySubmitResendAllowed(session))) {
+        // Interactive windows are all short, so each resend is an early Enter.
+        // Launch sends stay ungated: claude has no status file yet.
+        const gated = earlyWindow || (interactive && !freshLaunch);
+        if (gated && !(await this.earlySubmitResendAllowed(session, message))) {
           continue;
         }
         const resend = () => {
