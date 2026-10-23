@@ -3358,9 +3358,6 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
   const emoji = telegramStatusEmoji(session.state);
   const identity = `${session.id} ${session.agent}`;
   const title = sessionTitle(session);
-  if (!title) return `${emoji} ${identity}`;
-  const suffix = ` — ${identity}`;
-  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
   const truncate = (value: string, limit: number): string =>
     value.length > limit
       ? value
@@ -3368,6 +3365,9 @@ function telegramTopicName(session: Pick<SessionView, "id" | "agent" | "state" |
           .replace(/[\uD800-\uDBFF]$/u, "")
           .trimEnd() + "…"
       : value;
+  if (!title) return truncate(`${emoji} ${identity}`, TELEGRAM_TOPIC_NAME_MAX);
+  const suffix = ` — ${identity}`;
+  const titleLimit = TELEGRAM_TOPIC_NAME_MAX - emoji.length - 1 - suffix.length;
   if (titleLimit < 1) return truncate(`${emoji} ${title}${suffix}`, TELEGRAM_TOPIC_NAME_MAX);
   return `${emoji} ${truncate(title, titleLimit)}${suffix}`;
 }
