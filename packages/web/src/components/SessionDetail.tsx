@@ -1739,6 +1739,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   // means "follow the live tail" (the default, no `from` query param).
   const [fromIndex, setFromIndex] = useState<number | null>(null);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const loadingOlderIndexRef = useRef<number | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
   >({});
@@ -1790,6 +1791,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setError(null);
     setConversation(null);
     setFromIndex(null);
+    loadingOlderIndexRef.current = null;
+    setIsLoadingOlder(false);
     dismissLoadErrorToast();
     return () => {
       loadRequestIdRef.current += 1;
@@ -1976,6 +1979,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         if (!signal.aborted) setConversation(payload);
       } catch {
         if (!signal.aborted) setConversation(null);
+      } finally {
+        if (!signal.aborted && fromIndex !== null && loadingOlderIndexRef.current === fromIndex) {
+          loadingOlderIndexRef.current = null;
+          setIsLoadingOlder(false);
+        }
       }
     },
     [session?.agent, sessionId, fromIndex],
@@ -1985,20 +1993,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleLoadOlder = useCallback(() => {
     const startIndex = conversation?.startIndex ?? 0;
     if (startIndex <= 0) return;
+    const olderIndex = Math.max(0, startIndex - CONVERSATION_SCROLL_PAGE_ENTRIES);
+    loadingOlderIndexRef.current = olderIndex;
     setIsLoadingOlder(true);
-    setFromIndex(Math.max(0, startIndex - CONVERSATION_SCROLL_PAGE_ENTRIES));
+    setFromIndex(olderIndex);
   }, [conversation?.startIndex]);
 
   const handleResumeTail = useCallback(() => {
+    loadingOlderIndexRef.current = null;
+    setIsLoadingOlder(false);
     setFromIndex(null);
   }, []);
-
-  useEffect(() => {
-    setIsLoadingOlder(false);
-    // Only a freshly loaded conversation should clear the older-page spinner;
-    // isLoadingOlder is intentionally excluded so setting it true doesn't
-    // immediately re-run this effect and clear it before the fetch resolves.
-  }, [conversation]);
 
   const handleAnswer = useCallback(
     async (optionIndex: number) => {

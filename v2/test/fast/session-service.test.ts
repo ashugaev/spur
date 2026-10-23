@@ -26176,6 +26176,118 @@ describe("SessionService", () => {
     );
   });
 
+  it.each([0, 1])(
+    "Codex quota expiry restores retained native queue flush at reset +%sms and reblocks fresh rejection",
+    async (afterResetMs) => {
+      const resetAtMs = Date.now();
+      const session = runningSession({
+        agent: "codex",
+        launchCommand: agentLaunchCommand("codex"),
+        agentSessionId: "quota-root",
+        codexRestoreStartedAt: new Date(resetAtMs - 5_000).toISOString(),
+        rateLimitedAt: new Date(resetAtMs - 10_000).toISOString(),
+        queuedMessages: { messages: ["probe quota", "retained next"], awaitingPrompt: false },
+      });
+      const sessions = createSessionStore(session);
+      readAgentHookStateMock.mockReturnValue(null);
+      const actualCodex = await vi.importActual<typeof CodexModule>("../../src/agents/codex.js");
+      readCodexRolloutStateMock.mockImplementation(actualCodex.readCodexRolloutState);
+      const sessionsDir = join(TEST_DATA_DIR, "session-tools", "api-1", "codex-home", "sessions");
+      mkdirSync(sessionsDir, { recursive: true });
+      const record = (timestampMs: number, type: string, payload: Record<string, unknown>) =>
+        JSON.stringify({ timestamp: new Date(timestampMs).toISOString(), type, payload });
+      const filePath = join(sessionsDir, "rollout-root.jsonl");
+      writeFileSync(
+        filePath,
+        [
+          record(resetAtMs - 10_000, "session_meta", { id: "quota-root" }),
+          record(resetAtMs - 9_000, "event_msg", { type: "task_started", turn_id: "old-turn" }),
+          record(resetAtMs - 8_000, "event_msg", {
+            type: "token_count",
+            rate_limits: {
+              primary: { used_percent: 100, window_minutes: 10080, resets_at: resetAtMs / 1000 },
+              secondary: null,
+              rate_limit_reached_type: null,
+            },
+          }),
+          record(resetAtMs - 2_000, "event_msg", {
+            type: "thread_settings_applied",
+            thread_id: "quota-root",
+          }),
+        ].join("\n"),
+      );
+      const { SessionService, SessionRateLimitedError } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", new Date(resetAtMs).toISOString(), {
+        deferBackgroundLoops: true,
+      });
+      vi.setSystemTime(resetAtMs - 5_000);
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      await expect(service.flushQueuedMessage("api-1", "probe quota")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual([
+        "probe quota",
+        "retained next",
+      ]);
+      vi.setSystemTime(resetAtMs + afterResetMs);
+      expect((await service.get("api-1")).state).toBe("waiting");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeUndefined();
+      let pasted: () => void = () => {};
+      const paste = new Promise<void>((resolve) => {
+        pasted = resolve;
+      });
+      sendMessageToTmuxMock.mockImplementation(async () => {
+        pasted();
+      });
+      let releaseAck: () => void = () => {};
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockImplementation(
+        async () => {
+          await ackGate;
+          return { found: true, lastScannedFile: filePath };
+        },
+      );
+      const flush = service.flushQueuedMessage("api-1", "probe quota");
+      await paste;
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "probe quota", {
+        agent: "codex",
+        interrupt: false,
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual([
+        "probe quota",
+        "retained next",
+      ]);
+      releaseAck();
+      await flush;
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["retained next"]);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("quota-root");
+      expect(createTmuxSessionMock).not.toHaveBeenCalled();
+      expect(sessionServiceInternals(service).paneWriteLocks.size).toBe(0);
+      expect(sessionServiceInternals(service).queueDeliveryInFlight.size).toBe(0);
+      appendFileSync(
+        filePath,
+        `\n${record(resetAtMs + 1_000, "event_msg", {
+          type: "token_count",
+          rate_limits: { rate_limit_reached_type: "weekly" },
+        })}`,
+      );
+      vi.setSystemTime(resetAtMs + 1_000);
+      expect((await service.get("api-1")).state).toBe("rate_limited");
+      expect(sessions.get("api-1")?.rateLimitedAt).toBeDefined();
+      sendMessageToTmuxMock.mockClear();
+      await expect(service.flushQueuedMessage("api-1", "retained next")).rejects.toBeInstanceOf(
+        SessionRateLimitedError,
+      );
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["retained next"]);
+      expect(sessions.get("api-1")?.agentSessionId).toBe("quota-root");
+      service.dispose();
+    },
+  );
+
   it("detects needs_input for Cursor from AskUserQuestion JSONL", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
