@@ -57737,11 +57737,16 @@ describe("SessionService", () => {
           lastMtimeMs: Date.now(),
           tailRecords: [
             {
-              type: "assistant", role: "assistant", stopReason: "stop_sequence",
-              authenticationFailed: true, timestampMs: Date.now(),
+              type: "assistant",
+              role: "assistant",
+              stopReason: "stop_sequence",
+              authenticationFailed: true,
+              timestampMs: Date.now(),
             },
             ...Array.from({ length: 49 }, () => ({
-              type: "user", role: "user", timestampMs: Date.now(),
+              type: "user",
+              role: "user",
+              timestampMs: Date.now(),
             })),
           ],
         },
@@ -57761,7 +57766,8 @@ describe("SessionService", () => {
       expect(view.state).toBe("needs_input");
       captureTmuxPaneMock.mockClear();
       const dashboard = await sessionServiceInternals(service).classifySessionRecord(
-        runningSession(), { scanPane: false },
+        runningSession(),
+        { scanPane: false },
       );
       expect(dashboard.state).toBe("needs_input");
       expect(captureTmuxPaneMock).not.toHaveBeenCalled();
@@ -57781,7 +57787,12 @@ describe("SessionService", () => {
         captureTmuxPaneMock.mockResolvedValue(pane);
         const service = await createDisposedSessionService();
         const classified = await sessionServiceInternals(service).classifySessionRecord(record);
-        expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl", serverError: false });
+        expect(classified).toMatchObject({
+          state: "needs_input",
+          source: "jsonl",
+          historySourcePath: "test.jsonl",
+          serverError: false,
+        });
       },
     );
 
@@ -57796,7 +57807,11 @@ describe("SessionService", () => {
       internals.claudeCompactingOverrides.set(record.id, Date.now() + 10_000);
       captureTmuxPaneMock.mockClear();
       const classified = await internals.classifySessionRecord(record, { scanPane: false });
-      expect(classified).toMatchObject({ state: "needs_input", source: "jsonl", historySourcePath: "test.jsonl" });
+      expect(classified).toMatchObject({
+        state: "needs_input",
+        source: "jsonl",
+        historySourcePath: "test.jsonl",
+      });
       expect(captureTmuxPaneMock).not.toHaveBeenCalled();
     });
 
@@ -57808,12 +57823,25 @@ describe("SessionService", () => {
       const service = await createDisposedSessionService();
       expect((await service.get("api-1")).state).toBe("needs_input");
       readClaudeJsonlStateMock.mockResolvedValue({
-        state: "waiting", serverError: false,
+        state: "waiting",
+        serverError: false,
         reader: {
-          filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: Date.now(),
+          filePath: "test.jsonl",
+          lastOffset: 0,
+          lastMtimeMs: Date.now(),
           tailRecords: [
-            { type: "assistant", role: "assistant", authenticationFailed: true, timestampMs: Date.now() },
-            { type: "assistant", role: "assistant", stopReason: "end_turn", timestampMs: Date.now() + 1 },
+            {
+              type: "assistant",
+              role: "assistant",
+              authenticationFailed: true,
+              timestampMs: Date.now(),
+            },
+            {
+              type: "assistant",
+              role: "assistant",
+              stopReason: "end_turn",
+              timestampMs: Date.now() + 1,
+            },
           ],
         },
       });
