@@ -175,10 +175,10 @@ function parseMockJson(raw: unknown, fallback: unknown): unknown {
   }
 }
 
-function graphqlAuthor(user: unknown): { login: unknown } | null {
-  return typeof user === "object" && user !== null && "login" in user
-    ? { login: user.login }
-    : null;
+// REST `user.type` maps onto the GraphQL actor `__typename`.
+function graphqlAuthor(user: unknown): { login: unknown; __typename?: unknown } | null {
+  if (typeof user !== "object" || user === null || !("login" in user)) return null;
+  return "type" in user ? { login: user.login, __typename: user.type } : { login: user.login };
 }
 
 // The account the daemon authenticates as, answered by the batch query's root
@@ -1897,6 +1897,31 @@ describe("github source", () => {
       .filter(([name]) => name === "github:comment")
       .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
     expect(comments.map((signal) => signal.key)).toEqual(["review-comment:621", "comment:623"]);
+    handle.stop();
+  });
+
+  it("does not wake on bot-authored issue comments", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", storedSnapshot([])]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(prView({ headRefName: "feature/native-pr-binding" }))
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { id: 640, body: "PR Reviewer Guide", user: { login: "github-actions", type: "Bot" } },
+          { id: 641, body: "please check", user: { login: "other-reviewer", type: "User" } },
+        ]),
+      )
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await startLifecycle(emit);
+
+    const comments = emit.mock.calls
+      .filter(([name]) => name === "github:comment")
+      .flatMap(([, payload]) => (payload as { signals: ReviewSignal[] }).signals);
+    expect(comments.map((signal) => signal.key)).toEqual(["comment:641"]);
     handle.stop();
   });
 
