@@ -3578,48 +3578,56 @@ describe("SessionService", () => {
       service.dispose();
     });
 
-    it("blocks agent completion on an empty ledger, but allows human completion without override", async () => {
-      const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
-      await useRealTodoLedger();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    it.each(["ui", "telegram"] as const)(
+      "blocks agent completion on an empty ledger, but allows human completion without override (%s)",
+      async (origin) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_ledger_empty" });
-      await service.complete(
-        "api-1",
-        { skipPrCheck: true },
-        { todoActor: { kind: "human", origin: "ui" } },
-      );
+        await expect(service.complete("api-1")).rejects.toMatchObject({
+          code: "todo_ledger_empty",
+        });
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin } },
+        );
 
-      expect(sessions.get("api-1")?.status).toBe("completed");
-      service.dispose();
-    });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        service.dispose();
+      },
+    );
 
-    it("blocks agent completion on open work, but allows human completion without override", async () => {
-      const sessions = createSessionStore();
-      sessions.set("api-1", runningSession());
-      await useRealTodoLedger();
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      await service.mutateTodo(
-        "api-1",
-        { action: "add", text: "Ship it", reason: "Session objective" },
-        { kind: "agent", agent: "claude", sessionId: "api-1" },
-      );
+    it.each(["ui", "telegram"] as const)(
+      "blocks agent completion on open work, but allows human completion without override (%s)",
+      async (origin) => {
+        const sessions = createSessionStore();
+        sessions.set("api-1", runningSession());
+        await useRealTodoLedger();
+        const { SessionService } = await loadSessionServiceModule();
+        const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+        await service.mutateTodo(
+          "api-1",
+          { action: "add", text: "Ship it", reason: "Session objective" },
+          { kind: "agent", agent: "claude", sessionId: "api-1" },
+        );
 
-      await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
-      await service.complete(
-        "api-1",
-        { skipPrCheck: true },
-        { todoActor: { kind: "human", origin: "ui" } },
-      );
+        await expect(service.complete("api-1")).rejects.toMatchObject({ code: "todo_open_work" });
+        await service.complete(
+          "api-1",
+          { skipPrCheck: true },
+          { todoActor: { kind: "human", origin } },
+        );
 
-      expect(sessions.get("api-1")?.status).toBe("completed");
-      const projection = await service.readTodo("api-1");
-      expect(projection.items[0]?.status).toBe("open");
-      service.dispose();
-    });
+        expect(sessions.get("api-1")?.status).toBe("completed");
+        const projection = await service.readTodo("api-1");
+        expect(projection.items[0]?.status).toBe("open");
+        service.dispose();
+      },
+    );
 
     it("self-destruct refuses open work, then completes once the items resolve", async () => {
       const sessions = createSessionStore();
