@@ -163,6 +163,7 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
           const stderr = probeStderr(error);
           throw new Error(
             `Cannot resolve daemon environment through systemd; existing installation was preserved${stderr ? `: ${stderr}` : ""}`,
+            { cause: error },
           );
         }
         let parsed: unknown;
