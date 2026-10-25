@@ -304,5 +304,4 @@ chmod 600 "$RUNTIME_TMP_FILE"
 mv "$RUNTIME_TMP_FILE" "$RUNTIME_FILE"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
-export SPUR_CONFIG="$SPUR_ISOLATED_CONFIG"
 exec "$ISOLATED_WRAPPER" daemon start

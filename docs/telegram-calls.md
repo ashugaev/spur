@@ -58,7 +58,8 @@ Stop listener before daemon:
 "$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name voice-daemon
 ```
 
-Daemon stop terminates sandbox agent processes before deleting owned fixture.
+Daemon stop terminates sandbox agent processes before deleting owned fixture and launcher config dir.
+Start refuses only while the recorded daemon is alive; receipt of a dead daemon is discarded.
 Inspect logs with `spur service logs`; inspect reserved port with sidecar `ports` command.
 
 ## Test one call

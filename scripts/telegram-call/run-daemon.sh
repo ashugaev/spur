@@ -9,12 +9,32 @@ check_voice_inputs
 TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}/voice-daemon"
 mkdir -p "$TOOL_DIR"
 chmod 700 "$TOOL_DIR"
+process_identity() {
+  local stat suffix
+  local -a fields
+  [[ -e "/proc/$1/stat" ]] || return 1
+  IFS= read -r stat < "/proc/$1/stat" || return 2
+  suffix="${stat##*) }"
+  read -r -a fields <<< "$suffix"
+  [[ "${fields[0]:-}" != Z && "${fields[0]:-}" != X ]] || return 1
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 2
+  printf '%s\n' "${fields[19]}"
+}
+# Receipt survives SIGKILL and reboot. Refuse only while its recorded daemon
+# generation (pid + start time) is alive; otherwise drop the stale receipt.
 if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
-  echo "voice-daemon: scoped runtime already exists; stop previous sidecar" >&2
-  exit 1
+  receipt_pid=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_DAEMON_PID:-}")
+  receipt_start=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_DAEMON_STARTTIME:-}")
+  if [[ "$receipt_pid" =~ ^[0-9]+$ && "$receipt_start" =~ ^[0-9]+$ ]] && \
+     [[ "$(process_identity "$receipt_pid" || true)" == "$receipt_start" ]]; then
+    echo "voice-daemon: scoped runtime already exists; stop previous sidecar" >&2
+    exit 1
+  fi
+  rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
 fi
 FIXTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-voice-sandbox.XXXXXX")
 DAEMON_PID=""
+LAUNCHER_DIR=""
 
 cleanup() {
   trap - EXIT
@@ -23,17 +43,6 @@ cleanup() {
   local teardown_failed=0
   local pane_pid child_pid identity i
   local -A child_identities=()
-  process_identity() {
-    local stat suffix
-    local -a fields
-    [[ -e "/proc/$1/stat" ]] || return 1
-    IFS= read -r stat < "/proc/$1/stat" || return 2
-    suffix="${stat##*) }"
-    read -r -a fields <<< "$suffix"
-    [[ "${fields[0]:-}" != Z && "${fields[0]:-}" != X ]] || return 1
-    [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 2
-    printf '%s\n' "${fields[19]}"
-  }
   collect_children() {
     local identity
     if identity="$(process_identity "$1")"; then
@@ -49,6 +58,9 @@ cleanup() {
     # Receipt belongs to this launcher and contains no credentials.
     source "$TOOL_DIR/isolated-env.sh"
     if [[ "${SPUR_ISOLATED_DAEMON_PID:-}" == "$DAEMON_PID" ]]; then
+      LAUNCHER_DIR=$(dirname "${SPUR_ISOLATED_CONFIG:-/}")
+      [[ "$(basename "$LAUNCHER_DIR")" == spur-isolated-daemon.* &&
+         "$SPUR_ISOLATED_CONFIG" == "$LAUNCHER_DIR/config.yaml" ]] || LAUNCHER_DIR=""
       if tmux -L "$SPUR_ISOLATED_TMUX_SOCKET_NAME" has-session 2>/dev/null; then
         while IFS= read -r pane_pid; do
           collect_children "$pane_pid"
@@ -88,6 +100,7 @@ cleanup() {
   fi
   if [[ "$children_stopped" == 1 && "$teardown_failed" == 0 ]]; then
     rm -rf "$FIXTURE_DIR"
+    [[ -z "$LAUNCHER_DIR" ]] || rm -rf "$LAUNCHER_DIR"
     rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
   else
     echo "voice-daemon: sandbox retained; child teardown failed" >&2

@@ -164,6 +164,7 @@ it("finishes owned tmux teardown when pane HUP follows TERM", async () => {
   const capture = join(path, "capture");
   const marker = join(path, "cleaning");
   const termed = join(path, "termed");
+  const launcher = join(path, "spur-isolated-daemon.TEST");
   const socket = `spur-voice-test-${process.pid}`;
   mkdirSync(bin);
   mkdirSync(tools);
@@ -174,7 +175,9 @@ it("finishes owned tmux teardown when pane HUP follows TERM", async () => {
 set -euo pipefail
 printf '%s\\n' "$SPUR_PROJECT_CONFIG_PATH" > "$VOICE_CAPTURE"
 "$VOICE_TMUX" -L "$VOICE_SOCKET" -f /dev/null new-session -d -s owned 'sleep 60'
+mkdir -p "$VOICE_LAUNCHER"
 cat > "$SPUR_SESSION_TOOL_DIR/isolated-env.sh" <<RUNTIME
+SPUR_ISOLATED_CONFIG="$VOICE_LAUNCHER/config.yaml"
 SPUR_ISOLATED_DAEMON_PID="$$"
 SPUR_ISOLATED_TMUX_SOCKET_NAME="$VOICE_SOCKET"
 RUNTIME
@@ -207,6 +210,7 @@ exec "$VOICE_TMUX" "$@"
       VOICE_NODE: process.execPath,
       VOICE_TMUX: tmux,
       VOICE_SOCKET: socket,
+      VOICE_LAUNCHER: launcher,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -236,6 +240,7 @@ exec "$VOICE_TMUX" "$@"
     expect(() => execFileSync(tmux, ["-L", socket, "has-session"], { stdio: "pipe" })).toThrow();
     expect(existsSync(join(tools, "voice-daemon/isolated-env.sh"))).toBe(false);
     expect(existsSync(dirname(input))).toBe(false);
+    expect(existsSync(launcher)).toBe(false);
   } finally {
     child.kill("SIGKILL");
     try {
@@ -243,5 +248,86 @@ exec "$VOICE_TMUX" "$@"
     } catch {
       // The tested cleanup already stopped this test's socket.
     }
+  }
+});
+
+function receiptStart(pid: number): string {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  return stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[19] ?? "";
+}
+
+function runWithReceipt(receipt: (path: string) => string): {
+  status: number | null;
+  stderr: string;
+  started: boolean;
+  receiptPath: string;
+} {
+  const path = fixture();
+  const bin = join(path, "bin");
+  const tools = join(path, "tools");
+  const started = join(path, "started");
+  mkdirSync(bin);
+  mkdirSync(join(tools, "voice-daemon"), { recursive: true });
+  writeFileSync(join(bin, "bash"), `#!/bin/bash\ntouch "$VOICE_STARTED"\n`);
+  chmodSync(join(bin, "bash"), 0o700);
+  const receiptPath = join(tools, "voice-daemon/isolated-env.sh");
+  writeFileSync(receiptPath, receipt(path));
+  const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:/usr/bin:/bin`,
+      SPUR_SESSION_TOOL_DIR: tools,
+      TELEGRAM_CALL_PYTHON: inputChecker(path),
+      TELEGRAM_CALL_STATE_DIR: join(path, "state"),
+      VOICE_STARTED: started,
+    },
+    encoding: "utf8",
+  });
+  return {
+    status: result.status,
+    stderr: result.stderr,
+    started: existsSync(started),
+    receiptPath,
+  };
+}
+
+it("restarts when the receipt names a dead daemon", () => {
+  const dead = spawnSync("/bin/true");
+  expect(dead.pid).toBeGreaterThan(0);
+  const result = runWithReceipt(
+    () => `SPUR_ISOLATED_DAEMON_PID="${dead.pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\n`,
+  );
+  expect(result.status).toBe(0);
+  expect(result.started).toBe(true);
+  expect(existsSync(result.receiptPath)).toBe(false);
+});
+
+it("restarts when the receipt names a reused pid with another start time", () => {
+  const live = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    const result = runWithReceipt(
+      () => `SPUR_ISOLATED_DAEMON_PID="${live.pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\n`,
+    );
+    expect(result.status).toBe(0);
+    expect(result.started).toBe(true);
+    expect(live.exitCode).toBeNull();
+  } finally {
+    live.kill("SIGKILL");
+  }
+});
+
+it("still refuses while the receipt daemon is alive", () => {
+  const live = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    const result = runWithReceipt(
+      () =>
+        `SPUR_ISOLATED_DAEMON_PID="${live.pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="${receiptStart(live.pid ?? 0)}"\n`,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("scoped runtime already exists");
+    expect(result.started).toBe(false);
+    expect(existsSync(result.receiptPath)).toBe(true);
+  } finally {
+    live.kill("SIGKILL");
   }
 });
