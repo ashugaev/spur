@@ -256,7 +256,10 @@ function receiptStart(pid: number): string {
   return stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[19] ?? "";
 }
 
-function runWithReceipt(receipt: (path: string) => string): {
+function runWithReceipt(
+  receipt: (path: string) => string,
+  prepare?: (path: string, voiceDir: string) => void,
+): {
   status: number | null;
   stderr: string;
   started: boolean;
@@ -272,6 +275,7 @@ function runWithReceipt(receipt: (path: string) => string): {
   chmodSync(join(bin, "bash"), 0o700);
   const receiptPath = join(tools, "voice-daemon/isolated-env.sh");
   writeFileSync(receiptPath, receipt(path));
+  prepare?.(path, join(tools, "voice-daemon"));
   const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
     env: {
       ...process.env,
@@ -330,4 +334,84 @@ it("still refuses while the receipt daemon is alive", () => {
   } finally {
     live.kill("SIGKILL");
   }
+});
+
+function deadPid(): number {
+  const dead = spawnSync("/bin/true");
+  expect(dead.pid).toBeGreaterThan(0);
+  return dead.pid;
+}
+
+const staleSockets: string[] = [];
+afterEach(() => {
+  for (const socket of staleSockets.splice(0)) {
+    try {
+      execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+    } catch {
+      // Server already gone.
+    }
+  }
+});
+
+it("refuses when the daemon is dead but its tmux server still runs", () => {
+  const socket = `spur-voice-stale-${process.pid}`;
+  staleSockets.push(socket);
+  execFileSync("tmux", ["-L", socket, "-f", "/dev/null", "new-session", "-d", "sleep 60"]);
+  const pid = deadPid();
+  const result = runWithReceipt(
+    () =>
+      `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`,
+  );
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain(socket);
+  expect(result.started).toBe(false);
+  expect(existsSync(result.receiptPath)).toBe(true);
+  expect(() => execFileSync("tmux", ["-L", socket, "has-session"], { stdio: "pipe" })).not.toThrow();
+});
+
+function staleDirs(path: string): { fixtureDir: string; launcher: string } {
+  const fixtureDir = join(path, "spur-voice-sandbox.OLD");
+  const launcher = join(path, "spur-isolated-daemon.OLD");
+  mkdirSync(join(fixtureDir, "repository"), { recursive: true });
+  writeFileSync(join(fixtureDir, "project.yaml"), "projects: {}\n");
+  mkdirSync(launcher);
+  writeFileSync(join(launcher, "config.yaml"), "x: 1\n");
+  return { fixtureDir, launcher };
+}
+
+it("removes stale fixture and launcher dirs when daemon and tmux are gone", () => {
+  const pid = deadPid();
+  let dirs = { fixtureDir: "", launcher: "" };
+  const result = runWithReceipt(
+    (path) => {
+      dirs = staleDirs(path);
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="spur-voice-none-${process.pid}"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+  );
+  expect(result.status).toBe(0);
+  expect(result.started).toBe(true);
+  expect(existsSync(dirs.fixtureDir)).toBe(false);
+  expect(existsSync(dirs.launcher)).toBe(false);
+});
+
+it("leaves dirs outside the owned name patterns untouched", () => {
+  const pid = deadPid();
+  let outside = "";
+  let fixtureLike = "";
+  const result = runWithReceipt(
+    (path) => {
+      outside = join(path, "keep-config");
+      fixtureLike = join(path, "keep-fixture");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "config.yaml"), "x: 1\n");
+      mkdirSync(join(fixtureLike, "repository"), { recursive: true });
+      writeFileSync(join(fixtureLike, "project.yaml"), "projects: {}\n");
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${outside}/config.yaml"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${fixtureLike}\n`),
+  );
+  expect(result.status).toBe(0);
+  expect(existsSync(join(outside, "config.yaml"))).toBe(true);
+  expect(existsSync(join(fixtureLike, "project.yaml"))).toBe(true);
 });

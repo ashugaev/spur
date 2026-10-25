@@ -30,9 +30,31 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
     echo "voice-daemon: scoped runtime already exists; stop previous sidecar" >&2
     exit 1
   fi
-  rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
+  # Dead daemon can leave the sandbox tmux server (and its agents) running; the
+  # receipt is the only record of its socket. Keep it and refuse.
+  receipt_socket=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}")
+  if [[ "$receipt_socket" =~ ^[A-Za-z0-9._-]+$ ]] && \
+     tmux -L "$receipt_socket" has-session 2>/dev/null; then
+    echo "voice-daemon: previous sandbox agents still run on tmux socket '$receipt_socket'; stop them with: tmux -L $receipt_socket kill-server" >&2
+    exit 1
+  fi
+  stale_config=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_CONFIG:-}")
+  stale_launcher=$(dirname "${stale_config:-/}")
+  if [[ "$(basename "$stale_launcher")" == spur-isolated-daemon.* &&
+        "$stale_config" == "$stale_launcher/config.yaml" ]]; then
+    rm -rf "$stale_launcher"
+  fi
+  if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
+    IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
+    if [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
+          -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]]; then
+      rm -rf "$stale_fixture"
+    fi
+  fi
+  rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated" "$TOOL_DIR/fixture-dir"
 fi
 FIXTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-voice-sandbox.XXXXXX")
+printf '%s\n' "$FIXTURE_DIR" > "$TOOL_DIR/fixture-dir"
 DAEMON_PID=""
 LAUNCHER_DIR=""
 
@@ -101,7 +123,7 @@ cleanup() {
   if [[ "$children_stopped" == 1 && "$teardown_failed" == 0 ]]; then
     rm -rf "$FIXTURE_DIR"
     [[ -z "$LAUNCHER_DIR" ]] || rm -rf "$LAUNCHER_DIR"
-    rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
+    rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated" "$TOOL_DIR/fixture-dir"
   else
     echo "voice-daemon: sandbox retained; child teardown failed" >&2
   fi
