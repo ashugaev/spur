@@ -268,6 +268,7 @@ class InputTests(unittest.TestCase):
                            "TELEGRAM_CALL_ENV_FILE": str(inputs), "TELEGRAM_CALL_PYTHON": sys.executable,
                            "SPUR_SESSION_TOOL_DIR": str(root / "tools"), "TMPDIR": str(root / "tmp"),
                            "TELEGRAM_CALL_ALLOWLIST_FILE": str(root / "absent.env"),
+                           "SPUR_RESERVED_PORT_DAEMON": "4310",
                            "PYTHONDONTWRITEBYTECODE": "1"}
                     result = subprocess.run(["/bin/bash", str(Path(__file__).with_name(script))],
                                             env=env, capture_output=True, text=True, timeout=5)
