@@ -49,7 +49,7 @@ vi.mock("../../src/glab.js", () => ({
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
-  hasTrailingClaudeAuthenticationFailure: () => false,
+  hasTrailingClaudeAuthenticationFailure: vi.fn(() => false),
 }));
 vi.mock("../../src/claude-session-status.js", () => ({
   readClaudeSessionStatus: readClaudeSessionStatusMock,
