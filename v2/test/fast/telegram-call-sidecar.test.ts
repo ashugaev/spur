@@ -539,6 +539,28 @@ it("refuses without deleting when list-panes fails after has-session succeeds", 
   expect(result.stderr).not.toContain("kill-server");
 });
 
+it("refuses without deleting when list-panes fails on a non-reserved receipt socket", () => {
+  const socket = `spur-voice-unreadable-${process.pid}`;
+  const pid = deadPid();
+  let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
+  const result = runWithReceipt(
+    (path) => {
+      dirs = staleDirs(path);
+      startServer(socket, join(dirs.launcher, "worktrees"));
+      const tmux = execFileSync("which", ["tmux"], { encoding: "utf8" }).trim();
+      writeFileSync(
+        join(path, "bin", "tmux"),
+        `#!/bin/bash\n[[ "$*" == *list-panes* ]] && exit 1\nexec "${tmux}" "$@"\n`,
+      );
+      chmodSync(join(path, "bin", "tmux"), 0o700);
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+  );
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).not.toContain("kill-server");
+});
+
 it.each(["launcher", "fixtureDir"] as const)(
   "treats a pane under a sibling-prefixed %s as foreign",
   (which) => {

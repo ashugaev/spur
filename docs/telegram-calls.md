@@ -64,8 +64,9 @@ Start requires `SPUR_RESERVED_PORT_DAEMON` (numeric); the sidecar sets it. Unset
 Start also refuses while a tmux server is live on the receipt socket or on `spur-<reserved daemon port>`; nothing is deleted or killed.
 Server whose panes all started under the previous run's launcher or fixture dir: receipt and dirs kept; clear with `tmux -L <socket> kill-server`.
 Mixed server (any pane outside those dirs) on either socket: refuse, no kill advice.
-Foreign, no-pane or unreadable server on `spur-<reserved daemon port>`: refuse, no kill advice, leave it.
-Same kind of server on a different receipt socket: left untouched, start continues; stale receipt and dirs are discarded.
+Unreadable server (pane list fails) on either socket: refuse, no kill advice, nothing deleted.
+Foreign or no-pane server on `spur-<reserved daemon port>`: refuse, no kill advice, leave it.
+Foreign or no-pane server on a different receipt socket: left untouched, start continues; stale receipt and dirs are discarded.
 No live server: stale receipt, fixture and launcher dirs are discarded; an orphan fixture pointer is swept without a receipt.
 Inspect logs with `spur service logs`; inspect reserved port with sidecar `ports` command.
 
