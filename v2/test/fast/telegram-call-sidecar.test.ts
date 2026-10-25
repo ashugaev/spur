@@ -485,7 +485,6 @@ it("leaves dirs outside the owned name patterns untouched", () => {
 });
 
 it("sweeps an orphan fixture pointer when no receipt exists", () => {
-  let dirs = { fixtureDir: "", launcher: "" };
   const path = fixture();
   const tools = join(path, "tools");
   const bin = join(path, "bin");
@@ -493,7 +492,7 @@ it("sweeps an orphan fixture pointer when no receipt exists", () => {
   mkdirSync(join(tools, "voice-daemon"), { recursive: true });
   writeFileSync(join(bin, "bash"), "#!/bin/bash\nexit 0\n");
   chmodSync(join(bin, "bash"), 0o700);
-  dirs = staleDirs(path);
+  const dirs = staleDirs(path);
   const pointer = join(tools, "voice-daemon/fixture-dir");
   writeFileSync(pointer, `${dirs.fixtureDir}\n`);
   const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
