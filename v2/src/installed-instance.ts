@@ -95,9 +95,7 @@ export interface InstallationSelection {
 function probeStderr(error: unknown): string {
   if (typeof error !== "object" || error === null || !("stderr" in error)) return "";
   const { stderr } = error;
-  return (typeof stderr === "string" ? stderr : Buffer.isBuffer(stderr) ? stderr.toString() : "")
-    .trim()
-    .slice(-500);
+  return (typeof stderr === "string" ? stderr : "").trim().slice(-500);
 }
 
 function rejectsExpandEnvironment(error: unknown): boolean {
@@ -127,7 +125,7 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
           `EnvironmentFile=${options.scope === "user" ? "-" : ""}${options.daemonEnvFile}`,
         ];
         if (options.serviceUser) properties.push(`User=${options.serviceUser}`);
-        const args = [
+        const systemdOptions = [
           "--wait",
           "--pipe",
           "--quiet",
@@ -135,11 +133,8 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
           "--service-type=exec",
           ...(options.scope === "user" ? ["--user"] : []),
           ...properties.flatMap((property) => ["--property", property]),
-          "/usr/bin/node",
-          "--input-type=module",
-          "-e",
-          code,
         ];
+        const command = ["/usr/bin/node", "--input-type=module", "-e", code];
         const runProbe = (probeArgs: string[]): string =>
           execFileSync(
             options.scope === "system" ? "sudo" : "systemd-run",
@@ -149,16 +144,20 @@ export function resolveInstallationConfig(options: InstallationSelection): strin
               timeout: 10_000,
               maxBuffer: 16_384,
               stdio: ["ignore", "pipe", "pipe"],
+              env: { ...process.env, LC_ALL: "C" },
             },
           );
         let output: string;
         try {
           try {
-            output = runProbe(["--expand-environment=no", ...args]);
+            output = runProbe(["--expand-environment=no", ...systemdOptions, ...command]);
           } catch (error) {
-            // systemd < 254 rejects the flag and never expands $VAR in command args.
             if (!rejectsExpandEnvironment(error)) throw error;
-            output = runProbe(args);
+            // systemd < 254 always expands $VAR in the command line; $$ keeps it literal.
+            output = runProbe([
+              ...systemdOptions,
+              ...command.map((arg) => arg.replaceAll("$", () => "$$")),
+            ]);
           }
         } catch (error) {
           const stderr = probeStderr(error);
