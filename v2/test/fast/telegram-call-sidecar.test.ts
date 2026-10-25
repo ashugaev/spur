@@ -350,25 +350,74 @@ afterEach(() => {
     } catch {
       // Server already gone.
     }
+    rmSync(join(process.env["TMUX_TMPDIR"] ?? "/tmp", `tmux-${process.getuid?.() ?? 0}`, socket), {
+      force: true,
+    });
   }
 });
 
-it("refuses when the daemon is dead but its tmux server still runs", () => {
-  const socket = `spur-voice-stale-${process.pid}`;
+function startServer(socket: string, cwd: string): void {
   staleSockets.push(socket);
-  execFileSync("tmux", ["-L", socket, "-f", "/dev/null", "new-session", "-d", "sleep 60"]);
+  execFileSync("tmux", [
+    "-L",
+    socket,
+    "-f",
+    "/dev/null",
+    "new-session",
+    "-d",
+    "-c",
+    cwd,
+    "sleep 60",
+  ]);
+}
+
+function serverAlive(socket: string): boolean {
+  try {
+    execFileSync("tmux", ["-L", socket, "has-session"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+it("refuses when the daemon is dead but its owned tmux server still runs", () => {
+  const socket = `spur-voice-stale-${process.pid}`;
   const pid = deadPid();
+  let dirs = { fixtureDir: "", launcher: "" };
   const result = runWithReceipt(
-    () =>
-      `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`,
+    (path) => {
+      dirs = staleDirs(path);
+      startServer(socket, join(dirs.launcher, "worktrees"));
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+    },
+    () => undefined,
   );
   expect(result.status).toBe(1);
   expect(result.stderr).toContain(socket);
   expect(result.started).toBe(false);
   expect(existsSync(result.receiptPath)).toBe(true);
-  expect(() =>
-    execFileSync("tmux", ["-L", socket, "has-session"], { stdio: "pipe" }),
-  ).not.toThrow();
+  expect(existsSync(dirs.launcher)).toBe(true);
+  expect(serverAlive(socket)).toBe(true);
+});
+
+it("treats a live tmux server outside this run's dirs as foreign and starts", () => {
+  const socket = `spur-voice-foreign-${process.pid}`;
+  const pid = deadPid();
+  let dirs = { fixtureDir: "", launcher: "" };
+  let foreign = "";
+  const result = runWithReceipt((path) => {
+    dirs = staleDirs(path);
+    foreign = join(path, "other-session");
+    mkdirSync(foreign);
+    startServer(socket, foreign);
+    return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+  });
+  expect(result.status).toBe(0);
+  expect(result.started).toBe(true);
+  expect(result.stderr).not.toContain("kill-server");
+  expect(existsSync(result.receiptPath)).toBe(false);
+  expect(existsSync(dirs.launcher)).toBe(false);
+  expect(serverAlive(socket)).toBe(true);
 });
 
 function staleDirs(path: string): { fixtureDir: string; launcher: string } {
@@ -416,4 +465,32 @@ it("leaves dirs outside the owned name patterns untouched", () => {
   expect(result.status).toBe(0);
   expect(existsSync(join(outside, "config.yaml"))).toBe(true);
   expect(existsSync(join(fixtureLike, "project.yaml"))).toBe(true);
+});
+
+it("sweeps an orphan fixture pointer when no receipt exists", () => {
+  let dirs = { fixtureDir: "", launcher: "" };
+  const path = fixture();
+  const tools = join(path, "tools");
+  const bin = join(path, "bin");
+  mkdirSync(bin);
+  mkdirSync(join(tools, "voice-daemon"), { recursive: true });
+  writeFileSync(join(bin, "bash"), "#!/bin/bash\nexit 0\n");
+  chmodSync(join(bin, "bash"), 0o700);
+  dirs = staleDirs(path);
+  const pointer = join(tools, "voice-daemon/fixture-dir");
+  writeFileSync(pointer, `${dirs.fixtureDir}\n`);
+  const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:/usr/bin:/bin`,
+      SPUR_SESSION_TOOL_DIR: tools,
+      TELEGRAM_CALL_PYTHON: inputChecker(path),
+      TELEGRAM_CALL_STATE_DIR: join(path, "state"),
+      TMPDIR: path,
+    },
+    encoding: "utf8",
+  });
+  expect(result.status).toBe(0);
+  expect(existsSync(dirs.fixtureDir)).toBe(false);
+  expect(existsSync(dirs.launcher)).toBe(true);
 });

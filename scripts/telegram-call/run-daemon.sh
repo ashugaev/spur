@@ -30,28 +30,49 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
     echo "voice-daemon: scoped runtime already exists; stop previous sidecar" >&2
     exit 1
   fi
-  # Dead daemon can leave the sandbox tmux server (and its agents) running; the
-  # receipt is the only record of its socket. Keep it and refuse.
+  stale_config=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_CONFIG:-}")
+  stale_launcher=$(dirname "${stale_config:-/}")
+  [[ "$(basename "$stale_launcher")" == spur-isolated-daemon.* &&
+     "$stale_config" == "$stale_launcher/config.yaml" ]] || stale_launcher=""
+  stale_fixture=""
+  if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
+    IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
+    [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
+       -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]] || stale_fixture=""
+  fi
+  # Dead daemon can leave the sandbox tmux server (and its agents) running. Socket
+  # name spur-<port> is reused by other sessions, so the server is ours only when
+  # it has panes and every pane started under this run's unique launcher or
+  # fixture dir. Anything else is foreign: never touched, never advised against.
   receipt_socket=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}")
   if [[ "$receipt_socket" =~ ^[A-Za-z0-9._-]+$ ]] && \
      tmux -L "$receipt_socket" has-session 2>/dev/null; then
-    echo "voice-daemon: previous sandbox agents still run on tmux socket '$receipt_socket'; stop them with: tmux -L $receipt_socket kill-server" >&2
-    exit 1
-  fi
-  stale_config=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_CONFIG:-}")
-  stale_launcher=$(dirname "${stale_config:-/}")
-  if [[ "$(basename "$stale_launcher")" == spur-isolated-daemon.* &&
-        "$stale_config" == "$stale_launcher/config.yaml" ]]; then
-    rm -rf "$stale_launcher"
-  fi
-  if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
-    IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
-    if [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
-          -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]]; then
-      rm -rf "$stale_fixture"
+    owned=0
+    while IFS= read -r pane_path; do
+      if [[ -n "$stale_launcher" && ( "$pane_path" == "$stale_launcher" || "$pane_path" == "$stale_launcher/"* ) ]] || \
+         [[ -n "$stale_fixture" && ( "$pane_path" == "$stale_fixture" || "$pane_path" == "$stale_fixture/"* ) ]]; then
+        owned=1
+      else
+        owned=0
+        break
+      fi
+    done < <(tmux -L "$receipt_socket" list-panes -a -F '#{pane_start_path}' 2>/dev/null || true)
+    if [[ "$owned" == 1 ]]; then
+      echo "voice-daemon: previous sandbox agents still run on tmux socket '$receipt_socket'; stop them with: tmux -L $receipt_socket kill-server" >&2
+      exit 1
     fi
   fi
-  rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated" "$TOOL_DIR/fixture-dir"
+  [[ -z "$stale_launcher" ]] || rm -rf "$stale_launcher"
+  rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
+fi
+# Pointer can outlive a run killed before its receipt was written.
+if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
+  IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
+  if [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
+        -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]]; then
+    rm -rf "$stale_fixture"
+  fi
+  rm -f "$TOOL_DIR/fixture-dir"
 fi
 FIXTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-voice-sandbox.XXXXXX")
 printf '%s\n' "$FIXTURE_DIR" > "$TOOL_DIR/fixture-dir"
