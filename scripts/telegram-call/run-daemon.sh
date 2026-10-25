@@ -22,6 +22,9 @@ process_identity() {
 }
 # Receipt survives SIGKILL and reboot. Refuse only while its recorded daemon
 # generation (pid + start time) is alive; otherwise drop the stale receipt.
+stale_launcher=""
+stale_fixture=""
+receipt_socket=""
 if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
   receipt_pid=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_DAEMON_PID:-}")
   receipt_start=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_DAEMON_STARTTIME:-}")
@@ -36,36 +39,48 @@ if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
   stale_launcher=$(dirname "${stale_config:-/}")
   [[ "$(basename "$stale_launcher")" == spur-isolated-daemon.* &&
      "$stale_config" == "$stale_launcher/config.yaml" ]] || stale_launcher=""
-  stale_fixture=""
   if [[ -f "$TOOL_DIR/fixture-dir" ]]; then
     IFS= read -r stale_fixture < "$TOOL_DIR/fixture-dir" || true
     [[ -z "$stale_fixture" ]] || stale_fixture=$(realpath -m -s -- "$stale_fixture")
     [[ "$(basename "${stale_fixture:-/}")" == spur-voice-sandbox.* &&
        -f "$stale_fixture/project.yaml" && -d "$stale_fixture/repository" ]] || stale_fixture=""
   fi
-  # Dead daemon can leave the sandbox tmux server (and its agents) running. Socket
-  # name spur-<port> is reused by other sessions, so the server is ours only when
-  # it has panes and every pane started under this run's unique launcher or
-  # fixture dir. Anything else is foreign: never touched, never advised against.
   receipt_socket=$(source "$TOOL_DIR/isolated-env.sh" && printf '%s' "${SPUR_ISOLATED_TMUX_SOCKET_NAME:-}")
-  if [[ "$receipt_socket" =~ ^[A-Za-z0-9._-]+$ ]] && \
-     tmux -L "$receipt_socket" has-session 2>/dev/null; then
-    owned=0
+fi
+# Socket name spur-<port> is reused: the new run joins a live server there and its
+# teardown kills the whole server. Never start over a live server on the receipt
+# socket or the socket this run will use. A server is a dead run's only when it has
+# panes and every pane started under that run's unique launcher or fixture dir;
+# anything else is not ours: refuse, touch nothing, no kill advice.
+check_socket() {
+  local socket="$1" panes pane_path foreign=0
+  [[ "$socket" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
+  tmux -L "$socket" has-session 2>/dev/null || return 0
+  if ! panes=$(tmux -L "$socket" list-panes -a -F '#{pane_start_path}' 2>/dev/null); then
+    foreign=1
+  else
     while IFS= read -r pane_path; do
       [[ -z "$pane_path" ]] || pane_path=$(realpath -m -s -- "$pane_path")
       if [[ -n "$stale_launcher" && ( "$pane_path" == "$stale_launcher" || "$pane_path" == "$stale_launcher/"* ) ]] || \
          [[ -n "$stale_fixture" && ( "$pane_path" == "$stale_fixture" || "$pane_path" == "$stale_fixture/"* ) ]]; then
-        owned=1
+        :
       else
-        owned=0
-        break
+        foreign=1
       fi
-    done < <(tmux -L "$receipt_socket" list-panes -a -F '#{pane_start_path}' 2>/dev/null || true)
-    if [[ "$owned" == 1 ]]; then
-      echo "voice-daemon: previous sandbox agents still run on tmux socket '$receipt_socket'; stop them with: tmux -L $receipt_socket kill-server" >&2
-      exit 1
-    fi
+    done <<< "$panes"
   fi
+  if [[ "$foreign" == 1 ]]; then
+    echo "voice-daemon: tmux socket '$socket' is live and not owned by this voice run; nothing touched" >&2
+  else
+    echo "voice-daemon: previous sandbox agents still run on tmux socket '$socket'; stop them with: tmux -L $socket kill-server" >&2
+  fi
+  exit 1
+}
+check_socket "$receipt_socket"
+if [[ "${SPUR_RESERVED_PORT_DAEMON:-}" =~ ^[0-9]+$ ]]; then
+  check_socket "spur-$SPUR_RESERVED_PORT_DAEMON"
+fi
+if [[ -f "$TOOL_DIR/isolated-env.sh" ]]; then
   [[ -z "$stale_launcher" ]] || rm -rf "$stale_launcher"
   rm -f "$TOOL_DIR/isolated-env.sh" "$TOOL_DIR/spur-isolated"
 fi

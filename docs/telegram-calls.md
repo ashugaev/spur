@@ -59,7 +59,11 @@ Stop listener before daemon:
 ```
 
 Daemon stop terminates sandbox agent processes before deleting owned fixture and launcher config dir.
-Start refuses while the recorded daemon is alive, or while a tmux server on its socket runs only panes started under its launcher or fixture dir (receipt kept; clear with `tmux -L <socket> kill-server`). A live server on that socket with other panes belongs to another session: left untouched, start proceeds. Otherwise stale receipt, fixture and launcher dirs are discarded; an orphan fixture pointer is swept without a receipt.
+Start refuses while the recorded daemon is alive.
+Start also refuses while a tmux server is live on the receipt socket or on `spur-<reserved daemon port>`; nothing is deleted or killed.
+Server whose panes all started under the previous run's launcher or fixture dir: receipt and dirs kept; clear with `tmux -L <socket> kill-server`.
+Any other live server (foreign, mixed, no panes, unreadable): not owned by this voice run; no kill advice, leave it.
+No live server: stale receipt, fixture and launcher dirs are discarded; an orphan fixture pointer is swept without a receipt.
 Inspect logs with `spur service logs`; inspect reserved port with sidecar `ports` command.
 
 ## Test one call

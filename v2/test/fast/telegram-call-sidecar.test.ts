@@ -257,8 +257,9 @@ function receiptStart(pid: number): string {
 }
 
 function runWithReceipt(
-  receipt: (path: string) => string,
+  receipt: ((path: string) => string) | undefined,
   prepare?: (path: string, voiceDir: string) => void,
+  extraEnv: Record<string, string> = {},
 ): {
   status: number | null;
   stderr: string;
@@ -274,7 +275,7 @@ function runWithReceipt(
   writeFileSync(join(bin, "bash"), `#!/bin/bash\ntouch "$VOICE_STARTED"\n`);
   chmodSync(join(bin, "bash"), 0o700);
   const receiptPath = join(tools, "voice-daemon/isolated-env.sh");
-  writeFileSync(receiptPath, receipt(path));
+  if (receipt) writeFileSync(receiptPath, receipt(path));
   prepare?.(path, join(tools, "voice-daemon"));
   const result = spawnSync("/bin/bash", [resolve("../scripts/telegram-call/run-daemon.sh")], {
     env: {
@@ -284,6 +285,7 @@ function runWithReceipt(
       TELEGRAM_CALL_PYTHON: inputChecker(path),
       TELEGRAM_CALL_STATE_DIR: join(path, "state"),
       VOICE_STARTED: started,
+      ...extraEnv,
     },
     encoding: "utf8",
   });
@@ -390,14 +392,10 @@ it("refuses when the daemon is dead but its owned tmux server still runs", () =>
       startServer(socket, join(dirs.launcher, "worktrees"));
       return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
     },
-    () => undefined,
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
   );
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(socket);
-  expect(result.started).toBe(false);
-  expect(existsSync(result.receiptPath)).toBe(true);
-  expect(existsSync(dirs.launcher)).toBe(true);
-  expect(serverAlive(socket)).toBe(true);
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).toContain(`tmux -L ${socket} kill-server`);
 });
 
 it("refuses when receipt paths carry a double slash but panes start at the normalized path", () => {
@@ -405,39 +403,171 @@ it("refuses when receipt paths carry a double slash but panes start at the norma
   const pid = deadPid();
   const result = runWithReceipt(
     (path) => {
-      const dirs = staleDirs(path);
-      startServer(socket, join(dirs.launcher, "worktrees"));
+      staleDirs(path);
+      startServer(socket, `${path}//spur-isolated-daemon.OLD/worktrees`);
       return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${path}//spur-isolated-daemon.OLD/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
     },
     () => undefined,
   );
   expect(result.status).toBe(1);
-  expect(result.stderr).toContain(socket);
+  expect(result.stderr).toContain(`tmux -L ${socket} kill-server`);
   expect(result.started).toBe(false);
   expect(serverAlive(socket)).toBe(true);
 });
 
-it("treats a live tmux server outside this run's dirs as foreign and starts", () => {
-  const socket = `spur-voice-foreign-${process.pid}`;
+function foreignRun(
+  socket: string,
+  options: { reserved?: boolean } = {},
+): { result: ReturnType<typeof runWithReceipt>; dirs: StaleDirs; foreign: string } {
   const pid = deadPid();
-  let dirs = { fixtureDir: "", launcher: "" };
+  let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
   let foreign = "";
-  const result = runWithReceipt((path) => {
-    dirs = staleDirs(path);
-    foreign = join(path, "other-session");
-    mkdirSync(foreign);
-    startServer(socket, foreign);
-    return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
-  });
-  expect(result.status).toBe(0);
-  expect(result.started).toBe(true);
+  const result = runWithReceipt(
+    (path) => {
+      dirs = staleDirs(path);
+      foreign = join(path, "other-session");
+      mkdirSync(foreign);
+      startServer(socket, foreign);
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${options.reserved ? "spur-voice-unused" : socket}"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+    options.reserved ? { SPUR_RESERVED_PORT_DAEMON: socket.replace(/^spur-/, "") } : {},
+  );
+  return { result, dirs, foreign };
+}
+
+function expectUntouched(
+  result: ReturnType<typeof runWithReceipt>,
+  dirs: StaleDirs,
+  socket: string,
+): void {
+  expect(result.status).toBe(1);
+  expect(result.started).toBe(false);
+  expect(result.stderr).toContain(socket);
+  expect(existsSync(result.receiptPath)).toBe(true);
+  expect(existsSync(dirs.launcher)).toBe(true);
+  expect(existsSync(dirs.fixtureDir)).toBe(true);
+  expect(serverAlive(socket)).toBe(true);
+}
+
+it("refuses without kill advice when a foreign server holds the receipt socket", () => {
+  const socket = `spur-voice-foreign-${process.pid}`;
+  const { result, dirs } = foreignRun(socket);
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).toContain("not owned by this voice run");
   expect(result.stderr).not.toContain("kill-server");
-  expect(existsSync(result.receiptPath)).toBe(false);
-  expect(existsSync(dirs.launcher)).toBe(false);
+});
+
+it("refuses without kill advice when a foreign server holds the reserved port socket and no receipt names it", () => {
+  const port = `${40000 + (process.pid % 20000)}`;
+  const socket = `spur-${port}`;
+  const { result, dirs } = foreignRun(socket, { reserved: true });
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).toContain("not owned by this voice run");
+  expect(result.stderr).not.toContain("kill-server");
+});
+
+it("refuses on the reserved port socket when no receipt exists", () => {
+  const port = `${40000 + (process.pid % 20000)}`;
+  const socket = `spur-${port}`;
+  const path = fixture();
+  const other = join(path, "other-session");
+  mkdirSync(other);
+  startServer(socket, other);
+  const result = runWithReceipt(undefined, undefined, { SPUR_RESERVED_PORT_DAEMON: port });
+  expect(result.status).toBe(1);
+  expect(result.started).toBe(false);
+  expect(result.stderr).toContain("not owned by this voice run");
   expect(serverAlive(socket)).toBe(true);
 });
 
-function staleDirs(path: string): { fixtureDir: string; launcher: string } {
+it.each(["foreign-first", "owned-first"])(
+  "refuses a mixed server and keeps owned dirs (%s)",
+  (order) => {
+    const socket = `spur-voice-mixed-${order}-${process.pid}`;
+    const pid = deadPid();
+    let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
+    const result = runWithReceipt(
+      (path) => {
+        dirs = staleDirs(path);
+        const foreign = join(path, "other-session");
+        mkdirSync(foreign);
+        const owned = join(dirs.launcher, "worktrees");
+        mkdirSync(owned);
+        const [first, second] = order === "foreign-first" ? [foreign, owned] : [owned, foreign];
+        startServer(socket, first ?? "");
+        execFileSync("tmux", ["-L", socket, "new-window", "-c", second ?? "", "sleep 60"]);
+        return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+      },
+      (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+    );
+    expectUntouched(result, dirs, socket);
+    expect(result.stderr).not.toContain("kill-server");
+  },
+);
+
+it("refuses without deleting when list-panes fails after has-session succeeds", () => {
+  const socket = `spur-voice-listfail-${process.pid}`;
+  const pid = deadPid();
+  let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
+  const result = runWithReceipt(
+    (path) => {
+      dirs = staleDirs(path);
+      startServer(socket, join(dirs.launcher, "worktrees"));
+      const tmux = execFileSync("which", ["tmux"], { encoding: "utf8" }).trim();
+      writeFileSync(
+        join(path, "bin", "tmux"),
+        `#!/bin/bash\n[[ "$*" == *list-panes* ]] && exit 1\nexec "${tmux}" "$@"\n`,
+      );
+      chmodSync(join(path, "bin", "tmux"), 0o700);
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+  );
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).not.toContain("kill-server");
+});
+
+it.each(["launcher", "fixtureDir"] as const)(
+  "treats a pane under a sibling-prefixed %s as foreign",
+  (which) => {
+    const socket = `spur-voice-sibling-${process.pid}`;
+    const pid = deadPid();
+    let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
+    const result = runWithReceipt(
+      (path) => {
+        dirs = staleDirs(path);
+        const sibling = `${dirs[which]}-sibling`;
+        mkdirSync(sibling);
+        startServer(socket, sibling);
+        return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+      },
+      (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+    );
+    expectUntouched(result, dirs, socket);
+    expect(result.stderr).not.toContain("kill-server");
+  },
+);
+
+it("refuses with kill advice when the only pane starts under the fixture dir", () => {
+  const socket = `spur-voice-fixpane-${process.pid}`;
+  const pid = deadPid();
+  let dirs: StaleDirs = { fixtureDir: "", launcher: "" };
+  const result = runWithReceipt(
+    (path) => {
+      dirs = staleDirs(path);
+      startServer(socket, join(dirs.fixtureDir, "repository"));
+      return `SPUR_ISOLATED_DAEMON_PID="${pid}"\nSPUR_ISOLATED_DAEMON_STARTTIME="1"\nSPUR_ISOLATED_CONFIG="${dirs.launcher}/config.yaml"\nSPUR_ISOLATED_TMUX_SOCKET_NAME="${socket}"\n`;
+    },
+    (_path, voiceDir) => writeFileSync(join(voiceDir, "fixture-dir"), `${dirs.fixtureDir}\n`),
+  );
+  expectUntouched(result, dirs, socket);
+  expect(result.stderr).toContain(`tmux -L ${socket} kill-server`);
+});
+
+type StaleDirs = { fixtureDir: string; launcher: string };
+
+function staleDirs(path: string): StaleDirs {
   const fixtureDir = join(path, "spur-voice-sandbox.OLD");
   const launcher = join(path, "spur-isolated-daemon.OLD");
   mkdirSync(join(fixtureDir, "repository"), { recursive: true });
