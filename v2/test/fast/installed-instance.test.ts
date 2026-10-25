@@ -123,6 +123,38 @@ describe("installed instance selection", () => {
     },
   );
 
+  it.each(["user", "system"] as const)(
+    "retries %s probe without --expand-environment on systemd < 254",
+    (scope) => {
+      const selected = config();
+      writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+      execFileSyncMock
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error("Command failed"), {
+            stderr: "systemd-run: unrecognized option '--expand-environment=no'\n",
+          });
+        })
+        .mockReturnValueOnce(JSON.stringify(selected));
+      expect(api.resolveInstallationConfig({ ...options(), scope })).toBe(selected);
+      expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+      const [first, second] = execFileSyncMock.mock.calls.map((call) => call[1] as string[]);
+      expect(first).toContain("--expand-environment=no");
+      expect(second).not.toContain("--expand-environment=no");
+      expect(second).toEqual(first?.filter((arg) => arg !== "--expand-environment=no"));
+    },
+  );
+
+  it("does not retry other probe failures and surfaces stderr", () => {
+    writeFileSync(options().daemonEnvFile, "SPUR_CONFIG=relative.yaml\n");
+    execFileSyncMock.mockImplementation(() => {
+      throw Object.assign(new Error("Command failed"), { stderr: "Failed to connect to bus\n" });
+    });
+    expect(() => api.resolveInstallationConfig(options())).toThrow(
+      /existing installation was preserved: Failed to connect to bus$/,
+    );
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses missing receipt for existing argv pin, invalid JSON and failed probe before writes", () => {
     writeFileSync(
       options().daemonUnitPath,
